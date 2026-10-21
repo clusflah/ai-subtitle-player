@@ -25,6 +25,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
@@ -47,6 +49,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -60,20 +63,11 @@ import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PlayerScreen(vm: MainViewModel) {
+fun PlayerScreen(vm: MainViewModel, onBack: () -> Unit) {
     val state by vm.state.collectAsStateWithLifecycle()
-    val context = LocalContext.current
     var showSettings by remember { mutableStateOf(false) }
     var exportMode by remember { mutableStateOf(SrtMode.BILINGUAL) }
 
-    val openLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            runCatching {
-                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            vm.openVideo(uri)
-        }
-    }
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/x-subrip")
     ) { uri -> if (uri != null) vm.exportSrt(uri, exportMode) }
@@ -90,10 +84,12 @@ fun PlayerScreen(vm: MainViewModel) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("AI 字幕播放器") },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回") } },
+                title = {
+                    Text(state.current?.title ?: "播放", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                },
                 actions = {
-                    TextButton(onClick = { openLauncher.launch(arrayOf("video/*", "audio/*")) }) { Text("打开") }
-                    TextButton(onClick = { showSettings = true }) { Text("设置") }
+                    IconButton(onClick = { showSettings = true }) { Icon(AppIcons.Settings, "设置") }
                 },
             )
         },
@@ -117,7 +113,7 @@ fun PlayerScreen(vm: MainViewModel) {
                 )
                 if (state.videoUri == null) {
                     Text(
-                        "点击右上角「打开」选择视频",
+                        "没有正在播放的媒体",
                         color = Color.White,
                         modifier = Modifier.align(Alignment.Center),
                     )

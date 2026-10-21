@@ -6,6 +6,7 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import com.aisub.player.remote.AuthRegistry
 import java.nio.ByteOrder
 
 /**
@@ -28,7 +29,8 @@ class AudioDecoder(private val context: Context, private val uri: Uri) {
         onChunk: (FloatArray) -> Unit,
     ) {
         val extractor = MediaExtractor()
-        extractor.setDataSource(context, uri, null)
+        // 远程文件（WebDAV）需要带鉴权头
+        extractor.setDataSource(context, uri, AuthRegistry.headersFor(uri.toString()).ifEmpty { null })
         var codec: MediaCodec? = null
         try {
             val trackIndex = (0 until extractor.trackCount).firstOrNull {

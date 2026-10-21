@@ -14,8 +14,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用
@@ -52,6 +52,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     // 每个 CPU 架构单独出一个 APK（onnxruntime 原生库很大），另外保留一个通用包

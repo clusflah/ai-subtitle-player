@@ -5,7 +5,18 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import com.aisub.player.media.AppStore
+import com.aisub.player.media.MediaEntry
+import com.aisub.player.remote.AuthRegistry
 import com.aisub.player.asr.AudioDecoder
 import com.aisub.player.asr.AzureTranscriber
 import com.aisub.player.asr.ModelManager
@@ -31,6 +42,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 data class UiState(
+    val current: MediaEntry? = null,
     val videoUri: Uri? = null,
     val cues: List<Cue> = emptyList(),
     val transcribing: Boolean = false,
@@ -42,25 +54,62 @@ data class UiState(
     val settings: AppSettings = AppSettings(),
 )
 
+@OptIn(UnstableApi::class)
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
-    val player: ExoPlayer = ExoPlayer.Builder(app).build()
+    val player: ExoPlayer = ExoPlayer.Builder(app)
+        .setMediaSourceFactory(DefaultMediaSourceFactory(authDataSourceFactory(app)))
+        .build()
 
     private val settingsRepo = SettingsRepository(app)
     private val store = SubtitleStore(app)
     private val models = ModelManager(app)
+    private val library = AppStore(app)
 
     private val _state = MutableStateFlow(UiState(settings = settingsRepo.load()))
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private var transcribeJob: Job? = null
     private var translateJob: Job? = null
+    private var queue: List<MediaEntry> = emptyList()
 
-    fun openVideo(uri: Uri) {
+    init {
+        player.addListener(object : Player.Listener {
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                queue.getOrNull(player.currentMediaItemIndex)?.let(::onEntryChanged)
+            }
+        })
+    }
+
+    /** 播放一组媒体，从 index 开始；上次看到一半的会自动续播。 */
+    fun play(entries: List<MediaEntry>, index: Int) {
+        if (entries.isEmpty()) return
+        savePosition()
+        queue = entries
+        val start = entries[index.coerceIn(entries.indices)]
+        val items = entries.map {
+            MediaItem.Builder()
+                .setUri(it.uri)
+                .setMediaId(it.uri)
+                .setMediaMetadata(MediaMetadata.Builder().setTitle(it.title).build())
+                .build()
+        }
+        val resume = library.positionOf(start.uri)
+            .takeIf { start.durationMs <= 0 || it < start.durationMs - 10_000 } ?: 0L
+        player.setMediaItems(items, index.coerceIn(entries.indices), resume)
+        player.prepare()
+        player.play()
+        onEntryChanged(start)
+    }
+
+    private fun onEntryChanged(entry: MediaEntry) {
+        if (_state.value.current?.uri == entry.uri) return
         cancelAll()
+        val uri = Uri.parse(entry.uri)
         val cached = store.load(uri)
         _state.update {
             it.copy(
+                current = entry,
                 videoUri = uri,
                 cues = cached,
                 status = if (cached.isEmpty()) "点击「生成字幕」开始识别" else "已加载缓存字幕 ${cached.size} 条",
@@ -68,9 +117,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 error = null,
             )
         }
-        player.setMediaItem(MediaItem.fromUri(uri))
-        player.prepare()
-        player.play()
+        library.recordHistory(entry, 0)
+    }
+
+    /** 记录当前播放进度，离开播放页或切换视频时调用。 */
+    fun savePosition() {
+        val entry = _state.value.current ?: return
+        if (player.mediaItemCount == 0) return
+        val duration = player.duration.takeIf { it > 0 } ?: entry.durationMs
+        library.recordHistory(entry.copy(durationMs = duration), player.currentPosition)
     }
 
     fun updateSettings(s: AppSettings) {
@@ -231,11 +286,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        savePosition()
         player.release()
     }
 
     companion object {
         private const val BATCH_SIZE = 20
         private const val CONTEXT_SIZE = 6
+    }
+}
+
+/** 给已登记的 WebDAV 地址加上鉴权头，其他地址原样访问。 */
+@UnstableApi
+private fun authDataSourceFactory(app: Application): DataSource.Factory {
+    val http = DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true)
+    return ResolvingDataSource.Factory(DefaultDataSource.Factory(app, http)) { spec ->
+        val headers = AuthRegistry.headersFor(spec.uri.toString())
+        if (headers.isEmpty()) spec else spec.withAdditionalHeaders(headers)
     }
 }
