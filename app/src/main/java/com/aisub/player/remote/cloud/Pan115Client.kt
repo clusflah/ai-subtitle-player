@@ -74,6 +74,36 @@ class Pan115Client(server: Server) : CloudClient(server) {
         return ResolvedLink(link, mapOf("User-Agent" to UA, "Cookie" to cookies.joinToString("; ")), validMs = 30 * 60_000L)
     }
 
+    private fun postForm(url: String, form: FormBody): JSONObject {
+        val json = cloudHttp.newCall(request(url).post(form).build()).execute().use { it.json() }
+        check(json)
+        return json
+    }
+
+    // 目录的定位符是 cid，文件是 fid，接口里两者通用
+    override suspend fun rename(parent: String, item: RemoteItem, newName: String) = withContext(Dispatchers.IO) {
+        postForm(
+            "https://webapi.115.com/files/batch_rename",
+            FormBody.Builder().add("files_new_name[${item.path}]", com.aisub.player.remote.checkName(newName)).build(),
+        )
+        Unit
+    }
+
+    override suspend fun delete(parent: String, items: List<RemoteItem>) = withContext(Dispatchers.IO) {
+        val form = FormBody.Builder().add("pid", parent.ifEmpty { "0" }).add("ignore_warn", "1")
+        items.forEachIndexed { i, item -> form.add("fid[$i]", item.path) }
+        postForm("https://webapi.115.com/rb/delete", form.build())
+        Unit
+    }
+
+    override suspend fun mkdir(parent: String, name: String) = withContext(Dispatchers.IO) {
+        postForm(
+            "https://webapi.115.com/files/add",
+            FormBody.Builder().add("pid", parent.ifEmpty { "0" }).add("cname", com.aisub.player.remote.checkName(name)).build(),
+        )
+        Unit
+    }
+
     private fun check(json: JSONObject) {
         if (json.optBoolean("state", true)) return
         val msg = json.optString("error").ifEmpty { json.optString("msg") }.ifEmpty { "errno ${json.optInt("errno")}" }

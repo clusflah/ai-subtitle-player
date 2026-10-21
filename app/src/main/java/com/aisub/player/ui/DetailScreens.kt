@@ -8,6 +8,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import android.widget.Toast
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -24,6 +27,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -149,9 +155,17 @@ fun RemoteFolderScreen(
     play: (List<MediaEntry>, Int) -> Unit,
 ) {
     val server = lib.server(serverId)
+    val state by lib.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var items by remember { mutableStateOf<List<RemoteItem>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
+    var busy by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf<RemoteItem?>(null) }
+    var deleting by remember { mutableStateOf<RemoteItem?>(null) }
+    var creatingFolder by remember { mutableStateOf(false) }
+    var addTo by remember { mutableStateOf<List<MediaEntry>?>(null) }
 
     LaunchedEffect(serverId, path, reload) {
         if (server == null) return@LaunchedEffect
@@ -164,9 +178,35 @@ fun RemoteFolderScreen(
         }
     }
 
+    /** 执行一个写操作：完成后提示并刷新目录。 */
+    fun operate(done: String, op: suspend (com.aisub.player.remote.RemoteClient) -> Unit) {
+        if (server == null || busy) return
+        busy = true
+        scope.launch {
+            try {
+                op(lib.client(server))
+                Toast.makeText(context, done, Toast.LENGTH_SHORT).show()
+                reload++
+            } catch (e: Exception) {
+                Toast.makeText(context, "操作失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
+            }
+            busy = false
+        }
+    }
+
+    fun itemMenu(item: RemoteItem, entry: MediaEntry?): List<MenuAction> = listOfNotNull(
+        entry?.let { MenuAction("加入播放列表") { addTo = listOf(it) } },
+        MenuAction("重命名") { renaming = item },
+        MenuAction("删除") { deleting = item },
+    )
+
     DetailScaffold(
         title, onBack,
-        actions = { IconButton(onClick = { reload++ }) { Icon(AppIcons.Refresh, "刷新") } },
+        actions = {
+            if (busy) CircularProgressIndicator(Modifier.size(24.dp).padding(end = 4.dp), strokeWidth = 2.dp)
+            IconButton(onClick = { reload++ }) { Icon(AppIcons.Refresh, "刷新") }
+            OverflowMenu(listOf(MenuAction("新建文件夹") { creatingFolder = true }))
+        },
     ) {
         val list = items
         when {
@@ -175,18 +215,65 @@ fun RemoteFolderScreen(
             list == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             else -> {
                 val dirs = list.filter { it.isDir }
-                val media = list.filter { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }
-                    .map { MediaEntry(it.playUrl!!, it.name, isVideo = MediaEntry.isVideoName(it.name)) }
+                val files = list.filter { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }
+                val media = files.map { MediaEntry(it.playUrl!!, it.name, isVideo = MediaEntry.isVideoName(it.name), sizeBytes = it.size) }
                 if (dirs.isEmpty() && media.isEmpty()) {
                     EmptyState("这里没有文件夹或媒体文件", icon = AppIcons.Folder)
                 } else {
                     LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
-                        items(dirs, key = { "d:" + it.path }) { d -> FolderRow(d.name) { openFolder(d) } }
-                        itemsIndexed(media, key = { _, e -> e.uri }) { i, e -> MediaRow(e, emptyList()) { play(media, i) } }
+                        items(dirs, key = { "d:" + it.path }) { d -> FolderRow(d.name, menu = itemMenu(d, null)) { openFolder(d) } }
+                        itemsIndexed(media, key = { _, e -> e.uri }) { i, e -> MediaRow(e, itemMenu(files[i], e)) { play(media, i) } }
                     }
                 }
             }
         }
+    }
+
+    renaming?.let { item ->
+        val ext = if (item.isDir) "" else item.name.substringAfterLast('.', "")
+        TextInputDialog(
+            title = if (item.isDir) "重命名文件夹" else "重命名",
+            label = if (ext.isEmpty()) "新名字" else "新名字（扩展名会保留）",
+            initial = if (ext.isEmpty()) item.name else item.name.substringBeforeLast('.'),
+            onDismiss = { renaming = null },
+        ) { input ->
+            renaming = null
+            val name = input.trim().let { if (ext.isNotEmpty() && !it.endsWith(".$ext", ignoreCase = true)) "$it.$ext" else it }
+            if (name != item.name) operate("已重命名") { it.rename(path, item, name) }
+        }
+    }
+    deleting?.let { item ->
+        val cloud = server?.type?.isCloud == true
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("删除「${item.name}」？") },
+            text = {
+                Text(
+                    if (cloud) "会移到网盘的回收站，可以在网盘 App 里恢复。"
+                    else "会直接从服务器上删除${if (item.isDir) "整个文件夹" else ""}，不能恢复。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { deleting = null; operate("已删除") { it.delete(path, listOf(item)) } }) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { deleting = null }) { Text("取消") } },
+        )
+    }
+    if (creatingFolder) {
+        TextInputDialog(title = "新建文件夹", label = "文件夹名", onDismiss = { creatingFolder = false }) { name ->
+            creatingFolder = false
+            operate("已新建文件夹") { it.mkdir(path, name) }
+        }
+    }
+    addTo?.let { entries ->
+        AddToPlaylistDialog(
+            playlists = state.playlists,
+            onDismiss = { addTo = null },
+            onPick = { p -> entries.forEach { lib.addToPlaylist(p.id, it) }; addTo = null },
+            onCreate = { lib.createPlaylistWith(it, entries); addTo = null },
+        )
     }
 }
 

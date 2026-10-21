@@ -97,6 +97,25 @@ data class RemoteItem(
 
 interface RemoteClient {
     suspend fun list(path: String): List<RemoteItem>
+
+    /** 重命名。parent 是所在目录的定位符（与 list 的参数相同）。 */
+    suspend fun rename(parent: String, item: RemoteItem, newName: String): Unit =
+        throw UnsupportedOperationException("这个来源不支持重命名")
+
+    /** 删除（网盘一般是移到回收站）。 */
+    suspend fun delete(parent: String, items: List<RemoteItem>): Unit =
+        throw UnsupportedOperationException("这个来源不支持删除")
+
+    /** 在 parent 下新建文件夹。 */
+    suspend fun mkdir(parent: String, name: String): Unit =
+        throw UnsupportedOperationException("这个来源不支持新建文件夹")
+}
+
+/** 检查新文件名：不能为空、不能含路径分隔符。 */
+internal fun checkName(name: String): String {
+    val n = name.trim()
+    require(n.isNotEmpty() && '/' !in n && '\\' !in n) { "名称不合法" }
+    return n
 }
 
 fun clientFor(server: Server): RemoteClient = when (server.type) {

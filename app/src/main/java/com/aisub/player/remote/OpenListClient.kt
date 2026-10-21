@@ -56,6 +56,22 @@ class OpenListClient(private val server: Server) : RemoteClient {
         }.sortedWith(compareBy({ !it.isDir }, { it.name.lowercase() }))
     }
 
+    override suspend fun rename(parent: String, item: RemoteItem, newName: String) = withContext(Dispatchers.IO) {
+        post("/api/fs/rename", JSONObject().put("path", item.path).put("name", checkName(newName)), auth = true)
+        Unit
+    }
+
+    override suspend fun delete(parent: String, items: List<RemoteItem>) = withContext(Dispatchers.IO) {
+        val names = org.json.JSONArray(items.map { it.name })
+        post("/api/fs/remove", JSONObject().put("dir", parent.ifEmpty { "/" }).put("names", names), auth = true)
+        Unit
+    }
+
+    override suspend fun mkdir(parent: String, name: String) = withContext(Dispatchers.IO) {
+        post("/api/fs/mkdir", JSONObject().put("path", joinPath(parent.ifEmpty { "/" }, checkName(name))), auth = true)
+        Unit
+    }
+
     private fun login(): String? {
         if (server.username.isEmpty()) return null // 访客访问
         val body = JSONObject().put("username", server.username).put("password", server.password)

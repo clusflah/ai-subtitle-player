@@ -43,6 +43,42 @@ class WebDavClient(private val server: Server) : RemoteClient {
             .sortedWith(compareBy({ !it.isDir }, { it.name.lowercase() }))
     }
 
+    override suspend fun rename(parent: String, item: RemoteItem, newName: String) = withContext(Dispatchers.IO) {
+        val name = checkName(newName)
+        val src = item.path.trimEnd('/')
+        val dst = src.substringBeforeLast('/') + "/" + name
+        val suffix = if (item.isDir) "/" else ""
+        send(
+            request(src + suffix).method("MOVE", null)
+                .header("Destination", base + encodePath(dst + suffix))
+                .header("Overwrite", "F"),
+        )
+    }
+
+    override suspend fun delete(parent: String, items: List<RemoteItem>) = withContext(Dispatchers.IO) {
+        for (item in items) send(request(item.path.trimEnd('/') + if (item.isDir) "/" else "").delete())
+    }
+
+    override suspend fun mkdir(parent: String, name: String) = withContext(Dispatchers.IO) {
+        send(request(joinPath(parent.ifEmpty { "/" }, checkName(name)) + "/").method("MKCOL", null))
+    }
+
+    private fun request(path: String) = Request.Builder().url(base + encodePath(path))
+        .apply { server.basicAuthHeader()?.let { header("Authorization", it) } }
+
+    private fun send(builder: Request.Builder) {
+        http.newCall(builder.build()).execute().use { resp ->
+            when {
+                resp.isSuccessful -> Unit
+                resp.code == 401 -> throw IOException("用户名或密码错误")
+                resp.code == 403 -> throw IOException("服务器不允许这个操作（没有写入权限）")
+                resp.code == 405 || resp.code == 412 -> throw IOException("已存在同名文件或文件夹")
+                resp.code == 409 -> throw IOException("上级目录不存在")
+                else -> throw IOException("WebDAV 操作失败 HTTP ${resp.code}")
+            }
+        }
+    }
+
     private fun parse(xml: String): List<RemoteItem> {
         val parser = Xml.newPullParser()
         parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)

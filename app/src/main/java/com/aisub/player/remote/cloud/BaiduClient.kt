@@ -66,6 +66,50 @@ class BaiduClient(server: Server) : CloudClient(server) {
         return json
     }
 
+    private fun post(path: String, params: Map<String, String>, form: Map<String, String>, retried: Boolean = false): JSONObject {
+        val b = "https://pan.baidu.com/rest/2.0$path".toHttpUrl().newBuilder()
+        params.forEach { (k, v) -> b.addQueryParameter(k, v) }
+        b.addQueryParameter("access_token", accessToken())
+        val body = okhttp3.FormBody.Builder().apply { form.forEach { (k, v) -> add(k, v) } }.build()
+        val json = cloudHttp.newCall(Request.Builder().url(b.build()).header("User-Agent", UA).post(body).build())
+            .execute().use { it.json() }
+        val errno = json.optInt("errno")
+        if (errno != 0) {
+            if (!retried && (errno == 111 || errno == -6)) {
+                accessToken(forceRefresh = true)
+                return post(path, params, form, retried = true)
+            }
+            throw IOException(
+                when (errno) {
+                    -8, -30 -> "百度网盘：已存在同名文件"
+                    -7 -> "百度网盘：文件名不合法"
+                    else -> "百度网盘：错误码 $errno"
+                },
+            )
+        }
+        return json
+    }
+
+    // 百度网盘的定位符就是完整路径
+    override suspend fun rename(parent: String, item: RemoteItem, newName: String) = withContext(Dispatchers.IO) {
+        val list = org.json.JSONArray().put(JSONObject().put("path", item.path).put("newname", com.aisub.player.remote.checkName(newName)))
+        post("/xpan/file", mapOf("method" to "filemanager", "opera" to "rename"), mapOf("async" to "0", "filelist" to list.toString(), "ondup" to "fail"))
+        Unit
+    }
+
+    /** 移到回收站（10 天内可在百度网盘里恢复）。 */
+    override suspend fun delete(parent: String, items: List<RemoteItem>) = withContext(Dispatchers.IO) {
+        val list = org.json.JSONArray(items.map { it.path })
+        post("/xpan/file", mapOf("method" to "filemanager", "opera" to "delete"), mapOf("async" to "0", "filelist" to list.toString()))
+        Unit
+    }
+
+    override suspend fun mkdir(parent: String, name: String) = withContext(Dispatchers.IO) {
+        val path = parent.ifEmpty { "/" }.trimEnd('/') + "/" + com.aisub.player.remote.checkName(name)
+        post("/xpan/file", mapOf("method" to "create"), mapOf("path" to path, "isdir" to "1", "rtype" to "0"))
+        Unit
+    }
+
     override suspend fun list(path: String): List<RemoteItem> = withContext(Dispatchers.IO) {
         val dir = path.ifEmpty { "/" }
         val items = ArrayList<RemoteItem>()

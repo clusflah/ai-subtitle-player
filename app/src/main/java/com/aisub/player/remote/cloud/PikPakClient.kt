@@ -111,20 +111,21 @@ class PikPakClient(server: Server) : CloudClient(server) {
         creds.put("access_token", access).put("refresh_token", refresh).put("user_id", json.optString("sub"))
     }
 
-    private fun request(url: String, retries: Int = 2): JSONObject {
+    private fun request(url: String, retries: Int = 2, method: String = "GET", body: JSONObject? = null): JSONObject {
         if (creds.optString("access_token").isEmpty()) {
             if (creds.optString("refresh_token").isNotEmpty()) refreshToken() else login()
         }
-        val json = cloudHttp.newCall(baseRequest(url).build()).execute().use { it.json() }
+        val req = baseRequest(url).method(method, body?.toString()?.toRequestBody(JSON)).build()
+        val json = cloudHttp.newCall(req).execute().use { it.json() }
         val code = json.optInt("error_code")
         if (code != 0 && retries > 0) {
             when (code) {
-                4122, 4121, 16 -> { refreshToken(); return request(url, retries - 1) }
+                4122, 4121, 16 -> { refreshToken(); return request(url, retries - 1, method, body) }
                 9 -> {
                     val path = url.toHttpUrl().encodedPath
-                    refreshCaptcha("GET:$path", JSONObject().put("user_id", creds.optString("user_id")))
+                    refreshCaptcha("$method:$path", JSONObject().put("user_id", creds.optString("user_id")))
                     saveCreds()
-                    return request(url, retries - 1)
+                    return request(url, retries - 1, method, body)
                 }
             }
         }
@@ -162,6 +163,25 @@ class PikPakClient(server: Server) : CloudClient(server) {
             pageToken = json.optString("next_page_token")
         } while (pageToken.isNotEmpty())
         items.sortedWith(compareBy({ !it.isDir }, { it.name.lowercase() }))
+    }
+
+    override suspend fun rename(parent: String, item: RemoteItem, newName: String) = withContext(Dispatchers.IO) {
+        request("$DRIVE_API/drive/v1/files/${item.path}", method = "PATCH", body = JSONObject().put("name", com.aisub.player.remote.checkName(newName)))
+        Unit
+    }
+
+    /** 移到回收站。 */
+    override suspend fun delete(parent: String, items: List<RemoteItem>) = withContext(Dispatchers.IO) {
+        request("$DRIVE_API/drive/v1/files:batchTrash", method = "POST", body = JSONObject().put("ids", org.json.JSONArray(items.map { it.path })))
+        Unit
+    }
+
+    override suspend fun mkdir(parent: String, name: String) = withContext(Dispatchers.IO) {
+        request(
+            "$DRIVE_API/drive/v1/files", method = "POST",
+            body = JSONObject().put("kind", "drive#folder").put("parent_id", parent).put("name", com.aisub.player.remote.checkName(name)),
+        )
+        Unit
     }
 
     override fun resolve(fileRef: String): ResolvedLink {

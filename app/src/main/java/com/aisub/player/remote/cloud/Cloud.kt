@@ -94,6 +94,8 @@ internal val cloudHttpNoRedirect: OkHttpClient = cloudHttp.newBuilder().followRe
 
 internal fun Response.json(): JSONObject {
     val text = body?.string().orEmpty()
+    // 部分写操作成功时不返回正文
+    if (text.isBlank() && isSuccessful) return JSONObject()
     return try {
         JSONObject(text)
     } catch (e: Exception) {

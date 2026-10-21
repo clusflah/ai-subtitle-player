@@ -86,6 +86,31 @@ class AliyunClient(server: Server) : CloudClient(server) {
         items.sortedWith(compareBy({ !it.isDir }, { it.name.lowercase() }))
     }
 
+    override suspend fun rename(parent: String, item: RemoteItem, newName: String) = withContext(Dispatchers.IO) {
+        api(
+            "/adrive/v1.0/openFile/update",
+            JSONObject().put("drive_id", driveId()).put("file_id", item.path)
+                .put("name", com.aisub.player.remote.checkName(newName)).put("check_name_mode", "refuse"),
+        )
+        Unit
+    }
+
+    /** 移到回收站（可在阿里云盘 App 里恢复）。 */
+    override suspend fun delete(parent: String, items: List<RemoteItem>) = withContext(Dispatchers.IO) {
+        for (item in items) {
+            api("/adrive/v1.0/openFile/recyclebin/trash", JSONObject().put("drive_id", driveId()).put("file_id", item.path))
+        }
+    }
+
+    override suspend fun mkdir(parent: String, name: String) = withContext(Dispatchers.IO) {
+        api(
+            "/adrive/v1.0/openFile/create",
+            JSONObject().put("drive_id", driveId()).put("parent_file_id", parent.ifEmpty { "root" })
+                .put("name", com.aisub.player.remote.checkName(name)).put("type", "folder").put("check_name_mode", "refuse"),
+        )
+        Unit
+    }
+
     override fun resolve(fileRef: String): ResolvedLink {
         val json = api(
             "/adrive/v1.0/openFile/getDownloadUrl",
