@@ -10,7 +10,6 @@ import com.k2fsa.sherpa.onnx.SileroVadModelConfig
 import com.k2fsa.sherpa.onnx.SpeechSegment
 import com.k2fsa.sherpa.onnx.Vad
 import com.k2fsa.sherpa.onnx.VadModelConfig
-import java.io.Closeable
 
 /**
  * VAD 切出语音段 → SenseVoice 离线识别 → 生成字幕。
@@ -18,7 +17,7 @@ import java.io.Closeable
  *
  * @param language SenseVoice 的语言代码："auto"、"zh"、"en"、"ja"、"ko"、"yue"
  */
-class Transcriber(paths: ModelManager.Paths, language: String, numThreads: Int) : Closeable {
+class Transcriber(paths: ModelManager.Paths, language: String, numThreads: Int) : SpeechEngine {
 
     private val vad = Vad(
         config = VadModelConfig(
@@ -54,8 +53,7 @@ class Transcriber(paths: ModelManager.Paths, language: String, numThreads: Int) 
     private val pending = FloatArrayBuilder()
     private var nextId = 1
 
-    /** 送入一块 16kHz 音频；每识别出一条字幕就回调 onCue。 */
-    fun accept(samples: FloatArray, onCue: (Cue) -> Unit) {
+    override fun accept(samples: FloatArray, onCue: (Cue) -> Unit) {
         pending.append(samples)
         while (pending.size >= VAD_WINDOW) {
             vad.acceptWaveform(pending.take(VAD_WINDOW))
@@ -63,8 +61,7 @@ class Transcriber(paths: ModelManager.Paths, language: String, numThreads: Int) 
         }
     }
 
-    /** 音频结束，处理剩余部分。 */
-    fun finish(onCue: (Cue) -> Unit) {
+    override fun finish(onCue: (Cue) -> Unit) {
         vad.flush()
         drain(onCue)
     }

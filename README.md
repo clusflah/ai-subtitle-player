@@ -3,7 +3,9 @@
 本地语音识别生成字幕 + LLM 翻译的安卓视频播放器。
 
 - 播放：Media3 ExoPlayer
-- 识别：sherpa-onnx + SenseVoice（中/英/日/韩/粤）+ Silero VAD，完全在手机上离线运行
+- 识别（二选一）：
+  - 本地：sherpa-onnx + SenseVoice（中/英/日/韩/粤）+ Silero VAD，完全在手机上离线运行
+  - 云端：Azure AI Speech 快速转写（Fast Transcription），省电、准确率高，需要 Speech 资源的 Key 和区域
 - 翻译：Claude（官方 anthropic-java SDK）、DeepSeek、Gemini、Index-Translate（B 站开源翻译模型，公共接口免费）或任意 OpenAI 兼容接口（通义千问、Kimi、Ollama 等）
 
 ## 构建
@@ -28,7 +30,8 @@
 | 路径 | 作用 |
 |---|---|
 | `asr/AudioDecoder.kt` | MediaExtractor + MediaCodec 解码音轨，重采样到 16kHz 单声道 |
-| `asr/Transcriber.kt` | VAD 切段 → SenseVoice 识别 → 字幕条目 |
+| `asr/Transcriber.kt` | 本地引擎：VAD 切段 → SenseVoice 识别 → 字幕条目 |
+| `asr/AzureTranscriber.kt` | Azure 引擎：按静音点切成几分钟一段的 WAV 上传转写 |
 | `asr/ModelManager.kt` | 首次使用时下载并解压模型 |
 | `translate/` | 翻译接口、Claude 实现、OpenAI 兼容实现、提示词 |
 | `subtitle/` | 字幕数据结构、缓存、SRT 导出 |

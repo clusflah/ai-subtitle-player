@@ -1,6 +1,7 @@
 package com.aisub.player
 
 import android.content.Context
+import com.aisub.player.asr.AzureTranscriber
 import com.aisub.player.asr.ModelManager
 import com.aisub.player.translate.ChatCompletionsTranslator
 import com.aisub.player.translate.ClaudeTranslator
@@ -33,14 +34,24 @@ enum class Provider(
     OPENAI_COMPAT("自定义", "https://api.openai.com/v1", "", needsApiKey = false, editableBaseUrl = true),
 }
 
+enum class AsrEngine(val label: String) {
+    LOCAL("本地 SenseVoice"),
+    AZURE("Azure 语音"),
+}
+
 data class ProviderConfig(val apiKey: String = "", val model: String = "", val baseUrl: String = "")
 
 data class AppSettings(
     val provider: Provider = Provider.CLAUDE,
     val providerConfigs: Map<Provider, ProviderConfig> = emptyMap(),
     val targetLanguage: String = "简体中文",
+    val asrEngine: AsrEngine = AsrEngine.LOCAL,
     val asrLanguage: String = "auto",
     val modelBaseUrl: String = ModelManager.DEFAULT_BASE_URL,
+    val azureKey: String = "",
+    val azureRegion: String = "eastasia",
+    /** 留空时按区域拼默认地址；Azure 中国区或自定义域名时填写 */
+    val azureEndpoint: String = "",
     val autoTranslate: Boolean = true,
     val showOriginal: Boolean = true,
     val showTranslation: Boolean = true,
@@ -56,6 +67,16 @@ data class AppSettings(
     }
 
     fun withConfig(p: Provider, c: ProviderConfig) = copy(providerConfigs = providerConfigs + (p to c))
+
+    fun azureEndpointOrDefault(): String =
+        azureEndpoint.trim().ifEmpty { AzureTranscriber.defaultEndpoint(azureRegion) }
+
+    /** 当前识别引擎缺少必填项时返回提示，否则返回 null。 */
+    fun asrProblem(): String? = when {
+        asrEngine == AsrEngine.AZURE && azureKey.isBlank() -> "请先在设置里填写 Azure 语音的 Key"
+        asrEngine == AsrEngine.AZURE && azureRegion.isBlank() && azureEndpoint.isBlank() -> "请先在设置里填写 Azure 区域"
+        else -> null
+    }
 
     /** 当前服务商缺少必填项时返回提示，否则返回 null。 */
     fun translatorProblem(): String? {
@@ -115,8 +136,12 @@ class SettingsRepository(context: Context) {
             provider = runCatching { Provider.valueOf(prefs.getString("provider", d.provider.name)!!) }.getOrDefault(d.provider),
             providerConfigs = configs,
             targetLanguage = prefs.getString("targetLanguage", d.targetLanguage)!!,
+            asrEngine = runCatching { AsrEngine.valueOf(prefs.getString("asrEngine", d.asrEngine.name)!!) }.getOrDefault(d.asrEngine),
             asrLanguage = prefs.getString("asrLanguage", d.asrLanguage)!!,
             modelBaseUrl = prefs.getString("modelBaseUrl", d.modelBaseUrl)!!,
+            azureKey = prefs.getString("azureKey", d.azureKey)!!,
+            azureRegion = prefs.getString("azureRegion", d.azureRegion)!!,
+            azureEndpoint = prefs.getString("azureEndpoint", d.azureEndpoint)!!,
             autoTranslate = prefs.getBoolean("autoTranslate", d.autoTranslate),
             showOriginal = prefs.getBoolean("showOriginal", d.showOriginal),
             showTranslation = prefs.getBoolean("showTranslation", d.showTranslation),
@@ -127,8 +152,12 @@ class SettingsRepository(context: Context) {
         val editor = prefs.edit()
             .putString("provider", s.provider.name)
             .putString("targetLanguage", s.targetLanguage)
+            .putString("asrEngine", s.asrEngine.name)
             .putString("asrLanguage", s.asrLanguage)
             .putString("modelBaseUrl", s.modelBaseUrl)
+            .putString("azureKey", s.azureKey)
+            .putString("azureRegion", s.azureRegion)
+            .putString("azureEndpoint", s.azureEndpoint)
             .putBoolean("autoTranslate", s.autoTranslate)
             .putBoolean("showOriginal", s.showOriginal)
             .putBoolean("showTranslation", s.showTranslation)

@@ -7,7 +7,9 @@ import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import com.aisub.player.asr.AudioDecoder
+import com.aisub.player.asr.AzureTranscriber
 import com.aisub.player.asr.ModelManager
+import com.aisub.player.asr.SpeechEngine
 import com.aisub.player.asr.Transcriber
 import com.aisub.player.subtitle.Cue
 import com.aisub.player.subtitle.SrtMode
@@ -18,6 +20,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -86,26 +90,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         transcribeJob = viewModelScope.launch {
             try {
                 val settings = _state.value.settings
-                if (!models.isReady()) {
+                settings.asrProblem()?.let { throw IllegalStateException(it) }
+                if (settings.asrEngine == AsrEngine.LOCAL && !models.isReady()) {
                     models.ensureModels(settings.modelBaseUrl) { msg, p ->
                         _state.update { it.copy(status = msg, progress = p) }
                     }
                 }
-                _state.update { it.copy(status = "正在识别语音…", progress = 0f) }
+                val engineName = settings.asrEngine.label
+                _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f) }
                 if (settings.autoTranslate && settings.createTranslator() != null) startTranslation()
 
-                withContext(Dispatchers.Default) {
-                    val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
-                    Transcriber(models.paths, settings.asrLanguage, threads).use { transcriber ->
-                        val onCue: (Cue) -> Unit = { cue -> _state.update { it.copy(cues = it.cues + cue) } }
-                        AudioDecoder(getApplication(), uri).decode(
-                            isActive = { isActive },
-                            onProgress = { p -> _state.update { it.copy(progress = p) } },
-                            onChunk = { chunk -> transcriber.accept(chunk, onCue) },
-                        )
-                        if (isActive) transcriber.finish(onCue)
+                // Azure 引擎大部分时间在等网络，放到 IO 线程池
+                val dispatcher = if (settings.asrEngine == AsrEngine.AZURE) Dispatchers.IO else Dispatchers.Default
+                withContext(dispatcher) {
+                    createEngine(settings).use { engine ->
+                        // 协程取消时中断引擎里正在进行的网络请求
+                        val cancelHandle = coroutineContext.job.invokeOnCompletion { engine.cancel() }
+                        try {
+                            val onCue: (Cue) -> Unit = { cue -> _state.update { it.copy(cues = it.cues + cue) } }
+                            AudioDecoder(getApplication(), uri).decode(
+                                isActive = { isActive },
+                                onProgress = { p -> _state.update { it.copy(progress = p) } },
+                                onChunk = { chunk -> engine.accept(chunk, onCue) },
+                            )
+                            if (isActive) engine.finish(onCue)
+                        } finally {
+                            cancelHandle.dispose()
+                        }
                     }
                 }
+                ensureActive()
                 val count = _state.value.cues.size
                 _state.update { it.copy(status = "识别完成，共 $count 条字幕", progress = null) }
                 store.save(uri, _state.value.cues)
@@ -113,11 +127,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(status = "已取消", progress = null) }
                 throw e
             } catch (e: Exception) {
+                // 取消时被中断的网络请求会抛 IOException，不算失败
+                if (!isActive) {
+                    _state.update { it.copy(status = "已取消", progress = null) }
+                    throw CancellationException("cancelled")
+                }
                 _state.update { it.copy(status = "识别失败", progress = null, error = e.message ?: e.toString()) }
             } finally {
                 _state.update { it.copy(transcribing = false) }
             }
         }
+    }
+
+    private fun createEngine(settings: AppSettings): SpeechEngine = when (settings.asrEngine) {
+        AsrEngine.LOCAL -> {
+            val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+            Transcriber(models.paths, settings.asrLanguage, threads)
+        }
+        AsrEngine.AZURE -> AzureTranscriber(
+            endpoint = settings.azureEndpointOrDefault(),
+            apiKey = settings.azureKey.trim(),
+            locales = AzureTranscriber.localesFor(settings.asrLanguage),
+        )
     }
 
     /** 翻译所有还没有译文的字幕。识别进行中时会持续等待新字幕。 */
