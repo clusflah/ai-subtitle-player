@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
@@ -64,6 +65,8 @@ data class UiState(
     /** A-B 循环的 A、B 点（毫秒） */
     val loopA: Long? = null,
     val loopB: Long? = null,
+    /** 播放失败的原因；null 表示正常 */
+    val playbackError: String? = null,
     val settings: AppSettings = AppSettings(),
 )
 
@@ -93,7 +96,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 queue.getOrNull(player.currentMediaItemIndex)?.let(::onEntryChanged)
             }
+
+            override fun onPlayerError(error: PlaybackException) {
+                android.util.Log.e("AiSub", "播放失败", error)
+                _state.update { it.copy(playbackError = describePlaybackError(error)) }
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_READY) _state.update { it.copy(playbackError = null) }
+            }
         })
+    }
+
+    /**
+     * 播放/暂停。出错后（播放器处于空闲状态）重新加载并从当前位置继续；播完后从头播放。
+     * 以 playWhenReady 判断而不是 isPlaying：缓冲中 isPlaying 为 false，按"播放"不会有任何效果。
+     */
+    fun togglePlay() {
+        when (player.playbackState) {
+            Player.STATE_IDLE -> {
+                _state.update { it.copy(playbackError = null) }
+                player.prepare()
+                player.play()
+            }
+            Player.STATE_ENDED -> {
+                player.seekTo(player.currentMediaItemIndex, 0)
+                player.play()
+            }
+            else -> if (player.playWhenReady) player.pause() else player.play()
+        }
     }
 
     /** 播放一组媒体，从 index 开始；上次看到一半的会自动续播。 */
@@ -112,6 +143,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val resume = library.positionOf(start.uri)
             .takeIf { start.durationMs <= 0 || it < start.durationMs - 10_000 } ?: 0L
         player.setMediaItems(items, index.coerceIn(entries.indices), resume)
+        _state.update { it.copy(playbackError = null) }
         player.prepare()
         player.play()
         onEntryChanged(start)
@@ -485,4 +517,34 @@ internal fun renderersFactory(app: Application) = DefaultRenderersFactory(app)
 private fun decodeText(bytes: ByteArray): String {
     val utf8 = String(bytes, Charsets.UTF_8)
     return if ('�' in utf8) runCatching { String(bytes, charset("GBK")) }.getOrDefault(utf8) else utf8
+}
+
+/** 把播放器错误翻译成用户能看懂的话，附上错误码方便反馈。 */
+internal fun describePlaybackError(e: PlaybackException): String {
+    val reason = when (e.errorCode) {
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "网络连接失败或超时"
+        PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> {
+            val code = (e.cause as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode
+            "服务器拒绝了请求" + (code?.let { "（HTTP $it）" } ?: "") + "，可能是登录过期或链接失效"
+        }
+        PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "找不到文件"
+        PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE -> "文件不完整或已损坏（可能没下载完）"
+        PlaybackException.ERROR_CODE_IO_NO_PERMISSION -> "没有读取这个文件的权限"
+        PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+        PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED -> "不支持或已损坏的视频封装格式"
+        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+        PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+        PlaybackException.ERROR_CODE_DECODING_FAILED,
+        PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+        PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES -> "手机无法解码这个视频的画面或声音格式"
+        PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
+        PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED -> "音频输出失败"
+        else -> "播放出错"
+    }
+    val detail = generateSequence(e.cause) { it.cause }.mapNotNull { it.message }.firstOrNull()?.take(200)
+    return buildString {
+        append(reason).append("\n错误码：").append(e.errorCodeName)
+        if (!detail.isNullOrBlank()) append("\n").append(detail)
+    }
 }

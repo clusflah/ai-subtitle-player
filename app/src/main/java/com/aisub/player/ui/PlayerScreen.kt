@@ -178,10 +178,15 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     // ---- 播放状态轮询 ----
     var positionMs by remember { mutableLongStateOf(0L) }
     var isPlaying by remember { mutableStateOf(player.isPlaying) }
+    // 按钮图标跟随"想要播放"，缓冲时也显示暂停，避免看起来像没反应
+    var wantsPlay by remember { mutableStateOf(player.playWhenReady) }
+    var buffering by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         while (true) {
             positionMs = player.currentPosition
             isPlaying = player.isPlaying
+            wantsPlay = player.playWhenReady && player.playbackState != Player.STATE_IDLE && player.playbackState != Player.STATE_ENDED
+            buffering = player.playbackState == Player.STATE_BUFFERING
             vm.checkAbLoop(positionMs)
             delay(100)
         }
@@ -274,6 +279,27 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         )
         if (PipState.inPip) return@Box
 
+        // ---- 缓冲 / 出错提示 ----
+        val playbackError = state.playbackError
+        if (playbackError != null) {
+            Column(
+                Modifier.align(Alignment.Center).padding(32.dp).clip(RoundedCornerShape(12.dp)).background(Color(0xCC000000)).padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text("无法播放", color = Color.White, fontSize = 18.sp)
+                Spacer(Modifier.height(8.dp))
+                Text(playbackError, color = Color(0xFFCCCCCC), fontSize = 13.sp)
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = { vm.togglePlay() }) { Text("重试", color = Orange) }
+            }
+        } else if (buffering && wantsPlay) {
+            Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator(color = Orange)
+                Spacer(Modifier.height(8.dp))
+                Text("正在缓冲…", color = Color.White, fontSize = 13.sp)
+            }
+        }
+
         // ---- 手势层 ----
         GestureLayer(
             locked = locked,
@@ -281,6 +307,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             onIndicator = { indicator = it },
             speed = { speed },
             player = player,
+            onTogglePlay = vm::togglePlay,
         )
 
         // ---- 顶部：返回 + 标题 + 任务状态 ----
@@ -324,14 +351,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                     Spacer(Modifier.weight(1f))
                     IconButton(
-                        onClick = { if (player.isPlaying) player.pause() else player.play(); interactions++ },
+                        onClick = { vm.togglePlay(); interactions++ },
                         modifier = Modifier.size(64.dp).clip(CircleShape).background(Color.Transparent),
                     ) {
                         Box(
                             Modifier.size(60.dp).clip(CircleShape).background(Color(0x22FFFFFF)),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Icon(if (isPlaying) AppIcons.Pause else AppIcons.PlayArrow, if (isPlaying) "暂停" else "播放", tint = Color.White, modifier = Modifier.size(36.dp))
+                            Icon(if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow, if (wantsPlay) "暂停" else "播放", tint = Color.White, modifier = Modifier.size(36.dp))
                         }
                     }
                     Spacer(Modifier.weight(1f))
@@ -592,6 +619,7 @@ private fun GestureLayer(
     onIndicator: (Pair<ImageVector?, String>) -> Unit,
     speed: () -> Float,
     player: Player,
+    onTogglePlay: () -> Unit,
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -614,7 +642,7 @@ private fun GestureLayer(
                         when {
                             offset.x < third -> { player.seekTo((player.currentPosition - 10_000).coerceAtLeast(0)); onIndicator(null to "« 10 秒") }
                             offset.x > third * 2 -> { player.seekTo(player.currentPosition + 10_000); onIndicator(null to "10 秒 »") }
-                            else -> if (player.isPlaying) player.pause() else player.play()
+                            else -> onTogglePlay()
                         }
                     },
                     onLongPress = {
