@@ -10,6 +10,8 @@ data class MediaEntry(
     val durationMs: Long = 0,
     /** 本地文件所在目录（相对存储根目录，例如 "Movies/动画"）；远程文件为空 */
     val folder: String = "",
+    /** 文件大小（字节）；未知为 0 */
+    val sizeBytes: Long = 0,
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("uri", uri)
@@ -17,6 +19,7 @@ data class MediaEntry(
         .put("isVideo", isVideo)
         .put("duration", durationMs)
         .put("folder", folder)
+        .put("size", sizeBytes)
 
     companion object {
         fun fromJson(o: JSONObject) = MediaEntry(
@@ -25,6 +28,7 @@ data class MediaEntry(
             isVideo = o.optBoolean("isVideo", true),
             durationMs = o.optLong("duration"),
             folder = o.optString("folder"),
+            sizeBytes = o.optLong("size"),
         )
 
         private val VIDEO_EXT = setOf(

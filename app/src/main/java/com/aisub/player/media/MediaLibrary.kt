@@ -25,6 +25,7 @@ object MediaLibrary {
             MediaStore.MediaColumns._ID,
             MediaStore.MediaColumns.DISPLAY_NAME,
             MediaStore.Video.VideoColumns.DURATION,
+            MediaStore.MediaColumns.SIZE,
             pathColumn,
         )
         val storageRoot = Environment.getExternalStorageDirectory().absolutePath.trimEnd('/') + "/"
@@ -35,6 +36,7 @@ object MediaLibrary {
             val idCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
             val nameCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
             val durCol = c.getColumnIndexOrThrow(MediaStore.Video.VideoColumns.DURATION)
+            val sizeCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
             val pathCol = c.getColumnIndexOrThrow(pathColumn)
             while (c.moveToNext()) {
                 val uri = ContentUris.withAppendedId(collection, c.getLong(idCol))
@@ -48,6 +50,7 @@ object MediaLibrary {
                         isVideo = isVideo,
                         durationMs = c.getLong(durCol),
                         folder = folder,
+                        sizeBytes = c.getLong(sizeCol),
                     )
                 )
             }

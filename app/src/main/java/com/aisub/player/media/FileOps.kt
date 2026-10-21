@@ -84,6 +84,72 @@ object FileOps {
     }
 
     /**
+     * 复制到另一个目录。复制出来的新文件属于本应用，不需要用户授权。
+     * Android 10+ 通过 MediaStore 新建（同名时系统自动加序号）；旧系统直接复制文件再通知媒体库。
+     */
+    @Suppress("DEPRECATION")
+    fun copy(context: Context, entry: MediaEntry, relativeDir: String, onProgress: (Long) -> Unit = {}) {
+        val dir = relativeDir.trim('/').ifEmpty { throw IllegalArgumentException("目标目录为空") }
+        val resolver = context.contentResolver
+        val src = Uri.parse(entry.uri)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val collection = if (entry.isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, entry.title)
+                resolver.getType(src)?.let { put(MediaStore.MediaColumns.MIME_TYPE, it) }
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "$dir/")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val dst = resolver.insert(collection, values) ?: throw IllegalStateException("无法在 $dir 创建文件")
+            try {
+                resolver.openInputStream(src)!!.use { input ->
+                    resolver.openOutputStream(dst)!!.use { output -> copyStream(input, output, onProgress) }
+                }
+                resolver.update(dst, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            } catch (e: Exception) {
+                runCatching { resolver.delete(dst, null, null) }
+                throw e
+            }
+            return
+        }
+        val folder = File(Environment.getExternalStorageDirectory(), dir).apply { mkdirs() }
+        val base = entry.title.substringBeforeLast('.')
+        val ext = entry.title.substringAfterLast('.', "").let { if (it.isEmpty()) "" else ".$it" }
+        var target = File(folder, entry.title)
+        var n = 1
+        while (target.exists()) target = File(folder, "$base (${n++})$ext")
+        resolver.openInputStream(src)!!.use { input -> target.outputStream().use { output -> copyStream(input, output, onProgress) } }
+        android.media.MediaScannerConnection.scanFile(context, arrayOf(target.absolutePath), null, null)
+    }
+
+    private fun copyStream(input: java.io.InputStream, output: java.io.OutputStream, onProgress: (Long) -> Unit) {
+        val buf = ByteArray(1 shl 16)
+        var total = 0L
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            output.write(buf, 0, n)
+            total += n
+            onProgress(total)
+            if (Thread.currentThread().isInterrupted) throw InterruptedException()
+        }
+    }
+
+    /**
+     * 重命名文件夹：把其中（含子目录）的媒体文件移到新名字的目录下，保留子目录结构。
+     * 文件夹里的非媒体文件不在媒体库里，不会跟着移动。
+     */
+    fun renameFolder(context: Context, entries: List<MediaEntry>, oldPath: String, newName: String) {
+        val name = newName.trim()
+        require(name.isNotEmpty() && '/' !in name) { "文件夹名不合法" }
+        val parent = oldPath.substringBeforeLast('/', "")
+        val newPath = if (parent.isEmpty()) name else "$parent/$name"
+        for (e in entries) {
+            move(context, e, newPath + e.folder.removePrefix(oldPath))
+        }
+    }
+
+    /**
      * Android 10+ 直接更新 MediaStore；Android 8/9 没有 RELATIVE_PATH，改为重命名实际文件后再通知媒体库。
      */
     @Suppress("DEPRECATION")

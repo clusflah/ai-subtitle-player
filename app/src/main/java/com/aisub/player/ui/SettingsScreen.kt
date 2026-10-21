@@ -222,6 +222,34 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 }
             }
 
+            // ---------------- 在线字幕 ----------------
+            SectionHeader("在线字幕")
+            SurfaceCard {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("射手网（中文字幕多）", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "在 assrt.net 注册登录后，到「用户面板」复制 API Token",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    ConfigField(s.assrtToken, { s = s.copy(assrtToken = it) }, "API Token", "", secret = true)
+                    Spacer(Modifier.height(8.dp))
+                    Text("OpenSubtitles（外语片多）", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "在 opensubtitles.com 注册后，到 opensubtitles.com/consumers 新建 API Key。账号密码可不填，不登录每天限 5 次下载",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    ConfigField(s.osApiKey, { s = s.copy(osApiKey = it) }, "API Key", "", secret = true)
+                    ConfigField(s.osUsername, { s = s.copy(osUsername = it) }, "用户名（可选）", "")
+                    ConfigField(s.osPassword, { s = s.copy(osPassword = it) }, "密码（可选）", "", secret = true)
+                    ConfigField(s.subtitleLanguages, { s = s.copy(subtitleLanguages = it) }, "搜索语言", "zh-cn,en")
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("zh-cn,en" to "简中 + 英", "zh-cn,zh-tw" to "简中 + 繁中", "en" to "仅英文", "zh-cn,en,ja" to "简中 + 英 + 日").forEach { (v, label) ->
+                            FilterChip(selected = s.subtitleLanguages == v, onClick = { s = s.copy(subtitleLanguages = v) }, label = { Text(label) })
+                        }
+                    }
+                }
+            }
+
             // ---------------- 字幕样式 ----------------
             SectionHeader("字幕样式")
             SurfaceCard {

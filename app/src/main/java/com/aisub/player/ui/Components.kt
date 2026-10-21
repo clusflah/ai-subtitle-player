@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.formatDuration
+import com.aisub.player.media.formatSize
 
 data class MenuAction(val label: String, val enabled: Boolean = true, val onClick: () -> Unit)
 
@@ -264,7 +265,8 @@ fun MediaRow(
         }
         Column(Modifier.weight(1f).padding(start = 12.dp)) {
             Text(entry.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
-            val info = subtitle ?: formatDuration(entry.durationMs)
+            val info = subtitle ?: listOf(formatDuration(entry.durationMs), if (entry.sizeBytes > 0) formatSize(entry.sizeBytes) else "")
+                .filter { it.isNotEmpty() }.joinToString(" · ")
             if (info.isNotEmpty()) Text(info, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
         if (menu.isNotEmpty() && selected == null) OverflowMenu(menu) else Spacer(Modifier.width(12.dp))
@@ -273,8 +275,12 @@ fun MediaRow(
 
 /** 列表里的一行文件夹。 */
 @Composable
-fun FolderRow(name: String, subtitle: String? = null, onClick: () -> Unit) {
-    ListRow(title = name, subtitle = subtitle, icon = AppIcons.Folder, mutedIcon = true, onClick = onClick)
+fun FolderRow(name: String, subtitle: String? = null, menu: List<MenuAction> = emptyList(), onClick: () -> Unit) {
+    ListRow(
+        title = name, subtitle = subtitle, icon = AppIcons.Folder, mutedIcon = true,
+        trailing = if (menu.isEmpty()) null else ({ OverflowMenu(menu) }),
+        onClick = onClick,
+    )
 }
 
 /** 统一的空状态：简洁图标 + 明确说明 + 一个主要操作（可选一个次要操作）。 */

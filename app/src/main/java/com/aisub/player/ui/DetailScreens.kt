@@ -1,5 +1,6 @@
 package com.aisub.player.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -80,16 +81,58 @@ fun LocalFolderScreen(
             onCreate = { lib.createPlaylistWith(it, entries); addTo = null },
         )
     }
-    DetailScaffold(title, onBack) {
-        if (folders.isEmpty() && files.isEmpty()) {
-            EmptyState("这个文件夹里没有媒体文件", icon = AppIcons.Folder)
-            return@DetailScaffold
-        }
-        LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
-            items(folders, key = { "d:" + it.path }) { f ->
-                FolderRow(f.name, subtitle = countText(f.folderCount, f.fileCount)) { openFolder(f.path, f.name) }
+    // 长按文件进入多选
+    var selected by remember(path) { mutableStateOf(emptySet<String>()) }
+    val selectedEntries = files.filter { it.uri in selected }
+    BackHandler(enabled = selected.isNotEmpty()) { selected = emptySet() }
+    val toggle: (MediaEntry) -> Unit = { e -> selected = if (e.uri in selected) selected - e.uri else selected + e.uri }
+    val inFolder: (String) -> List<MediaEntry> = { p -> all.filter { it.folder == p || it.folder.startsWith("$p/") } }
+
+    Box(Modifier.fillMaxSize()) {
+        DetailScaffold(
+            title, onBack,
+            actions = {
+                if (files.isNotEmpty()) {
+                    OverflowMenu(
+                        listOf(
+                            MenuAction("全部播放") { play(files, 0) },
+                            MenuAction("选择…") { selected = setOf(files.first().uri) },
+                        ) + if (path.isNotEmpty()) fm.folderMenu(path, inFolder(path)) { play(inFolder(path), 0) }.drop(1) else emptyList(),
+                    )
+                }
+            },
+        ) {
+            if (folders.isEmpty() && files.isEmpty()) {
+                EmptyState("这个文件夹里没有媒体文件", icon = AppIcons.Folder)
+                return@DetailScaffold
             }
-            itemsIndexed(files, key = { _, e -> e.uri }) { i, e -> MediaRow(e, fm.menu(e)) { play(files, i) } }
+            val selecting = selected.isNotEmpty()
+            LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+                items(folders, key = { "d:" + it.path }) { f ->
+                    val entries = inFolder(f.path)
+                    FolderRow(
+                        f.name, subtitle = countText(f.folderCount, f.fileCount),
+                        menu = if (selecting) emptyList() else fm.folderMenu(f.path, entries) { play(entries, 0) },
+                    ) { openFolder(f.path, f.name) }
+                }
+                itemsIndexed(files, key = { _, e -> e.uri }) { i, e ->
+                    MediaRow(e, fm.menu(e), selected = if (selecting) e.uri in selected else null, onLongClick = { toggle(e) }) {
+                        if (selecting) toggle(e) else play(files, i)
+                    }
+                }
+            }
+        }
+        if (selected.isNotEmpty()) {
+            SelectionBar(
+                count = selected.size,
+                onClose = { selected = emptySet() },
+                onSelectAll = { selected = files.map { it.uri }.toSet() },
+                onShare = { fm.share(selectedEntries) },
+                onAddToPlaylist = { addTo = selectedEntries },
+                onMove = { fm.move(selectedEntries); selected = emptySet() },
+                onCopy = { fm.copy(selectedEntries); selected = emptySet() },
+                onDelete = { fm.delete(selectedEntries); selected = emptySet() },
+            )
         }
     }
 }

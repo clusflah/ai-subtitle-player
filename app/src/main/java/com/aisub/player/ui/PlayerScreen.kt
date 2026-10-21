@@ -226,6 +226,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     var showTracks by remember { mutableStateOf(false) }
     var showMore by remember { mutableStateOf(false) }
     var showCues by remember { mutableStateOf(false) }
+    var showOnline by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<PlayerDialog?>(null) }
 
     LaunchedEffect(controls, interactions, isPlaying, showMore, showTracks) {
@@ -451,12 +452,18 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         SubtitleAction.LIST -> { showTracks = false; showCues = true }
                         SubtitleAction.DELAY -> dialog = PlayerDialog.DELAY
                         SubtitleAction.IMPORT -> importLauncher.launch(arrayOf("application/x-subrip", "text/*", "application/octet-stream"))
+                        SubtitleAction.ONLINE -> { showTracks = false; showOnline = true }
                         SubtitleAction.EXPORT -> dialog = PlayerDialog.EXPORT
                         SubtitleAction.ERROR -> dialog = PlayerDialog.ERROR
                     }
                 },
             )
         }
+    }
+
+    // ---- 在线下载字幕 ----
+    if (showOnline) {
+        OnlineSubtitleSheet(vm, onDismiss = { showOnline = false }, onOpenSettings = { showOnline = false; onOpenSettings() })
     }
 
     // ---- 字幕列表 ----
@@ -779,7 +786,7 @@ private fun enterPip(activity: Activity?) {
 
 // ---------------- 字幕与音轨面板 ----------------
 
-private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, EXPORT, ERROR }
+private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ONLINE, EXPORT, ERROR }
 
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
@@ -850,7 +857,8 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
             ActionRow(AppIcons.History, "字幕延迟", subtitle = if (state.subtitleDelayMs == 0L) null else "%+.1f 秒".format(state.subtitleDelayMs / 1000f)) {
                 onSubtitleAction(SubtitleAction.DELAY)
             }
-            ActionRow(AppIcons.File, "选择字幕文件", subtitle = "SRT / VTT") { onSubtitleAction(SubtitleAction.IMPORT) }
+            ActionRow(AppIcons.File, "选择字幕文件", subtitle = "SRT / VTT / ASS") { onSubtitleAction(SubtitleAction.IMPORT) }
+            ActionRow(AppIcons.Search, "在线下载字幕", subtitle = "射手网 / OpenSubtitles") { onSubtitleAction(SubtitleAction.ONLINE) }
             ActionRow(AppIcons.Download, "导出字幕", enabled = state.cues.isNotEmpty()) { onSubtitleAction(SubtitleAction.EXPORT) }
         }
     }

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -23,6 +24,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -42,6 +48,7 @@ class FileManager internal constructor(
     private val lib: LibraryViewModel,
     private val launch: (IntentSenderRequest) -> Unit,
     private val onAddToPlaylist: (List<MediaEntry>) -> Unit,
+    private val scope: CoroutineScope,
 ) {
     internal var dialog by mutableStateOf<FileDialog?>(null)
 
@@ -123,6 +130,59 @@ class FileManager internal constructor(
     internal fun doMove(entries: List<MediaEntry>, dir: String) =
         withWriteAccess(entries, { entries.forEach { FileOps.move(context, it, dir) } }, "已移动到 $dir")
 
+    fun copy(entries: List<MediaEntry>) {
+        val local = entries.filter(FileOps::isLocal)
+        if (local.isEmpty()) return
+        val folders = (lib.state.value.videos + lib.state.value.audios).map { it.folder }.distinct()
+        dialog = FileDialog.Move(local, FileOps.moveTargets(local, folders), copy = true)
+    }
+
+    /** 正在复制时显示的进度（0～1），null 表示没有在复制。 */
+    internal var copyProgress by mutableStateOf<Float?>(null)
+
+    internal fun doCopy(entries: List<MediaEntry>, dir: String) {
+        if (copyProgress != null) return
+        val total = entries.sumOf { it.sizeBytes }.coerceAtLeast(1)
+        copyProgress = 0f
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    var done = 0L
+                    for (e in entries) {
+                        FileOps.copy(context, e, dir) { n -> copyProgress = ((done + n).toFloat() / total).coerceAtMost(1f) }
+                        done += e.sizeBytes
+                    }
+                }
+                finished("已复制 ${entries.size} 个文件到 $dir")
+            } catch (e: Exception) {
+                Toast.makeText(context, "复制失败：${e.message}", Toast.LENGTH_LONG).show()
+                lib.refreshMedia()
+            }
+            copyProgress = null
+        }
+    }
+
+    fun renameFolder(path: String, entries: List<MediaEntry>) {
+        if ('/' !in path) {
+            Toast.makeText(context, "系统目录不能重命名", Toast.LENGTH_SHORT).show()
+            return
+        }
+        dialog = FileDialog.RenameFolder(path, entries.filter(FileOps::isLocal))
+    }
+
+    internal fun doRenameFolder(path: String, entries: List<MediaEntry>, name: String) =
+        withWriteAccess(entries, { FileOps.renameFolder(context, entries, path, name) }, "已重命名")
+
+    /** 文件夹的"⋮"菜单。 */
+    fun folderMenu(path: String, entries: List<MediaEntry>, onPlayAll: () -> Unit): List<MenuAction> = listOf(
+        MenuAction("全部播放", onClick = onPlayAll),
+        MenuAction("全部加入播放列表") { onAddToPlaylist(entries) },
+        MenuAction("分享全部") { share(entries) },
+        MenuAction("重命名文件夹") { renameFolder(path, entries) },
+        MenuAction("移动全部到…") { move(entries) },
+        MenuAction("删除文件夹（${entries.size} 个媒体文件）") { delete(entries) },
+    )
+
     fun details(entry: MediaEntry) {
         dialog = FileDialog.Info(FileOps.details(context, entry))
     }
@@ -135,6 +195,7 @@ class FileManager internal constructor(
             MenuAction("分享") { share(listOf(entry)) }.takeIf { local },
             MenuAction("重命名") { rename(entry) }.takeIf { local },
             MenuAction("移动到…") { move(listOf(entry)) }.takeIf { local },
+            MenuAction("复制到…") { copy(listOf(entry)) }.takeIf { local },
             MenuAction("详细信息") { details(entry) }.takeIf { local },
             MenuAction("删除") { delete(listOf(entry)) }.takeIf { local },
         )
@@ -143,7 +204,8 @@ class FileManager internal constructor(
 
 internal sealed interface FileDialog {
     data class Rename(val entry: MediaEntry) : FileDialog
-    data class Move(val entries: List<MediaEntry>, val targets: List<String>) : FileDialog
+    data class Move(val entries: List<MediaEntry>, val targets: List<String>, val copy: Boolean = false) : FileDialog
+    data class RenameFolder(val path: String, val entries: List<MediaEntry>) : FileDialog
     data class Info(val details: FileOps.Details) : FileDialog
     data class ConfirmDelete(val entries: List<MediaEntry>) : FileDialog
 }
@@ -155,7 +217,8 @@ fun rememberFileManager(lib: LibraryViewModel, onAddToPlaylist: (List<MediaEntry
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         holder?.onPermissionResult(result.resultCode == Activity.RESULT_OK)
     }
-    val fm = remember(lib) { FileManager(context, lib, { launcher.launch(it) }, onAddToPlaylist) }
+    val scope = rememberCoroutineScope()
+    val fm = remember(lib) { FileManager(context, lib, { launcher.launch(it) }, onAddToPlaylist, scope) }
     holder = fm
     FileDialogs(fm)
     return fm
@@ -163,6 +226,14 @@ fun rememberFileManager(lib: LibraryViewModel, onAddToPlaylist: (List<MediaEntry
 
 @Composable
 private fun FileDialogs(fm: FileManager) {
+    fm.copyProgress?.let { p ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("正在复制…") },
+            text = { LinearProgressIndicator(progress = { p }, modifier = Modifier.fillMaxWidth()) },
+            confirmButton = {},
+        )
+    }
     when (val d = fm.dialog) {
         null -> {}
         is FileDialog.Rename -> TextInputDialog(
@@ -170,17 +241,23 @@ private fun FileDialogs(fm: FileManager) {
             initial = d.entry.title.substringBeforeLast('.'), confirm = "确定",
             onDismiss = { fm.dialog = null },
         ) { name -> fm.dialog = null; fm.doRename(d.entry, name) }
+        is FileDialog.RenameFolder -> TextInputDialog(
+            title = "重命名文件夹", label = "新名字（其中 ${d.entries.size} 个媒体文件会一起移过去）",
+            initial = d.path.substringAfterLast('/'), confirm = "确定",
+            onDismiss = { fm.dialog = null },
+        ) { name -> fm.dialog = null; fm.doRenameFolder(d.path, d.entries, name) }
         is FileDialog.Move -> {
             var custom by remember { mutableStateOf("") }
+            val go: (String) -> Unit = { dir -> fm.dialog = null; if (d.copy) fm.doCopy(d.entries, dir) else fm.doMove(d.entries, dir) }
             AlertDialog(
                 onDismissRequest = { fm.dialog = null },
-                title = { Text("移动 ${d.entries.size} 个文件到") },
+                title = { Text("${if (d.copy) "复制" else "移动"} ${d.entries.size} 个文件到") },
                 text = {
                     Column(Modifier.verticalScroll(rememberScrollState())) {
                         d.targets.forEach { dir ->
                             Text(
                                 dir, style = MaterialTheme.typography.bodyLarge,
-                                modifier = Modifier.fillMaxWidth().clickable { fm.dialog = null; fm.doMove(d.entries, dir) }.padding(vertical = 12.dp),
+                                modifier = Modifier.fillMaxWidth().clickable { go(dir) }.padding(vertical = 12.dp),
                             )
                         }
                         OutlinedTextField(
@@ -191,7 +268,7 @@ private fun FileDialogs(fm: FileManager) {
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = { fm.dialog = null; fm.doMove(d.entries, custom) }, enabled = custom.isNotBlank()) { Text("移动到新文件夹") }
+                    TextButton(onClick = { go(custom) }, enabled = custom.isNotBlank()) { Text(if (d.copy) "复制到新文件夹" else "移动到新文件夹") }
                 },
                 dismissButton = { TextButton(onClick = { fm.dialog = null }) { Text("取消") } },
             )

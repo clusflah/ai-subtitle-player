@@ -99,7 +99,7 @@ class AppStore(context: Context) {
 }
 
 /** 浏览偏好：排序方式、网格/列表，按页面保存。 */
-enum class SortOrder(val label: String) { RECENT("最近添加"), NAME("名称"), DURATION("时长") }
+enum class SortOrder(val label: String) { RECENT("最近添加"), NAME("名称"), DURATION("时长"), SIZE("大小") }
 
 class ViewPrefs(context: Context) {
     private val prefs = context.getSharedPreferences("view", Context.MODE_PRIVATE)

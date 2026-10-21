@@ -55,6 +55,14 @@ data class AppSettings(
     val subtitleOffset: Int = 40,
     /** 字幕列表自动滚动到当前句 */
     val followPlayback: Boolean = true,
+    /** 在线字幕：OpenSubtitles.com 的 API Key 与账号（账号可不填，不登录每天限 5 次下载） */
+    val osApiKey: String = "",
+    val osUsername: String = "",
+    val osPassword: String = "",
+    /** 在线字幕：射手网（assrt.net）的 API Token */
+    val assrtToken: String = "",
+    /** 在线字幕搜索语言，OpenSubtitles 语言代码，逗号分隔 */
+    val subtitleLanguages: String = "zh-cn,en",
 ) {
     /** 某个服务商的配置，未填的字段用默认值补齐。 */
     fun configOf(p: Provider): ProviderConfig {
@@ -137,6 +145,11 @@ class SettingsRepository(context: Context) {
             subtitleScale = prefs.getFloat("subtitleScale", d.subtitleScale),
             subtitleOffset = prefs.getInt("subtitleOffset", d.subtitleOffset),
             followPlayback = prefs.getBoolean("followPlayback", d.followPlayback),
+            osApiKey = prefs.getString("osApiKey", "")!!,
+            osUsername = prefs.getString("osUsername", "")!!,
+            osPassword = prefs.getString("osPassword", "")!!,
+            assrtToken = prefs.getString("assrtToken", "")!!,
+            subtitleLanguages = prefs.getString("subtitleLanguages", d.subtitleLanguages)!!,
         )
     }
 
@@ -154,6 +167,11 @@ class SettingsRepository(context: Context) {
             .putFloat("subtitleScale", s.subtitleScale)
             .putInt("subtitleOffset", s.subtitleOffset)
             .putBoolean("followPlayback", s.followPlayback)
+            .putString("osApiKey", s.osApiKey)
+            .putString("osUsername", s.osUsername)
+            .putString("osPassword", s.osPassword)
+            .putString("assrtToken", s.assrtToken)
+            .putString("subtitleLanguages", s.subtitleLanguages)
         for ((p, c) in s.providerConfigs) {
             editor.putString("${p.name}.apiKey", c.apiKey)
                 .putString("${p.name}.model", c.model)

@@ -160,6 +160,7 @@ fun HomeScreen(
                     onShare = { files.share(selectedEntries) },
                     onAddToPlaylist = { dialog = HomeDialog.AddToPlaylist(selectedEntries) },
                     onMove = { files.move(selectedEntries); selected = emptySet() },
+                    onCopy = { files.copy(selectedEntries); selected = emptySet() },
                     onDelete = { files.delete(selectedEntries); selected = emptySet() },
                 )
             } else {
@@ -344,6 +345,7 @@ private fun List<MediaEntry>.sortedBy(order: SortOrder): List<MediaEntry> = when
     SortOrder.RECENT -> this // 媒体库本身按添加时间倒序
     SortOrder.NAME -> sortedBy { it.title.lowercase() }
     SortOrder.DURATION -> sortedByDescending { it.durationMs }
+    SortOrder.SIZE -> sortedByDescending { it.sizeBytes }
 }
 
 @Composable
@@ -603,13 +605,14 @@ private fun MoreTab(
 /** 多选模式的顶栏：已选数量 + 批量操作。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SelectionBar(
+internal fun SelectionBar(
     count: Int,
     onClose: () -> Unit,
     onSelectAll: () -> Unit,
     onShare: () -> Unit,
     onAddToPlaylist: () -> Unit,
     onMove: () -> Unit,
+    onCopy: () -> Unit,
     onDelete: () -> Unit,
 ) {
     TopAppBar(
@@ -624,6 +627,7 @@ private fun SelectionBar(
                 listOf(
                     MenuAction("全选", onClick = onSelectAll),
                     MenuAction("移动到…", onClick = onMove),
+                    MenuAction("复制到…", onClick = onCopy),
                 )
             )
         },

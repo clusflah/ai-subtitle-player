@@ -30,6 +30,10 @@ import com.aisub.player.subtitle.Cue
 import com.aisub.player.subtitle.SrtMode
 import com.aisub.player.subtitle.SubtitleParser
 import com.aisub.player.subtitle.SubtitleStore
+import com.aisub.player.subtitle.OnlineSubtitle
+import com.aisub.player.subtitle.OnlineSubtitleSource
+import com.aisub.player.subtitle.OnlineSubtitles
+import com.aisub.player.subtitle.decodeText
 import com.aisub.player.subtitle.writeSrt
 import com.aisub.player.translate.Translator
 import kotlinx.coroutines.CancellationException
@@ -410,15 +414,52 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     getApplication<Application>().contentResolver.openInputStream(file)!!.use { it.readBytes() }
                         .let { bytes -> decodeText(bytes) }
                 }
-                val cues = SubtitleParser.parse(text)
-                if (cues.isEmpty()) throw IllegalArgumentException("文件里没有识别到字幕")
-                cancelAll()
-                _state.update { it.copy(cues = cues, status = "已载入 ${cues.size} 句字幕", error = null, failedTask = null) }
-                store.save(video, cues)
+                applySubtitleText(video, text)
             } catch (e: Exception) {
                 _state.update { it.copy(error = "载入字幕失败：${e.message}") }
             }
         }
+    }
+
+    private fun applySubtitleText(video: Uri, text: String): Int {
+        val cues = SubtitleParser.parse(text)
+        if (cues.isEmpty()) throw IllegalArgumentException("文件里没有识别到字幕")
+        cancelAll()
+        _state.update { it.copy(cues = cues, status = "已载入 ${cues.size} 句字幕", error = null, failedTask = null) }
+        store.save(video, cues)
+        return cues.size
+    }
+
+    // ---------------- 在线字幕 ----------------
+
+    private var online: Pair<AppSettings, OnlineSubtitles>? = null
+
+    /** 按当前设置创建（设置没变就复用，保留 OpenSubtitles 的登录状态）。 */
+    fun onlineSubtitles(): OnlineSubtitles {
+        val s = _state.value.settings
+        online?.takeIf { it.first == s }?.let { return it.second }
+        return OnlineSubtitles(s.osApiKey, s.osUsername, s.osPassword, s.assrtToken).also { online = s to it }
+    }
+
+    /** 搜索框的默认内容：去掉扩展名的文件名。 */
+    fun defaultSubtitleQuery(): String = _state.value.current?.title?.substringBeforeLast('.').orEmpty()
+
+    suspend fun searchOnlineSubtitles(source: OnlineSubtitleSource, query: String): List<OnlineSubtitle> = withContext(Dispatchers.IO) {
+        val video = _state.value.videoUri
+        // 本地文件附带哈希，能精确匹配到同一版本的字幕
+        val hash = if (source == OnlineSubtitleSource.OPENSUBTITLES && video != null) {
+            OnlineSubtitles.movieHash(getApplication(), video)
+        } else {
+            null
+        }
+        onlineSubtitles().search(source, query, _state.value.settings.subtitleLanguages, hash)
+    }
+
+    /** 下载并替换当前字幕，返回句数。 */
+    suspend fun downloadOnlineSubtitle(sub: OnlineSubtitle): Int {
+        val video = _state.value.videoUri ?: throw IllegalStateException("没有正在播放的视频")
+        val text = withContext(Dispatchers.IO) { onlineSubtitles().download(sub) }
+        return applySubtitleText(video, text)
     }
 
     /** 当前播放队列存为播放列表。 */
@@ -514,11 +555,6 @@ internal fun renderersFactory(app: Application) = DefaultRenderersFactory(app)
     .setEnableDecoderFallback(true)
 
 /** 字幕文件常见 UTF-8 / GBK 两种编码：UTF-8 解码出现替换字符时按 GBK 重试。 */
-private fun decodeText(bytes: ByteArray): String {
-    val utf8 = String(bytes, Charsets.UTF_8)
-    return if ('�' in utf8) runCatching { String(bytes, charset("GBK")) }.getOrDefault(utf8) else utf8
-}
-
 /** 把播放器错误翻译成用户能看懂的话，附上错误码方便反馈。 */
 internal fun describePlaybackError(e: PlaybackException): String {
     val reason = when (e.errorCode) {
