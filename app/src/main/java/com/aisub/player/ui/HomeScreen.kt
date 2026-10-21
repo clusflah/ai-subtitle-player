@@ -215,7 +215,7 @@ fun HomeScreen(
                                 HorizontalDivider()
                             }
                             DropdownMenuItem(text = { Text("刷新媒体库") }, onClick = { menu = false; lib.refreshMedia() })
-                            DropdownMenuItem(text = { Text("打开文件…") }, onClick = { menu = false; pickFile.launch(arrayOf("video/*", "audio/*")) })
+                            DropdownMenuItem(text = { Text("打开文件…") }, onClick = { menu = false; pickFile.launch(arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream")) })
                             DropdownMenuItem(text = { Text("设置") }, onClick = { menu = false; openSettings() })
                         }
                     }
@@ -258,7 +258,7 @@ fun HomeScreen(
                     onRequestPermission = onRequestPermission,
                     openLocal = { path, title -> nav.push(Screen.LocalFolder(path, title)) },
                     openRemote = { s -> nav.push(Screen.Remote(s.id, s.rootPath, s.name)) },
-                    pickFile = { pickFile.launch(arrayOf("video/*", "audio/*")) },
+                    pickFile = { pickFile.launch(arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream")) },
                     addSource = { dialog = HomeDialog.AddSource },
                     serverMenu = { s ->
                         if (s.type.isCloud) listOf(

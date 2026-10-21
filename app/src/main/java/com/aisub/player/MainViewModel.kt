@@ -4,6 +4,7 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
@@ -18,6 +19,8 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.aisub.player.media.AppStore
 import com.aisub.player.media.MediaEntry
+import com.aisub.player.media.MediaProxy
+import com.aisub.player.media.VlcPlayer
 import com.aisub.player.remote.AuthRegistry
 import com.aisub.player.remote.cloud.CloudRegistry
 import com.aisub.player.asr.AudioDecoder
@@ -79,9 +82,20 @@ enum class Task { TRANSCRIBE, TRANSLATE }
 @OptIn(UnstableApi::class)
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
-    val player: ExoPlayer = ExoPlayer.Builder(app, renderersFactory(app))
+    /** 默认播放内核 */
+    val exoPlayer: ExoPlayer = ExoPlayer.Builder(app, renderersFactory(app))
         .setMediaSourceFactory(DefaultMediaSourceFactory(authDataSourceFactory(app)))
         .build()
+
+    /** VLC 内核：ISO 光盘镜像，或用户在 ExoPlayer 播放失败后手动切换。用到时才创建。 */
+    private var vlcPlayer: VlcPlayer? = null
+    private val proxy by lazy { MediaProxy(authDataSourceFactory(app)) }
+
+    private val _player = MutableStateFlow<Player>(exoPlayer)
+    /** 当前使用的播放内核，切换时播放页会重新绑定画面 */
+    val playerFlow: StateFlow<Player> = _player.asStateFlow()
+    val player: Player get() = _player.value
+    val usingVlc: Boolean get() = player !== exoPlayer
 
     private val settingsRepo = SettingsRepository(app)
     private val store = SubtitleStore(app)
@@ -95,21 +109,57 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var translateJob: Job? = null
     private var queue: List<MediaEntry> = emptyList()
 
+    private val listener = object : Player.Listener {
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            if (!usingVlc) queue.getOrNull(exoPlayer.currentMediaItemIndex)?.let(::onEntryChanged)
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            android.util.Log.e("AiSub", "播放失败", error)
+            _state.update { it.copy(playbackError = describePlaybackError(error)) }
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            if (playbackState == Player.STATE_READY) _state.update { it.copy(playbackError = null) }
+        }
+    }
+
     init {
-        player.addListener(object : Player.Listener {
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                queue.getOrNull(player.currentMediaItemIndex)?.let(::onEntryChanged)
-            }
+        exoPlayer.addListener(listener)
+        // 内嵌字幕默认不显示（避免和 AI 字幕重叠），在字幕面板里手动选择
+        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+    }
 
-            override fun onPlayerError(error: PlaybackException) {
-                android.util.Log.e("AiSub", "播放失败", error)
-                _state.update { it.copy(playbackError = describePlaybackError(error)) }
-            }
+    private fun vlc(): VlcPlayer = vlcPlayer ?: VlcPlayer(getApplication(), proxy).also {
+        it.addListener(listener)
+        vlcPlayer = it
+    }
 
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_READY) _state.update { it.copy(playbackError = null) }
-            }
-        })
+    private fun itemOf(e: MediaEntry) = MediaItem.Builder()
+        .setUri(e.uri)
+        .setMediaId(e.uri)
+        .setMediaMetadata(MediaMetadata.Builder().setTitle(e.title).build())
+        .build()
+
+    /** 用 VLC 内核播放一个文件（不带播放队列）。 */
+    private fun playWithVlc(entry: MediaEntry, positionMs: Long) {
+        exoPlayer.stop()
+        exoPlayer.clearMediaItems()
+        queue = listOf(entry)
+        val v = vlc()
+        v.setMediaItem(itemOf(entry), positionMs)
+        _state.update { it.copy(playbackError = null) }
+        v.prepare()
+        v.play()
+        _player.value = v
+        onEntryChanged(entry)
+    }
+
+    /** ExoPlayer 播放失败时，从当前位置改用 VLC 内核重试。 */
+    fun switchToVlc() {
+        val entry = _state.value.current ?: return
+        playWithVlc(entry, exoPlayer.currentPosition.coerceAtLeast(0))
     }
 
     /**
@@ -135,21 +185,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun play(entries: List<MediaEntry>, index: Int) {
         if (entries.isEmpty()) return
         savePosition()
-        queue = entries
         val start = entries[index.coerceIn(entries.indices)]
-        val items = entries.map {
-            MediaItem.Builder()
-                .setUri(it.uri)
-                .setMediaId(it.uri)
-                .setMediaMetadata(MediaMetadata.Builder().setTitle(it.title).build())
-                .build()
-        }
         val resume = library.positionOf(start.uri)
             .takeIf { start.durationMs <= 0 || it < start.durationMs - 10_000 } ?: 0L
-        player.setMediaItems(items, index.coerceIn(entries.indices), resume)
+        // 光盘镜像只能用 VLC 内核播放
+        if (VlcPlayer.needsVlc(start.title)) {
+            playWithVlc(start, resume)
+            return
+        }
+        vlcPlayer?.stop()
+        _player.value = exoPlayer
+        // 连播队列里跳过光盘镜像，ExoPlayer 打不开
+        queue = entries.filter { it == start || !VlcPlayer.needsVlc(it.title) }
+        exoPlayer.setMediaItems(queue.map(::itemOf), queue.indexOf(start), resume)
         _state.update { it.copy(playbackError = null) }
-        player.prepare()
-        player.play()
+        exoPlayer.prepare()
+        exoPlayer.play()
         onEntryChanged(start)
     }
 
@@ -178,7 +229,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun updateAutoAdvance() {
         val busy = _state.value.transcribing || _state.value.translating
-        player.pauseAtEndOfMediaItems = busy
+        exoPlayer.pauseAtEndOfMediaItems = busy
     }
 
     /** 记录当前播放进度，离开播放页或切换视频时调用。 */
@@ -206,6 +257,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         transcribeJob = viewModelScope.launch {
             try {
+                _state.value.current?.takeIf { VlcPlayer.needsVlc(it.title) }?.let {
+                    throw IllegalStateException("光盘镜像（ISO）暂不支持 AI 识别字幕，可以用「在线下载字幕」或选择字幕文件")
+                }
                 val settings = _state.value.settings
                 settings.asrProblem()?.let { throw IllegalStateException(it) }
                 val localModel = ModelCatalog.byId(settings.localModel)
@@ -368,11 +422,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 睡眠计时：minutes > 0 为倒计时；0 为本集结束后暂停；null 为取消。 */
     fun setSleepTimer(minutes: Int?) {
         sleepJob?.cancel()
-        player.pauseAtEndOfMediaItems = false
+        exoPlayer.pauseAtEndOfMediaItems = false
         when {
             minutes == null -> _state.update { it.copy(sleepAt = null) }
             minutes == 0 -> {
-                player.pauseAtEndOfMediaItems = true
+                exoPlayer.pauseAtEndOfMediaItems = true
                 _state.update { it.copy(sleepAt = -1) }
             }
             else -> {
@@ -519,7 +573,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         savePosition()
-        player.release()
+        exoPlayer.release()
+        vlcPlayer?.release()
     }
 
     companion object {
@@ -554,7 +609,6 @@ internal fun renderersFactory(app: Application) = DefaultRenderersFactory(app)
     .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
     .setEnableDecoderFallback(true)
 
-/** 字幕文件常见 UTF-8 / GBK 两种编码：UTF-8 解码出现替换字符时按 GBK 重试。 */
 /** 把播放器错误翻译成用户能看懂的话，附上错误码方便反馈。 */
 internal fun describePlaybackError(e: PlaybackException): String {
     val reason = when (e.errorCode) {

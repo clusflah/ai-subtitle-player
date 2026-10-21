@@ -35,6 +35,12 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:scheme="content" android:mimeType="video/*" />
             </intent-filter>
+            <!-- 光盘镜像（ISO） -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="application/x-iso9660-image" />
+            </intent-filter>
         </activity>
     </application>
 </manifest>

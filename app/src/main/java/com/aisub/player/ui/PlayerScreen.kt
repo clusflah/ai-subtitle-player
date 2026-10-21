@@ -170,7 +170,8 @@ fun PlayerScreen(vm: MainViewModel, onBack: () -> Unit, onOpenSettings: () -> Un
 @Composable
 private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings: () -> Unit) {
     val state by vm.state.collectAsStateWithLifecycle()
-    val player = vm.player
+    // 播放内核可能在 ExoPlayer 和 VLC 之间切换
+    val player by vm.playerFlow.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val activity = context as? Activity
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -181,7 +182,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     // 按钮图标跟随"想要播放"，缓冲时也显示暂停，避免看起来像没反应
     var wantsPlay by remember { mutableStateOf(player.playWhenReady) }
     var buffering by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(player) {
         while (true) {
             positionMs = player.currentPosition
             isPlaying = player.isPlaying
@@ -258,10 +259,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 PlayerView(ctx).apply {
                     this.player = player
                     useController = false
-                    subtitleView?.visibility = android.view.View.GONE
+                    // 遮罩透明：画面背景本来就是黑色；VLC 内核不一定按 ExoPlayer 的方式通知首帧
+                    setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                 }
             },
-            update = { it.resizeMode = RESIZE_MODES[resizeIndex].first },
+            update = {
+                if (it.player !== player) it.player = player
+                it.resizeMode = RESIZE_MODES[resizeIndex].first
+            },
             modifier = Modifier.fillMaxSize(),
         )
         if (audioOnly) {
@@ -291,7 +296,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 Spacer(Modifier.height(8.dp))
                 Text(playbackError, color = Color(0xFFCCCCCC), fontSize = 13.sp)
                 Spacer(Modifier.height(12.dp))
-                TextButton(onClick = { vm.togglePlay() }) { Text("重试", color = Orange) }
+                Row {
+                    TextButton(onClick = { vm.togglePlay() }) { Text("重试", color = Orange) }
+                    if (!vm.usingVlc) TextButton(onClick = { vm.switchToVlc() }) { Text("换用 VLC 内核播放", color = Orange) }
+                }
             }
         } else if (buffering && wantsPlay) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -411,7 +419,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         MoreAction.SLEEP -> dialog = PlayerDialog.SLEEP
                         MoreAction.SPEED -> dialog = PlayerDialog.SPEED
                         MoreAction.GOTO -> dialog = PlayerDialog.GOTO
-                        MoreAction.EQUALIZER -> openEqualizer(context, player.audioSessionId)
+                        MoreAction.EQUALIZER -> openEqualizer(context, (player as? androidx.media3.exoplayer.ExoPlayer)?.audioSessionId ?: 0)
                         MoreAction.AUDIO_ONLY -> {
                             audioOnly = !audioOnly
                             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
@@ -791,15 +799,16 @@ private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ON
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (SubtitleAction) -> Unit) {
-    val player = vm.player
+    val player by vm.playerFlow.collectAsStateWithLifecycle()
     var audioOpen by remember { mutableStateOf(true) }
     var subtitleOpen by remember { mutableStateOf(true) }
+    var embeddedOpen by remember { mutableStateOf(true) }
     var version by remember { mutableIntStateOf(0) } // 选轨后刷新
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
         SheetHeader("音频", audioOpen) { audioOpen = !audioOpen }
         if (audioOpen) {
-            val groups = remember(version, state.current?.uri) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO } }
+            val groups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO } }
             val disabled = remember(version, state.current?.uri) { C.TRACK_TYPE_AUDIO in player.trackSelectionParameters.disabledTrackTypes }
             TrackRow("禁用轨道", disabled) {
                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true).build()
@@ -825,6 +834,33 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
             }
         }
         HorizontalDivider(color = Color(0xFF333333))
+
+        // 视频文件自带的字幕轨（MKV、蓝光、DVD 等）
+        val textGroups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT } }
+        if (textGroups.isNotEmpty()) {
+            SheetHeader("内嵌字幕", embeddedOpen) { embeddedOpen = !embeddedOpen }
+            if (embeddedOpen) {
+                val textDisabled = remember(version, player) { C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes }
+                TrackRow("关闭", textDisabled || textGroups.none { it.isSelected }) {
+                    player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+                    version++
+                }
+                textGroups.forEachIndexed { gi, group ->
+                    for (i in 0 until group.length) {
+                        val f = group.getTrackFormat(i)
+                        val name = f.label ?: f.language?.takeIf { it != "und" }?.let { java.util.Locale.forLanguageTag(it).displayLanguage } ?: "字幕 ${gi + 1}"
+                        TrackRow(name, !textDisabled && group.isTrackSelected(i)) {
+                            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                                .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
+                                .build()
+                            version++
+                        }
+                    }
+                }
+            }
+            HorizontalDivider(color = Color(0xFF333333))
+        }
 
         SheetHeader("字幕", subtitleOpen) { subtitleOpen = !subtitleOpen }
         if (subtitleOpen) {
@@ -1028,12 +1064,15 @@ private fun DelayDialog(delayMs: Long, onChange: (Long) -> Unit, onDismiss: () -
 @Composable
 private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     val p = vm.player
-    val v = p.videoFormat
-    val a = p.audioFormat
+    val exo = p as? androidx.media3.exoplayer.ExoPlayer
+    val v = exo?.videoFormat
+    val a = exo?.audioFormat
     val entry = vm.state.value.current
     val rows = listOfNotNull(
         "文件" to (entry?.title ?: ""),
         "时长" to formatClock(p.duration.coerceAtLeast(0)),
+        "播放内核" to if (exo != null) "ExoPlayer" else "VLC",
+        if (exo == null && p.videoSize.width > 0) "画面" to "${p.videoSize.width}×${p.videoSize.height}" else null,
         v?.let { "画面" to "${it.width}×${it.height}" + (it.frameRate.takeIf { f -> f > 0 }?.let { f -> " · %.0f fps".format(f) } ?: "") },
         v?.let { "视频编码" to (it.sampleMimeType ?: "") + (it.codecs?.let { c -> " ($c)" } ?: "") },
         a?.let { "音频编码" to (it.sampleMimeType ?: "") },
