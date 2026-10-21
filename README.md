@@ -1,0 +1,42 @@
+# AI 字幕播放器（Android）
+
+本地语音识别生成字幕 + LLM 翻译的安卓视频播放器。
+
+- 播放：Media3 ExoPlayer
+- 识别：sherpa-onnx + SenseVoice（中/英/日/韩/粤）+ Silero VAD，完全在手机上离线运行
+- 翻译：Claude（官方 anthropic-java SDK）、DeepSeek、Gemini、Index-Translate（B 站开源翻译模型，公共接口免费）或任意 OpenAI 兼容接口（通义千问、Kimi、Ollama 等）
+
+## 构建
+
+```bash
+./gradlew assembleDebug
+```
+
+输出在 `app/build/outputs/apk/debug/`，真机一般装 `app-arm64-v8a-debug.apk`。
+
+## 使用
+
+1. 「打开」选择视频（也可以在文件管理器里用本应用打开）。
+2. 「设置」里填翻译服务的 API Key，选择视频语言（默认自动识别）。
+3. 「生成字幕」：首次会下载识别模型（约 160MB），之后边识别边显示字幕，开启自动翻译时同步翻译。
+4. 点字幕列表可跳转；「导出」可保存双语 / 译文 / 原文 SRT。
+
+字幕结果按视频缓存在应用私有目录，再次打开同一视频会直接加载。
+
+## 代码结构
+
+| 路径 | 作用 |
+|---|---|
+| `asr/AudioDecoder.kt` | MediaExtractor + MediaCodec 解码音轨，重采样到 16kHz 单声道 |
+| `asr/Transcriber.kt` | VAD 切段 → SenseVoice 识别 → 字幕条目 |
+| `asr/ModelManager.kt` | 首次使用时下载并解压模型 |
+| `translate/` | 翻译接口、Claude 实现、OpenAI 兼容实现、提示词 |
+| `subtitle/` | 字幕数据结构、缓存、SRT 导出 |
+| `MainViewModel.kt` | 串起识别、翻译、播放器 |
+| `ui/` | Compose 界面 |
+
+## 已知限制
+
+- 识别在 ViewModel 里运行，应用被系统杀掉时会中断（后续可改成前台服务）。
+- 从头顺序识别；拖到还没识别到的位置时暂时没有字幕。
+- API Key 以明文存在应用私有的 SharedPreferences 里。

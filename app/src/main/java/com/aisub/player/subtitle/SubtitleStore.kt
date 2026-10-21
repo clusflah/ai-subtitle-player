@@ -1,0 +1,90 @@
+package com.aisub.player.subtitle
+
+import android.content.Context
+import android.net.Uri
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.io.OutputStream
+import java.security.MessageDigest
+
+/**
+ * 字幕缓存：每个视频按 URI 的哈希存一份 JSON（原文 + 译文），
+ * 下次打开同一个视频直接加载，不用重新识别。
+ */
+class SubtitleStore(context: Context) {
+    private val dir = File(context.filesDir, "subtitles").apply { mkdirs() }
+
+    private fun fileFor(video: Uri): File {
+        val digest = MessageDigest.getInstance("SHA-1").digest(video.toString().toByteArray())
+        val name = digest.joinToString("") { "%02x".format(it) }
+        return File(dir, "$name.json")
+    }
+
+    fun load(video: Uri): List<Cue> {
+        val file = fileFor(video)
+        if (!file.exists()) return emptyList()
+        return try {
+            val arr = JSONObject(file.readText()).getJSONArray("cues")
+            List(arr.length()) { i ->
+                val o = arr.getJSONObject(i)
+                Cue(
+                    id = o.getInt("id"),
+                    startMs = o.getLong("start"),
+                    endMs = o.getLong("end"),
+                    text = o.getString("text"),
+                    translation = o.optString("translation").takeIf { o.has("translation") },
+                )
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun save(video: Uri, cues: List<Cue>) {
+        val arr = JSONArray()
+        for (c in cues) {
+            arr.put(JSONObject().apply {
+                put("id", c.id)
+                put("start", c.startMs)
+                put("end", c.endMs)
+                put("text", c.text)
+                c.translation?.let { put("translation", it) }
+            })
+        }
+        val file = fileFor(video)
+        val tmp = File(file.path + ".tmp")
+        tmp.writeText(JSONObject().put("version", 1).put("cues", arr).toString())
+        tmp.renameTo(file)
+    }
+
+    fun delete(video: Uri) {
+        fileFor(video).delete()
+    }
+}
+
+enum class SrtMode { ORIGINAL, TRANSLATION, BILINGUAL }
+
+fun writeSrt(cues: List<Cue>, mode: SrtMode, out: OutputStream) {
+    val sb = StringBuilder()
+    var index = 1
+    for (c in cues) {
+        val body = when (mode) {
+            SrtMode.ORIGINAL -> c.text
+            SrtMode.TRANSLATION -> c.translation ?: c.text
+            SrtMode.BILINGUAL -> listOfNotNull(c.translation, c.text).joinToString("\n")
+        }
+        sb.append(index++).append('\n')
+        sb.append(srtTime(c.startMs)).append(" --> ").append(srtTime(c.endMs)).append('\n')
+        sb.append(body).append("\n\n")
+    }
+    out.write(sb.toString().toByteArray(Charsets.UTF_8))
+}
+
+private fun srtTime(ms: Long): String {
+    val h = ms / 3_600_000
+    val m = ms / 60_000 % 60
+    val s = ms / 1000 % 60
+    val milli = ms % 1000
+    return "%02d:%02d:%02d,%03d".format(h, m, s, milli)
+}
