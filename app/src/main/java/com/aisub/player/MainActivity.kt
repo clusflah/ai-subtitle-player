@@ -22,6 +22,7 @@ import com.aisub.player.ui.HomeScreen
 import com.aisub.player.ui.LocalFolderScreen
 import com.aisub.player.ui.Navigator
 import com.aisub.player.ui.PlayerScreen
+import com.aisub.player.ui.PipState
 import com.aisub.player.ui.PlaylistDetailScreen
 import com.aisub.player.ui.RemoteFolderScreen
 import com.aisub.player.ui.Screen
@@ -36,6 +37,8 @@ class MainActivity : ComponentActivity() {
     private val mediaPermissions: Array<String>
         get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             arrayOf(Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.READ_MEDIA_AUDIO)
+        } else if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE)
         } else {
             arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
@@ -95,6 +98,11 @@ class MainActivity : ComponentActivity() {
         main.player.pause()
         main.savePosition()
         lib.reloadStored()
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: android.content.res.Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        PipState.inPip = isInPictureInPictureMode
     }
 
     override fun onNewIntent(intent: Intent) {

@@ -2,6 +2,7 @@ package com.aisub.player.ui
 
 import android.content.Intent
 import android.text.format.DateUtils
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -95,7 +96,7 @@ private sealed interface HomeDialog {
     data object Stream : HomeDialog
     data object NewPlaylist : HomeDialog
     data object AddSource : HomeDialog
-    data class AddToPlaylist(val entry: MediaEntry) : HomeDialog
+    data class AddToPlaylist(val entries: List<MediaEntry>) : HomeDialog
     data class EditServer(val server: Server, val hint: String? = null) : HomeDialog
     data class CloudLogin(val type: ServerType, val existing: Server?) : HomeDialog
     data class RenameServer(val server: Server) : HomeDialog
@@ -137,14 +138,31 @@ fun HomeScreen(
             play(listOf(MediaLibrary.entryFor(context, uri)), 0)
         }
     }
-    val entryMenu: (MediaEntry) -> List<MenuAction> = { e ->
-        listOf(MenuAction("加入播放列表") { dialog = HomeDialog.AddToPlaylist(e) })
-    }
+    val files = rememberFileManager(lib) { dialog = HomeDialog.AddToPlaylist(it) }
+    val entryMenu: (MediaEntry) -> List<MenuAction> = { e -> files.menu(e) }
+
+    // 多选：长按进入，返回键或右上角关闭退出
+    var selected by remember { mutableStateOf(emptySet<String>()) }
+    val selectable = (if (tab == Tab.VIDEO) state.videos else if (tab == Tab.AUDIO) state.audios else emptyList())
+    val selectedEntries = selectable.filter { it.uri in selected }
+    BackHandler(enabled = selected.isNotEmpty()) { selected = emptySet() }
+    val toggle: (MediaEntry) -> Unit = { e -> selected = if (e.uri in selected) selected - e.uri else selected + e.uri }
     val openSettings = { nav.push(Screen.Settings) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
+            if (selected.isNotEmpty()) {
+                SelectionBar(
+                    count = selected.size,
+                    onClose = { selected = emptySet() },
+                    onSelectAll = { selected = selectable.map { it.uri }.toSet() },
+                    onShare = { files.share(selectedEntries) },
+                    onAddToPlaylist = { dialog = HomeDialog.AddToPlaylist(selectedEntries) },
+                    onMove = { files.move(selectedEntries); selected = emptySet() },
+                    onDelete = { files.delete(selectedEntries); selected = emptySet() },
+                )
+            } else {
             TopAppBar(
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
                 title = {
@@ -202,6 +220,7 @@ fun HomeScreen(
                     }
                 },
             )
+            }
         },
         bottomBar = {
             AnimatedVisibility(barVisible, enter = slideInVertically { it }, exit = slideOutVertically { it }) {
@@ -211,6 +230,7 @@ fun HomeScreen(
                             selected = tab == t,
                             onClick = {
                                 tab = t
+                                selected = emptySet()
                                 searching = false
                                 query = ""
                                 barVisible = true
@@ -230,8 +250,8 @@ fun HomeScreen(
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize().nestedScroll(scrollWatcher)) {
             when (tab) {
-                Tab.VIDEO -> MediaTab(state, isVideo = true, query, onRequestPermission, lib::refreshMedia, play, entryMenu)
-                Tab.AUDIO -> MediaTab(state, isVideo = false, query, onRequestPermission, lib::refreshMedia, play, entryMenu)
+                Tab.VIDEO -> MediaTab(state, isVideo = true, query, onRequestPermission, lib::refreshMedia, play, entryMenu, selected, toggle)
+                Tab.AUDIO -> MediaTab(state, isVideo = false, query, onRequestPermission, lib::refreshMedia, play, entryMenu, selected, toggle)
                 Tab.BROWSE -> BrowseTab(
                     state = state,
                     onRequestPermission = onRequestPermission,
@@ -299,8 +319,8 @@ fun HomeScreen(
         is HomeDialog.AddToPlaylist -> AddToPlaylistDialog(
             playlists = state.playlists,
             onDismiss = { dialog = null },
-            onPick = { lib.addToPlaylist(it.id, d.entry); dialog = null },
-            onCreate = { lib.createPlaylist(it, d.entry); dialog = null },
+            onPick = { p -> d.entries.forEach { lib.addToPlaylist(p.id, it) }; dialog = null },
+            onCreate = { lib.createPlaylistWith(it, d.entries); dialog = null },
         )
         is HomeDialog.CloudLogin -> CloudLoginDialog(
             type = d.type, existing = d.existing,
@@ -335,7 +355,10 @@ private fun MediaTab(
     onRefresh: () -> Unit,
     play: (List<MediaEntry>, Int) -> Unit,
     menu: (MediaEntry) -> List<MenuAction>,
+    selected: Set<String> = emptySet(),
+    onToggle: (MediaEntry) -> Unit = {},
 ) {
+    val selecting = selected.isNotEmpty()
     if (!state.hasPermission) {
         EmptyState("需要媒体访问权限才能显示手机里的${if (isVideo) "视频" else "音频"}", "授予权限", onButton = onRequestPermission)
         return
@@ -367,12 +390,20 @@ private fun MediaTab(
     if (isVideo && state.videoGrid) {
         LazyVerticalGrid(GridCells.Adaptive(160.dp), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
             if (resume != null) item(span = { GridItemSpan(maxLineSpan) }) { ResumeCard(resume) { play(listOf(resume.entry), 0) } }
-            itemsIndexed(list, key = { _, e -> e.uri }) { i, e -> VideoCard(e, menu(e)) { play(list, i) } }
+            itemsIndexed(list, key = { _, e -> e.uri }) { i, e ->
+                VideoCard(e, menu(e), selected = if (selecting) e.uri in selected else null, onLongClick = { onToggle(e) }) {
+                    if (selecting) onToggle(e) else play(list, i)
+                }
+            }
         }
     } else {
         LazyColumn(contentPadding = PaddingValues(vertical = 4.dp)) {
             if (resume != null) item { ResumeCard(resume) { play(listOf(resume.entry), 0) } }
-            itemsIndexed(list, key = { _, e -> e.uri }) { i, e -> MediaRow(e, menu(e)) { play(list, i) } }
+            itemsIndexed(list, key = { _, e -> e.uri }) { i, e ->
+                MediaRow(e, menu(e), selected = if (selecting) e.uri in selected else null, onLongClick = { onToggle(e) }) {
+                    if (selecting) onToggle(e) else play(list, i)
+                }
+            }
         }
     }
 }
@@ -567,4 +598,34 @@ private fun MoreTab(
             ListRow("关于", null, AppIcons.Info, onClick = onAbout)
         }
     }
+}
+
+/** 多选模式的顶栏：已选数量 + 批量操作。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SelectionBar(
+    count: Int,
+    onClose: () -> Unit,
+    onSelectAll: () -> Unit,
+    onShare: () -> Unit,
+    onAddToPlaylist: () -> Unit,
+    onMove: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    TopAppBar(
+        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+        navigationIcon = { IconButton(onClick = onClose) { Icon(AppIcons.Close, "退出多选") } },
+        title = { Text("已选 $count 项", style = MaterialTheme.typography.titleMedium) },
+        actions = {
+            IconButton(onClick = onShare) { Icon(AppIcons.Share, "分享") }
+            IconButton(onClick = onAddToPlaylist) { Icon(AppIcons.PlaylistAdd, "加入播放列表") }
+            IconButton(onClick = onDelete) { Icon(AppIcons.Delete, "删除") }
+            OverflowMenu(
+                listOf(
+                    MenuAction("全选", onClick = onSelectAll),
+                    MenuAction("移动到…", onClick = onMove),
+                )
+            )
+        },
+    )
 }

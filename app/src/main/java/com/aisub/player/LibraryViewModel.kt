@@ -122,6 +122,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         if (p.items.any { it.uri == entry.uri }) p else p.copy(items = p.items + entry)
     }
 
+    /** 新建播放列表并加入多个条目。 */
+    fun createPlaylistWith(name: String, entries: List<MediaEntry>) {
+        val p = store.createPlaylist(name.ifBlank { "新建播放列表" })
+        editPlaylist(p.id) { it.copy(items = entries.distinctBy { e -> e.uri }) }
+    }
+
     /** 用最近播放的内容新建一个播放列表。 */
     fun playlistFromHistory() {
         val p = store.createPlaylist("最近播放")

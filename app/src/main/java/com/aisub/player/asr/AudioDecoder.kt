@@ -14,9 +14,18 @@ import java.nio.ByteOrder
  * 用系统自带的 MediaExtractor + MediaCodec 把视频的音轨解码成 16kHz 单声道 float PCM，
  * 不依赖 FFmpeg。解码是流式的：每解出一块就回调一次 onChunk。
  */
-class AudioDecoder(private val context: Context, private val uri: Uri) {
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+class AudioDecoder(
+    private val context: Context,
+    private val uri: Uri,
+    /** 系统解码器不支持时，备用的 ExoPlayer + FFmpeg 解码通道用的数据源 */
+    private val fallbackDataSource: androidx.media3.datasource.DataSource.Factory? = null,
+) {
 
     class NoAudioTrackException : Exception("视频里没有可识别的音轨")
+
+    /** 系统 MediaCodec 处理不了（格式不支持、容器打不开）：改走备用通道。 */
+    private class UnsupportedBySystem(message: String) : Exception(message)
 
     /**
      * @param onChunk 每块重采样后的音频
@@ -29,28 +38,65 @@ class AudioDecoder(private val context: Context, private val uri: Uri) {
         onProgress: (Float) -> Unit,
         onChunk: (FloatArray) -> Unit,
     ) {
+        try {
+            decodeWithMediaCodec(targetRate, isActive, onProgress, onChunk)
+        } catch (e: Exception) {
+            // 系统解析器有时会直接丢掉自己不支持的音轨（例如 MKV 里的 AC3），表现为"没有音轨"，
+            // 所以这两种情况都再用 ExoPlayer + FFmpeg 试一次
+            if (e !is UnsupportedBySystem && e !is NoAudioTrackException) throw e
+            val factory = fallbackDataSource ?: throw e
+            var gotAudio = false
+            ExoAudioDecoder(context, uri, factory).decode(targetRate, isActive, onProgress) { chunk ->
+                gotAudio = true
+                onChunk(chunk)
+            }
+            if (!gotAudio && isActive()) throw NoAudioTrackException()
+        }
+    }
+
+    private fun decodeWithMediaCodec(
+        targetRate: Int,
+        isActive: () -> Boolean,
+        onProgress: (Float) -> Unit,
+        onChunk: (FloatArray) -> Unit,
+    ) {
         val extractor = MediaExtractor()
-        if (CloudRegistry.isCloud(uri.toString())) {
-            // 网盘：先换成直链，带上必需的 UA/Cookie
-            val link = CloudRegistry.resolve(uri.toString())
-            extractor.setDataSource(context, Uri.parse(link.url), link.headers.ifEmpty { null })
-        } else {
-            // 远程文件（WebDAV）需要带鉴权头
-            extractor.setDataSource(context, uri, AuthRegistry.headersFor(uri.toString()).ifEmpty { null })
+        try {
+            if (CloudRegistry.isCloud(uri.toString())) {
+                // 网盘：先换成直链，带上必需的 UA/Cookie
+                val link = CloudRegistry.resolve(uri.toString())
+                extractor.setDataSource(context, Uri.parse(link.url), link.headers.ifEmpty { null })
+            } else {
+                // 远程文件（WebDAV）需要带鉴权头
+                extractor.setDataSource(context, uri, AuthRegistry.headersFor(uri.toString()).ifEmpty { null })
+            }
+        } catch (e: java.io.IOException) {
+            extractor.release()
+            throw UnsupportedBySystem("系统无法打开这个文件：${e.message}")
         }
         var codec: MediaCodec? = null
         try {
-            val trackIndex = (0 until extractor.trackCount).firstOrNull {
+            val audioTracks = (0 until extractor.trackCount).filter {
                 extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
-            } ?: throw NoAudioTrackException()
+            }
+            if (audioTracks.isEmpty()) throw NoAudioTrackException()
+            // 优先选系统真正有解码器的音轨（多音轨视频里常有 AC3/DTS 和 AAC 并存）
+            val codecs = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+            val trackIndex = audioTracks.firstOrNull { codecs.findDecoderForFormat(extractor.getTrackFormat(it)) != null }
+                ?: throw UnsupportedBySystem("音轨格式 ${extractor.getTrackFormat(audioTracks[0]).getString(MediaFormat.KEY_MIME)} 系统不支持")
             extractor.selectTrack(trackIndex)
             val inFormat = extractor.getTrackFormat(trackIndex)
             val durationUs = if (inFormat.containsKey(MediaFormat.KEY_DURATION)) inFormat.getLong(MediaFormat.KEY_DURATION) else 0L
             val mime = inFormat.getString(MediaFormat.KEY_MIME)!!
 
-            codec = MediaCodec.createDecoderByType(mime)
-            codec.configure(inFormat, null, null, 0)
-            codec.start()
+            codec = try {
+                MediaCodec.createDecoderByType(mime).also {
+                    it.configure(inFormat, null, null, 0)
+                    it.start()
+                }
+            } catch (e: Exception) {
+                throw UnsupportedBySystem("系统解码器无法处理 $mime")
+            }
 
             var sampleRate = inFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
             var channels = inFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)

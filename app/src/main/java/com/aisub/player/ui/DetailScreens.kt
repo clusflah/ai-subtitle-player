@@ -70,6 +70,16 @@ fun LocalFolderScreen(
     val state by lib.state.collectAsStateWithLifecycle()
     val all = remember(state.videos, state.audios) { state.videos + state.audios }
     val (folders, files) = remember(all, path) { LocalBrowser.children(all, path) }
+    var addTo by remember { mutableStateOf<List<MediaEntry>?>(null) }
+    val fm = rememberFileManager(lib) { addTo = it }
+    addTo?.let { entries ->
+        AddToPlaylistDialog(
+            playlists = state.playlists,
+            onDismiss = { addTo = null },
+            onPick = { p -> entries.forEach { lib.addToPlaylist(p.id, it) }; addTo = null },
+            onCreate = { lib.createPlaylistWith(it, entries); addTo = null },
+        )
+    }
     DetailScaffold(title, onBack) {
         if (folders.isEmpty() && files.isEmpty()) {
             EmptyState("这个文件夹里没有媒体文件", icon = AppIcons.Folder)
@@ -79,7 +89,7 @@ fun LocalFolderScreen(
             items(folders, key = { "d:" + it.path }) { f ->
                 FolderRow(f.name, subtitle = countText(f.folderCount, f.fileCount)) { openFolder(f.path, f.name) }
             }
-            itemsIndexed(files, key = { _, e -> e.uri }) { i, e -> MediaRow(e, emptyList()) { play(files, i) } }
+            itemsIndexed(files, key = { _, e -> e.uri }) { i, e -> MediaRow(e, fm.menu(e)) { play(files, i) } }
         }
     }
 }

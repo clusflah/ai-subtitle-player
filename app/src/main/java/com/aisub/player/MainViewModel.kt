@@ -12,6 +12,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.aisub.player.media.AppStore
@@ -26,6 +27,7 @@ import com.aisub.player.asr.SpeechEngine
 import com.aisub.player.asr.Transcriber
 import com.aisub.player.subtitle.Cue
 import com.aisub.player.subtitle.SrtMode
+import com.aisub.player.subtitle.SubtitleParser
 import com.aisub.player.subtitle.SubtitleStore
 import com.aisub.player.subtitle.writeSrt
 import com.aisub.player.translate.Translator
@@ -55,6 +57,13 @@ data class UiState(
     val error: String? = null,
     /** 最近失败的任务，用于在播放页显示"失败，点击重试" */
     val failedTask: Task? = null,
+    /** 字幕延迟（毫秒，正数表示字幕推后出现） */
+    val subtitleDelayMs: Long = 0,
+    /** 睡眠计时器结束时间（System.currentTimeMillis），-1 表示本集结束，null 表示未开启 */
+    val sleepAt: Long? = null,
+    /** A-B 循环的 A、B 点（毫秒） */
+    val loopA: Long? = null,
+    val loopB: Long? = null,
     val settings: AppSettings = AppSettings(),
 )
 
@@ -63,7 +72,7 @@ enum class Task { TRANSCRIBE, TRANSLATE }
 @OptIn(UnstableApi::class)
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
-    val player: ExoPlayer = ExoPlayer.Builder(app)
+    val player: ExoPlayer = ExoPlayer.Builder(app, renderersFactory(app))
         .setMediaSourceFactory(DefaultMediaSourceFactory(authDataSourceFactory(app)))
         .build()
 
@@ -121,9 +130,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 status = "",
                 progress = null,
                 error = null,
+                failedTask = null,
             )
         }
         library.recordHistory(entry, 0)
+    }
+
+    /**
+     * 识别或翻译进行中时，当前视频播完就暂停，不自动切到队列里的下一个，
+     * 否则切换会取消正在进行的任务。任务结束后恢复连播。
+     */
+    private fun updateAutoAdvance() {
+        val busy = _state.value.transcribing || _state.value.translating
+        player.pauseAtEndOfMediaItems = busy
     }
 
     /** 记录当前播放进度，离开播放页或切换视频时调用。 */
@@ -147,6 +166,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (transcribeJob?.isActive == true) return
         translateJob?.cancel()
         _state.update { it.copy(cues = emptyList(), transcribing = true, error = null, failedTask = null) }
+        updateAutoAdvance()
 
         transcribeJob = viewModelScope.launch {
             try {
@@ -170,7 +190,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         val cancelHandle = coroutineContext.job.invokeOnCompletion { engine.cancel() }
                         try {
                             val onCue: (Cue) -> Unit = { cue -> _state.update { it.copy(cues = it.cues + cue) } }
-                            AudioDecoder(getApplication(), uri).decode(
+                            AudioDecoder(getApplication(), uri, authDataSourceFactory(getApplication())).decode(
                                 isActive = { isActive },
                                 onProgress = { p -> _state.update { it.copy(progress = p) } },
                                 onChunk = { chunk -> engine.accept(chunk, onCue) },
@@ -194,9 +214,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.update { it.copy(status = "已取消", progress = null) }
                     throw CancellationException("cancelled")
                 }
+                android.util.Log.e("AiSub", "识别失败", e)
                 _state.update { it.copy(status = "识别失败", progress = null, error = e.message ?: e.toString(), failedTask = Task.TRANSCRIBE) }
             } finally {
                 _state.update { it.copy(transcribing = false) }
+                updateAutoAdvance()
             }
         }
     }
@@ -225,6 +247,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         _state.update { it.copy(translating = true, error = null, failedTask = null) }
+        updateAutoAdvance()
         translateJob = viewModelScope.launch {
             try {
                 translateLoop(translator)
@@ -234,6 +257,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(error = "翻译失败：${e.message}", failedTask = Task.TRANSLATE) }
             } finally {
                 _state.update { it.copy(translating = false) }
+                updateAutoAdvance()
                 _state.value.videoUri?.let { store.save(it, _state.value.cues) }
             }
         }
@@ -299,6 +323,80 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---------------- 播放器"更多"菜单 ----------------
+
+    fun setSubtitleDelay(ms: Long) = _state.update { it.copy(subtitleDelayMs = ms) }
+
+    private var sleepJob: Job? = null
+
+    /** 睡眠计时：minutes > 0 为倒计时；0 为本集结束后暂停；null 为取消。 */
+    fun setSleepTimer(minutes: Int?) {
+        sleepJob?.cancel()
+        player.pauseAtEndOfMediaItems = false
+        when {
+            minutes == null -> _state.update { it.copy(sleepAt = null) }
+            minutes == 0 -> {
+                player.pauseAtEndOfMediaItems = true
+                _state.update { it.copy(sleepAt = -1) }
+            }
+            else -> {
+                val at = System.currentTimeMillis() + minutes * 60_000L
+                _state.update { it.copy(sleepAt = at) }
+                sleepJob = viewModelScope.launch {
+                    delay(minutes * 60_000L)
+                    player.pause()
+                    _state.update { it.copy(sleepAt = null) }
+                }
+            }
+        }
+    }
+
+    /** A-B 循环：依次设置 A、B，第三次清除。 */
+    fun toggleAbLoop(): String {
+        val s = _state.value
+        val pos = player.currentPosition
+        return when {
+            s.loopA == null -> { _state.update { it.copy(loopA = pos, loopB = null) }; "已设置 A 点，再点一次设置 B 点" }
+            s.loopB == null && pos > s.loopA -> { _state.update { it.copy(loopB = pos) }; "A-B 循环已开启" }
+            else -> { _state.update { it.copy(loopA = null, loopB = null) }; "A-B 循环已关闭" }
+        }
+    }
+
+    /** 由播放页的位置轮询调用：到达 B 点跳回 A 点。 */
+    fun checkAbLoop(positionMs: Long) {
+        val a = _state.value.loopA ?: return
+        val b = _state.value.loopB ?: return
+        if (positionMs >= b) player.seekTo(a)
+    }
+
+    /** 载入外挂字幕文件（SRT / VTT），替换当前字幕。 */
+    fun importSubtitles(file: Uri) {
+        val video = _state.value.videoUri ?: return
+        viewModelScope.launch {
+            try {
+                val text = withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openInputStream(file)!!.use { it.readBytes() }
+                        .let { bytes -> decodeText(bytes) }
+                }
+                val cues = SubtitleParser.parse(text)
+                if (cues.isEmpty()) throw IllegalArgumentException("文件里没有识别到字幕")
+                cancelAll()
+                _state.update { it.copy(cues = cues, status = "已载入 ${cues.size} 句字幕", error = null, failedTask = null) }
+                store.save(video, cues)
+            } catch (e: Exception) {
+                _state.update { it.copy(error = "载入字幕失败：${e.message}") }
+            }
+        }
+    }
+
+    /** 当前播放队列存为播放列表。 */
+    fun saveQueueAsPlaylist(name: String) {
+        val p = library.createPlaylist(name)
+        library.savePlaylists(library.playlists().map { if (it.id == p.id) it.copy(items = queue, updatedAt = System.currentTimeMillis()) else it })
+    }
+
+    val queueSize get() = queue.size
+
     /** 设置页的"测试连接"：用 1 秒静音请求一次识别服务。返回给用户看的结果。 */
     suspend fun testAsr(settings: AppSettings): String = withContext(Dispatchers.IO) {
         settings.asrProblem()?.let { return@withContext it }
@@ -359,7 +457,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
 /** 给已登记的 WebDAV 地址加上鉴权头，其他地址原样访问。 */
 @UnstableApi
-private fun authDataSourceFactory(app: Application): DataSource.Factory {
+internal fun authDataSourceFactory(app: Application): DataSource.Factory {
     val http = DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true)
     return ResolvingDataSource.Factory(DefaultDataSource.Factory(app, http)) { spec ->
         val uri = spec.uri.toString()
@@ -372,4 +470,19 @@ private fun authDataSourceFactory(app: Application): DataSource.Factory {
             if (headers.isEmpty()) spec else spec.withAdditionalHeaders(headers)
         }
     }
+}
+
+/**
+ * 系统解码器优先；AC3/E-AC3/DTS/TrueHD 等系统不支持的音频格式交给 FFmpeg 扩展软解，
+ * 否则这类视频（常见于 MKV 电影）会只有画面没有声音。
+ */
+@UnstableApi
+internal fun renderersFactory(app: Application) = DefaultRenderersFactory(app)
+    .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+    .setEnableDecoderFallback(true)
+
+/** 字幕文件常见 UTF-8 / GBK 两种编码：UTF-8 解码出现替换字符时按 GBK 重试。 */
+private fun decodeText(bytes: ByteArray): String {
+    val utf8 = String(bytes, Charsets.UTF_8)
+    return if ('�' in utf8) runCatching { String(bytes, charset("GBK")) }.getOrDefault(utf8) else utf8
 }

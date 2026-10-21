@@ -1,6 +1,9 @@
 package com.aisub.player.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -175,12 +178,41 @@ fun SourceCard(icon: ImageVector, title: String, subtitle: String, modifier: Mod
 fun countText(folders: Int, files: Int): String =
     if (folders > 0) "$folders 文件夹 · $files 文件" else "$files 个文件"
 
-/** 视频网格里的一项。 */
+/** 多选时的勾选标记。 */
 @Composable
-fun VideoCard(entry: MediaEntry, menu: List<MenuAction>, onClick: () -> Unit) {
-    Column(Modifier.clip(MaterialTheme.shapes.medium).clickable(onClick = onClick).padding(6.dp)) {
+private fun SelectionBadge(selected: Boolean, modifier: Modifier = Modifier) {
+    Box(
+        modifier.size(24.dp).clip(CircleShape)
+            .background(if (selected) MaterialTheme.colorScheme.primary else Color(0x66000000))
+            .border(2.dp, Color.White, CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (selected) Icon(AppIcons.Check, null, tint = Color.White, modifier = Modifier.size(16.dp))
+    }
+}
+
+/**
+ * 视频网格里的一项。
+ * @param selected null 表示不在多选模式；非 null 时显示勾选框
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun VideoCard(
+    entry: MediaEntry,
+    menu: List<MenuAction>,
+    selected: Boolean? = null,
+    onLongClick: (() -> Unit)? = null,
+    onClick: () -> Unit,
+) {
+    Column(
+        Modifier.clip(MaterialTheme.shapes.medium)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .background(if (selected == true) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+            .padding(6.dp),
+    ) {
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(MaterialTheme.shapes.medium)) {
             MediaThumbnail(entry, Modifier.fillMaxSize())
+            if (selected != null) SelectionBadge(selected, Modifier.align(Alignment.TopStart).padding(6.dp))
             val d = formatDuration(entry.durationMs)
             if (d.isNotEmpty()) {
                 Text(
@@ -198,18 +230,33 @@ fun VideoCard(entry: MediaEntry, menu: List<MenuAction>, onClick: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f).padding(start = 2.dp, top = 4.dp),
             )
-            if (menu.isNotEmpty()) OverflowMenu(menu, compact = true)
+            if (menu.isNotEmpty() && selected == null) OverflowMenu(menu, compact = true)
         }
     }
 }
 
 /** 列表里的一行媒体（音频、文件夹内容、播放列表内容）。 */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MediaRow(entry: MediaEntry, menu: List<MenuAction>, subtitle: String? = null, onClick: () -> Unit) {
+fun MediaRow(
+    entry: MediaEntry,
+    menu: List<MenuAction>,
+    subtitle: String? = null,
+    selected: Boolean? = null,
+    onLongClick: (() -> Unit)? = null,
+    onClick: () -> Unit,
+) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 16.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
+        Modifier.fillMaxWidth()
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .background(if (selected == true) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+            .padding(start = 16.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (selected != null) {
+            SelectionBadge(selected)
+            Spacer(Modifier.width(12.dp))
+        }
         if (entry.isVideo) {
             MediaThumbnail(entry, Modifier.size(width = 80.dp, height = 45.dp).clip(MaterialTheme.shapes.small))
         } else {
@@ -220,7 +267,7 @@ fun MediaRow(entry: MediaEntry, menu: List<MenuAction>, subtitle: String? = null
             val info = subtitle ?: formatDuration(entry.durationMs)
             if (info.isNotEmpty()) Text(info, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
-        if (menu.isNotEmpty()) OverflowMenu(menu) else Spacer(Modifier.width(12.dp))
+        if (menu.isNotEmpty() && selected == null) OverflowMenu(menu) else Spacer(Modifier.width(12.dp))
     }
 }
 
