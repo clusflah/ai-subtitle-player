@@ -152,6 +152,8 @@ fun PlayerScreen(vm: MainViewModel, onBack: () -> Unit) {
         SettingsDialog(
             initial = state.settings,
             onDismiss = { showSettings = false },
+            modelInstalled = vm::isModelInstalled,
+            onDeleteModel = vm::deleteModel,
             onSave = {
                 vm.updateSettings(it)
                 showSettings = false

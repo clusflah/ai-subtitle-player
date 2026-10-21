@@ -50,3 +50,31 @@ class CueSplitterTest {
         assertTrue(lines.isEmpty())
     }
 }
+
+class TokenToolsTest {
+    @Test
+    fun sentencePieceAndParaformerTokensGetSpaces() {
+        assertEquals(listOf(" Hello", " world"), CueSplitter.normalizeTokens(listOf("▁Hello", "▁world")))
+        // Paraformer：hel@@ lo 连成一个词，词与词之间补空格，中文不补
+        assertEquals(listOf("你", "好", "hel", "lo", " world"), CueSplitter.normalizeTokens(listOf("你", "好", "hel@@", "lo", "world")))
+    }
+
+    @Test
+    fun punctuationIsAttachedToTokens() {
+        val tokens = listOf("今", "天", "下", "雨", "我", "们", "回", "家")
+        val out = CueSplitter.attachPunctuation(tokens, "今天下雨，我们回家。")
+        assertEquals(listOf("今", "天", "下", "雨，", "我", "们", "回", "家。"), out)
+        val en = CueSplitter.attachPunctuation(listOf("hello", " world", " ok"), "Hello world. Ok?")
+        assertEquals(listOf("hello", " world.", " ok?"), en)
+    }
+
+    @Test
+    fun proportionalSplitCoversWholeRange() {
+        val lines = CueSplitter.splitProportional("第一句话说完了。第二句话也说完了。第三句话。", 1000, 10_000)
+        assertEquals(1000L, lines.first().first)
+        assertEquals(10_000L, lines.last().second)
+        assertTrue(lines.size >= 2)
+        // 短于 5 秒不拆
+        assertEquals(1, CueSplitter.splitProportional("一句。两句。", 0, 3000).size)
+    }
+}

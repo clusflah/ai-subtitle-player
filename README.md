@@ -5,9 +5,10 @@
 - 界面：仿 VLC，底部五个标签——视频 / 音频 / 浏览 / 播放列表 / 更多（设置、串流、历史）
 - 媒体来源：手机媒体库、系统文件选择器、网络串流、WebDAV、OpenList，以及直连网盘：115（扫码）、阿里云盘（扫码）、百度网盘（自有 AppKey 扫码或 refresh_token）、PikPak（账号密码）
 - 播放：Media3 ExoPlayer，支持播放队列、记住播放进度
-- 识别（二选一）：
-  - 本地：sherpa-onnx + SenseVoice（中/英/日/韩/粤）+ Silero VAD，完全在手机上离线运行
-  - 云端：Azure AI Speech 快速转写（Fast Transcription），省电、准确率高，需要 Speech 资源的 Key 和区域
+- 识别：
+  - 本地离线（sherpa-onnx，按需下载）：SenseVoice、Paraformer 中文（配标点模型）、FireRedASR2、Qwen3-ASR 0.6B、Whisper base、Parakeet TDT v3、Moonshine、Dolphin
+  - 云端：Azure、火山引擎豆包语音、阿里云 Fun-ASR、讯飞录音文件转写、ElevenLabs Scribe、Deepgram、OpenAI Whisper（及兼容接口）
+  - 字幕按逐字/逐词时间戳切成短句，逐句显示
 - 翻译：Claude（官方 anthropic-java SDK）、DeepSeek、Gemini、Index-Translate（B 站开源翻译模型，公共接口免费）或任意 OpenAI 兼容接口（通义千问、Kimi、Ollama 等）
 
 ## 构建
@@ -23,7 +24,7 @@
 1. 在「视频」「音频」「浏览」里选择要播放的文件（也可以在文件管理器里用本应用打开）。
    网盘：在「浏览 → 网盘」里点对应网盘登录（115、阿里云盘用手机 App 扫码）。
 2. 「设置」里填翻译服务的 API Key，选择视频语言（默认自动识别）。
-3. 「生成字幕」：首次会下载识别模型（约 160MB），之后边识别边显示字幕，开启自动翻译时同步翻译。
+3. 「生成字幕」：使用本地模型时首次会下载所选模型，之后边识别边显示字幕，开启自动翻译时同步翻译。
 4. 点字幕列表可跳转；「导出」可保存双语 / 译文 / 原文 SRT。
 
 字幕结果按视频缓存在应用私有目录，再次打开同一视频会直接加载。
@@ -33,8 +34,9 @@
 | 路径 | 作用 |
 |---|---|
 | `asr/AudioDecoder.kt` | MediaExtractor + MediaCodec 解码音轨，重采样到 16kHz 单声道 |
-| `asr/Transcriber.kt` | 本地引擎：VAD 切段 → SenseVoice 识别 → 字幕条目 |
-| `asr/AzureTranscriber.kt` | Azure 引擎：按静音点切成几分钟一段的 WAV 上传转写 |
+| `asr/Transcriber.kt` | 本地引擎：VAD 切段 → sherpa-onnx 识别 →（补标点）→ 字幕条目 |
+| `asr/ModelCatalog.kt` | 本地模型目录（下载包、文件名、配置） |
+| `asr/cloud/` | 云端识别：公共切块上传基类 + 各家实现 |
 | `asr/ModelManager.kt` | 首次使用时下载并解压模型 |
 | `translate/` | 翻译接口、Claude 实现、OpenAI 兼容实现、提示词 |
 | `subtitle/` | 字幕数据结构、缓存、SRT 导出 |

@@ -15,6 +15,69 @@ object CueSplitter {
     private const val MIN_DURATION_MS = 800L
     private const val STRONG = "。！？!?；;…"
     private const val WEAK = "，、,：:"
+    const val PUNCTUATION = "。，、！？；：,.!?;:…\"'“”‘’"
+
+    /**
+     * 统一各模型的 token 写法，让词首带空格：
+     * SentencePiece 的 "▁"、Paraformer 的 "@@" 续接符；都没有时在相邻西文词之间补空格。
+     */
+    fun normalizeTokens(tokens: List<String>): List<String> {
+        if (tokens.any { it.contains('▁') }) return tokens.map { it.replace('▁', ' ') }
+        if (tokens.any { it.startsWith(' ') }) return tokens // 已带空格（如 Whisper）
+        val out = ArrayList<String>(tokens.size)
+        var prevJoins = false // 上一个 token 以 @@ 结尾：与本 token 连成一个词
+        var prevLatin = false
+        for (t in tokens) {
+            val joinsNext = t.endsWith("@@")
+            val core = t.removeSuffix("@@")
+            val latin = core.isNotEmpty() && core.all { it.isLetterOrDigit() && !isCjk(it) || it == '\'' }
+            out.add(if (latin && prevLatin && !prevJoins) " $core" else core)
+            prevJoins = joinsNext
+            prevLatin = latin
+        }
+        return out
+    }
+
+    /**
+     * 标点模型只给出整句带标点的文本，这里把标点"挂"回对应的 token 后面，保留每个 token 的时间。
+     */
+    fun attachPunctuation(tokens: List<String>, punctuated: String): List<String> {
+        var p = 0
+        return tokens.map { token ->
+            val core = token.trim()
+            var matched = 0
+            while (p < punctuated.length && matched < core.length) {
+                if (punctuated[p].equals(core[matched], ignoreCase = true)) matched++
+                p++
+            }
+            val sb = StringBuilder(token)
+            while (p < punctuated.length && (punctuated[p] in PUNCTUATION)) sb.append(punctuated[p++])
+            sb.toString()
+        }
+    }
+
+    /** 没有逐字时间戳时：在标点处拆句，按字数比例分配时间。 */
+    fun splitProportional(text: String, startMs: Long, endMs: Long): List<Triple<Long, Long, String>> {
+        val duration = endMs - startMs
+        val pieces = Regex("[^。！？!?；;，,]+[。！？!?；;，,]*").findAll(text).map { it.value.trim() }.filter { it.isNotEmpty() }.toList()
+        if (duration <= MAX_DURATION_MS || pieces.size <= 1) return listOf(Triple(startMs, endMs, text.trim()))
+        // 把短句合并到宽度上限以内
+        val lines = ArrayList<String>()
+        for (piece in pieces) {
+            val last = lines.lastOrNull()
+            if (last != null && width(last + piece) <= MAX_WIDTH && last.last() !in STRONG) lines[lines.lastIndex] = last + piece
+            else lines.add(piece)
+        }
+        val total = lines.sumOf { width(it) }
+        val result = ArrayList<Triple<Long, Long, String>>()
+        var cursor = startMs
+        for ((i, line) in lines.withIndex()) {
+            val end = if (i == lines.lastIndex) endMs else cursor + (duration * width(line) / total).toLong()
+            result.add(Triple(cursor, end, line))
+            cursor = end
+        }
+        return result
+    }
 
     fun split(tokens: List<TimedToken>, segmentEndMs: Long): List<Triple<Long, Long, String>> {
         val lines = ArrayList<Pair<Long, StringBuilder>>()
@@ -59,7 +122,7 @@ object CueSplitter {
 
     private fun width(s: String): Double = s.sumOf { if (isCjk(it)) 1.0 else 0.5 }
 
-    private fun isCjk(c: Char?): Boolean {
+    fun isCjk(c: Char?): Boolean {
         if (c == null) return false
         val block = Character.UnicodeBlock.of(c)
         return block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS ||

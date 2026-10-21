@@ -224,6 +224,8 @@ fun HomeScreen(
             initial = mainState.settings,
             onDismiss = { dialog = null },
             onSave = { main.updateSettings(it); dialog = null },
+            modelInstalled = main::isModelInstalled,
+            onDeleteModel = main::deleteModel,
         )
         HomeDialog.About -> AboutDialog { dialog = null }
         HomeDialog.Stream -> TextInputDialog(

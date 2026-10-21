@@ -26,6 +26,12 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.aisub.player.AppSettings
 import com.aisub.player.AsrEngine
+import com.aisub.player.asr.LocalModel
+import com.aisub.player.asr.ModelCatalog
+import com.aisub.player.withAsrValue
+import androidx.compose.material3.RadioButton
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.text.input.VisualTransformation
 import com.aisub.player.Provider
 import com.aisub.player.ProviderConfig
 
@@ -43,7 +49,13 @@ private val ASR_LANGUAGES = listOf(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun SettingsDialog(initial: AppSettings, onDismiss: () -> Unit, onSave: (AppSettings) -> Unit) {
+fun SettingsDialog(
+    initial: AppSettings,
+    onDismiss: () -> Unit,
+    onSave: (AppSettings) -> Unit,
+    modelInstalled: (LocalModel) -> Boolean = { false },
+    onDeleteModel: (LocalModel) -> Unit = {},
+) {
     var s by remember { mutableStateOf(initial) }
 
     AlertDialog(
@@ -57,16 +69,13 @@ fun SettingsDialog(initial: AppSettings, onDismiss: () -> Unit, onSave: (AppSett
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Section("语音识别")
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     AsrEngine.entries.forEach { e ->
                         FilterChip(selected = s.asrEngine == e, onClick = { s = s.copy(asrEngine = e) }, label = { Text(e.label) })
                     }
                 }
                 Text(
-                    when (s.asrEngine) {
-                        AsrEngine.LOCAL -> "在手机上离线识别，免费；支持中、英、日、韩、粤语"
-                        AsrEngine.AZURE -> "上传音频到 Azure 识别，省电、准确率高，按时长计费"
-                    },
+                    s.asrEngine.hint + if (s.asrEngine == AsrEngine.LOCAL) "" else "；按时长计费",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
@@ -81,37 +90,39 @@ fun SettingsDialog(initial: AppSettings, onDismiss: () -> Unit, onSave: (AppSett
                         FilterChip(selected = s.asrLanguage == code, onClick = { s = s.copy(asrLanguage = code) }, label = { Text(label) })
                     }
                 }
-                when (s.asrEngine) {
-                    AsrEngine.LOCAL -> OutlinedTextField(
+                if (s.asrEngine == AsrEngine.LOCAL) {
+                    Text("本地模型（首次使用时下载）", style = MaterialTheme.typography.labelMedium)
+                    var installedVersion by remember { mutableIntStateOf(0) }
+                    ModelCatalog.all.forEach { m ->
+                        val installed = remember(installedVersion, m.id) { modelInstalled(m) }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(selected = s.localModel == m.id, onClick = { s = s.copy(localModel = m.id) })
+                            Column(Modifier.weight(1f)) {
+                                Text("${m.label} · ${m.sizeMb}MB${if (installed) " · 已下载" else ""}", style = MaterialTheme.typography.bodyMedium)
+                                Text(m.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                            }
+                            if (installed) {
+                                TextButton(onClick = { onDeleteModel(m); installedVersion++ }) { Text("删除") }
+                            }
+                        }
+                    }
+                    OutlinedTextField(
                         value = s.modelBaseUrl,
                         onValueChange = { s = s.copy(modelBaseUrl = it) },
                         label = { Text("模型下载地址（可换镜像）") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    AsrEngine.AZURE -> {
+                } else {
+                    val engine = s.asrEngine
+                    engine.fields.forEach { f ->
                         OutlinedTextField(
-                            value = s.azureKey,
-                            onValueChange = { s = s.copy(azureKey = it) },
-                            label = { Text("Azure 语音 Key") },
+                            value = s.asrConfigs[engine]?.get(f.key) ?: "",
+                            onValueChange = { s = s.withAsrValue(engine, f.key, it) },
+                            label = { Text(f.label) },
+                            placeholder = { Text(f.placeholder.ifEmpty { f.default }) },
                             singleLine = true,
-                            visualTransformation = PasswordVisualTransformation(),
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        OutlinedTextField(
-                            value = s.azureRegion,
-                            onValueChange = { s = s.copy(azureRegion = it) },
-                            label = { Text("区域（Region）") },
-                            placeholder = { Text("例如 eastasia、southeastasia") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        OutlinedTextField(
-                            value = s.azureEndpoint,
-                            onValueChange = { s = s.copy(azureEndpoint = it) },
-                            label = { Text("自定义 Endpoint（可不填）") },
-                            placeholder = { Text("中国区：https://chinanorth3.api.cognitive.azure.cn") },
-                            singleLine = true,
+                            visualTransformation = if (f.secret) PasswordVisualTransformation() else VisualTransformation.None,
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }

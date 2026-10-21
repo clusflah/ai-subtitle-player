@@ -19,7 +19,8 @@ import com.aisub.player.media.MediaEntry
 import com.aisub.player.remote.AuthRegistry
 import com.aisub.player.remote.cloud.CloudRegistry
 import com.aisub.player.asr.AudioDecoder
-import com.aisub.player.asr.AzureTranscriber
+import com.aisub.player.asr.LocalModel
+import com.aisub.player.asr.ModelCatalog
 import com.aisub.player.asr.ModelManager
 import com.aisub.player.asr.SpeechEngine
 import com.aisub.player.asr.Transcriber
@@ -147,17 +148,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val settings = _state.value.settings
                 settings.asrProblem()?.let { throw IllegalStateException(it) }
-                if (settings.asrEngine == AsrEngine.LOCAL && !models.isReady()) {
-                    models.ensureModels(settings.modelBaseUrl) { msg, p ->
+                val localModel = ModelCatalog.byId(settings.localModel)
+                if (settings.asrEngine == AsrEngine.LOCAL && !models.isReady(localModel)) {
+                    models.ensure(localModel, settings.modelBaseUrl) { msg, p ->
                         _state.update { it.copy(status = msg, progress = p) }
                     }
                 }
-                val engineName = settings.asrEngine.label
+                val engineName = if (settings.asrEngine == AsrEngine.LOCAL) localModel.label else settings.asrEngine.label
                 _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f) }
                 if (settings.autoTranslate && settings.createTranslator() != null) startTranslation()
 
-                // Azure 引擎大部分时间在等网络，放到 IO 线程池
-                val dispatcher = if (settings.asrEngine == AsrEngine.AZURE) Dispatchers.IO else Dispatchers.Default
+                // 云端引擎大部分时间在等网络，放到 IO 线程池
+                val dispatcher = if (settings.asrEngine == AsrEngine.LOCAL) Dispatchers.Default else Dispatchers.IO
                 withContext(dispatcher) {
                     createEngine(settings).use { engine ->
                         // 协程取消时中断引擎里正在进行的网络请求
@@ -198,14 +200,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun createEngine(settings: AppSettings): SpeechEngine = when (settings.asrEngine) {
         AsrEngine.LOCAL -> {
             val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
-            Transcriber(models.paths, settings.asrLanguage, threads)
+            Transcriber(ModelCatalog.byId(settings.localModel), models, settings.asrLanguage, threads)
         }
-        AsrEngine.AZURE -> AzureTranscriber(
-            endpoint = settings.azureEndpointOrDefault(),
-            apiKey = settings.azureKey.trim(),
-            locales = AzureTranscriber.localesFor(settings.asrLanguage),
-        )
+        else -> settings.createCloudEngine()
     }
+
+    // ---- 本地模型管理（设置页用） ----
+
+    fun isModelInstalled(model: LocalModel) = models.isInstalled(model)
+
+    fun deleteModel(model: LocalModel) = models.delete(model)
 
     /** 翻译所有还没有译文的字幕。识别进行中时会持续等待新字幕。 */
     fun startTranslation() {
