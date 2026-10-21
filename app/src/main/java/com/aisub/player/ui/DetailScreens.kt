@@ -39,7 +39,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aisub.player.LibraryViewModel
 import com.aisub.player.MainViewModel
 import com.aisub.player.media.LocalBrowser
+import com.aisub.player.media.Downloads
 import com.aisub.player.media.MediaEntry
+import com.aisub.player.media.formatSize
 import com.aisub.player.media.formatDuration
 import com.aisub.player.remote.RemoteItem
 
@@ -166,6 +168,7 @@ fun RemoteFolderScreen(
     var deleting by remember { mutableStateOf<RemoteItem?>(null) }
     var creatingFolder by remember { mutableStateOf(false) }
     var addTo by remember { mutableStateOf<List<MediaEntry>?>(null) }
+    var downloadPlan by remember { mutableStateOf<Downloads.Plan?>(null) }
 
     LaunchedEffect(serverId, path, reload) {
         if (server == null) return@LaunchedEffect
@@ -194,8 +197,35 @@ fun RemoteFolderScreen(
         }
     }
 
+    fun download(jobs: List<Downloads.Job>) {
+        scope.launch {
+            try {
+                val n = Downloads.enqueue(context, jobs)
+                Toast.makeText(context, "已加入下载 $n 个文件，保存到 Download/${Downloads.ROOT}，进度见通知栏", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(context, "下载失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /** 文件夹先统计文件数和大小，确认后再下载。 */
+    fun downloadFolder(folder: RemoteItem) {
+        if (server == null || busy) return
+        busy = true
+        scope.launch {
+            try {
+                downloadPlan = Downloads.planFolder(lib.client(server), folder)
+            } catch (e: Exception) {
+                Toast.makeText(context, "读取文件夹失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
+            }
+            busy = false
+        }
+    }
+
     fun itemMenu(item: RemoteItem, entry: MediaEntry?): List<MenuAction> = listOfNotNull(
         entry?.let { MenuAction("加入播放列表") { addTo = listOf(it) } },
+        if (item.isDir) MenuAction("下载文件夹") { downloadFolder(item) }
+        else MenuAction("下载") { download(listOf(Downloads.Job(item, ""))) },
         MenuAction("重命名") { renaming = item },
         MenuAction("删除") { deleting = item },
     )
@@ -205,7 +235,15 @@ fun RemoteFolderScreen(
         actions = {
             if (busy) CircularProgressIndicator(Modifier.size(24.dp).padding(end = 4.dp), strokeWidth = 2.dp)
             IconButton(onClick = { reload++ }) { Icon(AppIcons.Refresh, "刷新") }
-            OverflowMenu(listOf(MenuAction("新建文件夹") { creatingFolder = true }))
+            OverflowMenu(
+                listOf(
+                    MenuAction("新建文件夹") { creatingFolder = true },
+                    MenuAction("下载整个文件夹") { downloadFolder(RemoteItem(title, path, isDir = true)) },
+                    MenuAction("查看下载") {
+                        context.startActivity(android.content.Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS))
+                    },
+                ),
+            )
         },
     ) {
         val list = items
@@ -259,6 +297,24 @@ fun RemoteFolderScreen(
                 }
             },
             dismissButton = { TextButton(onClick = { deleting = null }) { Text("取消") } },
+        )
+    }
+    downloadPlan?.let { plan ->
+        AlertDialog(
+            onDismissRequest = { downloadPlan = null },
+            title = { Text("下载 ${plan.jobs.size} 个文件？") },
+            text = {
+                Text(
+                    buildString {
+                        append("共 ${formatSize(plan.totalBytes)}，保存到 Download/${Downloads.ROOT}，保留原有的文件夹结构。")
+                        if (plan.truncated) append("\n文件太多，只下载前 ${Downloads.MAX_FILES} 个。")
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { downloadPlan = null; download(plan.jobs) }, enabled = plan.jobs.isNotEmpty()) { Text("下载") }
+            },
+            dismissButton = { TextButton(onClick = { downloadPlan = null }) { Text("取消") } },
         )
     }
     if (creatingFolder) {

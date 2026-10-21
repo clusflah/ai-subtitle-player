@@ -499,6 +499,11 @@ private fun AddSourceDialog(onDismiss: () -> Unit, onPick: (ServerType) -> Unit)
         ServerType.ALIYUN to "用阿里云盘 App 扫码登录",
         ServerType.BAIDU to "自有 AppKey 扫码，或粘贴 refresh_token",
         ServerType.PIKPAK to "账号密码登录",
+        ServerType.EMBY to "Emby / Jellyfin 媒体服务器，账号密码登录",
+        ServerType.PLEX to "plex.tv 账号授权，或填服务器地址和令牌",
+        ServerType.ONEDRIVE to "需要自己注册的应用 ID（免费）",
+        ServerType.DROPBOX to "需要自己创建的 App key（免费）",
+        ServerType.GDRIVE to "需要自己创建的 OAuth 客户端（免费）",
         ServerType.WEBDAV to "NAS、Alist 等 WebDAV 服务",
         ServerType.OPENLIST to "OpenList / AList 站点",
     )
@@ -506,7 +511,7 @@ private fun AddSourceDialog(onDismiss: () -> Unit, onPick: (ServerType) -> Unit)
         onDismissRequest = onDismiss,
         title = { Text("添加网络位置") },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 options.forEach { (type, desc) ->
                     ListRow(
                         title = type.label, subtitle = desc,

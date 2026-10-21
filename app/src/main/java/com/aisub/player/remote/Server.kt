@@ -12,6 +12,11 @@ enum class ServerType(val label: String, val isCloud: Boolean = false, val rootR
     ALIYUN("阿里云盘", isCloud = true, rootRef = "root"),
     BAIDU("百度网盘", isCloud = true, rootRef = "/"),
     PIKPAK("PikPak", isCloud = true, rootRef = ""),
+    EMBY("Emby / Jellyfin", isCloud = true, rootRef = ""),
+    PLEX("Plex", isCloud = true, rootRef = ""),
+    ONEDRIVE("OneDrive", isCloud = true, rootRef = ""),
+    DROPBOX("Dropbox", isCloud = true, rootRef = ""),
+    GDRIVE("Google Drive", isCloud = true, rootRef = "root"),
 }
 
 /**
