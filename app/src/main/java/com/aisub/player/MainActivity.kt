@@ -25,6 +25,7 @@ import com.aisub.player.ui.PlayerScreen
 import com.aisub.player.ui.PlaylistDetailScreen
 import com.aisub.player.ui.RemoteFolderScreen
 import com.aisub.player.ui.Screen
+import com.aisub.player.ui.SettingsScreen
 
 class MainActivity : ComponentActivity() {
 
@@ -70,7 +71,8 @@ class MainActivity : ComponentActivity() {
             AppTheme {
                 when (val screen = nav.current) {
                     Screen.Home -> HomeScreen(lib, main, nav) { permissionLauncher.launch(mediaPermissions) }
-                    Screen.Player -> PlayerScreen(main, onBack = back)
+                    Screen.Player -> PlayerScreen(main, onBack = back, onOpenSettings = { nav.push(Screen.Settings) })
+                    Screen.Settings -> SettingsScreen(main, onBack = { nav.pop() })
                     Screen.History -> HistoryScreen(lib, back, play)
                     is Screen.LocalFolder -> LocalFolderScreen(
                         lib, screen.path, screen.title, back,

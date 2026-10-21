@@ -45,9 +45,10 @@ private fun DetailScaffold(
     content: @Composable () -> Unit,
 ) {
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
         topBar = {
             TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
                 navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回") } },
                 title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 actions = { actions() },
@@ -76,7 +77,7 @@ fun LocalFolderScreen(
         }
         LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
             items(folders, key = { "d:" + it.path }) { f ->
-                FolderRow(f.name, subtitle = { CountLine(f.folderCount, f.fileCount) }) { openFolder(f.path, f.name) }
+                FolderRow(f.name, subtitle = countText(f.folderCount, f.fileCount)) { openFolder(f.path, f.name) }
             }
             itemsIndexed(files, key = { _, e -> e.uri }) { i, e -> MediaRow(e, emptyList()) { play(files, i) } }
         }
@@ -161,7 +162,14 @@ fun PlaylistDetailScreen(
         }
         LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
             itemsIndexed(playlist.items, key = { _, e -> e.uri }) { i, e ->
-                MediaRow(e, listOf(MenuAction("从列表移除") { lib.removeFromPlaylist(id, e.uri) })) { play(playlist.items, i) }
+                MediaRow(
+                    e,
+                    listOf(
+                        MenuAction("上移", enabled = i > 0) { lib.moveInPlaylist(id, e.uri, -1) },
+                        MenuAction("下移", enabled = i < playlist.items.lastIndex) { lib.moveInPlaylist(id, e.uri, 1) },
+                        MenuAction("从列表移除") { lib.removeFromPlaylist(id, e.uri) },
+                    ),
+                ) { play(playlist.items, i) }
             }
         }
     }
@@ -188,9 +196,10 @@ fun HistoryScreen(lib: LibraryViewModel, onBack: () -> Unit, play: (List<MediaEn
         LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
             items(state.history, key = { it.entry.uri }) { h ->
                 val progress = formatDuration(h.positionMs)
+                val ago = android.text.format.DateUtils.getRelativeTimeSpanString(h.playedAt)
                 MediaRow(
-                    h.entry.copy(title = if (progress.isEmpty()) h.entry.title else "${h.entry.title}\n看到 $progress"),
-                    emptyList(),
+                    h.entry, emptyList(),
+                    subtitle = if (progress.isEmpty()) "$ago" else "看到 $progress · $ago",
                 ) { play(listOf(h.entry), 0) }
             }
         }

@@ -53,8 +53,12 @@ data class UiState(
     /** 0..1；-1 表示进度不确定；null 表示不显示进度条 */
     val progress: Float? = null,
     val error: String? = null,
+    /** 最近失败的任务，用于在播放页显示"失败，点击重试" */
+    val failedTask: Task? = null,
     val settings: AppSettings = AppSettings(),
 )
+
+enum class Task { TRANSCRIBE, TRANSLATE }
 
 @OptIn(UnstableApi::class)
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -114,7 +118,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 current = entry,
                 videoUri = uri,
                 cues = cached,
-                status = if (cached.isEmpty()) "点击「生成字幕」开始识别" else "已加载缓存字幕 ${cached.size} 条",
+                status = "",
                 progress = null,
                 error = null,
             )
@@ -135,14 +139,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(settings = s) }
     }
 
-    fun dismissError() = _state.update { it.copy(error = null) }
+    fun dismissError() = _state.update { it.copy(error = null, failedTask = null) }
 
     /** 识别整段音轨。边识别边出字幕，开启自动翻译时同时翻译。 */
     fun generateSubtitles() {
         val uri = _state.value.videoUri ?: return
         if (transcribeJob?.isActive == true) return
         translateJob?.cancel()
-        _state.update { it.copy(cues = emptyList(), transcribing = true, error = null) }
+        _state.update { it.copy(cues = emptyList(), transcribing = true, error = null, failedTask = null) }
 
         transcribeJob = viewModelScope.launch {
             try {
@@ -190,7 +194,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.update { it.copy(status = "已取消", progress = null) }
                     throw CancellationException("cancelled")
                 }
-                _state.update { it.copy(status = "识别失败", progress = null, error = e.message ?: e.toString()) }
+                _state.update { it.copy(status = "识别失败", progress = null, error = e.message ?: e.toString(), failedTask = Task.TRANSCRIBE) }
             } finally {
                 _state.update { it.copy(transcribing = false) }
             }
@@ -217,17 +221,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val settings = _state.value.settings
         val translator = settings.createTranslator()
         if (translator == null) {
-            _state.update { it.copy(error = settings.translatorProblem() ?: "翻译服务配置不完整") }
+            _state.update { it.copy(error = settings.translatorProblem() ?: "翻译服务配置不完整", failedTask = Task.TRANSLATE) }
             return
         }
-        _state.update { it.copy(translating = true) }
+        _state.update { it.copy(translating = true, error = null, failedTask = null) }
         translateJob = viewModelScope.launch {
             try {
                 translateLoop(translator)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _state.update { it.copy(error = "翻译失败：${e.message}") }
+                _state.update { it.copy(error = "翻译失败：${e.message}", failedTask = Task.TRANSLATE) }
             } finally {
                 _state.update { it.copy(translating = false) }
                 _state.value.videoUri?.let { store.save(it, _state.value.cues) }
@@ -270,6 +274,58 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelAll() {
         transcribeJob?.cancel()
         translateJob?.cancel()
+    }
+
+    /** 重新翻译某一句（带前后文）。 */
+    fun retranslate(cueId: Int) {
+        val settings = _state.value.settings
+        val translator = settings.createTranslator() ?: run {
+            _state.update { it.copy(error = settings.translatorProblem(), failedTask = Task.TRANSLATE) }
+            return
+        }
+        viewModelScope.launch {
+            val cues = _state.value.cues
+            val i = cues.indexOfFirst { it.id == cueId }.takeIf { it >= 0 } ?: return@launch
+            try {
+                val context = cues.subList(maxOf(0, i - CONTEXT_SIZE), i).map { it.text }
+                val result = translator.translate(listOf(cues[i].text), context, settings.targetLanguage).firstOrNull()
+                if (result != null) {
+                    _state.update { s -> s.copy(cues = s.cues.map { if (it.id == cueId) it.copy(translation = result) else it }) }
+                    _state.value.videoUri?.let { store.save(it, _state.value.cues) }
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(error = "翻译失败：${e.message}", failedTask = Task.TRANSLATE) }
+            }
+        }
+    }
+
+    /** 设置页的"测试连接"：用 1 秒静音请求一次识别服务。返回给用户看的结果。 */
+    suspend fun testAsr(settings: AppSettings): String = withContext(Dispatchers.IO) {
+        settings.asrProblem()?.let { return@withContext it }
+        if (settings.asrEngine == AsrEngine.LOCAL) {
+            val model = ModelCatalog.byId(settings.localModel)
+            return@withContext if (models.isReady(model)) "${model.label} 已就绪" else "${model.label} 尚未下载，首次识别时会自动下载"
+        }
+        try {
+            settings.createCloudEngine().use { engine ->
+                engine.accept(FloatArray(Transcriber.SAMPLE_RATE)) {}
+                engine.finish {}
+            }
+            "连接成功"
+        } catch (e: Exception) {
+            "连接失败：${e.message}"
+        }
+    }
+
+    /** 设置页的"测试连接"：翻译一句英文。 */
+    suspend fun testTranslator(settings: AppSettings): String {
+        val translator = settings.createTranslator() ?: return settings.translatorProblem() ?: "配置不完整"
+        return try {
+            val r = translator.translate(listOf("Hello, nice to meet you."), emptyList(), settings.targetLanguage).firstOrNull()
+            if (r != null) "连接成功：$r" else "连接成功，但没有返回译文"
+        } catch (e: Exception) {
+            "连接失败：${e.message}"
+        }
     }
 
     fun clearTranslations() {

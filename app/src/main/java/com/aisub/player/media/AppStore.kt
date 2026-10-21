@@ -10,7 +10,7 @@ import java.util.UUID
 
 data class HistoryItem(val entry: MediaEntry, val positionMs: Long, val playedAt: Long)
 
-data class Playlist(val id: String, val name: String, val items: List<MediaEntry>)
+data class Playlist(val id: String, val name: String, val items: List<MediaEntry>, val updatedAt: Long = 0)
 
 /** 播放历史、播放列表、网络服务器的持久化（SharedPreferences + JSON）。 */
 class AppStore(context: Context) {
@@ -42,15 +42,15 @@ class AppStore(context: Context) {
 
     fun playlists(): List<Playlist> = readArray("playlists").map { o ->
         val arr = o.getJSONArray("items")
-        Playlist(o.getString("id"), o.getString("name"), List(arr.length()) { MediaEntry.fromJson(arr.getJSONObject(it)) })
+        Playlist(o.getString("id"), o.getString("name"), List(arr.length()) { MediaEntry.fromJson(arr.getJSONObject(it)) }, o.optLong("updatedAt"))
     }
 
     fun savePlaylists(list: List<Playlist>) = writeArray("playlists", list.map { p ->
-        JSONObject().put("id", p.id).put("name", p.name).put("items", JSONArray(p.items.map { it.toJson() }))
+        JSONObject().put("id", p.id).put("name", p.name).put("items", JSONArray(p.items.map { it.toJson() })).put("updatedAt", p.updatedAt)
     })
 
     fun createPlaylist(name: String): Playlist {
-        val p = Playlist(UUID.randomUUID().toString(), name, emptyList())
+        val p = Playlist(UUID.randomUUID().toString(), name, emptyList(), System.currentTimeMillis())
         savePlaylists(playlists() + p)
         return p
     }
@@ -96,4 +96,20 @@ class AppStore(context: Context) {
     companion object {
         private const val MAX_HISTORY = 50
     }
+}
+
+/** 浏览偏好：排序方式、网格/列表，按页面保存。 */
+enum class SortOrder(val label: String) { RECENT("最近添加"), NAME("名称"), DURATION("时长") }
+
+class ViewPrefs(context: Context) {
+    private val prefs = context.getSharedPreferences("view", Context.MODE_PRIVATE)
+
+    fun sort(page: String): SortOrder =
+        runCatching { SortOrder.valueOf(prefs.getString("$page.sort", "")!!) }.getOrDefault(SortOrder.RECENT)
+
+    fun setSort(page: String, order: SortOrder) = prefs.edit().putString("$page.sort", order.name).apply()
+
+    fun grid(page: String): Boolean = prefs.getBoolean("$page.grid", true)
+
+    fun setGrid(page: String, grid: Boolean) = prefs.edit().putBoolean("$page.grid", grid).apply()
 }

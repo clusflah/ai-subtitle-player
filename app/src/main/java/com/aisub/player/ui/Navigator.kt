@@ -6,6 +6,7 @@ sealed interface Screen {
     data object Home : Screen
     data object Player : Screen
     data object History : Screen
+    data object Settings : Screen
     data class LocalFolder(val path: String, val title: String) : Screen
     /** path：WebDAV/OpenList 是目录路径，网盘是目录 ID；title 用于标题栏 */
     data class Remote(val serverId: String, val path: String, val title: String) : Screen

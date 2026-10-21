@@ -49,6 +49,12 @@ data class AppSettings(
     val autoTranslate: Boolean = true,
     val showOriginal: Boolean = true,
     val showTranslation: Boolean = true,
+    /** 字幕字号倍率（视频上的字幕） */
+    val subtitleScale: Float = 1f,
+    /** 字幕离视频底部的距离（dp） */
+    val subtitleOffset: Int = 40,
+    /** 字幕列表自动滚动到当前句 */
+    val followPlayback: Boolean = true,
 ) {
     /** 某个服务商的配置，未填的字段用默认值补齐。 */
     fun configOf(p: Provider): ProviderConfig {
@@ -128,6 +134,9 @@ class SettingsRepository(context: Context) {
             autoTranslate = prefs.getBoolean("autoTranslate", d.autoTranslate),
             showOriginal = prefs.getBoolean("showOriginal", d.showOriginal),
             showTranslation = prefs.getBoolean("showTranslation", d.showTranslation),
+            subtitleScale = prefs.getFloat("subtitleScale", d.subtitleScale),
+            subtitleOffset = prefs.getInt("subtitleOffset", d.subtitleOffset),
+            followPlayback = prefs.getBoolean("followPlayback", d.followPlayback),
         )
     }
 
@@ -142,6 +151,9 @@ class SettingsRepository(context: Context) {
             .putBoolean("autoTranslate", s.autoTranslate)
             .putBoolean("showOriginal", s.showOriginal)
             .putBoolean("showTranslation", s.showTranslation)
+            .putFloat("subtitleScale", s.subtitleScale)
+            .putInt("subtitleOffset", s.subtitleOffset)
+            .putBoolean("followPlayback", s.followPlayback)
         for ((p, c) in s.providerConfigs) {
             editor.putString("${p.name}.apiKey", c.apiKey)
                 .putString("${p.name}.model", c.model)

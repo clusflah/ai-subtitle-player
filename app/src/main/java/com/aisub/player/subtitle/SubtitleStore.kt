@@ -88,3 +88,12 @@ private fun srtTime(ms: Long): String {
     val milli = ms % 1000
     return "%02d:%02d:%02d,%03d".format(h, m, s, milli)
 }
+
+/** 在已缓存的字幕里搜索：返回原文或译文包含关键词的视频地址。 */
+fun SubtitleStore.searchCached(uris: List<String>, query: String): Set<String> {
+    val q = query.trim()
+    if (q.length < 2) return emptySet()
+    return uris.filter { uri ->
+        load(Uri.parse(uri)).any { it.text.contains(q, ignoreCase = true) || it.translation?.contains(q, ignoreCase = true) == true }
+    }.toSet()
+}
