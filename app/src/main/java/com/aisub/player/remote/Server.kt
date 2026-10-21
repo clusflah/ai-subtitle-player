@@ -5,12 +5,19 @@ import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-enum class ServerType(val label: String) {
+enum class ServerType(val label: String, val isCloud: Boolean = false, val rootRef: String = "/") {
     WEBDAV("WebDAV"),
     OPENLIST("OpenList"),
+    PAN115("115 网盘", isCloud = true, rootRef = "0"),
+    ALIYUN("阿里云盘", isCloud = true, rootRef = "root"),
+    BAIDU("百度网盘", isCloud = true, rootRef = "/"),
+    PIKPAK("PikPak", isCloud = true, rootRef = ""),
 }
 
-/** 一个网络媒体来源：WebDAV 服务器，或 OpenList（原 AList，可挂载 115/百度/阿里/PikPak 等网盘）。 */
+/**
+ * 一个网络媒体来源：WebDAV、OpenList，或直连的网盘账号。
+ * 网盘的登录凭据和 token 存在 [extra]（JSON）里。
+ */
 data class Server(
     val id: String = UUID.randomUUID().toString(),
     val type: ServerType,
@@ -19,8 +26,9 @@ data class Server(
     val baseUrl: String,
     val username: String = "",
     val password: String = "",
-    /** 进入时打开的目录，例如 OpenList 里网盘的挂载路径 /115 */
-    val rootPath: String = "/",
+    /** 进入时打开的目录：WebDAV/OpenList 是路径，网盘是根目录 ID */
+    val rootPath: String = type.rootRef,
+    val extra: String = "",
 ) {
     val normalizedBase get() = baseUrl.trim().trimEnd('/')
 
@@ -32,18 +40,22 @@ data class Server(
 
     fun toJson(): JSONObject = JSONObject()
         .put("id", id).put("type", type.name).put("name", name).put("baseUrl", baseUrl)
-        .put("username", username).put("password", password).put("rootPath", rootPath)
+        .put("username", username).put("password", password).put("rootPath", rootPath).put("extra", extra)
 
     companion object {
-        fun fromJson(o: JSONObject) = Server(
-            id = o.getString("id"),
-            type = runCatching { ServerType.valueOf(o.getString("type")) }.getOrDefault(ServerType.WEBDAV),
-            name = o.optString("name"),
-            baseUrl = o.optString("baseUrl"),
-            username = o.optString("username"),
-            password = o.optString("password"),
-            rootPath = o.optString("rootPath", "/"),
-        )
+        fun fromJson(o: JSONObject): Server {
+            val type = runCatching { ServerType.valueOf(o.getString("type")) }.getOrDefault(ServerType.WEBDAV)
+            return Server(
+                id = o.getString("id"),
+                type = type,
+                name = o.optString("name"),
+                baseUrl = o.optString("baseUrl"),
+                username = o.optString("username"),
+                password = o.optString("password"),
+                rootPath = o.optString("rootPath", type.rootRef),
+                extra = o.optString("extra"),
+            )
+        }
     }
 }
 
@@ -75,7 +87,7 @@ object AuthRegistry {
 
 data class RemoteItem(
     val name: String,
-    /** 服务器内的路径，例如 /电影/xxx.mkv */
+    /** 目录的定位符：WebDAV/OpenList 是路径（/电影/xxx），网盘是目录 ID；用于进入下一级 */
     val path: String,
     val isDir: Boolean,
     val size: Long = 0,
@@ -90,6 +102,8 @@ interface RemoteClient {
 fun clientFor(server: Server): RemoteClient = when (server.type) {
     ServerType.WEBDAV -> WebDavClient(server)
     ServerType.OPENLIST -> OpenListClient(server)
+    else -> com.aisub.player.remote.cloud.CloudRegistry.client(server)
+        ?: throw IllegalArgumentException("不支持的类型 ${server.type}")
 }
 
 /** 路径逐段做 URL 编码，保留分隔符。 */

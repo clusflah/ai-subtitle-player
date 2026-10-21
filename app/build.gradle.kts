@@ -14,8 +14,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用
@@ -108,4 +108,7 @@ dependencies {
 
     // 解压模型包（tar.bz2）
     implementation("org.apache.commons:commons-compress:1.27.1")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303") // android.jar 里的 org.json 只是空壳
 }

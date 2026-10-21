@@ -80,6 +80,8 @@ private sealed interface HomeDialog {
     data object NewPlaylist : HomeDialog
     data class AddToPlaylist(val entry: MediaEntry) : HomeDialog
     data class EditServer(val server: Server, val hint: String? = null) : HomeDialog
+    data class CloudLogin(val type: ServerType, val existing: Server?) : HomeDialog
+    data class RenameServer(val server: Server) : HomeDialog
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -190,10 +192,12 @@ fun HomeScreen(
                     state = state,
                     onRequestPermission = onRequestPermission,
                     openLocal = { path, title -> nav.push(Screen.LocalFolder(path, title)) },
-                    openRemote = { s -> nav.push(Screen.Remote(s.id, s.rootPath)) },
+                    openRemote = { s -> nav.push(Screen.Remote(s.id, s.rootPath, s.name)) },
                     pickFile = { pickFile.launch(arrayOf("video/*", "audio/*")) },
                     editServer = { s, hint -> dialog = HomeDialog.EditServer(s, hint) },
                     deleteServer = { lib.deleteServer(it.id) },
+                    cloudLogin = { t, s -> dialog = HomeDialog.CloudLogin(t, s) },
+                    renameServer = { dialog = HomeDialog.RenameServer(it) },
                 )
                 Tab.PLAYLISTS -> PlaylistsTab(
                     state = state,
@@ -240,6 +244,16 @@ fun HomeScreen(
             onDismiss = { dialog = null },
             onPick = { lib.addToPlaylist(it.id, d.entry); dialog = null },
             onCreate = { lib.createPlaylist(it, d.entry); dialog = null },
+        )
+        is HomeDialog.CloudLogin -> CloudLoginDialog(
+            type = d.type, existing = d.existing,
+            onDismiss = { dialog = null },
+            onLoggedIn = { lib.saveServer(it); dialog = null },
+        )
+        is HomeDialog.RenameServer -> TextInputDialog(
+            title = "重命名", label = "名称", initial = d.server.name,
+            onDismiss = { dialog = null },
+            onConfirm = { lib.saveServer(d.server.copy(name = it)); dialog = null },
         )
         is HomeDialog.EditServer -> ServerDialog(
             initial = d.server, hint = d.hint,
@@ -293,6 +307,8 @@ private fun BrowseTab(
     pickFile: () -> Unit,
     editServer: (Server, String?) -> Unit,
     deleteServer: (Server) -> Unit,
+    cloudLogin: (ServerType, Server?) -> Unit,
+    renameServer: (Server) -> Unit,
 ) {
     val all = remember(state.videos, state.audios) { state.videos + state.audios }
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
@@ -324,7 +340,7 @@ private fun BrowseTab(
 
         SectionHeader("网络")
         TileRow {
-            state.servers.forEach { s ->
+            state.servers.filter { !it.type.isCloud }.forEach { s ->
                 TileCard(
                     if (s.type == ServerType.OPENLIST) AppIcons.Cloud else AppIcons.Dns, s.name,
                     subtitle = { Text(s.type.label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline) },
@@ -336,25 +352,37 @@ private fun BrowseTab(
             }
             TileCard(AppIcons.Add, "WebDAV") { editServer(Server(type = ServerType.WEBDAV, name = "", baseUrl = ""), null) }
             TileCard(AppIcons.Add, "OpenList") {
-                editServer(
-                    Server(type = ServerType.OPENLIST, name = "OpenList", baseUrl = ""),
-                    "OpenList（原 AList）可以把 115、百度网盘、阿里云盘、PikPak 等网盘统一挂载成一个站点。",
-                )
+                editServer(Server(type = ServerType.OPENLIST, name = "OpenList", baseUrl = ""), null)
             }
         }
 
         SectionHeader("网盘")
         TileRow {
-            CLOUD_PRESETS.forEach { preset ->
+            state.servers.filter { it.type.isCloud }.forEach { s ->
                 TileCard(
-                    AppIcons.Cloud, preset.name,
-                    subtitle = { Text("经 OpenList", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline) },
-                ) {
-                    editServer(
-                        Server(type = ServerType.OPENLIST, name = preset.name, baseUrl = "", rootPath = preset.mountPath),
-                        cloudHint(preset),
-                    )
-                }
+                    AppIcons.Cloud, s.name,
+                    subtitle = { Text(s.type.label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline) },
+                    menu = listOf(
+                        MenuAction("重新登录") { cloudLogin(s.type, s) },
+                        MenuAction("重命名") { renameServer(s) },
+                        MenuAction("删除") { deleteServer(s) },
+                    ),
+                ) { openRemote(s) }
+            }
+            listOf(ServerType.PAN115, ServerType.ALIYUN, ServerType.BAIDU, ServerType.PIKPAK).forEach { t ->
+                TileCard(
+                    AppIcons.Add, t.label,
+                    subtitle = {
+                        Text(
+                            when (t) {
+                                ServerType.PIKPAK -> "账号密码登录"
+                                ServerType.BAIDU -> "AppKey / token"
+                                else -> "扫码登录"
+                            },
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                        )
+                    },
+                ) { cloudLogin(t, null) }
             }
         }
     }

@@ -17,6 +17,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.aisub.player.media.AppStore
 import com.aisub.player.media.MediaEntry
 import com.aisub.player.remote.AuthRegistry
+import com.aisub.player.remote.cloud.CloudRegistry
 import com.aisub.player.asr.AudioDecoder
 import com.aisub.player.asr.AzureTranscriber
 import com.aisub.player.asr.ModelManager
@@ -301,7 +302,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 private fun authDataSourceFactory(app: Application): DataSource.Factory {
     val http = DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true)
     return ResolvingDataSource.Factory(DefaultDataSource.Factory(app, http)) { spec ->
-        val headers = AuthRegistry.headersFor(spec.uri.toString())
-        if (headers.isEmpty()) spec else spec.withAdditionalHeaders(headers)
+        val uri = spec.uri.toString()
+        if (CloudRegistry.isCloud(uri)) {
+            // 网盘：在加载线程里把 cloud:// 换成临时直链（会联网，结果有缓存）
+            val link = CloudRegistry.resolve(uri)
+            spec.withUri(Uri.parse(link.url)).withAdditionalHeaders(link.headers)
+        } else {
+            val headers = AuthRegistry.headersFor(uri)
+            if (headers.isEmpty()) spec else spec.withAdditionalHeaders(headers)
+        }
     }
 }

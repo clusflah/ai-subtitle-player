@@ -274,13 +274,12 @@ private fun CueList(cues: List<Cue>, current: Cue?, onSeek: (Cue) -> Unit, modif
                     .background(if (active) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
                     .padding(horizontal = 12.dp, vertical = 6.dp),
             ) {
-                Text(
-                    formatTime(cue.startMs),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.width(56.dp).padding(top = 2.dp),
-                )
                 Column {
+                    Text(
+                        "${formatTime(cue.startMs)} → ${formatTime(cue.endMs)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                    )
                     Text(cue.text, style = MaterialTheme.typography.bodyMedium)
                     cue.translation?.let {
                         Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
@@ -291,8 +290,10 @@ private fun CueList(cues: List<Cue>, current: Cue?, onSeek: (Cue) -> Unit, modif
     }
 }
 
+/** 字幕时间，精确到 0.1 秒，例如 01:23.4 或 1:02:03.4 */
 private fun formatTime(ms: Long): String {
     val total = ms / 1000
-    return if (total >= 3600) "%d:%02d:%02d".format(total / 3600, total / 60 % 60, total % 60)
-    else "%02d:%02d".format(total / 60, total % 60)
+    val tenth = ms % 1000 / 100
+    return if (total >= 3600) "%d:%02d:%02d.%d".format(total / 3600, total / 60 % 60, total % 60, tenth)
+    else "%02d:%02d.%d".format(total / 60, total % 60, tenth)
 }

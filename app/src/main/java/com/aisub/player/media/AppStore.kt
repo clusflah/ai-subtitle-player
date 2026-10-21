@@ -3,6 +3,7 @@ package com.aisub.player.media
 import android.content.Context
 import com.aisub.player.remote.AuthRegistry
 import com.aisub.player.remote.Server
+import com.aisub.player.remote.cloud.CloudRegistry
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -58,14 +59,26 @@ class AppStore(context: Context) {
 
     fun servers(): List<Server> = readArray("servers").map(Server::fromJson)
 
+    /** 用户添加或编辑服务器：配置变了，丢弃旧的网盘客户端。 */
     fun saveServer(server: Server) {
-        val list = servers().filter { it.id != server.id } + server
+        writeServer(server)
+        CloudRegistry.forget(server.id)
+    }
+
+    /** 网盘客户端刷新 token 后回写，保留客户端。 */
+    fun updateServerCredentials(server: Server) = writeServer(server)
+
+    @Synchronized
+    private fun writeServer(server: Server) {
+        val list = servers().map { if (it.id == server.id) server else it }
+            .let { if (it.any { s -> s.id == server.id }) it else it + server }
         writeArray("servers", list.map { it.toJson() })
         AuthRegistry.register(server)
     }
 
     fun deleteServer(id: String) {
         servers().firstOrNull { it.id == id }?.let(AuthRegistry::unregister)
+        CloudRegistry.forget(id)
         writeArray("servers", servers().filter { it.id != id }.map { it.toJson() })
     }
 

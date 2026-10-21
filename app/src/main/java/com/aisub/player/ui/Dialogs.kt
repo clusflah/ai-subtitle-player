@@ -27,16 +27,6 @@ import com.aisub.player.media.Playlist
 import com.aisub.player.remote.Server
 import com.aisub.player.remote.ServerType
 
-/** 网盘入口：经 OpenList 挂载。 */
-data class CloudPreset(val name: String, val mountPath: String)
-
-val CLOUD_PRESETS = listOf(
-    CloudPreset("115 网盘", "/115"),
-    CloudPreset("百度网盘", "/百度网盘"),
-    CloudPreset("阿里云盘", "/阿里云盘"),
-    CloudPreset("PikPak", "/PikPak"),
-)
-
 @Composable
 fun TextInputDialog(
     title: String,
@@ -105,7 +95,7 @@ fun ServerDialog(initial: Server, hint: String? = null, onDismiss: () -> Unit, o
                     Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ServerType.entries.forEach { t ->
+                    listOf(ServerType.WEBDAV, ServerType.OPENLIST).forEach { t ->
                         FilterChip(selected = s.type == t, onClick = { s = s.copy(type = t) }, label = { Text(t.label) })
                     }
                 }
@@ -141,11 +131,6 @@ fun ServerDialog(initial: Server, hint: String? = null, onDismiss: () -> Unit, o
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
-
-fun cloudHint(preset: CloudPreset) =
-    "${preset.name}需要通过 OpenList（原 AList）访问：先在 OpenList 管理后台添加${preset.name}存储，" +
-        "挂载路径填「${preset.mountPath}」，再在这里填 OpenList 的地址和账号。" +
-        "部分网盘需要在存储设置里开启「Web 代理」才能在线播放。"
 
 @Composable
 fun AboutDialog(onDismiss: () -> Unit) {

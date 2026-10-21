@@ -89,8 +89,9 @@ fun RemoteFolderScreen(
     lib: LibraryViewModel,
     serverId: String,
     path: String,
+    title: String,
     onBack: () -> Unit,
-    openFolder: (String) -> Unit,
+    openFolder: (RemoteItem) -> Unit,
     play: (List<MediaEntry>, Int) -> Unit,
 ) {
     val server = lib.server(serverId)
@@ -109,7 +110,6 @@ fun RemoteFolderScreen(
         }
     }
 
-    val title = if (path == "/" || path.isEmpty()) server?.name.orEmpty() else path.trimEnd('/').substringAfterLast('/')
     DetailScaffold(
         title, onBack,
         actions = { IconButton(onClick = { reload++ }) { Icon(AppIcons.Refresh, "刷新") } },
@@ -127,7 +127,7 @@ fun RemoteFolderScreen(
                     EmptyState("这里没有文件夹或媒体文件", icon = AppIcons.Folder)
                 } else {
                     LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
-                        items(dirs, key = { "d:" + it.path }) { d -> FolderRow(d.name) { openFolder(d.path) } }
+                        items(dirs, key = { "d:" + it.path }) { d -> FolderRow(d.name) { openFolder(d) } }
                         itemsIndexed(media, key = { _, e -> e.uri }) { i, e -> MediaRow(e, emptyList()) { play(media, i) } }
                     }
                 }

@@ -78,8 +78,8 @@ class MainActivity : ComponentActivity() {
                         play = play,
                     )
                     is Screen.Remote -> RemoteFolderScreen(
-                        lib, screen.serverId, screen.path, back,
-                        openFolder = { path -> nav.push(Screen.Remote(screen.serverId, path)) },
+                        lib, screen.serverId, screen.path, screen.title, back,
+                        openFolder = { dir -> nav.push(Screen.Remote(screen.serverId, dir.path, dir.name)) },
                         play = play,
                     )
                     is Screen.PlaylistDetail -> PlaylistDetailScreen(lib, screen.id, back, play)

@@ -1,6 +1,8 @@
 package com.aisub.player.asr
 
 import com.aisub.player.subtitle.Cue
+import com.aisub.player.subtitle.CueSplitter
+import com.aisub.player.subtitle.TimedToken
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
@@ -76,22 +78,35 @@ class Transcriber(paths: ModelManager.Paths, language: String, numThreads: Int) 
 
     private fun recognize(segment: SpeechSegment): List<Cue> {
         val stream = recognizer.createStream()
-        val text = try {
+        val result = try {
             stream.acceptWaveform(segment.samples, SAMPLE_RATE)
             recognizer.decode(stream)
-            recognizer.getResult(stream).text.trim()
+            recognizer.getResult(stream)
         } finally {
             stream.release()
         }
+        val text = result.text.trim()
         if (text.isEmpty() || text.all { it in PUNCTUATION || it.isWhitespace() }) return emptyList()
 
         val startMs = segment.start * 1000L / SAMPLE_RATE
-        val durationMs = segment.samples.size * 1000L / SAMPLE_RATE
-        return splitLong(text, startMs, durationMs).map { (s, e, t) -> Cue(nextId++, s, e, t) }
+        val endMs = startMs + segment.samples.size * 1000L / SAMPLE_RATE
+
+        // 优先用逐 token 的时间戳切分（SenseVoice 的标点和数字转换在模型内完成，token 与最终文本一致）
+        val tokens = result.tokens
+        val stamps = result.timestamps
+        val lines = if (tokens.isNotEmpty() && tokens.size == stamps.size) {
+            val timed = tokens.indices
+                .filterNot { tokens[it].startsWith("<|") } // 语言、情感等特殊标记
+                .map { TimedToken(tokens[it].replace('▁', ' '), startMs + (stamps[it] * 1000).toLong()) }
+            CueSplitter.split(timed, endMs)
+        } else {
+            splitLong(text, startMs, endMs - startMs)
+        }
+        return lines.map { (s, e, t) -> Cue(nextId++, s, e, t) }
     }
 
     /**
-     * 长语音段在句末标点处拆开，按字数比例分配时间，避免一条字幕在屏幕上停太久。
+     * 没有逐字时间戳时的后备方案：在句末标点处拆开，按字数比例分配时间。
      */
     private fun splitLong(text: String, startMs: Long, durationMs: Long): List<Triple<Long, Long, String>> {
         if (durationMs <= MAX_CUE_MS) return listOf(Triple(startMs, startMs + durationMs, text))

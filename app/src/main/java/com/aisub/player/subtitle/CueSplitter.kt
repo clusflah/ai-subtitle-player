@@ -1,0 +1,73 @@
+package com.aisub.player.subtitle
+
+/** 带开始时间的识别单元：一个字、一个 token 或一个词。结束时间取下一个单元的开始。 */
+data class TimedToken(val text: String, val startMs: Long)
+
+/**
+ * 把逐字/逐词的识别结果切成适合屏幕阅读的短句字幕：
+ * 在句末标点处断开；逗号处在句子够长时断开；超过字数或时长上限强制断开。
+ * 返回 (开始, 结束, 文本)。
+ */
+object CueSplitter {
+    private const val MAX_WIDTH = 20.0       // 一行最多约 20 个汉字（西文字符按半个算）
+    private const val COMMA_BREAK_WIDTH = 10.0
+    private const val MAX_DURATION_MS = 5_000L
+    private const val MIN_DURATION_MS = 800L
+    private const val STRONG = "。！？!?；;…"
+    private const val WEAK = "，、,：:"
+
+    fun split(tokens: List<TimedToken>, segmentEndMs: Long): List<Triple<Long, Long, String>> {
+        val lines = ArrayList<Pair<Long, StringBuilder>>()
+        var current: StringBuilder? = null
+        var lineStart = 0L
+        for ((i, t) in tokens.withIndex()) {
+            if (current == null) {
+                current = StringBuilder()
+                lineStart = t.startMs
+                lines.add(lineStart to current)
+            }
+            current.append(t.text)
+            val text = current.toString().trim()
+            val width = width(text)
+            val last = text.lastOrNull()
+            val nextStart = tokens.getOrNull(i + 1)?.startMs ?: segmentEndMs
+            val shouldBreak = when {
+                i == tokens.lastIndex -> false
+                last != null && last in STRONG && width >= 2 -> true
+                last != null && last in WEAK && width >= COMMA_BREAK_WIDTH -> true
+                width >= MAX_WIDTH && isBoundary(t.text, tokens[i + 1].text) -> true
+                nextStart - lineStart >= MAX_DURATION_MS && isBoundary(t.text, tokens[i + 1].text) -> true
+                else -> false
+            }
+            if (shouldBreak) current = null
+        }
+
+        val result = ArrayList<Triple<Long, Long, String>>()
+        for ((i, line) in lines.withIndex()) {
+            val text = line.second.toString().trim()
+            if (text.isEmpty() || text.all { it in STRONG || it in WEAK || it.isWhitespace() }) continue
+            val start = line.first
+            val end = lines.getOrNull(i + 1)?.first ?: segmentEndMs
+            result.add(Triple(start, maxOf(end, start + MIN_DURATION_MS), text))
+        }
+        return result
+    }
+
+    /** 西文单词中间不断开：下一个单元以空格开头，或任一侧是中日韩文字时才算边界。 */
+    private fun isBoundary(current: String, next: String): Boolean =
+        next.startsWith(' ') || isCjk(current.lastOrNull()) || isCjk(next.firstOrNull())
+
+    private fun width(s: String): Double = s.sumOf { if (isCjk(it)) 1.0 else 0.5 }
+
+    private fun isCjk(c: Char?): Boolean {
+        if (c == null) return false
+        val block = Character.UnicodeBlock.of(c)
+        return block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS ||
+            block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A ||
+            block == Character.UnicodeBlock.HIRAGANA ||
+            block == Character.UnicodeBlock.KATAKANA ||
+            block == Character.UnicodeBlock.HANGUL_SYLLABLES ||
+            block == Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION ||
+            block == Character.UnicodeBlock.HALFWIDTH_AND_FULLWIDTH_FORMS
+    }
+}

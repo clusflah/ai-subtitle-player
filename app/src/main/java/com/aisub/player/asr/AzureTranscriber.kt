@@ -1,6 +1,8 @@
 package com.aisub.player.asr
 
 import com.aisub.player.subtitle.Cue
+import com.aisub.player.subtitle.CueSplitter
+import com.aisub.player.subtitle.TimedToken
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -150,7 +152,20 @@ class AzureTranscriber(
             if (text.isEmpty()) continue
             val start = chunkStartMs + p.optLong("offsetMilliseconds")
             val end = start + p.optLong("durationMilliseconds")
-            cues.add(Cue(nextId++, start, end, text))
+            // 长句按每个词的时间戳切成短句
+            val words = p.optJSONArray("words")
+            val lines = if (words != null && words.length() > 1) {
+                val spaced = !p.optString("locale").let { it.startsWith("zh") || it.startsWith("ja") || it.startsWith("ko") }
+                val tokens = List(words.length()) { w ->
+                    val o = words.getJSONObject(w)
+                    val wordText = o.optString("text")
+                    TimedToken(if (spaced && w > 0) " $wordText" else wordText, chunkStartMs + o.optLong("offsetMilliseconds"))
+                }
+                CueSplitter.split(tokens, end)
+            } else {
+                listOf(Triple(start, end, text))
+            }
+            lines.forEach { (s, e, t) -> cues.add(Cue(nextId++, s, e, t)) }
         }
         return cues
     }

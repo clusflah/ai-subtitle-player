@@ -112,5 +112,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     fun server(id: String): Server? = _state.value.servers.firstOrNull { it.id == id }
 
     /** 同一服务器复用客户端，OpenList 的登录 token 不用每次重新获取。 */
-    fun client(server: Server): RemoteClient = clients.getOrPut(server.id) { clientFor(server) }
+    fun client(server: Server): RemoteClient =
+        if (server.type.isCloud) clientFor(server) // 网盘客户端由 CloudRegistry 统一管理
+        else clients.getOrPut(server.id) { clientFor(server) }
 }

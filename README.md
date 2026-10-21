@@ -3,7 +3,7 @@
 本地语音识别生成字幕 + LLM 翻译的安卓视频播放器。
 
 - 界面：仿 VLC，底部五个标签——视频 / 音频 / 浏览 / 播放列表 / 更多（设置、串流、历史）
-- 媒体来源：手机媒体库、系统文件选择器、网络串流、WebDAV、OpenList（原 AList，可挂载 115 / 百度网盘 / 阿里云盘 / PikPak 等网盘）
+- 媒体来源：手机媒体库、系统文件选择器、网络串流、WebDAV、OpenList，以及直连网盘：115（扫码）、阿里云盘（扫码）、百度网盘（自有 AppKey 扫码或 refresh_token）、PikPak（账号密码）
 - 播放：Media3 ExoPlayer，支持播放队列、记住播放进度
 - 识别（二选一）：
   - 本地：sherpa-onnx + SenseVoice（中/英/日/韩/粤）+ Silero VAD，完全在手机上离线运行
@@ -21,7 +21,7 @@
 ## 使用
 
 1. 在「视频」「音频」「浏览」里选择要播放的文件（也可以在文件管理器里用本应用打开）。
-   网盘：先在 OpenList 后台挂载网盘，再在「浏览 → 网盘」里填 OpenList 的地址和账号。
+   网盘：在「浏览 → 网盘」里点对应网盘登录（115、阿里云盘用手机 App 扫码）。
 2. 「设置」里填翻译服务的 API Key，选择视频语言（默认自动识别）。
 3. 「生成字幕」：首次会下载识别模型（约 160MB），之后边识别边显示字幕，开启自动翻译时同步翻译。
 4. 点字幕列表可跳转；「导出」可保存双语 / 译文 / 原文 SRT。
@@ -46,3 +46,12 @@
 - 识别在 ViewModel 里运行，应用被系统杀掉时会中断（后续可改成前台服务）。
 - 从头顺序识别；拖到还没识别到的位置时暂时没有字幕。
 - API Key 以明文存在应用私有的 SharedPreferences 里。
+
+## 网盘接口说明
+
+115、阿里云盘、百度网盘、PikPak 的接入参考并移植自
+[OpenList](https://github.com/OpenListTeam/OpenList)（AGPL-3.0）、
+[OpenList-APIPages](https://github.com/OpenListTeam/OpenList-APIPages)（AGPL-3.0）与
+[115driver](https://github.com/SheltonZhu/115driver) 的实现。
+其中 115、PikPak、阿里云盘 TV 授权属于非官方接口，可能随时失效，也存在账号风控风险。
+若公开分发本项目，请遵守上述项目的开源许可（AGPL-3.0 要求公开对应源码）。

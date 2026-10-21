@@ -7,6 +7,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import com.aisub.player.remote.AuthRegistry
+import com.aisub.player.remote.cloud.CloudRegistry
 import java.nio.ByteOrder
 
 /**
@@ -29,8 +30,14 @@ class AudioDecoder(private val context: Context, private val uri: Uri) {
         onChunk: (FloatArray) -> Unit,
     ) {
         val extractor = MediaExtractor()
-        // 远程文件（WebDAV）需要带鉴权头
-        extractor.setDataSource(context, uri, AuthRegistry.headersFor(uri.toString()).ifEmpty { null })
+        if (CloudRegistry.isCloud(uri.toString())) {
+            // 网盘：先换成直链，带上必需的 UA/Cookie
+            val link = CloudRegistry.resolve(uri.toString())
+            extractor.setDataSource(context, Uri.parse(link.url), link.headers.ifEmpty { null })
+        } else {
+            // 远程文件（WebDAV）需要带鉴权头
+            extractor.setDataSource(context, uri, AuthRegistry.headersFor(uri.toString()).ifEmpty { null })
+        }
         var codec: MediaCodec? = null
         try {
             val trackIndex = (0 until extractor.trackCount).firstOrNull {
