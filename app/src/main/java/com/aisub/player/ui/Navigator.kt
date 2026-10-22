@@ -11,6 +11,18 @@ sealed interface Screen {
     /** path：WebDAV/OpenList 是目录路径，网盘是目录 ID；title 用于标题栏 */
     data class Remote(val serverId: String, val path: String, val title: String) : Screen
     data class PlaylistDetail(val id: String) : Screen
+    /**
+     * 文件详情：文件信息 + TMDB 简介 + 豆瓣评分。serverId 为 null 表示本地文件；
+     * queue / index 是点「播放」时的播放队列（同一文件夹里的媒体，方便连播下一集）。
+     */
+    data class FileDetail(
+        val serverId: String?,
+        val item: com.aisub.player.remote.RemoteItem,
+        val queue: List<com.aisub.player.media.MediaEntry> = emptyList(),
+        val index: Int = 0,
+    ) : Screen
+    /** 看图：同一文件夹里的图片左右滑动切换。 */
+    data class ImageViewer(val serverId: String?, val images: List<com.aisub.player.remote.RemoteItem>, val index: Int) : Screen
 }
 
 /** 极简页面栈：首页在栈底，返回键逐层弹出。 */
@@ -30,3 +42,6 @@ class Navigator {
         return true
     }
 }
+
+/** 本地文件的「影视信息」菜单打开详情页；由 MainActivity 提供。 */
+val LocalOpenDetail = androidx.compose.runtime.staticCompositionLocalOf<(com.aisub.player.media.MediaEntry) -> Unit> { {} }

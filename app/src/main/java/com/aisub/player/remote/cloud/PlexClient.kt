@@ -1,6 +1,7 @@
 package com.aisub.player.remote.cloud
 
 import android.net.Uri
+import com.aisub.player.remote.ItemMeta
 import com.aisub.player.remote.RemoteItem
 import com.aisub.player.remote.Server
 import kotlinx.coroutines.Dispatchers
@@ -67,8 +68,8 @@ class PlexClient(server: Server) : CloudClient(server) {
                 }
                 return@withContext items
             }
-            path.startsWith("s:") -> collect(get("/library/sections/${path.removePrefix("s:")}/all"), items)
-            else -> collect(get("/library/metadata/${path.removePrefix("m:")}/children"), items)
+            path.startsWith("s:") -> collect(get("/library/sections/${path.removePrefix("s:")}/all?includeGuids=1"), items)
+            else -> collect(get("/library/metadata/${path.removePrefix("m:")}/children?includeGuids=1"), items)
         }
         items
     }
@@ -79,8 +80,9 @@ class PlexClient(server: Server) : CloudClient(server) {
             val m = meta.getJSONObject(i)
             val type = m.optString("type")
             var title = m.optString("title")
+            val info = meta(m)
             if (type in FOLDER_TYPES) {
-                out += RemoteItem(title, "m:" + m.optString("ratingKey"), isDir = true)
+                out += RemoteItem(title, "m:" + m.optString("ratingKey"), isDir = true, meta = info)
                 continue
             }
             if (type == "episode" && m.has("index")) title = "第 ${m.optInt("index")} 集 · $title"
@@ -88,8 +90,57 @@ class PlexClient(server: Server) : CloudClient(server) {
             val part = m.optJSONArray("Media")?.optJSONObject(0)?.optJSONArray("Part")?.optJSONObject(0) ?: continue
             val ext = part.optString("container").ifEmpty { part.optString("file").substringAfterLast('.', "mkv") }
             val fileName = "${title.replace('/', '_')}.$ext"
-            out += RemoteItem(fileName, part.optString("key"), isDir = false, size = part.optLong("size"), playUrl = playUri(part.optString("key"), fileName))
+            out += RemoteItem(
+                fileName, part.optString("key"), isDir = false, size = part.optLong("size"),
+                playUrl = playUri(part.optString("key"), fileName), meta = info,
+            )
         }
+    }
+
+    /** 服务器缩放后的图片地址（原图可能有好几 MB）。 */
+    private fun photo(path: String, width: Int, height: Int): String? {
+        if (path.isEmpty()) return null
+        val base = baseUrl ?: return null
+        return "$base/photo/:/transcode?width=$width&height=$height&minSize=1&upscale=1&url=${Uri.encode(path)}&X-Plex-Token=$token"
+    }
+
+    /** 海报、年份、评分、外部编号（Guid 里的 tmdb://、imdb://）。 */
+    private fun meta(m: JSONObject): ItemMeta {
+        val type = m.optString("type")
+        val wide = type == "episode" && m.optString("thumb").isNotEmpty()
+        val poster = if (wide) photo(m.optString("thumb"), 400, 225)
+        else photo(m.optString("thumb").ifEmpty { m.optString("parentThumb").ifEmpty { m.optString("grandparentThumb") } }, 300, 450)
+        val guids = m.optJSONArray("Guid")?.let { g -> (0 until g.length()).map { g.getJSONObject(it).optString("id") } }.orEmpty()
+        fun guid(prefix: String) = guids.firstOrNull { it.startsWith("$prefix://") }?.substringAfter("://")
+        val leaf = m.optInt("leafCount") - m.optInt("viewedLeafCount")
+        return ItemMeta(
+            title = m.optString("title"),
+            posterUrl = poster,
+            posterRatio = if (wide) 16f / 9f else 2f / 3f,
+            backdropUrl = photo(m.optString("art").ifEmpty { m.optString("grandparentArt") }, 1280, 720),
+            year = m.optInt("year").takeIf { it > 0 } ?: m.optInt("parentYear").takeIf { it > 0 },
+            rating = (m.optDouble("audienceRating", 0.0).takeIf { it > 0 } ?: m.optDouble("rating", 0.0)).takeIf { it > 0 },
+            overview = m.optString("summary"),
+            genres = m.optJSONArray("Genre")?.let { g -> (0 until g.length()).map { g.getJSONObject(it).optString("tag") } }.orEmpty(),
+            kind = when (type) {
+                "movie" -> "movie"
+                "show" -> "tv"
+                "season" -> "season"
+                "episode" -> "episode"
+                else -> null
+            },
+            seriesName = m.optString("grandparentTitle").ifEmpty { m.optString("parentTitle").takeIf { type == "season" }.orEmpty() }
+                .takeIf { it.isNotEmpty() },
+            season = (if (type == "season") m.optInt("index") else m.optInt("parentIndex")).takeIf { it > 0 && type in setOf("season", "episode") },
+            episode = m.optInt("index").takeIf { it > 0 && type == "episode" },
+            tmdbId = guid("tmdb"),
+            imdbId = guid("imdb"),
+            badge = when {
+                type == "episode" && m.has("index") -> "第 ${m.optInt("index")} 集"
+                leaf > 0 && type in setOf("show", "season") -> leaf.toString()
+                else -> null
+            },
+        )
     }
 
     /** 原始文件地址，令牌放在地址里。 */

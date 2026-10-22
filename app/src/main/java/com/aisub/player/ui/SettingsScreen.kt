@@ -250,6 +250,29 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 }
             }
 
+            // ---------------- 影视信息 ----------------
+            SectionHeader("影视信息")
+            SurfaceCard {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("TMDB（简介、海报、演职员）", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "在 themoviedb.org 注册后，到「设置 → API」免费申请，填 API Key 或 Read Access Token 都可以。" +
+                            "国内连不上时可以填反代地址",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    ConfigField(s.tmdbKey, { s = s.copy(tmdbKey = it) }, "API Key", "", secret = true)
+                    ConfigField(s.tmdbBaseUrl, { s = s.copy(tmdbBaseUrl = it) }, "接口地址（可选）", com.aisub.player.meta.Tmdb.DEFAULT_BASE)
+                    ConfigField(s.tmdbImageBase, { s = s.copy(tmdbImageBase = it) }, "图片地址（可选）", com.aisub.player.meta.Tmdb.DEFAULT_IMAGE_BASE)
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow(
+                    title = "显示豆瓣评分",
+                    subtitle = "非官方接口，查不到或被限流时不显示",
+                    trailing = { Switch(checked = s.doubanEnabled, onCheckedChange = { s = s.copy(doubanEnabled = it) }) },
+                    onClick = { s = s.copy(doubanEnabled = !s.doubanEnabled) },
+                )
+            }
+
             // ---------------- 字幕样式 ----------------
             SectionHeader("字幕样式")
             SurfaceCard {

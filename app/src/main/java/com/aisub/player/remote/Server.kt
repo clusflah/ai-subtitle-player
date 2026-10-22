@@ -98,6 +98,31 @@ data class RemoteItem(
     val size: Long = 0,
     /** 文件的播放地址；目录为 null */
     val playUrl: String? = null,
+    /** 媒体服务器（Emby / Plex）给出的海报、年份、评分等；普通网盘为 null */
+    val meta: ItemMeta? = null,
+)
+
+/** 媒体服务器条目的元数据，用于海报墙和详情页。 */
+data class ItemMeta(
+    /** 服务器上的原始片名（不带扩展名、集数前缀） */
+    val title: String? = null,
+    val posterUrl: String? = null,
+    /** 海报宽高比：电影海报 2:3，单集截图、媒体库封面约 16:9 */
+    val posterRatio: Float = 2f / 3f,
+    val backdropUrl: String? = null,
+    val year: Int? = null,
+    val rating: Double? = null,
+    val overview: String = "",
+    val genres: List<String> = emptyList(),
+    /** "movie" / "tv" / "season" / "episode" / null */
+    val kind: String? = null,
+    val seriesName: String? = null,
+    val season: Int? = null,
+    val episode: Int? = null,
+    val tmdbId: String? = null,
+    val imdbId: String? = null,
+    /** 角标文字，例如剧集的集数、未看集数 */
+    val badge: String? = null,
 )
 
 interface RemoteClient {

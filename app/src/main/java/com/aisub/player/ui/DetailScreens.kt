@@ -47,7 +47,7 @@ import com.aisub.player.remote.RemoteItem
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DetailScaffold(
+internal fun DetailScaffold(
     title: String,
     onBack: () -> Unit,
     actions: @Composable () -> Unit = {},
@@ -155,8 +155,13 @@ fun RemoteFolderScreen(
     onBack: () -> Unit,
     openFolder: (RemoteItem) -> Unit,
     play: (List<MediaEntry>, Int) -> Unit,
+    openDetail: (RemoteItem, List<MediaEntry>, Int) -> Unit,
+    openImages: (List<RemoteItem>, Int) -> Unit,
 ) {
     val server = lib.server(serverId)
+    val appContext = LocalContext.current.applicationContext
+    val viewPrefs = remember { com.aisub.player.media.ViewPrefs(appContext) }
+    var posterWall by remember { mutableStateOf(viewPrefs.grid("remote")) }
     val state by lib.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -222,8 +227,34 @@ fun RemoteFolderScreen(
         }
     }
 
-    fun itemMenu(item: RemoteItem, entry: MediaEntry?): List<MenuAction> = listOfNotNull(
-        entry?.let { MenuAction("加入播放列表") { addTo = listOf(it) } },
+    /** 同一目录里的媒体文件，作为详情页「播放」时的队列。 */
+    fun showDetail(item: RemoteItem) {
+        val mediaFiles = items.orEmpty().filter { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }
+        val i = mediaFiles.indexOf(item)
+        if (i >= 0) openDetail(item, mediaFiles.map { it.toMediaEntry() }, i) else openDetail(item, emptyList(), 0)
+    }
+
+    /** 点击：文件夹进入，图片看图，音频直接播放，视频和其他文件进详情页。 */
+    fun open(item: RemoteItem) {
+        val all = items.orEmpty()
+        when {
+            item.isDir -> openFolder(item)
+            MediaEntry.isImageName(item.name) -> {
+                val images = all.filter { !it.isDir && it.playUrl != null && MediaEntry.isImageName(it.name) }
+                openImages(images, images.indexOf(item).coerceAtLeast(0))
+            }
+            MediaEntry.isAudioName(item.name) -> {
+                val media = all.filter { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }
+                play(media.map { it.toMediaEntry() }, media.indexOf(item).coerceAtLeast(0))
+            }
+            else -> showDetail(item)
+        }
+    }
+
+    fun itemMenu(item: RemoteItem): List<MenuAction> = listOfNotNull(
+        MenuAction("详情") { showDetail(item) }.takeIf { !item.isDir || item.meta != null },
+        item.takeIf { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }?.toMediaEntry()
+            ?.let { MenuAction("加入播放列表") { addTo = listOf(it) } },
         if (item.isDir) MenuAction("下载文件夹") { downloadFolder(item) }
         else MenuAction("下载") { download(listOf(Downloads.Job(item, ""))) },
         MenuAction("重命名") { renaming = item },
@@ -234,6 +265,11 @@ fun RemoteFolderScreen(
         title, onBack,
         actions = {
             if (busy) CircularProgressIndicator(Modifier.size(24.dp).padding(end = 4.dp), strokeWidth = 2.dp)
+            if (items.orEmpty().any { it.meta?.posterUrl != null }) {
+                IconButton(onClick = { posterWall = !posterWall; viewPrefs.setGrid("remote", posterWall) }) {
+                    Icon(if (posterWall) AppIcons.ListIcon else AppIcons.GridView, if (posterWall) "列表" else "海报墙")
+                }
+            }
             IconButton(onClick = { reload++ }) { Icon(AppIcons.Refresh, "刷新") }
             OverflowMenu(
                 listOf(
@@ -252,15 +288,18 @@ fun RemoteFolderScreen(
             error != null -> EmptyState("加载失败：$error", "重试", icon = AppIcons.Cloud) { reload++ }
             list == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             else -> {
-                val dirs = list.filter { it.isDir }
-                val files = list.filter { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }
-                val media = files.map { MediaEntry(it.playUrl!!, it.name, isVideo = MediaEntry.isVideoName(it.name), sizeBytes = it.size) }
-                if (dirs.isEmpty() && media.isEmpty()) {
-                    EmptyState("这里没有文件夹或媒体文件", icon = AppIcons.Folder)
-                } else {
-                    LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
-                        items(dirs, key = { "d:" + it.path }) { d -> FolderRow(d.name, menu = itemMenu(d, null)) { openFolder(d) } }
-                        itemsIndexed(media, key = { _, e -> e.uri }) { i, e -> MediaRow(e, itemMenu(files[i], e)) { play(media, i) } }
+                val shown = list.filter { it.isDir } + list.filter { !it.isDir && it.playUrl != null }
+                when {
+                    shown.isEmpty() -> EmptyState("这个文件夹是空的", icon = AppIcons.Folder)
+                    posterWall && shown.any { it.meta?.posterUrl != null } -> PosterWall(shown, ::itemMenu, ::open)
+                    else -> LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+                        items(shown, key = { (if (it.isDir) "d:" else "f:") + it.path }) { item ->
+                            when {
+                                item.isDir -> FolderRow(item.name, menu = itemMenu(item)) { open(item) }
+                                MediaEntry.isMediaName(item.name) -> MediaRow(item.toMediaEntry(), itemMenu(item)) { open(item) }
+                                else -> FileRow(item, itemMenu(item)) { open(item) }
+                            }
+                        }
                     }
                 }
             }

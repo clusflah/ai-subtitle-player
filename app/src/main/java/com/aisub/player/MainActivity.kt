@@ -12,7 +12,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import com.aisub.player.ui.FileDetailScreen
+import com.aisub.player.ui.ImageViewerScreen
+import com.aisub.player.ui.LocalOpenDetail
+import com.aisub.player.ui.toRemoteItem
 import androidx.core.content.ContextCompat
 import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.MediaLibrary
@@ -71,23 +76,39 @@ class MainActivity : ComponentActivity() {
             }
             BackHandler(enabled = nav.stack.size > 1, onBack = back)
 
+            val openDetail: (MediaEntry) -> Unit = { e -> nav.push(Screen.FileDetail(null, e.toRemoteItem(), listOf(e), 0)) }
             AppTheme {
-                when (val screen = nav.current) {
-                    Screen.Home -> HomeScreen(lib, main, nav) { permissionLauncher.launch(mediaPermissions) }
-                    Screen.Player -> PlayerScreen(main, onBack = back, onOpenSettings = { nav.push(Screen.Settings) })
-                    Screen.Settings -> SettingsScreen(main, onBack = { nav.pop() })
-                    Screen.History -> HistoryScreen(lib, back, play)
-                    is Screen.LocalFolder -> LocalFolderScreen(
-                        lib, screen.path, screen.title, back,
-                        openFolder = { path, title -> nav.push(Screen.LocalFolder(path, title)) },
-                        play = play,
-                    )
-                    is Screen.Remote -> RemoteFolderScreen(
-                        lib, screen.serverId, screen.path, screen.title, back,
-                        openFolder = { dir -> nav.push(Screen.Remote(screen.serverId, dir.path, dir.name)) },
-                        play = play,
-                    )
-                    is Screen.PlaylistDetail -> PlaylistDetailScreen(lib, screen.id, back, play)
+                CompositionLocalProvider(LocalOpenDetail provides openDetail) {
+                    when (val screen = nav.current) {
+                        Screen.Home -> HomeScreen(lib, main, nav) { permissionLauncher.launch(mediaPermissions) }
+                        Screen.Player -> PlayerScreen(main, onBack = back, onOpenSettings = { nav.push(Screen.Settings) })
+                        Screen.Settings -> SettingsScreen(main, onBack = { nav.pop() })
+                        Screen.History -> HistoryScreen(lib, back, play)
+                        is Screen.LocalFolder -> LocalFolderScreen(
+                            lib, screen.path, screen.title, back,
+                            openFolder = { path, title -> nav.push(Screen.LocalFolder(path, title)) },
+                            play = play,
+                        )
+                        is Screen.Remote -> RemoteFolderScreen(
+                            lib, screen.serverId, screen.path, screen.title, back,
+                            openFolder = { dir -> nav.push(Screen.Remote(screen.serverId, dir.path, dir.name)) },
+                            play = play,
+                            openDetail = { item, queue, i -> nav.push(Screen.FileDetail(screen.serverId, item, queue, i)) },
+                            openImages = { images, i -> nav.push(Screen.ImageViewer(screen.serverId, images, i)) },
+                        )
+                        is Screen.PlaylistDetail -> PlaylistDetailScreen(lib, screen.id, back, play)
+                        is Screen.FileDetail -> FileDetailScreen(
+                            main, lib, screen.serverId, screen.item, screen.queue, screen.index, back,
+                            play = play,
+                            openImages = { images, i -> nav.push(Screen.ImageViewer(screen.serverId, images, i)) },
+                            openFolder = { dir -> screen.serverId?.let { nav.push(Screen.Remote(it, dir.path, dir.name)) } },
+                            openSettings = { nav.push(Screen.Settings) },
+                        )
+                        is Screen.ImageViewer -> ImageViewerScreen(
+                            screen.serverId, screen.images, screen.index, back,
+                            openDetail = { item -> nav.push(Screen.FileDetail(screen.serverId, item)) },
+                        )
+                    }
                 }
             }
         }

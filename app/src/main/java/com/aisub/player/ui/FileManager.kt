@@ -49,6 +49,7 @@ class FileManager internal constructor(
     private val launch: (IntentSenderRequest) -> Unit,
     private val onAddToPlaylist: (List<MediaEntry>) -> Unit,
     private val scope: CoroutineScope,
+    private val openDetail: (MediaEntry) -> Unit = {},
 ) {
     internal var dialog by mutableStateOf<FileDialog?>(null)
 
@@ -191,6 +192,7 @@ class FileManager internal constructor(
     fun menu(entry: MediaEntry): List<MenuAction> {
         val local = FileOps.isLocal(entry)
         return listOfNotNull(
+            MenuAction("影视信息") { openDetail(entry) }.takeIf { entry.isVideo },
             MenuAction("加入播放列表") { onAddToPlaylist(listOf(entry)) },
             MenuAction("分享") { share(listOf(entry)) }.takeIf { local },
             MenuAction("重命名") { rename(entry) }.takeIf { local },
@@ -218,7 +220,8 @@ fun rememberFileManager(lib: LibraryViewModel, onAddToPlaylist: (List<MediaEntry
         holder?.onPermissionResult(result.resultCode == Activity.RESULT_OK)
     }
     val scope = rememberCoroutineScope()
-    val fm = remember(lib) { FileManager(context, lib, { launcher.launch(it) }, onAddToPlaylist, scope) }
+    val openDetail = LocalOpenDetail.current
+    val fm = remember(lib) { FileManager(context, lib, { launcher.launch(it) }, onAddToPlaylist, scope, openDetail) }
     holder = fm
     FileDialogs(fm)
     return fm

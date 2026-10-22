@@ -63,6 +63,13 @@ data class AppSettings(
     val assrtToken: String = "",
     /** 在线字幕搜索语言，OpenSubtitles 语言代码，逗号分隔 */
     val subtitleLanguages: String = "zh-cn,en",
+    /** 影视信息：TMDB 的 API Key（v3 Key 或 v4 Read Access Token），不填只显示豆瓣评分 */
+    val tmdbKey: String = "",
+    /** TMDB 接口和图片地址，国内可换成反代；空为官方地址 */
+    val tmdbBaseUrl: String = "",
+    val tmdbImageBase: String = "",
+    /** 详情页查询豆瓣评分 */
+    val doubanEnabled: Boolean = true,
 ) {
     /** 某个服务商的配置，未填的字段用默认值补齐。 */
     fun configOf(p: Provider): ProviderConfig {
@@ -150,6 +157,10 @@ class SettingsRepository(context: Context) {
             osPassword = prefs.getString("osPassword", "")!!,
             assrtToken = prefs.getString("assrtToken", "")!!,
             subtitleLanguages = prefs.getString("subtitleLanguages", d.subtitleLanguages)!!,
+            tmdbKey = prefs.getString("tmdbKey", "")!!,
+            tmdbBaseUrl = prefs.getString("tmdbBaseUrl", "")!!,
+            tmdbImageBase = prefs.getString("tmdbImageBase", "")!!,
+            doubanEnabled = prefs.getBoolean("doubanEnabled", d.doubanEnabled),
         )
     }
 
@@ -172,6 +183,10 @@ class SettingsRepository(context: Context) {
             .putString("osPassword", s.osPassword)
             .putString("assrtToken", s.assrtToken)
             .putString("subtitleLanguages", s.subtitleLanguages)
+            .putString("tmdbKey", s.tmdbKey)
+            .putString("tmdbBaseUrl", s.tmdbBaseUrl)
+            .putString("tmdbImageBase", s.tmdbImageBase)
+            .putBoolean("doubanEnabled", s.doubanEnabled)
         for ((p, c) in s.providerConfigs) {
             editor.putString("${p.name}.apiKey", c.apiKey)
                 .putString("${p.name}.model", c.model)

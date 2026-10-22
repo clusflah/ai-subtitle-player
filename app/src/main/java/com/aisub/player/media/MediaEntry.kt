@@ -40,6 +40,14 @@ data class MediaEntry(
         fun isVideoName(name: String) = name.substringAfterLast('.', "").lowercase() in VIDEO_EXT
         fun isAudioName(name: String) = name.substringAfterLast('.', "").lowercase() in AUDIO_EXT
         fun isMediaName(name: String) = isVideoName(name) || isAudioName(name)
+
+        private val IMAGE_EXT = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif", "avif")
+        private val TEXT_EXT = setOf(
+            "txt", "srt", "ass", "ssa", "vtt", "lrc", "nfo", "md", "log", "json", "xml", "ini", "cue", "csv", "yaml", "yml", "conf",
+        )
+
+        fun isImageName(name: String) = name.substringAfterLast('.', "").lowercase() in IMAGE_EXT
+        fun isTextName(name: String) = name.substringAfterLast('.', "").lowercase() in TEXT_EXT
     }
 }
 
