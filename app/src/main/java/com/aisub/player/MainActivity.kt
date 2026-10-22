@@ -14,6 +14,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import com.aisub.player.ui.FileDetailScreen
 import com.aisub.player.ui.ImageViewerScreen
 import com.aisub.player.ui.LocalOpenDetail
@@ -59,6 +61,7 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null) handleIntent(intent)
 
         setContent {
+            val ui by main.state.collectAsState()
             val permissionLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestMultiplePermissions()
             ) { result -> lib.onPermission(result.values.any { it }) }
@@ -102,6 +105,7 @@ class MainActivity : ComponentActivity() {
                                 nav.push(Screen.FileDetail(screen.serverId, item, queue, i, folder))
                             },
                             openImages = { images, i -> nav.push(Screen.ImageViewer(screen.serverId, images, i)) },
+                            settings = ui.settings,
                         )
                         is Screen.PlaylistDetail -> PlaylistDetailScreen(lib, screen.id, back, play)
                         is Screen.FileDetail -> FileDetailScreen(

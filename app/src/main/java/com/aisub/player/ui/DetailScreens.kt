@@ -158,6 +158,8 @@ fun RemoteFolderScreen(
     /** 参数：文件、播放队列、在队列里的位置、同目录的全部条目 */
     openDetail: (RemoteItem, List<MediaEntry>, Int, List<RemoteItem>) -> Unit,
     openImages: (List<RemoteItem>, Int) -> Unit,
+    /** 海报墙缺海报时到网上找要用（TMDB Key、是否用豆瓣） */
+    settings: com.aisub.player.AppSettings,
 ) {
     val server = lib.server(serverId)
     val appContext = LocalContext.current.applicationContext
@@ -267,7 +269,7 @@ fun RemoteFolderScreen(
         title, onBack,
         actions = {
             if (busy) CircularProgressIndicator(Modifier.size(24.dp).padding(end = 4.dp), strokeWidth = 2.dp)
-            if (items.orEmpty().any { it.meta?.posterUrl != null }) {
+            if (items.orEmpty().any { it.meta != null }) {
                 IconButton(onClick = { posterWall = !posterWall; viewPrefs.setGrid("remote", posterWall) }) {
                     Icon(if (posterWall) AppIcons.ListIcon else AppIcons.GridView, if (posterWall) "列表" else "海报墙")
                 }
@@ -293,7 +295,7 @@ fun RemoteFolderScreen(
                 val shown = list.filter { it.isDir } + list.filter { !it.isDir && it.playUrl != null }
                 when {
                     shown.isEmpty() -> EmptyState("这个文件夹是空的", icon = AppIcons.Folder)
-                    posterWall && shown.any { it.meta?.posterUrl != null } -> PosterWall(shown, ::itemMenu, ::open)
+                    posterWall && shown.any { it.meta != null } -> PosterWall(shown, settings, ::itemMenu, ::open)
                     else -> LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
                         items(shown, key = { (if (it.isDir) "d:" else "f:") + it.path }) { item ->
                             when {

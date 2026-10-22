@@ -26,6 +26,8 @@ object RemoteFiles {
         }
         val req = Request.Builder().url(realUrl).apply {
             headers.forEach { (k, v) -> header(k, v) }
+            // 豆瓣图片防盗链：不带豆瓣的 Referer 会返回 418
+            if (realUrl.contains(".doubanio.com/")) header("Referer", "https://movie.douban.com/")
             if (truncate) header("Range", "bytes=0-${maxBytes - 1}")
         }.build()
         return cloudHttp.newCall(req).execute().use { resp ->

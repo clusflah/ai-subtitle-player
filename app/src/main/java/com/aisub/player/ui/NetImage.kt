@@ -42,7 +42,8 @@ object ImageLoader {
     private val cache = object : LruCache<String, ImageBitmap>(48 * 1024 * 1024) {
         override fun sizeOf(key: String, value: ImageBitmap) = value.width * value.height * 4
     }
-    private val failed = HashSet<String>()
+    /** 加载失败的地址 → 失败时间。一段时间内不重复请求，过后（比如网络恢复了）再试 */
+    private val failed = HashMap<String, Long>()
     private val gate = Semaphore(4)
 
     fun cached(url: String, maxSize: Int): ImageBitmap? = cache.get("$maxSize|$url")
@@ -50,14 +51,15 @@ object ImageLoader {
     suspend fun load(context: Context, url: String, maxSize: Int): ImageBitmap? {
         val key = "$maxSize|$url"
         cache.get(key)?.let { return it }
-        if (synchronized(failed) { key in failed }) return null
+        val failedAt = synchronized(failed) { failed[key] }
+        if (failedAt != null && System.currentTimeMillis() - failedAt < RETRY_MS) return null
         return gate.withPermit {
             cache.get(key) ?: withContext(Dispatchers.IO) {
                 runCatching {
                     decode(RemoteFiles.read(context, url, MAX_BYTES), maxSize)
                 }.getOrNull()?.asImageBitmap()
             }?.also { cache.put(key, it) } ?: run {
-                synchronized(failed) { failed += key }
+                synchronized(failed) { failed[key] = System.currentTimeMillis() }
                 null
             }
         }
@@ -99,6 +101,7 @@ object ImageLoader {
     }
 
     private const val MAX_BYTES = 40 * 1024 * 1024
+    private const val RETRY_MS = 2 * 60_000L
 }
 
 /**
@@ -114,10 +117,13 @@ fun NetImage(
     fallback: ImageVector? = AppIcons.Movie,
     /** 加载前和失败时显示灰底；透明图片（标题图）叠在别的图上时关掉 */
     background: Boolean = true,
+    /** 地址为空或加载失败时调用（海报墙用来改查在线海报） */
+    onError: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val image by produceState(url?.let { ImageLoader.cached(it, maxSize) }, url, maxSize) {
         if (url != null && value == null) value = ImageLoader.load(context, url, maxSize)
+        if (value == null) onError?.invoke()
     }
     Box(if (background) modifier.background(MaterialTheme.colorScheme.surfaceVariant) else modifier, contentAlignment = Alignment.Center) {
         val img = image

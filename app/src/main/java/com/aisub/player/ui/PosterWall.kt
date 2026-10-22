@@ -20,6 +20,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import com.aisub.player.AppSettings
+import com.aisub.player.meta.MetaRepository
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,31 +44,41 @@ import com.aisub.player.remote.RemoteItem
  * 单集截图、媒体库封面是横版的，大部分条目是横版时改用宽一点的格子。
  */
 @Composable
-fun PosterWall(items: List<RemoteItem>, menu: (RemoteItem) -> List<MenuAction>, onClick: (RemoteItem) -> Unit) {
+fun PosterWall(items: List<RemoteItem>, settings: AppSettings, menu: (RemoteItem) -> List<MenuAction>, onClick: (RemoteItem) -> Unit) {
     val wide = items.count { (it.meta?.posterRatio ?: (2f / 3f)) > 1f } > items.size / 2
     LazyVerticalGrid(
         GridCells.Adaptive(if (wide) 168.dp else 112.dp),
         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
     ) {
         items(items, key = { (if (it.isDir) "d:" else "f:") + it.path }) { item ->
-            PosterCard(item, wide, menu(item)) { onClick(item) }
+            PosterCard(item, wide, settings, menu(item)) { onClick(item) }
         }
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PosterCard(item: RemoteItem, wide: Boolean, menu: List<MenuAction>, onClick: () -> Unit) {
+private fun PosterCard(item: RemoteItem, wide: Boolean, settings: AppSettings, menu: List<MenuAction>, onClick: () -> Unit) {
     val meta = item.meta
     val title = meta?.title ?: if (item.isDir) item.name else item.name.substringBeforeLast('.')
+    val scope = rememberCoroutineScope()
+    // 服务器没有海报或加载失败时，到网上（TMDB / 豆瓣）找一张；只找一次
+    var poster by remember(item.path) { mutableStateOf(meta?.posterUrl) }
+    var searchedOnline by remember(item.path) { mutableStateOf(false) }
     Column(Modifier.clip(MaterialTheme.shapes.medium).combinedClickable(onClick = onClick).padding(6.dp)) {
         Box(Modifier.fillMaxWidth().aspectRatio(if (wide) 16f / 9f else 2f / 3f).clip(MaterialTheme.shapes.medium)) {
             NetImage(
-                meta?.posterUrl, Modifier.fillMaxSize(), maxSize = if (wide) 480 else 360,
+                poster, Modifier.fillMaxSize(), maxSize = if (wide) 480 else 360,
                 fallback = when {
                     item.isDir -> AppIcons.Folder
                     MediaEntry.isAudioName(item.name) -> AppIcons.MusicNote
                     else -> AppIcons.Movie
+                },
+                onError = {
+                    if (!searchedOnline) {
+                        searchedOnline = true
+                        scope.launch { MetaRepository.poster(settings, item)?.let { poster = it } }
+                    }
                 },
             )
             meta?.badge?.let { badge ->

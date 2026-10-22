@@ -5,6 +5,7 @@ import android.util.LruCache
 import com.aisub.player.AppSettings
 import com.aisub.player.remote.RemoteItem
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 /** 查影片信息的条件：片名候选、年份、季集，以及媒体服务器给出的外部编号。 */
@@ -97,6 +98,23 @@ object MetaRepository {
         if (settings.fanartKey.isBlank()) return null
         return memo("fanart|${info.kind}|${info.tmdbId}|${info.imdbId}|${info.tvdbId}") {
             FanartTv.lookup(settings.fanartKey, info.kind, info.tmdbId, info.imdbId, info.tvdbId)
+        }
+    }
+
+    /** 海报墙同时查在线海报的数量：豆瓣请求太密会被限流 */
+    private val posterGate = kotlinx.coroutines.sync.Semaphore(2)
+
+    /**
+     * 媒体服务器没有海报（或加载失败）的条目，到网上找一张：有 TMDB Key 先查 TMDB（服务器给了 TMDB 编号时最准），
+     * 再查豆瓣。单集不查（截图是横的，海报对不上）。找不到返回 null。
+     */
+    suspend fun poster(settings: AppSettings, item: RemoteItem): String? {
+        val kind = item.meta?.kind
+        if (kind == "episode" || item.meta?.title == null) return null
+        return posterGate.withPermit {
+            val q = MetaQuery.of(item)
+            runCatching { tmdb(settings, q)?.posterUrl }.getOrNull()
+                ?: if (settings.doubanEnabled) runCatching { douban(q, null)?.info?.posterUrl }.getOrNull() else null
         }
     }
 
