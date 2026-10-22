@@ -112,12 +112,14 @@ fun NetImage(
     contentScale: ContentScale = ContentScale.Crop,
     maxSize: Int = 600,
     fallback: ImageVector? = AppIcons.Movie,
+    /** 加载前和失败时显示灰底；透明图片（标题图）叠在别的图上时关掉 */
+    background: Boolean = true,
 ) {
     val context = LocalContext.current
     val image by produceState(url?.let { ImageLoader.cached(it, maxSize) }, url, maxSize) {
         if (url != null && value == null) value = ImageLoader.load(context, url, maxSize)
     }
-    Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+    Box(if (background) modifier.background(MaterialTheme.colorScheme.surfaceVariant) else modifier, contentAlignment = Alignment.Center) {
         val img = image
         if (img != null) {
             Image(img, contentDescription = null, contentScale = contentScale, modifier = Modifier.fillMaxSize())

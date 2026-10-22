@@ -265,7 +265,7 @@ fun MediaRow(
             IconBadge(AppIcons.MusicNote, size = 40.dp)
         }
         Column(Modifier.weight(1f).padding(start = 12.dp)) {
-            Text(entry.title, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
+            Text(entry.title, style = MaterialTheme.typography.bodyLarge)
             val info = subtitle ?: listOf(formatDuration(entry.durationMs), if (entry.sizeBytes > 0) formatSize(entry.sizeBytes) else "")
                 .filter { it.isNotEmpty() }.joinToString(" · ")
             if (info.isNotEmpty()) Text(info, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
@@ -278,7 +278,7 @@ fun MediaRow(
 @Composable
 fun FolderRow(name: String, subtitle: String? = null, menu: List<MenuAction> = emptyList(), onClick: () -> Unit) {
     ListRow(
-        title = name, subtitle = subtitle, icon = AppIcons.Folder, mutedIcon = true, titleMaxLines = 3,
+        title = name, subtitle = subtitle, icon = AppIcons.Folder, mutedIcon = true, titleMaxLines = Int.MAX_VALUE,
         trailing = if (menu.isEmpty()) null else ({ OverflowMenu(menu) }),
         onClick = onClick,
     )

@@ -171,7 +171,15 @@ fun HomeScreen(
                         TextField(
                             value = query,
                             onValueChange = { query = it; lib.searchSubtitles(it) },
-                            placeholder = { Text("搜索文件名、文件夹或字幕内容") }, singleLine = true,
+                            // 标题栏只有一行高：提示文字不换行，输入内容超长时横向滚动
+                            placeholder = {
+                                Text(
+                                    "搜索文件名、文件夹或字幕内容", maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                            },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyLarge,
                             colors = TextFieldDefaults.colors(
                                 focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
                             ),

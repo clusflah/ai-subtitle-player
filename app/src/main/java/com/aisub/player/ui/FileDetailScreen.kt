@@ -62,7 +62,9 @@ import com.aisub.player.media.Downloads
 import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.RemoteFiles
 import com.aisub.player.media.formatSize
-import com.aisub.player.meta.DoubanRating
+import com.aisub.player.meta.DetailMeta
+import com.aisub.player.meta.MetaPipeline
+import com.aisub.player.meta.RatingInfo
 import com.aisub.player.meta.FolderContext
 import com.aisub.player.meta.LocalMeta
 import com.aisub.player.meta.LocalMetaLoader
@@ -91,6 +93,8 @@ private sealed interface Lookup<out T> {
 
 private val DOUBAN_GREEN = Color(0xFF00B51D)
 private val TMDB_BLUE = Color(0xFF01B4E4)
+private val BANGUMI_PINK = Color(0xFFF09199)
+private val IMDB_YELLOW = Color(0xFFC59A00)
 
 /**
  * 文件详情：海报 / 背景图、TMDB 简介与演职员、豆瓣评分、文件信息；文本文件显示内容预览。
@@ -130,17 +134,16 @@ fun FileDetailScreen(
     val query = remember(item, reload) {
         MetaRepository.override(context, fileKey)?.let { (t, y) -> MetaQuery.manual(t, y) } ?: MetaQuery.of(item)
     }
-    // tmdb：本地 NFO 与 TMDB 合并后的影片信息
-    var tmdb by remember { mutableStateOf<Lookup<MediaInfo>>(Lookup.Idle) }
-    var douban by remember { mutableStateOf<Lookup<DoubanRating>>(Lookup.Idle) }
+    // 本地 NFO、各在线来源合并后的影片信息和评分
+    var detail by remember { mutableStateOf(DetailMeta()) }
     var preview by remember { mutableStateOf<Lookup<String>>(Lookup.Idle) }
     var local by remember { mutableStateOf<LocalMeta?>(null) }
 
-    LaunchedEffect(query, settings.tmdbKey, settings.tmdbBaseUrl, settings.doubanEnabled) {
+    LaunchedEffect(query, settings) {
         if (!isVideo) return@LaunchedEffect
         // 1. 先读本地：视频旁边的 NFO、海报、背景图，以及目录名里的 {tmdb-xxx}（媒体服务器条目自带信息，不需要）
         val loc = if (local != null) local else if (server != null && folder != null && meta == null) {
-            tmdb = Lookup.Loading
+            detail = DetailMeta(loading = true)
             runCatching { LocalMetaLoader.load(context, lib.client(server), item, folder) }.getOrNull()
         } else null
         local = loc
@@ -154,41 +157,12 @@ fun FileDetailScreen(
             tmdbId = query.tmdbId ?: loc.tmdbId,
             imdbId = query.imdbId ?: loc.imdbId,
         )
-        var info = localInfo
-        tmdb = if (localInfo != null) Lookup.Done(localInfo) else Lookup.Idle
-
-        // 2. 本地缺简介、海报、背景图、本集信息时，再用 TMDB 补全
-        val episodic = q.season != null || q.episode != null
-        val missing = localInfo == null || localInfo.overview.isBlank() ||
-            (loc.posterUrl == null && localInfo.posterUrl == null) || (loc.backdropUrl == null && localInfo.backdropUrl == null) ||
-            (episodic && localInfo.episodeOverview == null)
-        if (settings.tmdbKey.isNotBlank() && missing) {
-            if (localInfo == null) tmdb = Lookup.Loading
-            try {
-                val remote = MetaRepository.tmdb(settings, q)
-                info = if (localInfo != null && remote != null) localInfo.fillFrom(remote) else localInfo ?: remote
-                tmdb = Lookup.Done(info)
-            } catch (e: Exception) {
-                if (localInfo == null) tmdb = Lookup.Failed(e.message ?: e.toString())
-            }
-        } else if (localInfo == null) {
-            tmdb = if (settings.tmdbKey.isNotBlank()) Lookup.Done<MediaInfo>(null) else Lookup.Idle
-        }
-
-        // 3. 豆瓣：NFO 里有豆瓣评分就直接用
-        if (settings.doubanEnabled) {
-            val nfoRating = info?.doubanRating
-            if (nfoRating != null) {
-                douban = Lookup.Done(DoubanRating(info.doubanId.orEmpty(), info.title, nfoRating, info.doubanVotes))
-            } else {
-                douban = Lookup.Loading
-                douban = try {
-                    Lookup.Done(MetaRepository.douban(q, info))
-                } catch (e: Exception) {
-                    Lookup.Failed(e.message ?: e.toString())
-                }
-            }
-        }
+        // 2. 本地缺的再按设置里的来源顺序从网上补
+        MetaPipeline.run(
+            settings, q, localInfo,
+            hasLocalPoster = loc?.posterUrl != null || (meta?.posterUrl != null && meta.posterRatio < 1f),
+            hasLocalBackdrop = loc?.backdropUrl != null || meta?.backdropUrl != null,
+        ) { detail = it }
     }
     LaunchedEffect(item) {
         if (!isText || item.playUrl == null) return@LaunchedEffect
@@ -201,7 +175,7 @@ fun FileDetailScreen(
         }
     }
 
-    val info = (tmdb as? Lookup.Done)?.value
+    val info = detail.info
     val parsed = remember(name) { NameParser.parse(name) }
     val title = info?.title?.takeIf { it.isNotEmpty() } ?: meta?.seriesName ?: meta?.title ?: if (isVideo) parsed.title else name
     val backdrop = local?.backdropUrl ?: info?.backdropUrl ?: meta?.backdropUrl
@@ -210,7 +184,6 @@ fun FileDetailScreen(
         meta?.posterUrl != null && meta.posterRatio < 1f -> meta.posterUrl
         else -> local?.posterUrl ?: info?.posterUrl ?: meta?.posterUrl
     }
-    val doubanHit = (douban as? Lookup.Done)?.value
 
     fun download() {
         scope.launch {
@@ -234,11 +207,8 @@ fun FileDetailScreen(
             OverflowMenu(
                 listOfNotNull(
                     MenuAction("重新匹配影片…") { rematching = true }.takeIf { isVideo },
-                    doubanHit?.takeIf { it.id.isNotEmpty() }?.let { d -> MenuAction("在豆瓣打开") { openUrl(d.url) } },
-                    info?.tmdbUrl?.let { url -> MenuAction("在 TMDB 打开") { openUrl(url) } },
-                    info?.imdbId?.let { id -> MenuAction("在 IMDb 打开") { openUrl("https://www.imdb.com/title/$id/") } },
                     MenuAction("下载") { download() }.takeIf { server != null && !item.isDir && item.playUrl != null },
-                ),
+                ) + detail.links.map { (label, url) -> MenuAction(label) { openUrl(url) } },
             )
         },
     ) {
@@ -252,6 +222,13 @@ fun FileDetailScreen(
                             Brush.verticalGradient(0.5f to Color.Transparent, 1f to MaterialTheme.colorScheme.surfaceContainerLowest),
                         ),
                     )
+                    // Fanart.tv 的透明标题图
+                    info?.logoUrl?.let { logo ->
+                        NetImage(
+                            logo, Modifier.align(Alignment.BottomStart).padding(16.dp).fillMaxWidth(0.5f).aspectRatio(2.6f),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Fit, maxSize = 800, fallback = null, background = false,
+                        )
+                    }
                 }
             }
             if (isImage) {
@@ -293,14 +270,8 @@ fun FileDetailScreen(
                     if (isVideo) {
                         Spacer(Modifier.height(4.dp))
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            if (settings.doubanEnabled) RatingChip("豆瓣", DOUBAN_GREEN, douban) { it?.rating to it?.votes }
-                            if (settings.tmdbKey.isNotBlank() || (info?.rating ?: 0.0) > 0) {
-                                val label = info?.ratingLabel ?: "TMDB"
-                                RatingChip(label, if (label == "TMDB") TMDB_BLUE else MaterialTheme.colorScheme.outline, tmdb) { it?.rating?.takeIf { r -> r > 0 } to it?.voteCount }
-                            }
-                            meta?.rating?.let { r ->
-                                RatingChip(server?.type?.label ?: "评分", MaterialTheme.colorScheme.outline, Lookup.Done(r)) { it to null }
-                            }
+                            detail.ratings.forEach { RatingChip(it) }
+                            meta?.rating?.let { r -> RatingChip(RatingInfo(server?.type?.label ?: "评分", r, null)) }
                         }
                     }
                 }
@@ -321,21 +292,27 @@ fun FileDetailScreen(
                 if (isVideo) FilledTonalButton(onClick = { rematching = true }) { Text("重新匹配") }
             }
 
-            if (isVideo && settings.tmdbKey.isBlank() && info?.overview.isNullOrBlank()) {
+            if (isVideo && !detail.loading && settings.tmdbKey.isBlank() && info?.backdropUrl == null && local?.backdropUrl == null) {
                 Spacer(Modifier.height(12.dp))
                 SurfaceCard {
                     ListRow(
-                        title = "显示影片简介和演职员",
-                        subtitle = "在设置里填写 TMDB API Key（免费申请）",
+                        title = "显示背景图和更完整的信息",
+                        subtitle = "在设置里填写 TMDB API Key（免费申请），也可以换主数据源",
                         icon = AppIcons.Info,
                         trailing = { TextButton(onClick = openSettings) { Text("去设置") } },
                         onClick = openSettings,
                     )
                 }
             }
-            (tmdb as? Lookup.Failed)?.let { Hint("TMDB 查询失败：${it.message}") }
+            if (detail.loading && info == null) {
+                Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text("正在查询影片信息…", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 8.dp))
+                }
+            }
+            detail.errors.forEach { Hint("查询失败 · $it") }
             info?.let { Hint("信息来源：${it.source}") }
-            if (tmdb is Lookup.Done && info == null) Hint("TMDB 没有找到「${query.titles.firstOrNull().orEmpty()}」，可以点「重新匹配」修改片名")
+            if (detail.notFound) Hint("没有找到「${query.titles.firstOrNull().orEmpty()}」，可以点「重新匹配」修改片名")
 
             // ---------- 简介 ----------
             val overview = info?.overview?.takeIf { it.isNotBlank() } ?: meta?.overview.orEmpty()
@@ -453,27 +430,31 @@ private fun kindLabel(item: RemoteItem): String {
 
 /** 评分标签：来源色块 + 分数；查询中显示转圈，没查到显示「暂无」。 */
 @Composable
-private fun <T> RatingChip(label: String, color: Color, state: Lookup<T>, value: (T?) -> Pair<Double?, Int?>) {
+private fun RatingChip(r: RatingInfo) {
+    val color = when (r.label) {
+        "豆瓣" -> DOUBAN_GREEN
+        "TMDB" -> TMDB_BLUE
+        "Bangumi" -> BANGUMI_PINK
+        "IMDb" -> IMDB_YELLOW
+        else -> MaterialTheme.colorScheme.outline
+    }
     Row(
         Modifier.clip(RoundedCornerShape(6.dp)).background(color.copy(alpha = 0.12f)).padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, color = color, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+        Text(r.label, color = color, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.width(6.dp))
-        when (state) {
-            Lookup.Idle, Lookup.Loading -> CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = color)
-            is Lookup.Failed -> Text("失败", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            is Lookup.Done -> {
-                val (score, votes) = value(state.value)
-                if (score == null) {
-                    Text("暂无", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    Icon(AppIcons.Star, null, tint = color, modifier = Modifier.size(12.dp))
-                    Text(" %.1f".format(score), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-                    if (votes != null && votes > 0) {
-                        Text(" · ${if (votes >= 10_000) "%.1f万".format(votes / 10_000.0) else votes.toString()}人",
-                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+        when {
+            r.loading -> CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = color)
+            r.failed -> Text("失败", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            r.value == null -> Text("暂无", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else -> {
+                Icon(AppIcons.Star, null, tint = color, modifier = Modifier.size(12.dp))
+                Text(" %.1f".format(r.value), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                val votes = r.votes
+                if (votes != null && votes > 0) {
+                    Text(" · ${if (votes >= 10_000) "%.1f万".format(votes / 10_000.0) else votes.toString()}人",
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }

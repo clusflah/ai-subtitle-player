@@ -33,7 +33,9 @@
 7. ISO 光盘镜像（DVD / 蓝光）自动使用 VLC 内核播放，直接进入正片；普通视频播放失败时可在错误提示里「换用 VLC 内核播放」。
 8. 下载：网络位置和网盘里文件或文件夹的「⋮」菜单选「下载」，保存到 Download/AiSubPlayer（文件夹保留目录结构），进度见通知栏。
 9. 文件详情：网络位置和网盘里点视频进入详情页，显示 TMDB 简介、演职员和豆瓣评分（TMDB 需在「设置 → 影视信息」填 API Key；国内可填反代地址），识别错了点「重新匹配」；本地视频在「⋮」菜单里选「影视信息」。
-   优先读取视频旁边的刮削文件（Kodi / Emby / Jellyfin / tinyMediaManager 格式）：`视频名.nfo`、`movie.nfo`、`tvshow.nfo`，`poster.jpg`、`folder.jpg`、`视频名-poster.jpg`，`fanart.jpg`、`视频名-fanart.jpg`，以及文件夹名里的 `{tmdb-123}`、`[imdbid-tt123]`；本地缺简介或图片时才从 TMDB 补全，NFO 里有豆瓣评分时不再联网查询。
+   优先读取视频旁边的刮削文件（Kodi / Emby / Jellyfin / tinyMediaManager 格式）：`视频名.nfo`、`movie.nfo`、`tvshow.nfo`，`poster.jpg`、`folder.jpg`、`视频名-poster.jpg`，`fanart.jpg`、`视频名-fanart.jpg`，以及文件夹名里的 `{tmdb-123}`、`[imdbid-tt123]`；本地缺简介或图片时才联网补全，NFO 里有豆瓣评分时不再联网查询。
+   在线来源参考 [MediaOrganizer](https://github.com/clusflah/MediaOrganizer)：TMDB、豆瓣（不用 Key，简介、海报、演职员、评分）、Bangumi（动画，不用 Key）、TheTVDB（分集信息，需 Key）、Fanart.tv（标题图、背景图，需 Key）。
+   「设置 → 影视信息」里选主数据源，其余开启的来源按 TMDB → 豆瓣 → TheTVDB 的顺序补全缺的字段；动画另查 Bangumi 评分。
    图片点开可滑动浏览、缩放；文本文件在详情页预览。Emby / Jellyfin、Plex 默认以海报墙显示，右上角可切换列表。
 
 字幕结果按视频缓存在应用私有目录，再次打开同一视频会直接加载。
@@ -49,7 +51,7 @@
 | `asr/ModelManager.kt` | 首次使用时下载并解压模型 |
 | `translate/` | 翻译接口、Claude 实现、OpenAI 兼容实现、提示词 |
 | `subtitle/` | 字幕数据结构、缓存、SRT 导出、SRT/VTT/ASS 解析、在线字幕 |
-| `meta/` | 文件名解析、本地 NFO / 海报读取、TMDB、豆瓣评分 |
+| `meta/` | 文件名解析、本地 NFO / 海报读取、TMDB / 豆瓣 / Bangumi / TheTVDB / Fanart.tv，`MetaPipeline` 串起查询顺序 |
 | `MainViewModel.kt` | 串起识别、翻译、播放器 |
 | `ui/` | Compose 界面 |
 

@@ -70,6 +70,15 @@ data class AppSettings(
     val tmdbImageBase: String = "",
     /** 详情页查询豆瓣评分 */
     val doubanEnabled: Boolean = true,
+    /** 主数据源：MetaSource 的名字（TMDB / DOUBAN / BANGUMI / TVDB），其余来源补全缺的字段 */
+    val metaPrimary: String = "TMDB",
+    /** 动画查 Bangumi 评分和分集标题 */
+    val bangumiEnabled: Boolean = true,
+    /** TheTVDB v4 的 API Key 和订阅 PIN */
+    val tvdbKey: String = "",
+    val tvdbPin: String = "",
+    /** Fanart.tv 个人 API Key：透明标题图、高清背景图 */
+    val fanartKey: String = "",
 ) {
     /** 某个服务商的配置，未填的字段用默认值补齐。 */
     fun configOf(p: Provider): ProviderConfig {
@@ -161,6 +170,11 @@ class SettingsRepository(context: Context) {
             tmdbBaseUrl = prefs.getString("tmdbBaseUrl", "")!!,
             tmdbImageBase = prefs.getString("tmdbImageBase", "")!!,
             doubanEnabled = prefs.getBoolean("doubanEnabled", d.doubanEnabled),
+            metaPrimary = prefs.getString("metaPrimary", d.metaPrimary)!!,
+            bangumiEnabled = prefs.getBoolean("bangumiEnabled", d.bangumiEnabled),
+            tvdbKey = prefs.getString("tvdbKey", "")!!,
+            tvdbPin = prefs.getString("tvdbPin", "")!!,
+            fanartKey = prefs.getString("fanartKey", "")!!,
         )
     }
 
@@ -187,6 +201,11 @@ class SettingsRepository(context: Context) {
             .putString("tmdbBaseUrl", s.tmdbBaseUrl)
             .putString("tmdbImageBase", s.tmdbImageBase)
             .putBoolean("doubanEnabled", s.doubanEnabled)
+            .putString("metaPrimary", s.metaPrimary)
+            .putBoolean("bangumiEnabled", s.bangumiEnabled)
+            .putString("tvdbKey", s.tvdbKey)
+            .putString("tvdbPin", s.tvdbPin)
+            .putString("fanartKey", s.fanartKey)
         for ((p, c) in s.providerConfigs) {
             editor.putString("${p.name}.apiKey", c.apiKey)
                 .putString("${p.name}.model", c.model)

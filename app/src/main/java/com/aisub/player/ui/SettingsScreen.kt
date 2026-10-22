@@ -253,6 +253,22 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             // ---------------- 影视信息 ----------------
             SectionHeader("影视信息")
             SurfaceCard {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("主数据源", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "详情页先读视频旁边的 NFO 和图片，缺的内容从主数据源取，再用其他已开启的来源补全",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        com.aisub.player.meta.MetaSource.entries.forEach { src ->
+                            FilterChip(
+                                selected = s.metaPrimary == src.name, onClick = { s = s.copy(metaPrimary = src.name) },
+                                label = { Text(src.label) },
+                            )
+                        }
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("TMDB（简介、海报、演职员）", style = MaterialTheme.typography.bodyLarge)
                     Text(
@@ -266,11 +282,35 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 ListRow(
-                    title = "显示豆瓣评分",
-                    subtitle = "非官方接口，查不到或被限流时不显示",
+                    title = "豆瓣",
+                    subtitle = "评分、中文简介、海报、演职员，不用 Key；非官方接口，可能被限流",
                     trailing = { Switch(checked = s.doubanEnabled, onCheckedChange = { s = s.copy(doubanEnabled = it) }) },
                     onClick = { s = s.copy(doubanEnabled = !s.doubanEnabled) },
                 )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow(
+                    title = "Bangumi 番组计划",
+                    subtitle = "动画的评分、简介和分集标题，不用 Key",
+                    trailing = { Switch(checked = s.bangumiEnabled, onCheckedChange = { s = s.copy(bangumiEnabled = it) }) },
+                    onClick = { s = s.copy(bangumiEnabled = !s.bangumiEnabled) },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("TheTVDB（剧集分集信息）", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "在 thetvdb.com 注册后到「API Keys」申请；订阅用户的 Key 还要填 PIN。不填则不使用",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    ConfigField(s.tvdbKey, { s = s.copy(tvdbKey = it) }, "API Key", "", secret = true)
+                    ConfigField(s.tvdbPin, { s = s.copy(tvdbPin = it) }, "PIN（可选）", "", secret = true)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Fanart.tv（标题图、高清背景图）", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "在 fanart.tv 注册后到个人页面的「API」申请个人 Key。剧集需要 TheTVDB 编号（TMDB 或 TheTVDB 能查到）",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    ConfigField(s.fanartKey, { s = s.copy(fanartKey = it) }, "API Key", "", secret = true)
+                }
             }
 
             // ---------------- 字幕样式 ----------------

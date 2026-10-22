@@ -142,6 +142,7 @@ object LocalMetaLoader {
             doubanRating = nfo?.doubanRating ?: show?.doubanRating,
             doubanVotes = nfo?.doubanVotes ?: show?.doubanVotes,
             doubanId = nfo?.doubanId ?: show?.doubanId,
+            tvdbId = (show ?: nfo?.takeIf { it.kind != "episode" })?.tvdbId?.toIntOrNull(),
         )
     }
 }

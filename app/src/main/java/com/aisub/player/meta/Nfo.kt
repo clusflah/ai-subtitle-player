@@ -28,6 +28,7 @@ data class NfoInfo(
     val doubanId: String? = null,
     val tmdbId: String? = null,
     val imdbId: String? = null,
+    val tvdbId: String? = null,
     val season: Int? = null,
     val episode: Int? = null,
     /** NFO 里写的海报、背景图地址（只取 http 地址） */
@@ -106,6 +107,7 @@ object Nfo {
             doubanId = ids["douban"] ?: text("doubanid").ifEmpty { text("douban_id") }.ifEmpty { null },
             tmdbId = (ids["tmdb"] ?: text("tmdbid").ifEmpty { null })?.takeIf { it.all(Char::isDigit) },
             imdbId = (ids["imdb"] ?: text("imdbid").ifEmpty { text("imdb_id") }.ifEmpty { plainId })?.takeIf { it.startsWith("tt") },
+            tvdbId = (ids["tvdb"] ?: text("tvdbid").ifEmpty { null })?.takeIf { it.all(Char::isDigit) },
             season = text("season").toIntOrNull()?.takeIf { it >= 0 },
             episode = text("episode").toIntOrNull()?.takeIf { it > 0 },
             posterUrl = poster,

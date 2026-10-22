@@ -102,7 +102,7 @@ fun FileRow(item: RemoteItem, menu: List<MenuAction>, onClick: () -> Unit) {
     ListRow(
         title = item.name,
         subtitle = if (item.size > 0) com.aisub.player.media.formatSize(item.size) else null,
-        titleMaxLines = 3,
+        titleMaxLines = Int.MAX_VALUE,
         leading = {
             if (isImage) {
                 NetImage(item.playUrl, Modifier.size(width = 80.dp, height = 45.dp).clip(MaterialTheme.shapes.small), maxSize = 240, fallback = AppIcons.Image)

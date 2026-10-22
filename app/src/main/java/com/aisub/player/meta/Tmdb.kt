@@ -37,6 +37,9 @@ data class MediaInfo(
     val doubanRating: Double? = null,
     val doubanVotes: Int? = null,
     val doubanId: String? = null,
+    val tvdbId: Int? = null,
+    /** 透明标题图（Fanart.tv） */
+    val logoUrl: String? = null,
 ) {
     /** 0 表示不知道 TMDB 编号（只有本地 NFO） */
     val tmdbUrl get() = if (tmdbId > 0) "https://www.themoviedb.org/$kind/$tmdbId" else null
@@ -64,9 +67,11 @@ data class MediaInfo(
         episodeStill = episodeStill ?: remote.episodeStill,
         ratingLabel = if (rating > 0) ratingLabel else remote.ratingLabel,
         source = "$source + ${remote.source}",
-        doubanRating = doubanRating,
-        doubanVotes = doubanVotes,
-        doubanId = doubanId,
+        doubanRating = doubanRating ?: remote.doubanRating,
+        doubanVotes = if (doubanRating != null) doubanVotes else remote.doubanVotes,
+        doubanId = doubanId ?: remote.doubanId,
+        tvdbId = tvdbId ?: remote.tvdbId,
+        logoUrl = logoUrl ?: remote.logoUrl,
     )
 }
 
@@ -184,6 +189,7 @@ class Tmdb(key: String, baseUrl: String, imageBase: String, private val language
             cast = credits?.optJSONArray("cast").objects().take(12).map { it.optString("name") },
             countries = d.optJSONArray("production_countries").objects().map { it.optString("name") }
                 .ifEmpty { d.optJSONArray("origin_country").strings() },
+            tvdbId = d.optJSONObject("external_ids")?.optInt("tvdb_id")?.takeIf { it > 0 },
         )
         if (kind == "tv" && episode != null) {
             val e = runCatching { get("/tv/$id/season/${season ?: 1}/episode/$episode") }.getOrNull()
