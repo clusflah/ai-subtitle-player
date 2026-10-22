@@ -155,7 +155,8 @@ fun RemoteFolderScreen(
     onBack: () -> Unit,
     openFolder: (RemoteItem) -> Unit,
     play: (List<MediaEntry>, Int) -> Unit,
-    openDetail: (RemoteItem, List<MediaEntry>, Int) -> Unit,
+    /** 参数：文件、播放队列、在队列里的位置、同目录的全部条目 */
+    openDetail: (RemoteItem, List<MediaEntry>, Int, List<RemoteItem>) -> Unit,
     openImages: (List<RemoteItem>, Int) -> Unit,
 ) {
     val server = lib.server(serverId)
@@ -231,7 +232,8 @@ fun RemoteFolderScreen(
     fun showDetail(item: RemoteItem) {
         val mediaFiles = items.orEmpty().filter { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }
         val i = mediaFiles.indexOf(item)
-        if (i >= 0) openDetail(item, mediaFiles.map { it.toMediaEntry() }, i) else openDetail(item, emptyList(), 0)
+        val all = items.orEmpty()
+        if (i >= 0) openDetail(item, mediaFiles.map { it.toMediaEntry() }, i, all) else openDetail(item, emptyList(), 0, all)
     }
 
     /** 点击：文件夹进入，图片看图，音频直接播放，视频和其他文件进详情页。 */

@@ -21,6 +21,7 @@ import com.aisub.player.ui.toRemoteItem
 import androidx.core.content.ContextCompat
 import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.MediaLibrary
+import com.aisub.player.meta.FolderContext
 import com.aisub.player.ui.AppTheme
 import com.aisub.player.ui.HistoryScreen
 import com.aisub.player.ui.HomeScreen
@@ -93,12 +94,18 @@ class MainActivity : ComponentActivity() {
                             lib, screen.serverId, screen.path, screen.title, back,
                             openFolder = { dir -> nav.push(Screen.Remote(screen.serverId, dir.path, dir.name)) },
                             play = play,
-                            openDetail = { item, queue, i -> nav.push(Screen.FileDetail(screen.serverId, item, queue, i)) },
+                            openDetail = { item, queue, i, siblings ->
+                                // 上一级目录是页面栈里的前一个同服务器目录页
+                                val parent = nav.stack.filterIsInstance<Screen.Remote>().dropLast(1).lastOrNull()
+                                    ?.takeIf { it.serverId == screen.serverId }
+                                val folder = FolderContext(siblings, screen.title, parent?.path, parent?.title)
+                                nav.push(Screen.FileDetail(screen.serverId, item, queue, i, folder))
+                            },
                             openImages = { images, i -> nav.push(Screen.ImageViewer(screen.serverId, images, i)) },
                         )
                         is Screen.PlaylistDetail -> PlaylistDetailScreen(lib, screen.id, back, play)
                         is Screen.FileDetail -> FileDetailScreen(
-                            main, lib, screen.serverId, screen.item, screen.queue, screen.index, back,
+                            main, lib, screen.serverId, screen.item, screen.queue, screen.index, screen.folder, back,
                             play = play,
                             openImages = { images, i -> nav.push(Screen.ImageViewer(screen.serverId, images, i)) },
                             openFolder = { dir -> screen.serverId?.let { nav.push(Screen.Remote(it, dir.path, dir.name)) } },

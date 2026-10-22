@@ -42,7 +42,7 @@ object NameParser {
     private val CN_SEASON = Regex("""第\s*([0-9零〇一二两三四五六七八九十]+)\s*季""")
     private val YEAR = Regex("""(?<![0-9])(19[2-9]\d|20[0-4]\d)(?![0-9pP])""")
     private val LEADING_TAG = Regex("""^\s*[\[【][^\]】]*[\]】]\s*""")
-    private val BRACKETS = Regex("""[\[【][^\]】]*[\]】]|[(（]\s*[)）]""")
+    private val BRACKETS = Regex("""[\[【][^\]】]*[\]】]|\{[^}]*\}|[(（]\s*[)）]""")
     private val NOISE = Regex(
         """(?i)(?<![a-z0-9])(2160p|1080[pi]|720p|576p|480p|4k|uhd|hdr(10)?\+?|dovi|dolby[ .]?vision|web-?dl|webrip|web|bluray|blu-ray|bdrip|brrip|bd|remux|hdtv|hdrip|dvdrip|dvd|x26[45]|h[ .]?26[45]|hevc|avc|aac(2\.0)?|e?ac-?3|ddp?\d?|dts(-?hd)?|truehd|atmos|flac|10bit|8bit|proper|repack|extended|unrated|uncut|complete|imax|internal|limited|中英字幕|中英双字|国英双语|国语|粤语|简繁|中字|双语|特效字幕|内封|内嵌)(?![a-z0-9])""",
     )
@@ -75,8 +75,8 @@ object NameParser {
         val year = yearMatch?.groupValues?.get(1)?.toInt()
         yearMatch?.let { cuts += it.range.first }
         NOISE.find(s)?.let { if (it.range.first > 0) cuts += it.range.first }
-        // 片名后面的 [xxx] 标签
-        Regex("""[\[【]""").find(s, 1)?.let { cuts += it.range.first }
+        // 片名后面的 [xxx] 标签、{tmdb-123} 编号
+        Regex("""[\[【{]""").find(s, 1)?.let { cuts += it.range.first }
 
         val cut = cuts.filter { it > 0 }.minOrNull() ?: s.length
         // 集数写在最前面时，片名在后面，走下面的去除法

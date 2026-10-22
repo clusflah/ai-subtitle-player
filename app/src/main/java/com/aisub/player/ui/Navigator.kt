@@ -20,6 +20,8 @@ sealed interface Screen {
         val item: com.aisub.player.remote.RemoteItem,
         val queue: List<com.aisub.player.media.MediaEntry> = emptyList(),
         val index: Int = 0,
+        /** 所在目录，用于读取旁边的 NFO、海报；null 表示不读本地元数据 */
+        val folder: com.aisub.player.meta.FolderContext? = null,
     ) : Screen
     /** 看图：同一文件夹里的图片左右滑动切换。 */
     data class ImageViewer(val serverId: String?, val images: List<com.aisub.player.remote.RemoteItem>, val index: Int) : Screen

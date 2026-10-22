@@ -30,8 +30,44 @@ data class MediaInfo(
     val episodeTitle: String? = null,
     val episodeOverview: String? = null,
     val episodeStill: String? = null,
+    /** 主评分的来源 */
+    val ratingLabel: String = "TMDB",
+    /** 信息来源，显示在详情页：「TMDB」「本地 NFO」「本地 NFO + TMDB」 */
+    val source: String = "TMDB",
+    val doubanRating: Double? = null,
+    val doubanVotes: Int? = null,
+    val doubanId: String? = null,
 ) {
-    val tmdbUrl get() = "https://www.themoviedb.org/$kind/$tmdbId"
+    /** 0 表示不知道 TMDB 编号（只有本地 NFO） */
+    val tmdbUrl get() = if (tmdbId > 0) "https://www.themoviedb.org/$kind/$tmdbId" else null
+
+    /** 用远程结果补全本地信息：本地已有的字段保留。 */
+    fun fillFrom(remote: MediaInfo): MediaInfo = MediaInfo(
+        kind = kind,
+        tmdbId = if (tmdbId > 0) tmdbId else remote.tmdbId,
+        imdbId = imdbId ?: remote.imdbId,
+        title = title.ifEmpty { remote.title },
+        originalTitle = originalTitle.ifEmpty { remote.originalTitle },
+        year = year.ifEmpty { remote.year },
+        overview = overview.ifBlank { remote.overview },
+        posterUrl = posterUrl ?: remote.posterUrl,
+        backdropUrl = backdropUrl ?: remote.backdropUrl,
+        genres = genres.ifEmpty { remote.genres },
+        length = length.ifEmpty { remote.length },
+        rating = if (rating > 0) rating else remote.rating,
+        voteCount = if (rating > 0) voteCount else remote.voteCount,
+        directors = directors.ifEmpty { remote.directors },
+        cast = cast.ifEmpty { remote.cast },
+        countries = countries.ifEmpty { remote.countries },
+        episodeTitle = episodeTitle ?: remote.episodeTitle,
+        episodeOverview = episodeOverview?.takeIf { it.isNotBlank() } ?: remote.episodeOverview,
+        episodeStill = episodeStill ?: remote.episodeStill,
+        ratingLabel = if (rating > 0) ratingLabel else remote.ratingLabel,
+        source = "$source + ${remote.source}",
+        doubanRating = doubanRating,
+        doubanVotes = doubanVotes,
+        doubanId = doubanId,
+    )
 }
 
 /**

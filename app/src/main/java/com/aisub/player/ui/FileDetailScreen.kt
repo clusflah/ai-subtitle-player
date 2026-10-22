@@ -63,6 +63,9 @@ import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.RemoteFiles
 import com.aisub.player.media.formatSize
 import com.aisub.player.meta.DoubanRating
+import com.aisub.player.meta.FolderContext
+import com.aisub.player.meta.LocalMeta
+import com.aisub.player.meta.LocalMetaLoader
 import com.aisub.player.meta.MediaInfo
 import com.aisub.player.meta.MetaQuery
 import com.aisub.player.meta.MetaRepository
@@ -102,6 +105,7 @@ fun FileDetailScreen(
     item: RemoteItem,
     queue: List<MediaEntry>,
     index: Int,
+    folder: FolderContext?,
     onBack: () -> Unit,
     play: (List<MediaEntry>, Int) -> Unit,
     openImages: (List<RemoteItem>, Int) -> Unit,
@@ -126,28 +130,63 @@ fun FileDetailScreen(
     val query = remember(item, reload) {
         MetaRepository.override(context, fileKey)?.let { (t, y) -> MetaQuery.manual(t, y) } ?: MetaQuery.of(item)
     }
+    // tmdb：本地 NFO 与 TMDB 合并后的影片信息
     var tmdb by remember { mutableStateOf<Lookup<MediaInfo>>(Lookup.Idle) }
     var douban by remember { mutableStateOf<Lookup<DoubanRating>>(Lookup.Idle) }
     var preview by remember { mutableStateOf<Lookup<String>>(Lookup.Idle) }
+    var local by remember { mutableStateOf<LocalMeta?>(null) }
 
     LaunchedEffect(query, settings.tmdbKey, settings.tmdbBaseUrl, settings.doubanEnabled) {
         if (!isVideo) return@LaunchedEffect
-        var info: MediaInfo? = null
-        if (settings.tmdbKey.isNotBlank()) {
+        // 1. 先读本地：视频旁边的 NFO、海报、背景图，以及目录名里的 {tmdb-xxx}（媒体服务器条目自带信息，不需要）
+        val loc = if (local != null) local else if (server != null && folder != null && meta == null) {
             tmdb = Lookup.Loading
-            tmdb = try {
-                info = MetaRepository.tmdb(settings, query)
-                Lookup.Done(info)
+            runCatching { LocalMetaLoader.load(context, lib.client(server), item, folder) }.getOrNull()
+        } else null
+        local = loc
+        // 手动重新匹配过就不用本地的编号和 NFO 文字（多半是它们错了），本地图片照用
+        val overridden = MetaRepository.override(context, fileKey) != null
+        val localInfo = loc?.info?.takeIf { !overridden }
+        val q = if (loc == null || overridden) query else query.copy(
+            titles = (listOfNotNull(localInfo?.title?.ifEmpty { null }, localInfo?.originalTitle?.ifEmpty { null }) + query.titles).distinct(),
+            year = localInfo?.year?.toIntOrNull() ?: query.year,
+            kind = query.kind ?: loc.kind,
+            tmdbId = query.tmdbId ?: loc.tmdbId,
+            imdbId = query.imdbId ?: loc.imdbId,
+        )
+        var info = localInfo
+        tmdb = if (localInfo != null) Lookup.Done(localInfo) else Lookup.Idle
+
+        // 2. 本地缺简介、海报、背景图、本集信息时，再用 TMDB 补全
+        val episodic = q.season != null || q.episode != null
+        val missing = localInfo == null || localInfo.overview.isBlank() ||
+            (loc.posterUrl == null && localInfo.posterUrl == null) || (loc.backdropUrl == null && localInfo.backdropUrl == null) ||
+            (episodic && localInfo.episodeOverview == null)
+        if (settings.tmdbKey.isNotBlank() && missing) {
+            if (localInfo == null) tmdb = Lookup.Loading
+            try {
+                val remote = MetaRepository.tmdb(settings, q)
+                info = if (localInfo != null && remote != null) localInfo.fillFrom(remote) else localInfo ?: remote
+                tmdb = Lookup.Done(info)
             } catch (e: Exception) {
-                Lookup.Failed(e.message ?: e.toString())
+                if (localInfo == null) tmdb = Lookup.Failed(e.message ?: e.toString())
             }
+        } else if (localInfo == null) {
+            tmdb = if (settings.tmdbKey.isNotBlank()) Lookup.Done<MediaInfo>(null) else Lookup.Idle
         }
+
+        // 3. 豆瓣：NFO 里有豆瓣评分就直接用
         if (settings.doubanEnabled) {
-            douban = Lookup.Loading
-            douban = try {
-                Lookup.Done(MetaRepository.douban(query, info))
-            } catch (e: Exception) {
-                Lookup.Failed(e.message ?: e.toString())
+            val nfoRating = info?.doubanRating
+            if (nfoRating != null) {
+                douban = Lookup.Done(DoubanRating(info.doubanId.orEmpty(), info.title, nfoRating, info.doubanVotes))
+            } else {
+                douban = Lookup.Loading
+                douban = try {
+                    Lookup.Done(MetaRepository.douban(q, info))
+                } catch (e: Exception) {
+                    Lookup.Failed(e.message ?: e.toString())
+                }
             }
         }
     }
@@ -165,11 +204,11 @@ fun FileDetailScreen(
     val info = (tmdb as? Lookup.Done)?.value
     val parsed = remember(name) { NameParser.parse(name) }
     val title = info?.title?.takeIf { it.isNotEmpty() } ?: meta?.seriesName ?: meta?.title ?: if (isVideo) parsed.title else name
-    val backdrop = info?.backdropUrl ?: meta?.backdropUrl
+    val backdrop = local?.backdropUrl ?: info?.backdropUrl ?: meta?.backdropUrl
     val poster = when {
         isImage -> item.playUrl
         meta?.posterUrl != null && meta.posterRatio < 1f -> meta.posterUrl
-        else -> info?.posterUrl ?: meta?.posterUrl
+        else -> local?.posterUrl ?: info?.posterUrl ?: meta?.posterUrl
     }
     val doubanHit = (douban as? Lookup.Done)?.value
 
@@ -195,8 +234,8 @@ fun FileDetailScreen(
             OverflowMenu(
                 listOfNotNull(
                     MenuAction("重新匹配影片…") { rematching = true }.takeIf { isVideo },
-                    doubanHit?.let { d -> MenuAction("在豆瓣打开") { openUrl(d.url) } },
-                    info?.let { i -> MenuAction("在 TMDB 打开") { openUrl(i.tmdbUrl) } },
+                    doubanHit?.takeIf { it.id.isNotEmpty() }?.let { d -> MenuAction("在豆瓣打开") { openUrl(d.url) } },
+                    info?.tmdbUrl?.let { url -> MenuAction("在 TMDB 打开") { openUrl(url) } },
                     info?.imdbId?.let { id -> MenuAction("在 IMDb 打开") { openUrl("https://www.imdb.com/title/$id/") } },
                     MenuAction("下载") { download() }.takeIf { server != null && !item.isDir && item.playUrl != null },
                 ),
@@ -255,7 +294,10 @@ fun FileDetailScreen(
                         Spacer(Modifier.height(4.dp))
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             if (settings.doubanEnabled) RatingChip("豆瓣", DOUBAN_GREEN, douban) { it?.rating to it?.votes }
-                            if (settings.tmdbKey.isNotBlank()) RatingChip("TMDB", TMDB_BLUE, tmdb) { it?.rating?.takeIf { r -> r > 0 } to it?.voteCount }
+                            if (settings.tmdbKey.isNotBlank() || (info?.rating ?: 0.0) > 0) {
+                                val label = info?.ratingLabel ?: "TMDB"
+                                RatingChip(label, if (label == "TMDB") TMDB_BLUE else MaterialTheme.colorScheme.outline, tmdb) { it?.rating?.takeIf { r -> r > 0 } to it?.voteCount }
+                            }
                             meta?.rating?.let { r ->
                                 RatingChip(server?.type?.label ?: "评分", MaterialTheme.colorScheme.outline, Lookup.Done(r)) { it to null }
                             }
@@ -279,7 +321,7 @@ fun FileDetailScreen(
                 if (isVideo) FilledTonalButton(onClick = { rematching = true }) { Text("重新匹配") }
             }
 
-            if (isVideo && settings.tmdbKey.isBlank()) {
+            if (isVideo && settings.tmdbKey.isBlank() && info?.overview.isNullOrBlank()) {
                 Spacer(Modifier.height(12.dp))
                 SurfaceCard {
                     ListRow(
@@ -292,6 +334,7 @@ fun FileDetailScreen(
                 }
             }
             (tmdb as? Lookup.Failed)?.let { Hint("TMDB 查询失败：${it.message}") }
+            info?.let { Hint("信息来源：${it.source}") }
             if (tmdb is Lookup.Done && info == null) Hint("TMDB 没有找到「${query.titles.firstOrNull().orEmpty()}」，可以点「重新匹配」修改片名")
 
             // ---------- 简介 ----------
@@ -302,9 +345,9 @@ fun FileDetailScreen(
             }
             if (info?.episodeTitle != null) {
                 SectionHeader("本集")
-                if (info.episodeStill != null) {
+                if (local?.stillUrl != null || info.episodeStill != null) {
                     NetImage(
-                        info.episodeStill,
+                        local?.stillUrl ?: info.episodeStill,
                         Modifier.padding(horizontal = 16.dp).fillMaxWidth().aspectRatio(16f / 9f).clip(MaterialTheme.shapes.medium),
                         maxSize = 800, fallback = null,
                     )
