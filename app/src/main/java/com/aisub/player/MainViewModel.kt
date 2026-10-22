@@ -22,6 +22,7 @@ import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.MediaProxy
 import com.aisub.player.media.VlcPlayer
 import com.aisub.player.remote.AuthRegistry
+import com.aisub.player.remote.Endpoints
 import com.aisub.player.remote.cloud.CloudRegistry
 import com.aisub.player.asr.AudioDecoder
 import com.aisub.player.asr.LocalModel
@@ -594,8 +595,11 @@ internal fun authDataSourceFactory(app: Application): DataSource.Factory {
             val link = CloudRegistry.resolve(uri)
             spec.withUri(Uri.parse(link.url)).withAdditionalHeaders(link.headers)
         } else {
-            val headers = AuthRegistry.headersFor(uri)
-            if (headers.isEmpty()) spec else spec.withAdditionalHeaders(headers)
+            // 双地址服务器：换成当前能连上的内网 / 外网地址
+            val routed = Endpoints.rewrite(uri)
+            val headers = AuthRegistry.headersFor(routed)
+            val s = if (routed == uri) spec else spec.withUri(Uri.parse(routed))
+            if (headers.isEmpty()) s else s.withAdditionalHeaders(headers)
         }
     }
 }

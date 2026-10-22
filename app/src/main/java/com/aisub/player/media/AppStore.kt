@@ -2,6 +2,7 @@ package com.aisub.player.media
 
 import android.content.Context
 import com.aisub.player.remote.AuthRegistry
+import com.aisub.player.remote.Endpoints
 import com.aisub.player.remote.Server
 import com.aisub.player.remote.cloud.CloudRegistry
 import org.json.JSONArray
@@ -17,7 +18,7 @@ class AppStore(context: Context) {
     private val prefs = context.getSharedPreferences("library", Context.MODE_PRIVATE)
 
     init {
-        servers().forEach(AuthRegistry::register)
+        servers().forEach { AuthRegistry.register(it); Endpoints.register(it) }
     }
 
     // ---- 历史 ----
@@ -74,10 +75,11 @@ class AppStore(context: Context) {
             .let { if (it.any { s -> s.id == server.id }) it else it + server }
         writeArray("servers", list.map { it.toJson() })
         AuthRegistry.register(server)
+        Endpoints.register(server)
     }
 
     fun deleteServer(id: String) {
-        servers().firstOrNull { it.id == id }?.let(AuthRegistry::unregister)
+        servers().firstOrNull { it.id == id }?.let { AuthRegistry.unregister(it); Endpoints.unregister(it) }
         CloudRegistry.forget(id)
         writeArray("servers", servers().filter { it.id != id }.map { it.toJson() })
     }

@@ -34,8 +34,11 @@ data class Server(
     /** 进入时打开的目录：WebDAV/OpenList 是路径，网盘是根目录 ID */
     val rootPath: String = type.rootRef,
     val extra: String = "",
+    /** 内网地址（可不填）：在家能连上时优先走它，连不上走 [baseUrl]，见 [Endpoints] */
+    val lanUrl: String = "",
 ) {
     val normalizedBase get() = baseUrl.trim().trimEnd('/')
+    val normalizedLan get() = lanUrl.trim().trimEnd('/')
 
     fun basicAuthHeader(): String? {
         if (username.isEmpty()) return null
@@ -46,6 +49,7 @@ data class Server(
     fun toJson(): JSONObject = JSONObject()
         .put("id", id).put("type", type.name).put("name", name).put("baseUrl", baseUrl)
         .put("username", username).put("password", password).put("rootPath", rootPath).put("extra", extra)
+        .put("lanUrl", lanUrl)
 
     companion object {
         fun fromJson(o: JSONObject): Server {
@@ -59,6 +63,7 @@ data class Server(
                 password = o.optString("password"),
                 rootPath = o.optString("rootPath", type.rootRef),
                 extra = o.optString("extra"),
+                lanUrl = o.optString("lanUrl"),
             )
         }
     }
@@ -66,24 +71,24 @@ data class Server(
 
 /**
  * 播放器和音频解码器访问 WebDAV 文件时需要带鉴权头。
- * 这里按地址前缀记录每台服务器的请求头，只对匹配的地址添加，不会泄露给其他主机。
+ * 这里按地址前缀（外网、内网地址各一个）记录每台服务器的请求头，只对匹配的地址添加，不会泄露给其他主机。
  * OpenList 的播放链接自带签名，不需要登记。
  */
 object AuthRegistry {
     private val headers = ConcurrentHashMap<String, Map<String, String>>()
-    private val prefixById = ConcurrentHashMap<String, String>()
+    private val prefixesById = ConcurrentHashMap<String, List<String>>()
 
     fun register(server: Server) {
         unregister(server)
         if (server.type != ServerType.WEBDAV) return
         val auth = server.basicAuthHeader() ?: return
-        val prefix = server.normalizedBase + "/"
-        headers[prefix] = mapOf("Authorization" to auth)
-        prefixById[server.id] = prefix
+        val prefixes = listOf(server.normalizedBase, server.normalizedLan).filter { it.isNotEmpty() }.map { "$it/" }
+        prefixes.forEach { headers[it] = mapOf("Authorization" to auth) }
+        prefixesById[server.id] = prefixes
     }
 
     fun unregister(server: Server) {
-        prefixById.remove(server.id)?.let(headers::remove)
+        prefixesById.remove(server.id)?.forEach(headers::remove)
     }
 
     fun headersFor(url: String): Map<String, String> =

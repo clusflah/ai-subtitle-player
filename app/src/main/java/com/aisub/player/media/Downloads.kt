@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import com.aisub.player.remote.AuthRegistry
+import com.aisub.player.remote.Endpoints
 import com.aisub.player.remote.RemoteClient
 import com.aisub.player.remote.RemoteItem
 import com.aisub.player.remote.cloud.CloudRegistry
@@ -51,7 +52,7 @@ object Downloads {
                 val link = CloudRegistry.resolve(url)
                 link.url to link.headers
             } else {
-                url to AuthRegistry.headersFor(url)
+                Endpoints.rewrite(url).let { it to AuthRegistry.headersFor(it) }
             }
             val sub = listOf(ROOT, job.relativeDir).filter { it.isNotEmpty() }.joinToString("/")
             val request = DownloadManager.Request(Uri.parse(realUrl))
