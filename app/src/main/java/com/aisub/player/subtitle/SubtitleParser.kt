@@ -96,6 +96,15 @@ object SubtitleParser {
         return ((h.toLong() * 60 + mi.toLong()) * 60 + se.toLong()) * 1000 + millis
     }
 
+    /** 一条字幕的几行文字转成 [Cue]：一行中文一行外文时拆成译文和原文，否则合成一行。 */
+    fun cueOf(id: Int, start: Long, end: Long, lines: List<String>): Cue =
+        if (lines.size == 2 && looksBilingual(lines[0], lines[1])) {
+            val (cn, other) = if (hasCjk(lines[0])) lines[0] to lines[1] else lines[1] to lines[0]
+            Cue(id, start, end, other, translation = cn)
+        } else {
+            Cue(id, start, end, lines.joinToString(" "))
+        }
+
     /** 一行中文一行西文时，视为"译文 + 原文"的双语字幕。 */
     private fun looksBilingual(first: String, second: String): Boolean =
         hasCjk(first) != hasCjk(second)

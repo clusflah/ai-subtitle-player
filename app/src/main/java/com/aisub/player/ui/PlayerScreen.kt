@@ -55,6 +55,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Switch
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -268,6 +269,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             update = {
                 if (it.player !== player) it.player = player
                 it.resizeMode = RESIZE_MODES[resizeIndex].first
+                // 视频自带字幕和 AI 字幕同时显示时，把自带字幕抬高，避免叠在一起
+                val aiVisible = state.settings.showAiSubtitles && state.cues.isNotEmpty()
+                it.subtitleView?.setBottomPaddingFraction(if (aiVisible) 0.32f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
             },
             modifier = Modifier.fillMaxSize(),
         )
@@ -466,10 +470,35 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         SubtitleAction.EXPORT -> dialog = PlayerDialog.EXPORT
                         SubtitleAction.ERROR -> dialog = PlayerDialog.ERROR
                         SubtitleAction.ROLES -> { showTracks = false; showRoles = true }
+                        SubtitleAction.EMBEDDED -> if (state.extractingEmbedded) vm.cancelAll() else vm.extractEmbeddedSubtitles()
                     }
                 },
             )
         }
+    }
+
+    // ---- 视频自带多条字幕轨时选择一条 ----
+    if (state.choosingEmbedded) {
+        val tracks = state.embeddedTracks.orEmpty().filter { it.cues.isNotEmpty() }
+        AlertDialog(
+            onDismissRequest = vm::dismissEmbeddedChoice,
+            title = { Text("选择字幕轨") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text("选一条作为字幕，之后可以翻译成${state.settings.targetLanguage}", fontSize = 13.sp, color = Color(0xFFB0B0B0))
+                    tracks.forEach { t ->
+                        Column(Modifier.fillMaxWidth().clickable { vm.useEmbeddedTrack(t) }.padding(vertical = 10.dp)) {
+                            Text(t.title, fontSize = 16.sp)
+                            Text(
+                                "${t.cues.size} 句 · " + t.cues.first().let { c -> listOfNotNull(c.translation, c.text).joinToString(" / ") }.take(60),
+                                fontSize = 12.sp, color = Color(0xFF999999), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = vm::dismissEmbeddedChoice) { Text("取消") } },
+        )
     }
 
     // ---- 角色与配音 ----
@@ -597,6 +626,7 @@ private fun BarButton(icon: ImageVector, label: String, onClick: () -> Unit) {
 @Composable
 private fun TaskChip(state: UiState, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val text = when {
+        state.extractingEmbedded -> "读取视频自带字幕 ${((state.progress ?: 0f) * 100).toInt()}%"
         state.transcribing -> state.progress?.takeIf { it >= 0 && state.status.startsWith("正在识别") }
             ?.let { "AI 识别字幕中 ${(it * 100).toInt()}%" } ?: state.status
         state.translating -> "AI 翻译中 ${state.cues.count { it.translation != null }}/${state.cues.size}"
@@ -608,7 +638,7 @@ private fun TaskChip(state: UiState, onClick: () -> Unit, modifier: Modifier = M
             .clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (state.transcribing || state.translating) {
+        if (state.transcribing || state.translating || state.extractingEmbedded) {
             CircularProgressIndicator(Modifier.size(12.dp), color = Color.White, strokeWidth = 1.5.dp)
             Spacer(Modifier.width(6.dp))
         }
@@ -618,7 +648,7 @@ private fun TaskChip(state: UiState, onClick: () -> Unit, modifier: Modifier = M
 
 @Composable
 private fun SubtitleOverlay(cue: Cue?, settings: AppSettings, modifier: Modifier = Modifier) {
-    if (cue == null) return
+    if (cue == null || !settings.showAiSubtitles) return
     // 原文已是目标语言时译文和原文相同，只显示一行
     val lines = if (cue.translation == cue.text) listOf(cue.text to true) else buildList {
         if (settings.showTranslation && cue.translation != null) add(cue.translation to true)
@@ -816,7 +846,7 @@ private fun enterPip(activity: Activity?) {
 
 // ---------------- 字幕与音轨面板 ----------------
 
-private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ONLINE, EXPORT, ERROR, ROLES }
+private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ONLINE, EXPORT, ERROR, ROLES, EMBEDDED }
 
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
@@ -860,10 +890,10 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
         // 视频文件自带的字幕轨（MKV、蓝光、DVD 等）
         val textGroups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT } }
         if (textGroups.isNotEmpty()) {
-            SheetHeader("内嵌字幕", embeddedOpen) { embeddedOpen = !embeddedOpen }
+            SheetHeader("视频自带字幕", embeddedOpen) { embeddedOpen = !embeddedOpen }
             if (embeddedOpen) {
                 val textDisabled = remember(version, player) { C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes }
-                TrackRow("关闭", textDisabled || textGroups.none { it.isSelected }) {
+                TrackRow("不显示", textDisabled || textGroups.none { it.isSelected }) {
                     player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
                     version++
                 }
@@ -892,6 +922,14 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                 else -> "AI 重新识别字幕"
             }
             ActionRow(AppIcons.AutoAwesome, gen, subtitle = "用语音识别为当前视频生成带时间轴的字幕") { onSubtitleAction(SubtitleAction.GENERATE) }
+            // 视频自带文字字幕轨时，直接拿来翻译，比语音识别准
+            if (textGroups.isNotEmpty() || vm.usingVlc || state.extractingEmbedded) {
+                ActionRow(
+                    AppIcons.Subtitles,
+                    if (state.extractingEmbedded) "停止读取（${state.progress?.let { "${(it * 100).toInt()}%" } ?: "准备中"}）" else "使用视频自带字幕",
+                    subtitle = "把视频里的外语字幕轨读出来作为字幕，可以直接翻译、朗读",
+                ) { onSubtitleAction(SubtitleAction.EMBEDDED) }
+            }
             ActionRow(
                 AppIcons.Translate,
                 if (state.translating) "停止翻译" else "AI 翻译字幕",
@@ -906,6 +944,11 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
             ActionRow(AppIcons.ListIcon, "字幕列表", subtitle = if (state.cues.isEmpty()) "还没有字幕" else "${state.cues.size} 句，点击可跳转、长按可复制", enabled = state.cues.isNotEmpty()) {
                 onSubtitleAction(SubtitleAction.LIST)
             }
+            SwitchRow(
+                AppIcons.Subtitles, "在画面上显示 AI 字幕",
+                subtitle = if (textGroups.isNotEmpty()) "视频自带字幕在上方「视频自带字幕」里单独开关" else "关掉后仍可翻译、朗读",
+                checked = state.settings.showAiSubtitles,
+            ) { vm.updateSettings(state.settings.copy(showAiSubtitles = it)) }
             Box(Modifier.padding(horizontal = 24.dp, vertical = 8.dp)) {
                 DisplayModeSelector(state.settings.showOriginal, state.settings.showTranslation) { o, t ->
                     vm.updateSettings(state.settings.copy(showOriginal = o, showTranslation = t))
@@ -957,6 +1000,22 @@ private fun TrackRow(label: String, selected: Boolean, enabled: Boolean = true, 
     ) {
         Box(Modifier.width(48.dp)) { if (selected) Icon(AppIcons.Check, null, tint = Color.White) }
         Text(label, color = if (enabled) Color.White else Color(0xFF888888), fontSize = 17.sp)
+    }
+}
+
+@Composable
+private fun SwitchRow(icon: ImageVector, label: String, subtitle: String?, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable { onChange(!checked) }.heightIn(min = 56.dp).padding(horizontal = 24.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, tint = Color.White, modifier = Modifier.size(26.dp))
+        Spacer(Modifier.width(24.dp))
+        Column(Modifier.weight(1f)) {
+            Text(label, color = Color.White, fontSize = 17.sp)
+            if (subtitle != null) Text(subtitle, color = Color(0xFF999999), fontSize = 13.sp)
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 

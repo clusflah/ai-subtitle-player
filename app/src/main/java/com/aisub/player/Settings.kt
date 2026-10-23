@@ -58,6 +58,8 @@ data class AppSettings(
     val subtitleOffset: Int = 40,
     /** 字幕列表自动滚动到当前句 */
     val followPlayback: Boolean = true,
+    /** 在画面上显示 AI 字幕（识别、导入或从视频提取的字幕）；关掉后仍可翻译、朗读 */
+    val showAiSubtitles: Boolean = true,
     /** 中文译文的每个字上方标注拼音 */
     val showPinyin: Boolean = false,
     /** 播放时跟随字幕时间朗读译文 */
@@ -197,6 +199,7 @@ class SettingsRepository(context: Context) {
             subtitleOffset = prefs.getInt("subtitleOffset", d.subtitleOffset),
             followPlayback = prefs.getBoolean("followPlayback", d.followPlayback),
             showPinyin = prefs.getBoolean("showPinyin", d.showPinyin),
+            showAiSubtitles = prefs.getBoolean("showAiSubtitles", d.showAiSubtitles),
             ttsEnabled = prefs.getBoolean("ttsEnabled", d.ttsEnabled),
             ttsEngine = runCatching { TtsEngineType.valueOf(prefs.getString("ttsEngine", d.ttsEngine.name)!!) }.getOrDefault(d.ttsEngine),
             ttsAzureKey = prefs.getString("ttsAzureKey", "")!!,
@@ -236,6 +239,7 @@ class SettingsRepository(context: Context) {
             .putInt("subtitleOffset", s.subtitleOffset)
             .putBoolean("followPlayback", s.followPlayback)
             .putBoolean("showPinyin", s.showPinyin)
+            .putBoolean("showAiSubtitles", s.showAiSubtitles)
             .putBoolean("ttsEnabled", s.ttsEnabled)
             .putString("ttsEngine", s.ttsEngine.name)
             .putString("ttsAzureKey", s.ttsAzureKey)
