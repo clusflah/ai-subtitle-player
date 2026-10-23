@@ -94,6 +94,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 private sealed interface HomeDialog {
     data object About : HomeDialog
     data object Stream : HomeDialog
+    data object Link : HomeDialog
     data object NewPlaylist : HomeDialog
     data object AddSource : HomeDialog
     data class AddToPlaylist(val entries: List<MediaEntry>) : HomeDialog
@@ -292,6 +293,7 @@ fun HomeScreen(
                     onSettings = openSettings,
                     onAbout = { dialog = HomeDialog.About },
                     onStream = { dialog = HomeDialog.Stream },
+                    onLink = if (main.linkDownloader != null) ({ dialog = HomeDialog.Link }) else null,
                     onHistory = { nav.push(Screen.History) },
                     onPlayHistory = { item -> play(listOf(item.entry), 0) },
                 )
@@ -302,6 +304,17 @@ fun HomeScreen(
     when (val d = dialog) {
         null -> {}
         HomeDialog.About -> AboutDialog { dialog = null }
+        HomeDialog.Link -> TextInputDialog(
+            title = "从链接下载", label = "视频网页链接（YouTube、B 站等）", confirm = "下载",
+            onDismiss = { dialog = null },
+            onConfirm = { text ->
+                dialog = null
+                com.aisub.player.download.extractUrl(text)?.let { url ->
+                    main.downloadLink(url)
+                    nav.push(Screen.Link)
+                }
+            },
+        )
         HomeDialog.Stream -> TextInputDialog(
             title = "新建串流", label = "网络地址（http / https / rtsp …）", confirm = "播放",
             onDismiss = { dialog = null },
@@ -586,6 +599,7 @@ private fun MoreTab(
     onSettings: () -> Unit,
     onAbout: () -> Unit,
     onStream: () -> Unit,
+    onLink: (() -> Unit)?,
     onHistory: () -> Unit,
     onPlayHistory: (HistoryItem) -> Unit,
 ) {
@@ -606,6 +620,10 @@ private fun MoreTab(
 
         SectionHeader("工具")
         SurfaceCard {
+            if (onLink != null) {
+                ListRow("从链接下载", "下载视频网站的视频，自动准备字幕后播放（也可以在其他 App 里分享给译幕）", AppIcons.Download, onClick = onLink)
+                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            }
             ListRow("新建串流", "播放网络地址（http、rtsp、m3u8 等）", AppIcons.Link, onClick = onStream)
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             ListRow("设置", "语音识别、字幕翻译、字幕样式", AppIcons.Settings, onClick = onSettings)

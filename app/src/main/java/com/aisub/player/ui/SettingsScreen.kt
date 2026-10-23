@@ -367,6 +367,16 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 )
             }
 
+            // ---------------- 视频下载（下载版） ----------------
+            if (vm.linkDownloader != null) {
+                SectionHeader("视频下载")
+                LinkDownloadSettings(
+                    quality = s.dlQuality, autoAsr = s.dlAutoAsr,
+                    onQuality = { s = s.copy(dlQuality = it) }, onAutoAsr = { s = s.copy(dlAutoAsr = it) },
+                    vm = vm,
+                )
+            }
+
             // ---------------- 朗读译文 ----------------
             SectionHeader("朗读译文")
             TtsSettings(s, vm) { s = it }

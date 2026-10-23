@@ -50,8 +50,12 @@ jobs:
         run: |
           VERSION=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
           mkdir dist
+          # 标准版：四个包；下载版（内置 yt-dlp）：不出通用包，太大
           for abi in arm64-v8a armeabi-v7a x86_64 universal; do
-            cp "app/build/outputs/apk/release/app-$abi-release.apk" "dist/Voxtitle-$VERSION-$abi.apk"
+            cp "app/build/outputs/apk/standard/release/app-standard-$abi-release.apk" "dist/Voxtitle-$VERSION-$abi.apk"
+          done
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            cp "app/build/outputs/apk/ytdlp/release/app-ytdlp-$abi-release.apk" "dist/Voxtitle-dl-$VERSION-$abi.apk"
           done
           ls -l dist
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
