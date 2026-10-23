@@ -15,12 +15,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -61,6 +64,7 @@ import com.aisub.player.MainViewModel
 import com.aisub.player.Provider
 import com.aisub.player.ProviderConfig
 import com.aisub.player.asr.ModelCatalog
+import com.aisub.player.translate.ModelList
 import com.aisub.player.asrProblem
 import com.aisub.player.withAsrValue
 import kotlinx.coroutines.launch
@@ -212,9 +216,13 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                                 raw.apiKey, { s = s.withConfig(p, raw.copy(apiKey = it)) },
                                 if (p.needsApiKey) "API Key" else "API Key（可不填）", "", secret = true,
                             )
-                            ConfigField(
+                            val cfg = s.configOf(p)
+                            ModelField(
                                 raw.model, { s = s.withConfig(p, raw.copy(model = it)) },
-                                "模型", p.defaultModel.ifEmpty { "例如 qwen-plus、moonshot-v1-8k" },
+                                p.defaultModel.ifEmpty { "例如 qwen-plus、moonshot-v1-8k" },
+                                // Key 或地址变了，之前拉到的列表作废
+                                listKey = "${p.name}|${cfg.baseUrl}|${cfg.apiKey}",
+                                fetch = { ModelList.fetch(p, cfg) },
                             )
                             TestRow(testing[key] == true, testResults[key]) { runTest(key) { vm.testTranslator(s) } }
                         }
@@ -376,6 +384,70 @@ private fun ConfigField(value: String, onChange: (String) -> Unit, label: String
         trailingIcon = if (secret) ({ TextButton(onClick = { visible = !visible }) { Text(if (visible) "隐藏" else "显示") } }) else null,
         modifier = Modifier.fillMaxWidth(),
     )
+}
+
+/** 模型输入框：可以手动填，也可以点右侧箭头从服务商拉取模型列表下拉选择。 */
+@Composable
+private fun ModelField(
+    value: String,
+    onChange: (String) -> Unit,
+    placeholder: String,
+    listKey: String,
+    fetch: suspend () -> List<String>,
+) {
+    var models by remember(listKey) { mutableStateOf<List<String>?>(null) }
+    var loading by remember(listKey) { mutableStateOf(false) }
+    var error by remember(listKey) { mutableStateOf<String?>(null) }
+    var expanded by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    fun load() {
+        loading = true
+        error = null
+        scope.launch {
+            try {
+                val list = fetch()
+                models = list
+                if (list.isEmpty()) error = "服务商没有返回可用的模型" else expanded = true
+            } catch (e: Exception) {
+                error = "获取模型列表失败：${e.message}"
+            }
+            loading = false
+        }
+    }
+    Box {
+        OutlinedTextField(
+            value = value, onValueChange = onChange,
+            label = { Text("模型") },
+            placeholder = { if (placeholder.isNotEmpty()) Text(placeholder) },
+            singleLine = true,
+            trailingIcon = {
+                if (loading) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                } else {
+                    IconButton(onClick = { if (models.isNullOrEmpty()) load() else expanded = !expanded }) {
+                        Icon(if (expanded) AppIcons.ArrowDropUp else AppIcons.ArrowDropDown, "选择模型")
+                    }
+                }
+            },
+            supportingText = { Text(error ?: "点右侧箭头从服务商获取模型列表", color = if (error != null) MaterialTheme.colorScheme.error else Color.Unspecified) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.heightIn(max = 360.dp)) {
+            DropdownMenuItem(
+                text = { Text("重新获取", color = MaterialTheme.colorScheme.primary) },
+                leadingIcon = { Icon(AppIcons.Refresh, null) },
+                onClick = { expanded = false; load() },
+            )
+            HorizontalDivider()
+            models.orEmpty().forEach { m ->
+                DropdownMenuItem(
+                    text = { Text(m) },
+                    trailingIcon = if (m == value) ({ Icon(AppIcons.Check, null, tint = MaterialTheme.colorScheme.primary) }) else null,
+                    onClick = { onChange(m); expanded = false },
+                )
+            }
+        }
+    }
 }
 
 @Composable
