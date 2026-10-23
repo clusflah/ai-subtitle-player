@@ -27,6 +27,7 @@ import com.aisub.player.meta.FolderContext
 import com.aisub.player.ui.AppTheme
 import com.aisub.player.ui.HistoryScreen
 import com.aisub.player.ui.HomeScreen
+import com.aisub.player.ui.LinkScreen
 import com.aisub.player.ui.LocalFolderScreen
 import com.aisub.player.ui.Navigator
 import com.aisub.player.ui.PlayerScreen
@@ -87,6 +88,13 @@ class MainActivity : ComponentActivity() {
                         Screen.Home -> HomeScreen(lib, main, nav) { permissionLauncher.launch(mediaPermissions) }
                         Screen.Player -> PlayerScreen(main, onBack = back, onOpenSettings = { nav.push(Screen.Settings) })
                         Screen.Settings -> SettingsScreen(main, onBack = { nav.pop() })
+                        Screen.Link -> LinkScreen(
+                            main, onBack = { nav.pop() },
+                            onDone = {
+                                nav.pop()
+                                nav.push(Screen.Player)
+                            },
+                        )
                         Screen.History -> HistoryScreen(lib, back, play)
                         is Screen.LocalFolder -> LocalFolderScreen(
                             lib, screen.path, screen.title, back,
@@ -142,8 +150,15 @@ class MainActivity : ComponentActivity() {
         handleIntent(intent)
     }
 
-    /** 从文件管理器"用此应用打开"视频。 */
+    /** 从文件管理器"用此应用打开"视频；下载版还接收其他 App 分享过来的视频链接。 */
     private fun handleIntent(intent: Intent?) {
+        if (intent?.action == Intent.ACTION_SEND && main.linkDownloader != null) {
+            val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: intent.getStringExtra(Intent.EXTRA_SUBJECT) ?: return
+            val url = com.aisub.player.download.extractUrl(text) ?: return
+            main.downloadLink(url)
+            if (nav.current != Screen.Link) nav.push(Screen.Link)
+            return
+        }
         if (intent?.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
         main.play(listOf(MediaLibrary.entryFor(this, uri)), 0)

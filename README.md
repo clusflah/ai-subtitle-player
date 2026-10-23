@@ -28,6 +28,7 @@
 - 🔤 **拼音标注**：中文译文可在每个字上方标注带声调的拼音，适合学中文
 - 🗣️ **朗读译文**：跟随字幕时间朗读，大模型识别说话角色，每个角色配不同的声音
 - 🎞️ **视频自带字幕直接翻译**：MKV / MP4 里的外语字幕轨可以直接读出来翻译，比语音识别更准；自带字幕和 AI 字幕可以分别开关显示
+- 🔗 **分享链接即看（下载版）**：在 YouTube、B 站等 App 里分享给译幕，自动下载视频、准备字幕（平台字幕优先，没有就 AI 识别）、翻译并播放
 - 📥 **已有字幕**：导入 SRT / VTT / ASS，或从射手网、OpenSubtitles 在线下载；可导出双语 / 译文 / 原文 SRT
 
 **播放器**
@@ -226,6 +227,29 @@ DVD / 蓝光 ISO 镜像自动用 VLC 内核播放，直接进入正片。普通�
 
 文件的「⋮」菜单可以重命名、移动、复制、删除、分享；文件夹可以重命名、整体移动或删除；长按进入多选。顶部搜索可以按文件名、文件夹，甚至**字幕内容**查找视频。
 
+### 下载版：分享链接自动下载、准备字幕、播放
+
+Release 里带 `-dl` 的安装包是下载版，内置 [yt-dlp](https://github.com/yt-dlp/yt-dlp)（通过 [youtubedl-android](https://github.com/JunkFood02/youtubedl-android) 打包 Python 和 FFmpeg），支持 YouTube、B 站等上千个网站。
+
+1. 在 YouTube、B 站、浏览器等 App 里点「分享」，选「译幕下载并播放」；也可以在「更多 → 从链接下载」粘贴链接
+2. 自动下载视频（默认最高 1080p，优先 H.264 + AAC，所有手机都能硬解），保存到 `Movies/Voxtitle`，媒体库里能看到
+3. 自动准备字幕：
+   - 优先用平台的**人工字幕**（视频原语言），其次平台**自动字幕**（会整理 YouTube 自动字幕的逐词滚动重复）
+   - 平台有**目标语言的人工字幕**时一并下载，直接当译文，不用再调大模型
+   - 平台没有字幕时，按设置自动用 **AI 语音识别**
+   - 开启「识别时自动翻译」时接着翻译
+4. 开始播放
+
+「设置 → 视频下载」里可以选最高画质、关掉自动 AI 识别、**更新 yt-dlp**（网站改版导致下载失败时先更新再试）。
+
+**需要登录的视频**（会员、部分 B 站 / 抖音视频、YouTube 年龄限制等）：在「设置 → 视频下载 → 登录 cookies」里
+- 点「网页登录」，选择 B 站、抖音、YouTube 或输入其他网站，在应用内网页里正常登录后点「完成」；
+- 或者「导入 cookies.txt」：用电脑浏览器扩展（如 Get cookies.txt LOCALLY）导出 Netscape 格式的 cookies.txt 再导入。Google 常常不允许在应用内网页登录，YouTube 建议用这种方式。
+
+cookies 只保存在应用私有目录，只在下载时交给 yt-dlp；「清除」会同时退出应用内网页的登录。
+
+> 下载版和标准版是同一个应用（包名相同），可以互相覆盖安装，设置和记录都会保留。下载时请留在应用里，切到后台太久可能被系统打断。请只下载你有权保存的内容。
+
 ## 常见问题
 
 **完全免费能用吗？**
@@ -253,11 +277,12 @@ DVD / 蓝光 ISO 镜像自动用 VLC 内核播放，直接进入正片。普通�
 ```bash
 git clone https://github.com/clusflah/ai-subtitle-player.git
 cd ai-subtitle-player
-./gradlew assembleDebug          # 调试版，输出在 app/build/outputs/apk/debug/
-./gradlew testDebugUnitTest      # 单元测试
+./gradlew assembleStandardDebug   # 标准版，输出在 app/build/outputs/apk/standard/debug/
+./gradlew assembleYtdlpDebug      # 下载版（内置 yt-dlp），输出在 app/build/outputs/apk/ytdlp/debug/
+./gradlew testStandardDebugUnitTest   # 单元测试
 ```
 
-每个 CPU 架构单独出一个 APK，真机一般装 `app-arm64-v8a-debug.apk`。
+每个 CPU 架构单独出一个 APK，真机一般装 `app-*-arm64-v8a-debug.apk`。两个版本是 Gradle 的两个 product flavor（`standard` / `ytdlp`），共用全部代码；下载版独有的代码在 `app/src/ytdlp/`。
 
 **发布**：推送 `v*` 标签，或在 Actions 页面手动运行「Build & Release APK」并勾选 publish，会按 `versionName` 打标签、构建并发布 Release。配置仓库 Secrets（`RELEASE_KEYSTORE_BASE64`、`RELEASE_KEYSTORE_PASSWORD`、`RELEASE_KEY_ALIAS`、`RELEASE_KEY_PASSWORD`）后使用固定证书签名，保证可以覆盖升级。
 

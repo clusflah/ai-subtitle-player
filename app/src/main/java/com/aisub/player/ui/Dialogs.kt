@@ -167,7 +167,7 @@ fun AboutDialog(onDismiss: () -> Unit) {
         title = { Text("关于") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("译幕 Voxtitle ${BuildConfig.VERSION_NAME}")
+                Text("译幕 Voxtitle ${BuildConfig.VERSION_NAME}（${com.aisub.player.download.Downloaders.EDITION}）")
                 Text(
                     "本地 / 云端语音识别生成字幕，大模型翻译。\n\n" +
                         "开源组件：Media3 ExoPlayer、sherpa-onnx、SenseVoice、Silero VAD、OkHttp、Apache Commons Compress。\n\n" +

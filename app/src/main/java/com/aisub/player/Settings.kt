@@ -60,6 +60,10 @@ data class AppSettings(
     val followPlayback: Boolean = true,
     /** 在画面上显示 AI 字幕（识别、导入或从视频提取的字幕）；关掉后仍可翻译、朗读 */
     val showAiSubtitles: Boolean = true,
+    /** 下载版：链接下载的最高分辨率，0 为不限 */
+    val dlQuality: Int = 1080,
+    /** 下载版：平台没有字幕时自动 AI 识别 */
+    val dlAutoAsr: Boolean = true,
     /** 中文译文的每个字上方标注拼音 */
     val showPinyin: Boolean = false,
     /** 播放时跟随字幕时间朗读译文 */
@@ -200,6 +204,8 @@ class SettingsRepository(context: Context) {
             followPlayback = prefs.getBoolean("followPlayback", d.followPlayback),
             showPinyin = prefs.getBoolean("showPinyin", d.showPinyin),
             showAiSubtitles = prefs.getBoolean("showAiSubtitles", d.showAiSubtitles),
+            dlQuality = prefs.getInt("dlQuality", d.dlQuality),
+            dlAutoAsr = prefs.getBoolean("dlAutoAsr", d.dlAutoAsr),
             ttsEnabled = prefs.getBoolean("ttsEnabled", d.ttsEnabled),
             ttsEngine = runCatching { TtsEngineType.valueOf(prefs.getString("ttsEngine", d.ttsEngine.name)!!) }.getOrDefault(d.ttsEngine),
             ttsAzureKey = prefs.getString("ttsAzureKey", "")!!,
@@ -240,6 +246,8 @@ class SettingsRepository(context: Context) {
             .putBoolean("followPlayback", s.followPlayback)
             .putBoolean("showPinyin", s.showPinyin)
             .putBoolean("showAiSubtitles", s.showAiSubtitles)
+            .putInt("dlQuality", s.dlQuality)
+            .putBoolean("dlAutoAsr", s.dlAutoAsr)
             .putBoolean("ttsEnabled", s.ttsEnabled)
             .putString("ttsEngine", s.ttsEngine.name)
             .putString("ttsAzureKey", s.ttsAzureKey)

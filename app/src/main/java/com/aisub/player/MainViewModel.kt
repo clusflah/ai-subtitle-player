@@ -31,6 +31,12 @@ import com.aisub.player.asr.ModelManager
 import com.aisub.player.asr.SpeechEngine
 import com.aisub.player.asr.Transcriber
 import com.aisub.player.subtitle.Cue
+import com.aisub.player.download.Downloaders
+import com.aisub.player.download.LinkDownloader
+import com.aisub.player.download.LinkProgress
+import com.aisub.player.download.LinkStage
+import com.aisub.player.download.PlatformSubtitles
+import com.aisub.player.media.MediaLibrary
 import com.aisub.player.subtitle.EmbeddedSubtitles
 import com.aisub.player.subtitle.SrtMode
 import com.aisub.player.subtitle.SubtitleParser
@@ -98,6 +104,17 @@ data class UiState(
     val embeddedTracks: List<EmbeddedSubtitles.Track>? = null,
     /** 有多条字幕轨，等用户选择 */
     val choosingEmbedded: Boolean = false,
+    /** 下载版：正在从分享的链接下载的任务 */
+    val linkTask: LinkTask? = null,
+)
+
+/** 链接下载任务的状态。done 时界面跳到播放页。 */
+data class LinkTask(
+    val url: String,
+    val title: String? = null,
+    val progress: LinkProgress = LinkProgress(LinkStage.INFO, null),
+    val error: String? = null,
+    val done: Boolean = false,
 )
 
 enum class Task { TRANSCRIBE, TRANSLATE }
@@ -132,6 +149,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var translateJob: Job? = null
     private var roleJob: Job? = null
     private var embeddedJob: Job? = null
+    private var linkJob: Job? = null
+
+    /** 下载版才有；标准版为 null */
+    val linkDownloader: LinkDownloader? = Downloaders.create(app)
+
+    /** 下载版：yt-dlp 用的登录 cookies */
+    val cookieJar = com.aisub.player.download.CookieJar(app)
 
     // ---- 朗读 ----
     private val ttsEngines = HashMap<String, TtsEngine>()
@@ -719,6 +743,76 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             else -> _state.update { it.copy(status = "找到 ${usable.size} 条字幕轨，请选择一条", choosingEmbedded = true) }
         }
     }
+
+    // ---------------- 下载版：分享链接 → 下载 → 字幕 → 播放 ----------------
+
+    /**
+     * 用 yt-dlp 下载链接里的视频和平台字幕，保存到 Movies/Voxtitle，
+     * 载入字幕（没有就按设置自动 AI 识别），需要时开始翻译，然后播放。
+     */
+    fun downloadLink(url: String) {
+        val downloader = linkDownloader ?: return
+        if (linkJob?.isActive == true) {
+            downloader.cancel()
+            linkJob?.cancel()
+        }
+        _state.update { it.copy(linkTask = LinkTask(url)) }
+        fun progress(p: LinkProgress, title: String? = null) =
+            _state.update { s -> s.copy(linkTask = s.linkTask?.copy(progress = p, title = title ?: s.linkTask.title)) }
+
+        linkJob = viewModelScope.launch {
+            val app = getApplication<Application>()
+            val settings = _state.value.settings
+            try {
+                // 临时目录放在应用的外部存储里，视频可能很大
+                val dir = java.io.File(app.getExternalFilesDir(null) ?: app.filesDir, "link-downloads")
+                val cookies = cookieJar.file.takeIf { cookieJar.exists }
+                val result = downloader.download(url, dir, settings.dlQuality, settings.ttsLocale, cookies) { p ->
+                    progress(p, p.detail.takeIf { p.stage == LinkStage.DOWNLOAD && it.isNotEmpty() && '%' !in it })
+                }
+                progress(LinkProgress(LinkStage.SAVE, 0f), result.title)
+                val uri = withContext(Dispatchers.IO) {
+                    com.aisub.player.download.MovieSaver.save(app, result.video, result.title) { f ->
+                        progress(LinkProgress(LinkStage.SAVE, f))
+                    }
+                }
+
+                progress(LinkProgress(LinkStage.SUBTITLE, null))
+                val cues = withContext(Dispatchers.IO) {
+                    fun read(f: java.io.File?) = f?.let { SubtitleParser.parse(decodeText(it.readBytes())) }.orEmpty()
+                    var source = read(result.subtitle)
+                    if (result.autoCaption) source = PlatformSubtitles.cleanRolling(source)
+                    val target = read(result.translation)
+                    listOfNotNull(result.subtitle, result.translation).forEach { it.delete() }
+                    if (source.isEmpty()) target else if (target.isEmpty()) source else PlatformSubtitles.mergeTranslation(source, target)
+                }
+                if (cues.isNotEmpty()) store.save(uri, cues)
+
+                play(listOf(MediaLibrary.entryFor(app, uri)), 0)
+                val s = _state.value.settings
+                when {
+                    _state.value.cues.isEmpty() && s.dlAutoAsr -> generateSubtitles()
+                    s.autoTranslate && cues.any { it.translation == null } && s.createTranslator() != null -> startTranslation()
+                }
+                _state.update { st -> st.copy(linkTask = st.linkTask?.copy(done = true)) }
+            } catch (e: CancellationException) {
+                _state.update { it.copy(linkTask = null) }
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("Voxtitle", "链接下载失败", e)
+                _state.update { s -> s.copy(linkTask = s.linkTask?.copy(error = e.message ?: e.toString())) }
+            }
+        }
+    }
+
+    fun cancelLink() {
+        linkDownloader?.cancel()
+        linkJob?.cancel()
+        _state.update { it.copy(linkTask = null) }
+    }
+
+    /** 界面已经跳到播放页（或关闭了出错提示）。 */
+    fun clearLinkTask() = _state.update { it.copy(linkTask = null) }
 
     /** 用某条自带字幕轨作为当前字幕（之后可以翻译、朗读、导出）。 */
     fun useEmbeddedTrack(track: EmbeddedSubtitles.Track) {

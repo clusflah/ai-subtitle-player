@@ -14,8 +14,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 19
-        versionName = "1.2.0"
+        versionCode = 20
+        versionName = "1.3.0"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用
@@ -53,6 +53,21 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    // 两个版本，同一个包名（可以互相覆盖安装、保留设置）：
+    // standard 标准版；ytdlp 下载版，内置 yt-dlp（Python + FFmpeg，每个架构多约 50 MB），
+    // 可以从其他 App 分享视频链接过来，自动下载、准备字幕、播放
+    flavorDimensions += "edition"
+    productFlavors {
+        create("standard") {
+            dimension = "edition"
+            isDefault = true
+        }
+        create("ytdlp") {
+            dimension = "edition"
+            versionNameSuffix = "-dl"
+        }
     }
 
     // 每个 CPU 架构单独出一个 APK（onnxruntime 原生库很大），另外保留一个通用包
@@ -113,8 +128,19 @@ dependencies {
     // 解压模型包（tar.bz2）
     implementation("org.apache.commons:commons-compress:1.27.1")
 
+    // 下载版：yt-dlp（含 Python 运行环境）和合并音视频用的 FFmpeg
+    "ytdlpImplementation"("io.github.junkfood02.youtubedl-android:library:0.18.1")
+    "ytdlpImplementation"("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
+
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303") // android.jar 里的 org.json 只是空壳
     // 需要真实 Android 类（Html、Bundle 等）的测试，如读取视频内嵌字幕
     testImplementation("org.robolectric:robolectric:4.14.1")
+}
+
+androidComponents {
+    // yt-dlp 要直接运行 so 里的 Python，原生库必须解压到磁盘
+    onVariants(selector().withFlavor("edition" to "ytdlp")) { variant ->
+        variant.packaging.jniLibs.useLegacyPackaging.set(true)
+    }
 }
