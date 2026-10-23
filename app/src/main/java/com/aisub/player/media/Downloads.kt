@@ -13,13 +13,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * 把网络位置、网盘里的文件或整个文件夹下载到手机的 Download/AiSubPlayer 目录。
+ * 把网络位置、网盘里的文件或整个文件夹下载到手机的 Download/Voxtitle 目录。
  * 交给系统下载管理器：后台下载、通知栏显示进度、断网自动重试。
  * 网盘直链和需要的请求头（Cookie、UA、鉴权）在加入下载前解析好。
  */
 object Downloads {
 
-    const val ROOT = "AiSubPlayer"
+    const val ROOT = "Voxtitle"
 
     /** 一个待下载的文件：remotePath 用于展示，relativeDir 是下载目录下的子目录。 */
     data class Job(val item: RemoteItem, val relativeDir: String)
@@ -57,7 +57,7 @@ object Downloads {
             val sub = listOf(ROOT, job.relativeDir).filter { it.isNotEmpty() }.joinToString("/")
             val request = DownloadManager.Request(Uri.parse(realUrl))
                 .setTitle(job.item.name)
-                .setDescription("AI 字幕播放器")
+                .setDescription("译幕")
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                 .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "$sub/${safe(job.item.name)}")
             headers.forEach { (k, v) -> request.addRequestHeader(k, v) }

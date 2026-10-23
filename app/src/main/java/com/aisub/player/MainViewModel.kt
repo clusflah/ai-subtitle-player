@@ -116,7 +116,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            android.util.Log.e("AiSub", "播放失败", error)
+            android.util.Log.e("Voxtitle", "播放失败", error)
             _state.update { it.copy(playbackError = describePlaybackError(error)) }
         }
 
@@ -305,7 +305,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.update { it.copy(status = "已取消", progress = null) }
                     throw CancellationException("cancelled")
                 }
-                android.util.Log.e("AiSub", "识别失败", e)
+                android.util.Log.e("Voxtitle", "识别失败", e)
                 _state.update { it.copy(status = "识别失败", progress = null, error = e.message ?: e.toString(), failedTask = Task.TRANSCRIBE) }
             } finally {
                 _state.update { it.copy(transcribing = false) }

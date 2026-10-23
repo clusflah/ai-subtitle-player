@@ -16,7 +16,7 @@ data class BangumiResult(val id: Int, val rating: Double?, val votes: Int?, val 
 object Bangumi {
 
     private const val API = "https://api.bgm.tv"
-    private const val UA = "clusflah/AiSubPlayer (https://github.com/clusflah/ai-subtitle-player)"
+    private const val UA = "clusflah/Voxtitle (https://github.com/clusflah/ai-subtitle-player)"
 
     private fun get(url: String): String? {
         val req = Request.Builder().url(url).header("User-Agent", UA).header("Accept", "application/json").build()

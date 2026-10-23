@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "AiSubPlayer"
+rootProject.name = "Voxtitle"
 include(":app")

@@ -54,7 +54,7 @@ class LoopbackReceiver {
                 val params = query.split('&').filter { '=' in it }
                     .associate { URLDecoder.decode(it.substringBefore('='), "UTF-8") to URLDecoder.decode(it.substringAfter('='), "UTF-8") }
                 val ok = params["code"] != null
-                val html = if (ok) "授权成功，请回到 AI 字幕播放器。" else "授权未完成：${params["error"] ?: "请重试"}"
+                val html = if (ok) "授权成功，请回到译幕。" else "授权未完成：${params["error"] ?: "请重试"}"
                 val bytes = "<html><meta charset='utf-8'><body style='font-size:20px;padding:40px'>$html</body></html>".toByteArray()
                 client.getOutputStream().apply {
                     write("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray())

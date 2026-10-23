@@ -2,10 +2,10 @@
 
 | 文件 | 适用设备 |
 |---|---|
-| `AiSubPlayer-*-arm64-v8a.apk` | **绝大多数安卓手机（推荐）** |
-| `AiSubPlayer-*-armeabi-v7a.apk` | 很老的 32 位手机 |
-| `AiSubPlayer-*-x86_64.apk` | 模拟器 |
-| `AiSubPlayer-*-universal.apk` | 不确定时用这个（包含所有架构，体积最大） |
+| `Voxtitle-*-arm64-v8a.apk` | **绝大多数安卓手机（推荐）** |
+| `Voxtitle-*-armeabi-v7a.apk` | 很老的 32 位手机 |
+| `Voxtitle-*-x86_64.apk` | 模拟器 |
+| `Voxtitle-*-universal.apk` | 不确定时用这个（包含所有架构，体积最大） |
 
 ## 首次使用
 

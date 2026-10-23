@@ -151,7 +151,7 @@ class PlexClient(server: Server) : CloudClient(server) {
 
     companion object {
         private val FOLDER_TYPES = setOf("show", "season", "artist", "album", "collection", "photo")
-        private const val PRODUCT = "AiSubPlayer"
+        private const val PRODUCT = "Voxtitle"
 
         /** 探测服务器地址时超时要短，局域网地址在外网时连不上 */
         private val probeHttp = cloudHttp.newBuilder().connectTimeout(5, TimeUnit.SECONDS).build()

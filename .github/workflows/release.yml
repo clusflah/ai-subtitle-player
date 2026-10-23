@@ -46,7 +46,7 @@ jobs:
           VERSION=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
           mkdir dist
           for abi in arm64-v8a armeabi-v7a x86_64 universal; do
-            cp "app/build/outputs/apk/release/app-$abi-release.apk" "dist/AiSubPlayer-$VERSION-$abi.apk"
+            cp "app/build/outputs/apk/release/app-$abi-release.apk" "dist/Voxtitle-$VERSION-$abi.apk"
           done
           ls -l dist
 
@@ -61,5 +61,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/*.apk \
-            --title "AI 字幕播放器 $GITHUB_REF_NAME" \
+            --title "译幕 Voxtitle $GITHUB_REF_NAME" \
             --notes-file .github/release-notes.md

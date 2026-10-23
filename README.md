@@ -1,4 +1,4 @@
-# AI 字幕播放器（Android）
+# 译幕 Voxtitle（Android）
 
 本地语音识别生成字幕 + LLM 翻译的安卓视频播放器。
 
@@ -31,7 +31,7 @@
 6. 文件管理：文件的「⋮」菜单可重命名、移动、复制、删除、分享；文件夹的「⋮」菜单可重命名、整体移动或删除；长按进入多选。
    网络位置和网盘：文件和文件夹的「⋮」菜单可重命名、删除（网盘移到回收站），右上角「⋮」可新建文件夹。
 7. ISO 光盘镜像（DVD / 蓝光）自动使用 VLC 内核播放，直接进入正片；普通视频播放失败时可在错误提示里「换用 VLC 内核播放」。
-8. 下载：网络位置和网盘里文件或文件夹的「⋮」菜单选「下载」，保存到 Download/AiSubPlayer（文件夹保留目录结构），进度见通知栏。
+8. 下载：网络位置和网盘里文件或文件夹的「⋮」菜单选「下载」，保存到 Download/Voxtitle（文件夹保留目录结构），进度见通知栏。
 9. 文件详情：网络位置和网盘里点视频进入详情页，显示 TMDB 简介、演职员和豆瓣评分（TMDB 需在「设置 → 影视信息」填 API Key；国内可填反代地址），识别错了点「重新匹配」；本地视频在「⋮」菜单里选「影视信息」。
    优先读取视频旁边的刮削文件（Kodi / Emby / Jellyfin / tinyMediaManager 格式）：`视频名.nfo`、`movie.nfo`、`tvshow.nfo`，`poster.jpg`、`folder.jpg`、`视频名-poster.jpg`，`fanart.jpg`、`视频名-fanart.jpg`，以及文件夹名里的 `{tmdb-123}`、`[imdbid-tt123]`；本地缺简介或图片时才联网补全，NFO 里有豆瓣评分时不再联网查询。
    在线来源参考 [MediaOrganizer](https://github.com/clusflah/MediaOrganizer)：TMDB、豆瓣（不用 Key，简介、海报、演职员、评分）、Bangumi（动画，不用 Key）、TheTVDB（分集信息，需 Key）、Fanart.tv（标题图、背景图，需 Key）。

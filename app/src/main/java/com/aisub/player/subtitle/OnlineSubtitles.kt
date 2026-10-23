@@ -223,7 +223,7 @@ class OnlineSubtitles(
     companion object {
         private const val OS_BASE = "https://api.opensubtitles.com/api/v1"
         private const val ASSRT_BASE = "https://api.assrt.net/v1"
-        private const val USER_AGENT = "AiSubPlayer v0.8"
+        private const val USER_AGENT = "Voxtitle v0.8"
         private val JSON = "application/json".toMediaType()
         private val SUB_EXT = Regex("\\.(srt|ass|ssa|vtt)$", RegexOption.IGNORE_CASE)
 

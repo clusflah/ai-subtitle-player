@@ -145,7 +145,7 @@ class EmbyClient(server: Server) : CloudClient(server) {
         private val FOLDER_TYPES = setOf("Folder", "CollectionFolder", "Series", "Season", "BoxSet", "MusicAlbum", "MusicArtist", "Playlist", "UserView")
 
         private fun authHeader(deviceId: String) =
-            """MediaBrowser Client="AiSubPlayer", Device="Android", DeviceId="$deviceId", Version="1.0""""
+            """MediaBrowser Client="Voxtitle", Device="Android", DeviceId="$deviceId", Version="1.0""""
 
         /** 用户名密码登录，返回凭据 JSON。填了内网地址时先试内网（在家可能连不上外网域名），失败再试外网。 */
         fun login(baseUrl: String, lanUrl: String, username: String, password: String): String {
