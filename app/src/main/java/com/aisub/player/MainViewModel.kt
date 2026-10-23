@@ -31,6 +31,7 @@ import com.aisub.player.asr.ModelManager
 import com.aisub.player.asr.SpeechEngine
 import com.aisub.player.asr.Transcriber
 import com.aisub.player.subtitle.Cue
+import com.aisub.player.subtitle.EmbeddedSubtitles
 import com.aisub.player.subtitle.SrtMode
 import com.aisub.player.subtitle.SubtitleParser
 import com.aisub.player.subtitle.SubtitleStore
@@ -91,6 +92,12 @@ data class UiState(
     val roles: List<Role> = emptyList(),
     /** 正在识别角色时的进度说明；null 表示没在识别 */
     val roleStatus: String? = null,
+    /** 正在读取视频自带的字幕轨 */
+    val extractingEmbedded: Boolean = false,
+    /** 读出的字幕轨（多条时让用户选），null 表示还没读 */
+    val embeddedTracks: List<EmbeddedSubtitles.Track>? = null,
+    /** 有多条字幕轨，等用户选择 */
+    val choosingEmbedded: Boolean = false,
 )
 
 enum class Task { TRANSCRIBE, TRANSLATE }
@@ -124,6 +131,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var transcribeJob: Job? = null
     private var translateJob: Job? = null
     private var roleJob: Job? = null
+    private var embeddedJob: Job? = null
 
     // ---- 朗读 ----
     private val ttsEngines = HashMap<String, TtsEngine>()
@@ -253,6 +261,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 cues = cached,
                 roles = store.loadRoles(uri),
                 roleStatus = null,
+                extractingEmbedded = false,
+                embeddedTracks = null,
+                choosingEmbedded = false,
                 status = "",
                 progress = null,
                 error = null,
@@ -572,6 +583,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelAll() {
         transcribeJob?.cancel()
         translateJob?.cancel()
+        embeddedJob?.cancel()
     }
 
     /** 重新翻译某一句（带前后文）。 */
@@ -658,6 +670,73 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    /**
+     * 读取视频自带的文字字幕轨。只有一条可用时直接用；有多条时放进 embeddedTracks 让用户选，
+     * 选中后调用 [useEmbeddedTrack]。
+     */
+    fun extractEmbeddedSubtitles() {
+        val uri = _state.value.videoUri ?: return
+        if (embeddedJob?.isActive == true) return
+        _state.value.embeddedTracks?.let { tracks -> offerEmbedded(tracks); return }
+        transcribeJob?.cancel()
+        _state.update { it.copy(extractingEmbedded = true, status = "正在读取视频自带的字幕…", progress = 0f, error = null) }
+        embeddedJob = viewModelScope.launch {
+            try {
+                val tracks = withContext(Dispatchers.IO) {
+                    EmbeddedSubtitles.extract(uri, authDataSourceFactory(getApplication()), isActive = { isActive }) { p ->
+                        _state.update { it.copy(progress = p) }
+                    }
+                }
+                _state.update { it.copy(embeddedTracks = tracks, progress = null) }
+                offerEmbedded(tracks)
+            } catch (e: CancellationException) {
+                _state.update { it.copy(status = "已取消", progress = null) }
+                throw e
+            } catch (e: InterruptedException) {
+                _state.update { it.copy(status = "已取消", progress = null) }
+            } catch (e: Exception) {
+                android.util.Log.e("Voxtitle", "读取内嵌字幕失败", e)
+                _state.update { it.copy(status = "", progress = null, error = "读取视频自带字幕失败：${e.message ?: e}") }
+            } finally {
+                _state.update { it.copy(extractingEmbedded = false) }
+            }
+        }
+    }
+
+    private fun offerEmbedded(tracks: List<EmbeddedSubtitles.Track>) {
+        val usable = tracks.filter { it.cues.isNotEmpty() }
+        when {
+            usable.size == 1 -> useEmbeddedTrack(usable[0])
+            usable.isEmpty() -> _state.update {
+                it.copy(
+                    status = "",
+                    error = if (tracks.any { t -> t.imageBased }) "视频自带的是图形字幕（PGS / VobSub），没有文字，无法翻译。可以用 AI 识别字幕"
+                    else "视频里没有找到文字字幕轨。画面里烧录的字幕无法提取，可以用 AI 识别字幕",
+                )
+            }
+            // 多条：界面弹出选择
+            else -> _state.update { it.copy(status = "找到 ${usable.size} 条字幕轨，请选择一条", choosingEmbedded = true) }
+        }
+    }
+
+    /** 用某条自带字幕轨作为当前字幕（之后可以翻译、朗读、导出）。 */
+    fun useEmbeddedTrack(track: EmbeddedSubtitles.Track) {
+        val video = _state.value.videoUri ?: return
+        if (track.cues.isEmpty()) return
+        cancelAll()
+        _state.update {
+            it.copy(
+                cues = track.cues, status = "已载入视频自带字幕「${track.title}」${track.cues.size} 句",
+                error = null, failedTask = null, choosingEmbedded = false,
+            )
+        }
+        store.save(video, track.cues)
+        val settings = _state.value.settings
+        if (settings.autoTranslate && settings.createTranslator() != null && track.cues.any { it.translation == null }) startTranslation()
+    }
+
+    fun dismissEmbeddedChoice() = _state.update { it.copy(choosingEmbedded = false) }
 
     private fun applySubtitleText(video: Uri, text: String): Int {
         val cues = SubtitleParser.parse(text)
