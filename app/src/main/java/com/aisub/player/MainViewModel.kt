@@ -154,6 +154,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 下载版才有；标准版为 null */
     val linkDownloader: LinkDownloader? = Downloaders.create(app)
 
+    /** 下载版：yt-dlp 用的登录 cookies */
+    val cookieJar = com.aisub.player.download.CookieJar(app)
+
     // ---- 朗读 ----
     private val ttsEngines = HashMap<String, TtsEngine>()
     private val voiceCache = HashMap<String, List<TtsVoice>>()
@@ -763,7 +766,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 // 临时目录放在应用的外部存储里，视频可能很大
                 val dir = java.io.File(app.getExternalFilesDir(null) ?: app.filesDir, "link-downloads")
-                val result = downloader.download(url, dir, settings.dlQuality, settings.ttsLocale) { p ->
+                val cookies = cookieJar.file.takeIf { cookieJar.exists }
+                val result = downloader.download(url, dir, settings.dlQuality, settings.ttsLocale, cookies) { p ->
                     progress(p, p.detail.takeIf { p.stage == LinkStage.DOWNLOAD && it.isNotEmpty() && '%' !in it })
                 }
                 progress(LinkProgress(LinkStage.SAVE, 0f), result.title)

@@ -47,8 +47,11 @@ private class YtDlpDownloader(private val context: Context) : LinkDownloader {
         dir: File,
         quality: Int,
         targetLocale: String?,
+        cookies: File?,
         onProgress: (LinkProgress) -> Unit,
     ): DownloadedLink = withContext(Dispatchers.IO) {
+        // 登录后才能看的视频（会员、部分 B 站 / 抖音视频）需要 cookies
+        fun YoutubeDLRequest.withCookies() = apply { cookies?.takeIf { it.length() > 0 }?.let { addOption("--cookies", it.absolutePath) } }
         onProgress(LinkProgress(LinkStage.INFO, null, "首次使用需要准备下载组件…"))
         ensureReady()
         onProgress(LinkProgress(LinkStage.INFO, null))
@@ -56,7 +59,7 @@ private class YtDlpDownloader(private val context: Context) : LinkDownloader {
 
         // 1. 视频信息：标题、ID、可用字幕
         val info = run(
-            YoutubeDLRequest(url).addOption("-J").addOption("--no-playlist").addOption("--no-warnings"),
+            YoutubeDLRequest(url).addOption("-J").addOption("--no-playlist").addOption("--no-warnings").withCookies(),
         ) { _, _, _ -> }.out.let { out ->
             val json = runCatching { JSONObject(out) }.getOrElse { throw IOException("无法解析视频信息") }
             // 链接是播放列表时取第一个视频
@@ -78,6 +81,7 @@ private class YtDlpDownloader(private val context: Context) : LinkDownloader {
             // 优先 H.264 + AAC，所有手机都能硬解；限制分辨率时取不超过它的最高画质
             .addOption("-S", listOfNotNull(quality.takeIf { it > 0 }?.let { "res:$it" }, "vcodec:h264", "acodec:m4a").joinToString(","))
             .addOption("--merge-output-format", "mp4")
+            .withCookies()
         if (subs.languages.isNotEmpty()) {
             if (subs.manual) request.addOption("--write-subs")
             if (subs.auto) request.addOption("--write-auto-subs")
@@ -145,7 +149,8 @@ private class YtDlpDownloader(private val context: Context) : LinkDownloader {
         val line = message.lines().lastOrNull { it.startsWith("ERROR:") }?.removePrefix("ERROR:")?.trim() ?: message.lines().last { it.isNotBlank() }
         return when {
             "Unsupported URL" in line -> "不支持这个网站的链接"
-            "Sign in" in line || "login" in line.lowercase() || "cookies" in line -> "这个视频需要登录才能下载：$line"
+            "Sign in" in line || "login" in line.lowercase() || "cookies" in line ->
+                "这个视频需要登录才能下载，请到「设置 → 视频下载 → 登录 cookies」登录网站或导入 cookies.txt（$line）"
             "Private video" in line -> "这是私密视频"
             "Video unavailable" in line -> "视频不可用（可能已删除或有地区限制）"
             else -> line.take(300)

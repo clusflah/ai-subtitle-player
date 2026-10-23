@@ -32,13 +32,15 @@ data class DownloadedLink(
 interface LinkDownloader {
     /**
      * 下载到 dir。quality 是最高分辨率（0 表示不限）；targetLocale 是翻译目标语言（如 zh-CN），
-     * 平台有这种语言的人工字幕时一并下载。阻塞较久，可以用 [cancel] 中止。
+     * 平台有这种语言的人工字幕时一并下载；cookies 是登录信息（Netscape 格式），没有为 null。
+     * 阻塞较久，可以用 [cancel] 中止。
      */
     suspend fun download(
         url: String,
         dir: File,
         quality: Int,
         targetLocale: String?,
+        cookies: File?,
         onProgress: (LinkProgress) -> Unit,
     ): DownloadedLink
 

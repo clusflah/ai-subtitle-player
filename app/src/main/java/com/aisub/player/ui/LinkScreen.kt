@@ -34,6 +34,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aisub.player.MainViewModel
+import com.aisub.player.download.LOGIN_SITES
+import com.aisub.player.download.LoginSite
 import com.aisub.player.download.LinkStage
 import kotlinx.coroutines.launch
 
@@ -177,6 +179,8 @@ fun LinkDownloadSettings(
             onClick = { onAutoAsr(!autoAsr) },
         )
         androidx.compose.material3.HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        CookieSettings(vm)
+        androidx.compose.material3.HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("yt-dlp", style = MaterialTheme.typography.bodyLarge)
@@ -198,6 +202,147 @@ fun LinkDownloadSettings(
             ) {
                 if (updating) androidx.compose.material3.CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                 else Text("检查更新")
+            }
+        }
+    }
+}
+
+/** 登录 cookies：应用内网页登录、导入 cookies.txt、清除。 */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun CookieSettings(vm: MainViewModel) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var version by remember { mutableStateOf(0) }
+    val sites = remember(version) { vm.cookieJar.sites() }
+    var message by remember { mutableStateOf<String?>(null) }
+    var choosing by remember { mutableStateOf(false) }
+    var customUrl by remember { mutableStateOf<String?>(null) }
+    var login by remember { mutableStateOf<LoginSite?>(null) }
+    val importer = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            message = runCatching { "已导入 ${vm.cookieJar.import(context, uri)} 条 cookies" }.getOrElse { "导入失败：${it.message}" }
+            version++
+        }
+    }
+    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("登录 cookies", style = MaterialTheme.typography.bodyLarge)
+        Text(
+            message ?: if (sites.isEmpty()) "需要登录才能看的视频（会员内容、部分 B 站和抖音视频）要先登录网站或导入 cookies.txt；只保存在本机，下载时交给 yt-dlp"
+            else "已保存：${sites.joinToString("、")}",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { choosing = true }) { Text("网页登录") }
+            OutlinedButton(onClick = { importer.launch(arrayOf("text/plain", "application/octet-stream", "*/*")) }) { Text("导入 cookies.txt") }
+            if (sites.isNotEmpty()) {
+                androidx.compose.material3.TextButton(onClick = {
+                    vm.cookieJar.clear()
+                    android.webkit.CookieManager.getInstance().removeAllCookies(null)
+                    message = "已清除登录信息"
+                    version++
+                }) { Text("清除") }
+            }
+        }
+    }
+
+    if (choosing) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { choosing = false },
+            title = { Text("登录哪个网站？") },
+            text = {
+                Column {
+                    LOGIN_SITES.forEach { site ->
+                        ListRow(title = site.name, subtitle = site.hint.ifEmpty { null }, onClick = { choosing = false; login = site })
+                    }
+                    ListRow(title = "其他网站", subtitle = "输入网站地址后登录", onClick = { choosing = false; customUrl = "https://" })
+                }
+            },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { choosing = false }) { Text("取消") } },
+        )
+    }
+    customUrl?.let { initial ->
+        TextInputDialog("其他网站", "网站地址", initial = initial, confirm = "打开", onDismiss = { customUrl = null }) { url ->
+            customUrl = null
+            val fixed = if (url.startsWith("http")) url else "https://$url"
+            login = LoginSite(android.net.Uri.parse(fixed).host ?: fixed, fixed, listOf(fixed))
+        }
+    }
+    login?.let { site ->
+        WebLoginDialog(site, onDismiss = { login = null }) { header ->
+            var count = 0
+            header.forEach { (host, cookie) -> count += vm.cookieJar.saveFromWebView(host, cookie) }
+            message = if (count > 0) "已保存 ${site.name} 的 $count 条 cookies" else "没有读到 cookies，请确认已经登录"
+            version++
+            login = null
+        }
+    }
+}
+
+/**
+ * 应用内网页登录：打开网站登录页，用户登录后点「完成」，从 WebView 读出这个网站的 cookies。
+ * 回调参数是 (主机名, Cookie 头) 列表。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WebLoginDialog(site: LoginSite, onDismiss: () -> Unit, onDone: (List<Pair<String, String>>) -> Unit) {
+    var webView by remember { mutableStateOf<android.webkit.WebView?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    navigationIcon = { IconButton(onClick = onDismiss) { Icon(AppIcons.Close, "取消") } },
+                    title = { Text("登录 ${site.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    actions = {
+                        androidx.compose.material3.TextButton(onClick = {
+                            val manager = android.webkit.CookieManager.getInstance()
+                            manager.flush()
+                            // 登录页和网站主页的 cookies 都要
+                            val urls = (site.cookieUrls + listOfNotNull(webView?.url)).distinct()
+                            val result = urls.mapNotNull { u ->
+                                val host = android.net.Uri.parse(u).host ?: return@mapNotNull null
+                                manager.getCookie(u)?.takeIf { it.isNotBlank() }?.let { host to it }
+                            }
+                            onDone(result)
+                        }) { Text("完成") }
+                    },
+                )
+            },
+        ) { padding ->
+            Column(Modifier.padding(padding).fillMaxSize()) {
+                if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (site.hint.isNotEmpty()) {
+                    Text(site.hint, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                }
+                Text(
+                    "登录成功后点右上角「完成」",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+                androidx.compose.ui.viewinterop.AndroidView(
+                    factory = { ctx ->
+                        android.webkit.WebView(ctx).apply {
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            // 去掉 WebView 标记，部分网站会拒绝 WebView 登录
+                            settings.userAgentString = settings.userAgentString.replace("; wv", "")
+                            android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                            webViewClient = object : android.webkit.WebViewClient() {
+                                override fun onPageStarted(view: android.webkit.WebView?, url: String?, favicon: android.graphics.Bitmap?) { loading = true }
+                                override fun onPageFinished(view: android.webkit.WebView?, url: String?) { loading = false }
+                            }
+                            loadUrl(site.loginUrl)
+                            webView = this
+                        }
+                    },
+                    onRelease = { it.destroy() },
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
         }
     }
