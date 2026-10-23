@@ -66,6 +66,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -187,10 +188,18 @@ fun HomeScreen(
                             modifier = Modifier.fillMaxWidth(),
                         )
                     } else {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconBadge(AppIcons.PlayArrow, size = 32.dp)
-                            Spacer(Modifier.width(10.dp))
-                            Text("译幕", style = MaterialTheme.typography.titleLarge)
+                        Column {
+                            Text("译幕", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                when (tab) {
+                                    Tab.VIDEO -> "AI 字幕 · 翻译 · 朗读"
+                                    Tab.AUDIO -> "音频也能识别和翻译"
+                                    Tab.BROWSE -> "本机、局域网和网盘"
+                                    Tab.PLAYLISTS -> "播放列表"
+                                    Tab.MORE -> "最近播放和工具"
+                                },
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 },

@@ -158,7 +158,7 @@ fun LinkDownloadSettings(
     var updating by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) { version = vm.linkDownloader?.version() }
-    SurfaceCard {
+    Column {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("最高画质", style = MaterialTheme.typography.bodyLarge)
             Text(
@@ -171,16 +171,16 @@ fun LinkDownloadSettings(
                 }
             }
         }
-        androidx.compose.material3.HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        CardDivider()
         ListRow(
             title = "没有平台字幕时自动 AI 识别",
             subtitle = "下载完先用平台自带的字幕；没有时用设置里的语音识别引擎生成",
             trailing = { androidx.compose.material3.Switch(checked = autoAsr, onCheckedChange = onAutoAsr) },
             onClick = { onAutoAsr(!autoAsr) },
         )
-        androidx.compose.material3.HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        CardDivider()
         CookieSettings(vm)
-        androidx.compose.material3.HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        CardDivider()
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("yt-dlp", style = MaterialTheme.typography.bodyLarge)

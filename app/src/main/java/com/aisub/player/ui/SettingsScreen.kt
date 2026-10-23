@@ -87,8 +87,8 @@ private val ASR_LANGUAGES = listOf(
 private val TARGET_LANGUAGES = listOf("简体中文", "繁體中文", "English", "日本語", "한국어")
 
 /**
- * 设置页：按工作流程分组（语音识别 → 字幕翻译 → 字幕样式），
- * 只展开当前选中服务的配置项；每个服务可单独测试连接；顶部"保存"统一保存。
+ * 设置页：按工作流程分组（语音识别 → 字幕翻译 → 字幕样式…），每组可折叠，收起时显示当前配置摘要；
+ * 组内只展开当前选中服务的配置项；每个服务可单独测试连接；顶部"保存"统一保存。
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -125,13 +125,18 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             )
         },
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 32.dp)) {
+        Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 4.dp, bottom = 32.dp)) {
 
             // ---------------- 语音识别 ----------------
-            SectionHeader("语音识别")
-            SurfaceCard {
+            val asrProblem = s.asrProblem()
+            CollapsibleCard(
+                "语音识别",
+                s.asrEngine.label + " · 视频语言：" + (ASR_LANGUAGES.firstOrNull { it.first == s.asrLanguage }?.second ?: s.asrLanguage) +
+                    (asrProblem?.let { " · $it" } ?: ""),
+                warn = asrProblem != null,
+            ) {
                 AsrEngine.entries.forEachIndexed { i, engine ->
-                    if (i > 0) HorizontalDivider(Modifier.padding(start = 64.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    if (i > 0) CardDivider(inset = 64.dp)
                     val selected = s.asrEngine == engine
                     val key = "asr:${engine.name}"
                     ListRow(
@@ -160,9 +165,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         }
                     }
                 }
-            }
-            Spacer(Modifier.height(12.dp))
-            SurfaceCard {
+                CardDivider()
                 Column(Modifier.padding(16.dp)) {
                     Text("视频语言", style = MaterialTheme.typography.bodyLarge)
                     Text("选错会降低准确率；不确定时选「自动」", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -175,12 +178,18 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             }
 
             // ---------------- 字幕翻译 ----------------
-            SectionHeader("字幕翻译")
-            SurfaceCard {
+            val trProblem = s.translatorProblem()
+            CollapsibleCard(
+                "字幕翻译",
+                "翻译成${s.targetLanguage} · ${s.provider.label}" + (if (s.autoTranslate) " · 识别时自动翻译" else "") +
+                    (trProblem?.let { " · $it" } ?: ""),
+                warn = trProblem != null,
+            ) {
                 Column(Modifier.padding(16.dp)) {
                     OutlinedTextField(
                         value = s.targetLanguage, onValueChange = { s = s.copy(targetLanguage = it) },
                         label = { Text("目标语言") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.small, colors = appFieldColors(),
                     )
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TARGET_LANGUAGES.forEach { lang ->
@@ -188,18 +197,16 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         }
                     }
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                CardDivider()
                 ListRow(
                     title = "识别时自动翻译",
                     subtitle = "边识别边翻译，攒够 20 句发一次请求",
                     trailing = { Switch(checked = s.autoTranslate, onCheckedChange = { s = s.copy(autoTranslate = it) }) },
                     onClick = { s = s.copy(autoTranslate = !s.autoTranslate) },
                 )
-            }
-            Spacer(Modifier.height(12.dp))
-            SurfaceCard {
+                CardDivider()
                 Provider.entries.forEachIndexed { i, p ->
-                    if (i > 0) HorizontalDivider(Modifier.padding(start = 64.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    if (i > 0) CardDivider(inset = 64.dp)
                     val selected = s.provider == p
                     val key = "tr:${p.name}"
                     ListRow(
@@ -234,8 +241,11 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             }
 
             // ---------------- 在线字幕 ----------------
-            SectionHeader("在线字幕")
-            SurfaceCard {
+            CollapsibleCard(
+                "在线字幕",
+                listOf("射手网" to s.assrtToken, "OpenSubtitles" to s.osApiKey)
+                    .joinToString(" · ") { (name, key) -> name + if (key.isBlank()) " 未配置" else " 已配置" },
+            ) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("射手网（中文字幕多）", style = MaterialTheme.typography.bodyLarge)
                     Text(
@@ -262,8 +272,14 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             }
 
             // ---------------- 影视信息 ----------------
-            SectionHeader("影视信息")
-            SurfaceCard {
+            CollapsibleCard(
+                "影视信息",
+                "主数据源：" + (com.aisub.player.meta.MetaSource.entries.firstOrNull { it.name == s.metaPrimary }?.label ?: s.metaPrimary) +
+                    " · 已开启：" + listOfNotNull(
+                        "TMDB".takeIf { s.tmdbKey.isNotBlank() }, "豆瓣".takeIf { s.doubanEnabled }, "Bangumi".takeIf { s.bangumiEnabled },
+                        "TheTVDB".takeIf { s.tvdbKey.isNotBlank() }, "Fanart".takeIf { s.fanartKey.isNotBlank() },
+                    ).ifEmpty { listOf("无") }.joinToString("、"),
+            ) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("主数据源", style = MaterialTheme.typography.bodyLarge)
                     Text(
@@ -279,7 +295,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         }
                     }
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                CardDivider()
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("TMDB（简介、海报、演职员）", style = MaterialTheme.typography.bodyLarge)
                     Text(
@@ -291,21 +307,21 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     ConfigField(s.tmdbBaseUrl, { s = s.copy(tmdbBaseUrl = it) }, "接口地址（可选）", com.aisub.player.meta.Tmdb.DEFAULT_BASE)
                     ConfigField(s.tmdbImageBase, { s = s.copy(tmdbImageBase = it) }, "图片地址（可选）", com.aisub.player.meta.Tmdb.DEFAULT_IMAGE_BASE)
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                CardDivider()
                 ListRow(
                     title = "豆瓣",
                     subtitle = "评分、中文简介、海报、演职员，不用 Key；非官方接口，可能被限流",
                     trailing = { Switch(checked = s.doubanEnabled, onCheckedChange = { s = s.copy(doubanEnabled = it) }) },
                     onClick = { s = s.copy(doubanEnabled = !s.doubanEnabled) },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                CardDivider()
                 ListRow(
                     title = "Bangumi 番组计划",
                     subtitle = "动画的评分、简介和分集标题，不用 Key",
                     trailing = { Switch(checked = s.bangumiEnabled, onCheckedChange = { s = s.copy(bangumiEnabled = it) }) },
                     onClick = { s = s.copy(bangumiEnabled = !s.bangumiEnabled) },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                CardDivider()
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("TheTVDB（剧集分集信息）", style = MaterialTheme.typography.bodyLarge)
                     Text(
@@ -325,8 +341,14 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             }
 
             // ---------------- 字幕样式 ----------------
-            SectionHeader("字幕样式")
-            SurfaceCard {
+            CollapsibleCard(
+                "字幕样式",
+                when {
+                    s.showOriginal && s.showTranslation -> "双语"
+                    s.showOriginal -> "只显示原文"
+                    else -> "只显示译文"
+                } + " · 字号 ${(s.subtitleScale * 100).toInt()}%" + (if (s.pinyinActive) " · 拼音" else ""),
+            ) {
                 Column(Modifier.padding(16.dp)) {
                     Text("显示内容", style = MaterialTheme.typography.bodyLarge)
                     Spacer(Modifier.height(8.dp))
@@ -342,7 +364,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     )
                     SubtitlePreview(s)
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                CardDivider()
                 ListRow(
                     title = "中文译文加拼音",
                     subtitle = when {
@@ -358,7 +380,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     },
                     onClick = { if (Pinyin.available && s.targetIsChinese) s = s.copy(showPinyin = !s.showPinyin) },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                CardDivider()
                 ListRow(
                     title = "字幕列表跟随播放",
                     subtitle = "自动滚动到正在播放的句子",
@@ -369,17 +391,27 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
 
             // ---------------- 视频下载（下载版） ----------------
             if (vm.linkDownloader != null) {
-                SectionHeader("视频下载")
+                CollapsibleCard(
+                    "视频下载",
+                    "最高画质：" + (if (s.dlQuality > 0) "${s.dlQuality}p" else "不限") +
+                        (if (s.dlAutoAsr) " · 没字幕时 AI 识别" else "") +
+                        vm.cookieJar.sites().let { if (it.isEmpty()) "" else " · 已登录 " + it.joinToString("、") },
+                ) {
                 LinkDownloadSettings(
                     quality = s.dlQuality, autoAsr = s.dlAutoAsr,
                     onQuality = { s = s.copy(dlQuality = it) }, onAutoAsr = { s = s.copy(dlAutoAsr = it) },
                     vm = vm,
                 )
+                }
             }
 
             // ---------------- 朗读译文 ----------------
-            SectionHeader("朗读译文")
-            TtsSettings(s, vm) { s = it }
+            CollapsibleCard(
+                "朗读译文",
+                if (s.ttsEnabled) "开启 · ${s.ttsEngine.label} · 默认语音：${s.ttsVoices[s.ttsEngine] ?: "自动"}" else "关闭",
+            ) {
+                TtsSettings(s, vm) { s = it }
+            }
         }
     }
 
@@ -398,7 +430,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
 @Composable
 private fun TtsSettings(s: AppSettings, vm: MainViewModel, onChange: (AppSettings) -> Unit) {
     var picking by remember { mutableStateOf(false) }
-    SurfaceCard {
+    Column {
         ListRow(
             title = "播放时朗读译文",
             subtitle = "跟随字幕时间朗读；识别角色后可以给每个角色配不同的语音（播放页「字幕」面板）",
@@ -406,7 +438,7 @@ private fun TtsSettings(s: AppSettings, vm: MainViewModel, onChange: (AppSetting
             onClick = { onChange(s.copy(ttsEnabled = !s.ttsEnabled)) },
         )
         TtsEngineType.entries.forEach { engine ->
-            HorizontalDivider(Modifier.padding(start = 64.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            CardDivider(inset = 64.dp)
             val selected = s.ttsEngine == engine
             ListRow(
                 title = engine.label,
@@ -426,14 +458,14 @@ private fun TtsSettings(s: AppSettings, vm: MainViewModel, onChange: (AppSetting
                 }
             }
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        CardDivider()
         ListRow(
             title = "默认语音",
             subtitle = (s.ttsVoices[s.ttsEngine] ?: "自动") + " · 旁白和没识别出角色的台词用它；按目标语言「${s.targetLanguage}」在线获取",
             trailing = { Icon(AppIcons.ArrowForward, null) },
             onClick = { picking = true },
         )
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        CardDivider()
         Column(Modifier.padding(16.dp)) {
             Text("朗读时原声音量 ${(s.ttsDuckVolume * 100).toInt()}%", style = MaterialTheme.typography.bodyLarge)
             Slider(value = s.ttsDuckVolume, onValueChange = { onChange(s.copy(ttsDuckVolume = it)) }, valueRange = 0f..1f, steps = 9)
@@ -475,6 +507,8 @@ private fun ConfigField(value: String, onChange: (String) -> Unit, label: String
         singleLine = true,
         visualTransformation = if (secret && !visible) PasswordVisualTransformation() else VisualTransformation.None,
         trailingIcon = if (secret) ({ TextButton(onClick = { visible = !visible }) { Text(if (visible) "隐藏" else "显示") } }) else null,
+        shape = MaterialTheme.shapes.small,
+        colors = appFieldColors(),
         modifier = Modifier.fillMaxWidth(),
     )
 }
@@ -523,6 +557,8 @@ private fun ModelField(
                 }
             },
             supportingText = { Text(error ?: "点右侧箭头从服务商获取模型列表", color = if (error != null) MaterialTheme.colorScheme.error else Color.Unspecified) },
+            shape = MaterialTheme.shapes.small,
+            colors = appFieldColors(),
             modifier = Modifier.fillMaxWidth(),
         )
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.heightIn(max = 360.dp)) {
