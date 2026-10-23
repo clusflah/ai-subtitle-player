@@ -170,7 +170,8 @@ fun AboutDialog(onDismiss: () -> Unit) {
                 Text("译幕 Voxtitle ${BuildConfig.VERSION_NAME}")
                 Text(
                     "本地 / 云端语音识别生成字幕，大模型翻译。\n\n" +
-                        "开源组件：Media3 ExoPlayer、sherpa-onnx、SenseVoice、Silero VAD、OkHttp、Apache Commons Compress。",
+                        "开源组件：Media3 ExoPlayer、sherpa-onnx、SenseVoice、Silero VAD、OkHttp、Apache Commons Compress。\n\n" +
+                        "本应用以 AGPL-3.0 许可证开源，源代码：\nhttps://github.com/clusflah/ai-subtitle-player",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }

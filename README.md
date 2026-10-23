@@ -2,6 +2,8 @@
 
 本地语音识别生成字幕 + LLM 翻译的安卓视频播放器。
 
+**下载**：到 [Releases](https://github.com/clusflah/ai-subtitle-player/releases/latest) 下载最新 APK，大多数手机选 `Voxtitle-*-arm64-v8a.apk`。需要 Android 8.0 及以上。
+
 - 界面：仿 VLC，底部五个标签——视频 / 音频 / 浏览 / 播放列表 / 更多（设置、串流、历史）
 - 媒体来源：手机媒体库、系统文件选择器、网络串流、WebDAV、OpenList，以及直连网盘：115（扫码）、阿里云盘（扫码）、百度网盘（自有 AppKey 扫码或 refresh_token）、PikPak（账号密码）
 - 播放：Media3 ExoPlayer，支持播放队列、记住播放进度
@@ -9,6 +11,7 @@
   - 本地离线（sherpa-onnx，按需下载）：SenseVoice、Paraformer 中文（配标点模型）、FireRedASR2、Qwen3-ASR 0.6B、Whisper base、Parakeet TDT v3、Moonshine、Dolphin
   - 云端：Azure、火山引擎豆包语音、阿里云 Fun-ASR、讯飞录音文件转写、ElevenLabs Scribe、Deepgram、OpenAI Whisper（及兼容接口）
   - 字幕按逐字/逐词时间戳切成短句，逐句显示
+- 字幕：中文译文可在每个字上方标注拼音（Android 10+）
 - 翻译：Claude（官方 anthropic-java SDK）、DeepSeek、Gemini、Index-Translate（B 站开源翻译模型，公共接口免费）或任意 OpenAI 兼容接口（通义千问、Kimi、Ollama 等）
 
 ## 构建
@@ -68,4 +71,8 @@
 [OpenList-APIPages](https://github.com/OpenListTeam/OpenList-APIPages)（AGPL-3.0）与
 [115driver](https://github.com/SheltonZhu/115driver) 的实现。
 其中 115、PikPak、阿里云盘 TV 授权属于非官方接口，可能随时失效，也存在账号风控风险。
-若公开分发本项目，请遵守上述项目的开源许可（AGPL-3.0 要求公开对应源码）。
+
+## 许可证
+
+本项目以 [GNU Affero General Public License v3.0](LICENSE)（AGPL-3.0）发布。
+分发修改版（包括 APK）时，需要以同样的许可证公开对应的完整源码。
