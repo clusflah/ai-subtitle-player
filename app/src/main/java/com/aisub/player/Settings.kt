@@ -2,6 +2,7 @@ package com.aisub.player
 
 import android.content.Context
 import com.aisub.player.asr.ModelManager
+import com.aisub.player.subtitle.Pinyin
 import com.aisub.player.translate.ChatCompletionsTranslator
 import com.aisub.player.translate.ClaudeTranslator
 import com.aisub.player.translate.PromptStyle
@@ -55,6 +56,8 @@ data class AppSettings(
     val subtitleOffset: Int = 40,
     /** 字幕列表自动滚动到当前句 */
     val followPlayback: Boolean = true,
+    /** 中文译文的每个字上方标注拼音 */
+    val showPinyin: Boolean = false,
     /** 在线字幕：OpenSubtitles.com 的 API Key 与账号（账号可不填，不登录每天限 5 次下载） */
     val osApiKey: String = "",
     val osUsername: String = "",
@@ -89,6 +92,16 @@ data class AppSettings(
             baseUrl = if (p.editableBaseUrl) c.baseUrl.trim().ifEmpty { p.defaultBaseUrl } else p.defaultBaseUrl,
         )
     }
+
+    /** 目标语言是中文时才标拼音（日文汉字的读音不同） */
+    val targetIsChinese: Boolean
+        get() = targetLanguage.trim().let { t ->
+            listOf("中文", "汉语", "漢語", "华语", "華語", "简体", "繁體", "繁体", "普通话", "国语", "國語").any { it in t } ||
+                t.contains("chinese", ignoreCase = true) || t.lowercase().startsWith("zh")
+        }
+
+    /** 当前是否给译文标拼音：开关打开、系统支持、目标语言是中文 */
+    val pinyinActive: Boolean get() = showPinyin && Pinyin.available && targetIsChinese
 
     fun withConfig(p: Provider, c: ProviderConfig) = copy(providerConfigs = providerConfigs + (p to c))
 
@@ -161,6 +174,7 @@ class SettingsRepository(context: Context) {
             subtitleScale = prefs.getFloat("subtitleScale", d.subtitleScale),
             subtitleOffset = prefs.getInt("subtitleOffset", d.subtitleOffset),
             followPlayback = prefs.getBoolean("followPlayback", d.followPlayback),
+            showPinyin = prefs.getBoolean("showPinyin", d.showPinyin),
             osApiKey = prefs.getString("osApiKey", "")!!,
             osUsername = prefs.getString("osUsername", "")!!,
             osPassword = prefs.getString("osPassword", "")!!,
@@ -192,6 +206,7 @@ class SettingsRepository(context: Context) {
             .putFloat("subtitleScale", s.subtitleScale)
             .putInt("subtitleOffset", s.subtitleOffset)
             .putBoolean("followPlayback", s.followPlayback)
+            .putBoolean("showPinyin", s.showPinyin)
             .putString("osApiKey", s.osApiKey)
             .putString("osUsername", s.osUsername)
             .putString("osPassword", s.osPassword)

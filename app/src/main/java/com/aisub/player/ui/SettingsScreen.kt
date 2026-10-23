@@ -64,6 +64,7 @@ import com.aisub.player.MainViewModel
 import com.aisub.player.Provider
 import com.aisub.player.ProviderConfig
 import com.aisub.player.asr.ModelCatalog
+import com.aisub.player.subtitle.Pinyin
 import com.aisub.player.translate.ModelList
 import com.aisub.player.asrProblem
 import com.aisub.player.withAsrValue
@@ -341,6 +342,22 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 ListRow(
+                    title = "中文译文加拼音",
+                    subtitle = when {
+                        !Pinyin.available -> "需要 Android 10 及以上"
+                        !s.targetIsChinese -> "目标语言是中文时可用"
+                        else -> "在每个字上方标注拼音，适合学中文；多音字可能不准"
+                    },
+                    trailing = {
+                        Switch(
+                            checked = s.showPinyin, onCheckedChange = { s = s.copy(showPinyin = it) },
+                            enabled = Pinyin.available && s.targetIsChinese,
+                        )
+                    },
+                    onClick = { if (Pinyin.available && s.targetIsChinese) s = s.copy(showPinyin = !s.showPinyin) },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow(
                     title = "字幕列表跟随播放",
                     subtitle = "自动滚动到正在播放的句子",
                     trailing = { Switch(checked = s.followPlayback, onCheckedChange = { s = s.copy(followPlayback = it) }) },
@@ -533,7 +550,10 @@ private fun SubtitlePreview(s: AppSettings) {
         contentAlignment = Alignment.BottomCenter,
     ) {
         Column(Modifier.padding(bottom = (s.subtitleOffset / 2).dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            if (s.showTranslation) Text("这是一句翻译后的字幕", color = Color.White, fontSize = (18 * s.subtitleScale).sp)
+            if (s.showTranslation) {
+                if (s.pinyinActive) PinyinText("这是一句翻译后的字幕", Color.White, (18 * s.subtitleScale).sp, center = true)
+                else Text("这是一句翻译后的字幕", color = Color.White, fontSize = (18 * s.subtitleScale).sp)
+            }
             if (s.showOriginal) Text("This is the original line.", color = Color(0xFFE0E0E0), fontSize = (14 * s.subtitleScale).sp)
         }
     }
