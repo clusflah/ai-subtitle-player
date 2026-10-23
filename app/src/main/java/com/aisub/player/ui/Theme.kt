@@ -16,9 +16,11 @@ import androidx.compose.ui.unit.sp
 
 /**
  * 设计基线（与 MediaOrganizer 一致）：柔和的紫色为主色，页面是很浅的紫、卡片接近纯白，
- * 靠底色和留白分层，不加阴影；橙色只用在播放器和分组标题前的短条上。
+ * 靠底色和留白分层，不加阴影；橙色只用在分组标题前的短条上。
  */
-val Orange = Color(0xFFF28C00)
+
+/** 播放器（深色背景）上的强调色：比浅色主题的主色更亮的紫，在黑底上看得清 */
+val PlayerAccent = Color(0xFFB4A3FF)
 
 private val Light = lightColorScheme(
     primary = Color(0xFF7562C9),
