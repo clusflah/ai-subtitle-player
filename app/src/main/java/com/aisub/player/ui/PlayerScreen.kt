@@ -619,7 +619,8 @@ private fun TaskChip(state: UiState, onClick: () -> Unit, modifier: Modifier = M
 @Composable
 private fun SubtitleOverlay(cue: Cue?, settings: AppSettings, modifier: Modifier = Modifier) {
     if (cue == null) return
-    val lines = buildList {
+    // 原文已是目标语言时译文和原文相同，只显示一行
+    val lines = if (cue.translation == cue.text) listOf(cue.text to true) else buildList {
         if (settings.showTranslation && cue.translation != null) add(cue.translation to true)
         if (settings.showOriginal || cue.translation == null) add(cue.text to false)
     }
@@ -1019,8 +1020,9 @@ private fun CueList(
                             "${formatTime(cue.startMs)} – ${formatTime(cue.endMs)}" + (speaker?.let { "  ·  $it" } ?: ""),
                             fontSize = 11.sp, color = Color(0xFF888888),
                         )
-                        if (settings.showOriginal || cue.translation == null) Text(cue.text, color = Color.White, fontSize = 15.sp)
-                        if (settings.showTranslation && cue.translation != null) {
+                        val sameText = cue.translation == cue.text
+                        if (!sameText && (settings.showOriginal || cue.translation == null)) Text(cue.text, color = Color.White, fontSize = 15.sp)
+                        if ((settings.showTranslation || sameText) && cue.translation != null) {
                             if (settings.pinyinActive) PinyinText(cue.translation, Orange, 15.sp)
                             else Text(cue.translation, color = Orange, fontSize = 15.sp)
                         }

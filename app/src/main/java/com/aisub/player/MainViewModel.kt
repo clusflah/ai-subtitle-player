@@ -39,6 +39,8 @@ import com.aisub.player.subtitle.OnlineSubtitleSource
 import com.aisub.player.subtitle.OnlineSubtitles
 import com.aisub.player.subtitle.decodeText
 import com.aisub.player.subtitle.writeSrt
+import com.aisub.player.translate.ChineseScript
+import com.aisub.player.translate.LanguageCheck
 import com.aisub.player.translate.Translator
 import com.aisub.player.subtitle.Role
 import com.aisub.player.tts.AzureTts
@@ -520,7 +522,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun translateLoop(translator: Translator) {
+        var skipped = 0
         while (true) {
+            // 原文已经是目标语言（或没有文字）的句子不发给大模型，原文直接当译文
+            val target = _state.value.settings.ttsLocale
+            val asrLanguage = _state.value.settings.asrLanguage
+            val same = _state.value.cues
+                .filter { it.translation == null && LanguageCheck.alreadyTarget(it.text, target, asrLanguage, ChineseScript::variant) }
+                .map { it.id }.toSet()
+            if (same.isNotEmpty()) {
+                skipped += same.size
+                _state.update { s -> s.copy(cues = s.cues.map { c -> if (c.id in same) c.copy(translation = c.text) else c }) }
+            }
+
             val snapshot = _state.value
             val firstPending = snapshot.cues.indexOfFirst { it.translation == null }
             if (firstPending < 0) {
@@ -528,9 +542,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     delay(1000)
                     continue
                 }
+                if (skipped > 0 && !snapshot.transcribing) {
+                    _state.update { it.copy(status = "翻译完成，其中 $skipped 句原文已是${it.settings.targetLanguage}，没有翻译") }
+                }
                 return
             }
-            val batch = snapshot.cues.drop(firstPending).takeWhile { it.translation == null }.take(BATCH_SIZE)
+            // 跳过中间不用翻译的句子，凑够一批再发
+            val batch = snapshot.cues.drop(firstPending).filter { it.translation == null }.take(BATCH_SIZE)
             // 识别还在进行时攒够一批再翻，翻译质量更好、请求也更少
             if (snapshot.transcribing && batch.size < BATCH_SIZE) {
                 delay(1000)

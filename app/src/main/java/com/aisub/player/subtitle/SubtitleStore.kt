@@ -108,7 +108,7 @@ fun writeSrt(cues: List<Cue>, mode: SrtMode, out: OutputStream) {
         val body = when (mode) {
             SrtMode.ORIGINAL -> c.text
             SrtMode.TRANSLATION -> c.translation ?: c.text
-            SrtMode.BILINGUAL -> listOfNotNull(c.translation, c.text).joinToString("\n")
+            SrtMode.BILINGUAL -> listOfNotNull(c.translation, c.text).distinct().joinToString("\n")
         }
         sb.append(index++).append('\n')
         sb.append(srtTime(c.startMs)).append(" --> ").append(srtTime(c.endMs)).append('\n')
