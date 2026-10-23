@@ -66,6 +66,8 @@ import com.aisub.player.ProviderConfig
 import com.aisub.player.asr.ModelCatalog
 import com.aisub.player.subtitle.Pinyin
 import com.aisub.player.translate.ModelList
+import com.aisub.player.tts.TtsEngineType
+import com.aisub.player.tts.TtsReader
 import com.aisub.player.asrProblem
 import com.aisub.player.withAsrValue
 import kotlinx.coroutines.launch
@@ -364,6 +366,10 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     onClick = { s = s.copy(followPlayback = !s.followPlayback) },
                 )
             }
+
+            // ---------------- 朗读译文 ----------------
+            SectionHeader("朗读译文")
+            TtsSettings(s, vm) { s = it }
         }
     }
 
@@ -375,6 +381,66 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             confirmButton = { TextButton(onClick = { vm.updateSettings(s); onBack() }) { Text("保存") } },
             dismissButton = { TextButton(onClick = { confirmDiscard = false; onBack() }) { Text("放弃") } },
         )
+    }
+}
+
+/** 朗读（TTS）设置：开关、引擎、Azure 配置、默认语音、原声音量。 */
+@Composable
+private fun TtsSettings(s: AppSettings, vm: MainViewModel, onChange: (AppSettings) -> Unit) {
+    var picking by remember { mutableStateOf(false) }
+    SurfaceCard {
+        ListRow(
+            title = "播放时朗读译文",
+            subtitle = "跟随字幕时间朗读；识别角色后可以给每个角色配不同的语音（播放页「字幕」面板）",
+            trailing = { Switch(checked = s.ttsEnabled, onCheckedChange = { onChange(s.copy(ttsEnabled = it)) }) },
+            onClick = { onChange(s.copy(ttsEnabled = !s.ttsEnabled)) },
+        )
+        TtsEngineType.entries.forEach { engine ->
+            HorizontalDivider(Modifier.padding(start = 64.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            val selected = s.ttsEngine == engine
+            ListRow(
+                title = engine.label,
+                subtitle = engine.hint,
+                leading = { RadioButton(selected = selected, onClick = { onChange(s.copy(ttsEngine = engine)) }) },
+                onClick = { onChange(s.copy(ttsEngine = engine)) },
+            )
+            AnimatedVisibility(selected && engine == TtsEngineType.AZURE) {
+                ConfigBlock {
+                    val asrKey = s.asrConfigs[AsrEngine.AZURE]?.get("key").orEmpty()
+                    ConfigField(
+                        s.ttsAzureKey, { onChange(s.copy(ttsAzureKey = it)) }, "Speech 资源 Key",
+                        if (asrKey.isNotBlank()) "留空则使用语音识别里的 Azure Key" else "", secret = true,
+                    )
+                    ConfigField(s.ttsAzureRegion, { onChange(s.copy(ttsAzureRegion = it)) }, "区域（Region）", s.ttsAzure().second.ifEmpty { "eastasia" })
+                    ConfigField(s.ttsAzureEndpoint, { onChange(s.copy(ttsAzureEndpoint = it)) }, "自定义接口地址（可不填）", "中国区：https://chinanorth3.tts.speech.azure.cn")
+                }
+            }
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        ListRow(
+            title = "默认语音",
+            subtitle = (s.ttsVoices[s.ttsEngine] ?: "自动") + " · 旁白和没识别出角色的台词用它；按目标语言「${s.targetLanguage}」在线获取",
+            trailing = { Icon(AppIcons.ArrowForward, null) },
+            onClick = { picking = true },
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        Column(Modifier.padding(16.dp)) {
+            Text("朗读时原声音量 ${(s.ttsDuckVolume * 100).toInt()}%", style = MaterialTheme.typography.bodyLarge)
+            Slider(value = s.ttsDuckVolume, onValueChange = { onChange(s.copy(ttsDuckVolume = it)) }, valueRange = 0f..1f, steps = 9)
+            Text(
+                "语音比字幕长时会自动加快（最多 ${TtsReader.MAX_SPEED} 倍）；下一句开始时上一句还没读完会被打断",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    if (picking) {
+        VoicePickerDialog(
+            vm, s, "默认语音", s.ttsVoices[s.ttsEngine], allowAuto = true,
+            onDismiss = { picking = false },
+        ) { v ->
+            onChange(s.copy(ttsVoices = if (v == null) s.ttsVoices - s.ttsEngine else s.ttsVoices + (s.ttsEngine to v)))
+            picking = false
+        }
     }
 }
 

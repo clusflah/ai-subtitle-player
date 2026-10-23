@@ -6,6 +6,9 @@ import org.json.JSONObject
 /** 一批字幕的翻译接口。返回值与 lines 一一对应，某条没翻出来时为 null。 */
 interface Translator {
     suspend fun translate(lines: List<String>, context: List<String>, targetLanguage: String): List<String?>
+
+    /** 通用对话：给一段系统提示词和用户消息，返回模型的文字回复。用于识别角色等非翻译任务。 */
+    suspend fun chat(system: String, user: String): String
 }
 
 class TranslationException(message: String, cause: Throwable? = null) : Exception(message, cause)
@@ -66,7 +69,7 @@ internal object TranslationPrompt {
         return List(expected) { i -> obj.optString((i + 1).toString()).trim().ifEmpty { null } }
     }
 
-    private fun extractJson(raw: String): JSONObject {
+    fun extractJson(raw: String): JSONObject {
         val start = raw.indexOf('{')
         val end = raw.lastIndexOf('}')
         if (start < 0 || end <= start) throw TranslationException("模型没有返回 JSON：${raw.take(200)}")
