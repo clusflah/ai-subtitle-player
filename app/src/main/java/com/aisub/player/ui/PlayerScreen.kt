@@ -122,10 +122,10 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 private val PlayerColors = darkColorScheme(
-    primary = Orange,
-    onPrimary = Color.Black,
+    primary = PlayerAccent,
+    onPrimary = Color(0xFF2A1D66),
     background = Color.Black,
-    secondaryContainer = Color(0x66F28C00),
+    secondaryContainer = Color(0x669C88F0),
     onSecondaryContainer = Color.White,
     surface = Color(0xFF111111),
     surfaceContainerLow = Color(0xFF111111),
@@ -303,13 +303,13 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 Text(playbackError, color = Color(0xFFCCCCCC), fontSize = 13.sp)
                 Spacer(Modifier.height(12.dp))
                 Row {
-                    TextButton(onClick = { vm.togglePlay() }) { Text("重试", color = Orange) }
-                    if (!vm.usingVlc) TextButton(onClick = { vm.switchToVlc() }) { Text("换用 VLC 内核播放", color = Orange) }
+                    TextButton(onClick = { vm.togglePlay() }) { Text("重试", color = PlayerAccent) }
+                    if (!vm.usingVlc) TextButton(onClick = { vm.switchToVlc() }) { Text("换用 VLC 内核播放", color = PlayerAccent) }
                 }
             }
         } else if (buffering && wantsPlay) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                CircularProgressIndicator(color = Orange)
+                CircularProgressIndicator(color = PlayerAccent)
                 Spacer(Modifier.height(8.dp))
                 Text("正在缓冲…", color = Color.White, fontSize = 13.sp)
             }
@@ -349,7 +349,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                     Text(formatClock(dragging?.toLong() ?: positionMs), color = Color.White, fontSize = 14.sp)
                     Spacer(Modifier.weight(1f))
-                    state.loopA?.let { Text(if (state.loopB != null) "A-B 循环中  " else "A 点已设置  ", color = Orange, fontSize = 13.sp) }
+                    state.loopA?.let { Text(if (state.loopB != null) "A-B 循环中  " else "A 点已设置  ", color = PlayerAccent, fontSize = 13.sp) }
                     Text(formatClock(duration), color = Color.White, fontSize = 14.sp)
                 }
                 SeekBar(
@@ -607,10 +607,10 @@ private fun SeekBar(fraction: Float, onDrag: (Float) -> Unit, onDragEnd: () -> U
         contentAlignment = Alignment.CenterStart,
     ) {
         Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color(0x55FFFFFF)))
-        Box(Modifier.fillMaxWidth(fraction).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Orange))
+        Box(Modifier.fillMaxWidth(fraction).height(3.dp).clip(RoundedCornerShape(2.dp)).background(PlayerAccent))
         Box(
             Modifier.offset { IntOffset((fraction * widthPx - 8.dp.toPx()).roundToInt(), 0) }
-                .size(16.dp).clip(CircleShape).background(Orange),
+                .size(16.dp).clip(CircleShape).background(PlayerAccent),
         )
     }
 }
@@ -634,7 +634,7 @@ private fun TaskChip(state: UiState, onClick: () -> Unit, modifier: Modifier = M
         else -> return
     }
     Row(
-        modifier.clip(RoundedCornerShape(50)).background(if (state.failedTask != null) Color(0x55D93025) else Color(0x55F28C00))
+        modifier.clip(RoundedCornerShape(50)).background(if (state.failedTask != null) Color(0x55D93025) else Color(0x559C88F0))
             .clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1069,10 +1069,10 @@ private fun CueList(
             Box {
                 Row(
                     Modifier.fillMaxWidth().height(IntrinsicSize.Min)
-                        .background(if (active) Color(0x33F28C00) else Color.Transparent)
+                        .background(if (active) Color(0x339C88F0) else Color.Transparent)
                         .combinedClickable(onClick = { onSeek(cue) }, onLongClick = { menu = true }),
                 ) {
-                    Box(Modifier.width(3.dp).fillMaxHeight().background(if (active) Orange else Color.Transparent))
+                    Box(Modifier.width(3.dp).fillMaxHeight().background(if (active) PlayerAccent else Color.Transparent))
                     Column(Modifier.padding(start = 13.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)) {
                         val speaker = cue.speaker?.let { id -> roles.firstOrNull { it.id == id }?.name }
                         Text(
@@ -1082,8 +1082,8 @@ private fun CueList(
                         val sameText = cue.translation == cue.text
                         if (!sameText && (settings.showOriginal || cue.translation == null)) Text(cue.text, color = Color.White, fontSize = 15.sp)
                         if ((settings.showTranslation || sameText) && cue.translation != null) {
-                            if (settings.pinyinActive) PinyinText(cue.translation, Orange, 15.sp)
-                            else Text(cue.translation, color = Orange, fontSize = 15.sp)
+                            if (settings.pinyinActive) PinyinText(cue.translation, PlayerAccent, 15.sp)
+                            else Text(cue.translation, color = PlayerAccent, fontSize = 15.sp)
                         }
                     }
                 }
@@ -1115,7 +1115,7 @@ private fun ChoiceDialog(title: String, options: List<String>, selected: Int, on
                         Modifier.fillMaxWidth().clickable { onPick(i) }.padding(vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Box(Modifier.width(36.dp)) { if (i == selected) Icon(AppIcons.Check, null, tint = Orange) }
+                        Box(Modifier.width(36.dp)) { if (i == selected) Icon(AppIcons.Check, null, tint = PlayerAccent) }
                         Text(label, fontSize = 16.sp)
                     }
                 }
