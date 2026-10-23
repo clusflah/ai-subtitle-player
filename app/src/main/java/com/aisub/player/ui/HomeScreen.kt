@@ -189,7 +189,7 @@ fun HomeScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             IconBadge(AppIcons.PlayArrow, size = 32.dp)
                             Spacer(Modifier.width(10.dp))
-                            Text("AI 字幕播放器", style = MaterialTheme.typography.titleLarge)
+                            Text("译幕", style = MaterialTheme.typography.titleLarge)
                         }
                     }
                 },

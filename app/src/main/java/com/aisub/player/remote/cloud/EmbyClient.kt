@@ -1,5 +1,6 @@
 package com.aisub.player.remote.cloud
 
+import com.aisub.player.remote.Endpoints
 import com.aisub.player.remote.ItemMeta
 import com.aisub.player.remote.RemoteItem
 import com.aisub.player.remote.Server
@@ -16,11 +17,12 @@ import java.util.UUID
 /**
  * Emby / Jellyfin 媒体服务器（两者接口兼容）。用服务器地址 + 用户名密码登录。
  * 浏览：媒体库 → 文件夹 / 剧集 → 季 → 集；播放用服务器原始文件（static=true，不转码）。
- * creds：token / user_id / device_id；Server.baseUrl 是服务器地址。定位符是条目 ID，根目录为空。
+ * creds：token / user_id / device_id；Server.baseUrl 是服务器地址，lanUrl 是可选的内网地址。定位符是条目 ID，根目录为空。
  */
 class EmbyClient(server: Server) : CloudClient(server) {
 
-    private val base get() = server.normalizedBase
+    /** 内网 / 外网地址里当前能用的那个；会联网探测，只在后台线程用 */
+    private val base get() = Endpoints.base(server)
     private val token get() = creds.optString("token")
 
     private fun get(path: String, params: Map<String, String> = emptyMap()): JSONObject {
@@ -143,10 +145,24 @@ class EmbyClient(server: Server) : CloudClient(server) {
         private val FOLDER_TYPES = setOf("Folder", "CollectionFolder", "Series", "Season", "BoxSet", "MusicAlbum", "MusicArtist", "Playlist", "UserView")
 
         private fun authHeader(deviceId: String) =
-            """MediaBrowser Client="AiSubPlayer", Device="Android", DeviceId="$deviceId", Version="1.0""""
+            """MediaBrowser Client="Voxtitle", Device="Android", DeviceId="$deviceId", Version="1.0""""
 
-        /** 用户名密码登录，返回凭据 JSON。 */
-        fun login(baseUrl: String, username: String, password: String): String {
+        /** 用户名密码登录，返回凭据 JSON。填了内网地址时先试内网（在家可能连不上外网域名），失败再试外网。 */
+        fun login(baseUrl: String, lanUrl: String, username: String, password: String): String {
+            val urls = listOf(lanUrl, baseUrl).map { it.trim() }.filter { it.isNotEmpty() }
+            var last: IOException? = null
+            for (url in urls) {
+                try {
+                    return login(url, username, password)
+                } catch (e: IOException) {
+                    if (e.message == "用户名或密码错误") throw e
+                    last = e
+                }
+            }
+            throw last ?: IOException("请填写服务器地址")
+        }
+
+        private fun login(baseUrl: String, username: String, password: String): String {
             val deviceId = UUID.randomUUID().toString()
             val body = JSONObject().put("Username", username).put("Pw", password).toString()
                 .toRequestBody("application/json".toMediaType())

@@ -120,6 +120,15 @@ fun ServerDialog(initial: Server, hint: String? = null, onDismiss: () -> Unit, o
                     },
                     singleLine = true, modifier = Modifier.fillMaxWidth(),
                 )
+                OutlinedTextField(
+                    s.lanUrl, { s = s.copy(lanUrl = it) },
+                    label = { Text("内网地址（可不填）") },
+                    placeholder = {
+                        Text(if (s.type == ServerType.OPENLIST) "http://192.168.1.2:5244" else "http://192.168.1.2:5005/dav")
+                    },
+                    supportingText = { Text("上面填外网域名时，在家能连上内网地址就自动走内网") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth(),
+                )
                 OutlinedTextField(s.username, { s = s.copy(username = it) }, label = { Text("用户名（可不填）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(
                     s.password, { s = s.copy(password = it) }, label = { Text("密码") }, singleLine = true,
@@ -135,14 +144,21 @@ fun ServerDialog(initial: Server, hint: String? = null, onDismiss: () -> Unit, o
             TextButton(
                 onClick = {
                     val root = s.rootPath.trim().ifEmpty { "/" }.let { if (it.startsWith('/')) it else "/$it" }
-                    onSave(s.copy(name = s.name.trim().ifEmpty { s.baseUrl.trim() }, baseUrl = s.baseUrl.trim(), rootPath = root))
+                    onSave(
+                        s.copy(
+                            name = s.name.trim().ifEmpty { s.baseUrl.trim() }, baseUrl = s.baseUrl.trim(),
+                            lanUrl = s.lanUrl.trim(), rootPath = root,
+                        ),
+                    )
                 },
-                enabled = s.baseUrl.startsWith("http://") || s.baseUrl.startsWith("https://"),
+                enabled = s.baseUrl.isHttpUrl() && (s.lanUrl.isBlank() || s.lanUrl.trim().isHttpUrl()),
             ) { Text("保存") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
+
+private fun String.isHttpUrl() = startsWith("http://") || startsWith("https://")
 
 @Composable
 fun AboutDialog(onDismiss: () -> Unit) {
@@ -151,10 +167,11 @@ fun AboutDialog(onDismiss: () -> Unit) {
         title = { Text("关于") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("AI 字幕播放器 ${BuildConfig.VERSION_NAME}")
+                Text("译幕 Voxtitle ${BuildConfig.VERSION_NAME}")
                 Text(
                     "本地 / 云端语音识别生成字幕，大模型翻译。\n\n" +
-                        "开源组件：Media3 ExoPlayer、sherpa-onnx、SenseVoice、Silero VAD、OkHttp、Apache Commons Compress。",
+                        "开源组件：Media3 ExoPlayer、sherpa-onnx、SenseVoice、Silero VAD、OkHttp、Apache Commons Compress。\n\n" +
+                        "本应用以 AGPL-3.0 许可证开源，源代码：\nhttps://github.com/clusflah/ai-subtitle-player",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }

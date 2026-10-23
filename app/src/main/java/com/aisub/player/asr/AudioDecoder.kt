@@ -7,6 +7,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import com.aisub.player.remote.AuthRegistry
+import com.aisub.player.remote.Endpoints
 import com.aisub.player.remote.cloud.CloudRegistry
 import java.nio.ByteOrder
 
@@ -68,7 +69,8 @@ class AudioDecoder(
                 extractor.setDataSource(context, Uri.parse(link.url), link.headers.ifEmpty { null })
             } else {
                 // 远程文件（WebDAV）需要带鉴权头
-                extractor.setDataSource(context, uri, AuthRegistry.headersFor(uri.toString()).ifEmpty { null })
+                val routed = Endpoints.rewrite(uri.toString())
+                extractor.setDataSource(context, Uri.parse(routed), AuthRegistry.headersFor(routed).ifEmpty { null })
             }
         } catch (e: java.io.IOException) {
             extractor.release()

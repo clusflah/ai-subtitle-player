@@ -22,6 +22,7 @@ import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.MediaProxy
 import com.aisub.player.media.VlcPlayer
 import com.aisub.player.remote.AuthRegistry
+import com.aisub.player.remote.Endpoints
 import com.aisub.player.remote.cloud.CloudRegistry
 import com.aisub.player.asr.AudioDecoder
 import com.aisub.player.asr.LocalModel
@@ -115,7 +116,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            android.util.Log.e("AiSub", "播放失败", error)
+            android.util.Log.e("Voxtitle", "播放失败", error)
             _state.update { it.copy(playbackError = describePlaybackError(error)) }
         }
 
@@ -304,7 +305,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.update { it.copy(status = "已取消", progress = null) }
                     throw CancellationException("cancelled")
                 }
-                android.util.Log.e("AiSub", "识别失败", e)
+                android.util.Log.e("Voxtitle", "识别失败", e)
                 _state.update { it.copy(status = "识别失败", progress = null, error = e.message ?: e.toString(), failedTask = Task.TRANSCRIBE) }
             } finally {
                 _state.update { it.copy(transcribing = false) }
@@ -594,8 +595,11 @@ internal fun authDataSourceFactory(app: Application): DataSource.Factory {
             val link = CloudRegistry.resolve(uri)
             spec.withUri(Uri.parse(link.url)).withAdditionalHeaders(link.headers)
         } else {
-            val headers = AuthRegistry.headersFor(uri)
-            if (headers.isEmpty()) spec else spec.withAdditionalHeaders(headers)
+            // 双地址服务器：换成当前能连上的内网 / 外网地址
+            val routed = Endpoints.rewrite(uri)
+            val headers = AuthRegistry.headersFor(routed)
+            val s = if (routed == uri) spec else spec.withUri(Uri.parse(routed))
+            if (headers.isEmpty()) s else s.withAdditionalHeaders(headers)
         }
     }
 }

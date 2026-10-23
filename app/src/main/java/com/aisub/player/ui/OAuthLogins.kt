@@ -84,13 +84,19 @@ private fun rememberRun(): Pair<Runner, (suspend () -> Unit) -> Unit> {
 }
 
 @Composable
-internal fun EmbyLogin(initialUrl: String, onSuccess: (String, String?) -> Unit) {
+internal fun EmbyLogin(initialUrl: String, initialLan: String, onSuccess: (creds: String, url: String, lanUrl: String) -> Unit) {
     var url by remember { mutableStateOf(initialUrl) }
+    var lan by remember { mutableStateOf(initialLan) }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     val (state, run) = rememberRun()
     Hint("Emby 和 Jellyfin 都可以，填服务器地址（例如 http://192.168.1.2:8096）和账号。")
     OutlinedTextField(url, { url = it }, label = { Text("服务器地址") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+    OutlinedTextField(
+        lan, { lan = it }, label = { Text("内网地址（可不填）") }, placeholder = { Text("http://192.168.1.2:8096") },
+        supportingText = { Text("上面填外网域名时，在家能连上内网地址就自动走内网") },
+        singleLine = true, modifier = Modifier.fillMaxWidth(),
+    )
     OutlinedTextField(username, { username = it }, label = { Text("用户名") }, singleLine = true, modifier = Modifier.fillMaxWidth())
     OutlinedTextField(
         password, { password = it }, label = { Text("密码") }, singleLine = true,
@@ -102,9 +108,11 @@ internal fun EmbyLogin(initialUrl: String, onSuccess: (String, String?) -> Unit)
             enabled = !state.busy && url.isNotBlank() && username.isNotBlank(),
             onClick = {
                 run {
-                    val fixed = url.trim().trimEnd('/').let { if (it.startsWith("http")) it else "http://$it" }
-                    val creds = withContext(Dispatchers.IO) { EmbyClient.login(fixed, username.trim(), password) }
-                    onSuccess(creds, fixed)
+                    fun fix(u: String) = u.trim().trimEnd('/').let { if (it.isEmpty() || it.startsWith("http")) it else "http://$it" }
+                    val fixed = fix(url)
+                    val fixedLan = fix(lan)
+                    val creds = withContext(Dispatchers.IO) { EmbyClient.login(fixed, fixedLan, username.trim(), password) }
+                    onSuccess(creds, fixed, fixedLan)
                 }
             },
         ) { Text("登录") }

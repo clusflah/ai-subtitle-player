@@ -22,7 +22,8 @@ class OpenListClient(private val server: Server) : RemoteClient {
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    private val base = server.normalizedBase
+    /** 内网 / 外网地址里当前能用的那个；会联网探测，只在 IO 线程里用 */
+    private val base get() = Endpoints.base(server)
 
     @Volatile
     private var token: String? = null

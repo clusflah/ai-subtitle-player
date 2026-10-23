@@ -1,6 +1,7 @@
 package com.aisub.player.remote.cloud
 
 import android.net.Uri
+import com.aisub.player.remote.Endpoints
 import com.aisub.player.remote.RemoteClient
 import com.aisub.player.remote.Server
 import okhttp3.OkHttpClient
@@ -64,6 +65,11 @@ object CloudRegistry {
 
     /** cloud://<serverId>/<fileRef> → 直链。阻塞调用。 */
     fun resolve(uri: String): ResolvedLink {
+        // 媒体服务器的直链里带着服务器地址，网络切换后换成当前能连上的内网 / 外网地址
+        return resolveCached(uri).let { it.copy(url = Endpoints.rewrite(it.url)) }
+    }
+
+    private fun resolveCached(uri: String): ResolvedLink {
         linkCache[uri]?.let { (link, expiry) -> if (System.currentTimeMillis() < expiry) return link }
         val parsed = Uri.parse(uri)
         val serverId = parsed.host ?: throw IOException("无效的网盘地址")

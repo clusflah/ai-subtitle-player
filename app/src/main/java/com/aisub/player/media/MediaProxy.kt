@@ -89,7 +89,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
             out.flush()
         } catch (e: Exception) {
             // VLC 拖动时会主动断开旧连接，属于正常情况
-            Log.d("AiSub", "中转连接结束：${e.message}")
+            Log.d("Voxtitle", "中转连接结束：${e.message}")
             runCatching {
                 out.write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
                 out.flush()

@@ -54,11 +54,8 @@ import okhttp3.Request
 /** 网盘登录：115 / 阿里云盘扫码，百度网盘设备码或 refresh_token，PikPak 账号密码。 */
 @Composable
 fun CloudLoginDialog(type: ServerType, existing: Server?, onDismiss: () -> Unit, onLoggedIn: (Server) -> Unit) {
-    val finishWithUrl: (String, String?) -> Unit = { creds, url ->
-        val base = existing ?: Server(type = type, name = type.label, baseUrl = "")
-        onLoggedIn(base.copy(extra = creds, baseUrl = url ?: base.baseUrl))
-    }
-    val finish: (String) -> Unit = { finishWithUrl(it, null) }
+    val base = existing ?: Server(type = type, name = type.label, baseUrl = "")
+    val finish: (String) -> Unit = { onLoggedIn(base.copy(extra = it)) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("登录${type.label}") },
@@ -85,7 +82,9 @@ fun CloudLoginDialog(type: ServerType, existing: Server?, onDismiss: () -> Unit,
                     )
                     ServerType.BAIDU -> BaiduLogin(finish)
                     ServerType.PIKPAK -> PikPakLogin(finish)
-                    ServerType.EMBY -> EmbyLogin(existing?.baseUrl.orEmpty(), finishWithUrl)
+                    ServerType.EMBY -> EmbyLogin(existing?.baseUrl.orEmpty(), existing?.lanUrl.orEmpty()) { creds, url, lan ->
+                        onLoggedIn(base.copy(extra = creds, baseUrl = url, lanUrl = lan))
+                    }
                     ServerType.PLEX -> PlexLogin(finish)
                     ServerType.ONEDRIVE -> OneDriveLogin(finish)
                     ServerType.DROPBOX -> DropboxLogin(finish)

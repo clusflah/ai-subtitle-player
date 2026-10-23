@@ -113,6 +113,7 @@ import com.aisub.player.Task
 import com.aisub.player.UiState
 import com.aisub.player.media.formatDuration
 import com.aisub.player.subtitle.Cue
+import com.aisub.player.subtitle.Pinyin
 import com.aisub.player.subtitle.SrtMode
 import com.aisub.player.subtitle.cueAt
 import kotlinx.coroutines.delay
@@ -611,6 +612,13 @@ private fun SubtitleOverlay(cue: Cue?, settings: AppSettings, modifier: Modifier
     }
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         for ((text, primary) in lines) {
+            if (primary && settings.pinyinActive) {
+                PinyinText(
+                    text, Color.White, (18 * settings.subtitleScale).sp, fontWeight = FontWeight.Medium, center = true,
+                    modifier = Modifier.background(Color(0x99000000)).padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+                continue
+            }
             Text(
                 text = text,
                 color = if (primary) Color.White else Color(0xFFE0E0E0),
@@ -889,6 +897,12 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                     vm.updateSettings(state.settings.copy(showOriginal = o, showTranslation = t))
                 }
             }
+            if (Pinyin.available && state.settings.targetIsChinese) {
+                ActionRow(
+                    AppIcons.Translate, if (state.settings.showPinyin) "关闭译文拼音" else "译文加拼音",
+                    subtitle = "在中文译文的每个字上方标注拼音",
+                ) { vm.updateSettings(state.settings.copy(showPinyin = !state.settings.showPinyin)) }
+            }
             HorizontalDivider(Modifier.padding(start = 24.dp, end = 24.dp, top = 8.dp), color = Color(0xFF333333))
             ActionRow(AppIcons.History, "字幕延迟", subtitle = if (state.subtitleDelayMs == 0L) null else "%+.1f 秒".format(state.subtitleDelayMs / 1000f)) {
                 onSubtitleAction(SubtitleAction.DELAY)
@@ -978,7 +992,10 @@ private fun CueList(
                     Column(Modifier.padding(start = 13.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)) {
                         Text("${formatTime(cue.startMs)} – ${formatTime(cue.endMs)}", fontSize = 11.sp, color = Color(0xFF888888))
                         if (settings.showOriginal || cue.translation == null) Text(cue.text, color = Color.White, fontSize = 15.sp)
-                        if (settings.showTranslation && cue.translation != null) Text(cue.translation, color = Orange, fontSize = 15.sp)
+                        if (settings.showTranslation && cue.translation != null) {
+                            if (settings.pinyinActive) PinyinText(cue.translation, Orange, 15.sp)
+                            else Text(cue.translation, color = Orange, fontSize = 15.sp)
+                        }
                     }
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {

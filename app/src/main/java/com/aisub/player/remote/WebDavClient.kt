@@ -20,11 +20,11 @@ class WebDavClient(private val server: Server) : RemoteClient {
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    private val base = server.normalizedBase
-    private val origin = Uri.parse(base).let { "${it.scheme}://${it.encodedAuthority}" }
-    private val basePath = Uri.parse(base).path.orEmpty().trimEnd('/')
+    /** 内网 / 外网地址里当前能用的那个；会联网探测，只在 IO 线程里用 */
+    private val base get() = Endpoints.base(server)
 
     override suspend fun list(path: String): List<RemoteItem> = withContext(Dispatchers.IO) {
+        val base = base
         val dirPath = if (path.endsWith('/')) path else "$path/"
         val request = Request.Builder()
             .url(base + encodePath(dirPath))
@@ -39,7 +39,7 @@ class WebDavClient(private val server: Server) : RemoteClient {
             }
             resp.body?.string().orEmpty()
         }
-        parse(xml).filter { it.name.isNotEmpty() && it.path.trimEnd('/') != dirPath.trimEnd('/') }
+        parse(xml, base).filter { it.name.isNotEmpty() && it.path.trimEnd('/') != dirPath.trimEnd('/') }
             .sortedWith(compareBy({ !it.isDir }, { it.name.lowercase() }))
     }
 
@@ -48,8 +48,9 @@ class WebDavClient(private val server: Server) : RemoteClient {
         val src = item.path.trimEnd('/')
         val dst = src.substringBeforeLast('/') + "/" + name
         val suffix = if (item.isDir) "/" else ""
+        val base = base
         send(
-            request(src + suffix).method("MOVE", null)
+            request(src + suffix, base).method("MOVE", null)
                 .header("Destination", base + encodePath(dst + suffix))
                 .header("Overwrite", "F"),
         )
@@ -63,7 +64,7 @@ class WebDavClient(private val server: Server) : RemoteClient {
         send(request(joinPath(parent.ifEmpty { "/" }, checkName(name)) + "/").method("MKCOL", null))
     }
 
-    private fun request(path: String) = Request.Builder().url(base + encodePath(path))
+    private fun request(path: String, base: String = this.base) = Request.Builder().url(base + encodePath(path))
         .apply { server.basicAuthHeader()?.let { header("Authorization", it) } }
 
     private fun send(builder: Request.Builder) {
@@ -79,7 +80,9 @@ class WebDavClient(private val server: Server) : RemoteClient {
         }
     }
 
-    private fun parse(xml: String): List<RemoteItem> {
+    private fun parse(xml: String, base: String): List<RemoteItem> {
+        val origin = Uri.parse(base).let { "${it.scheme}://${it.encodedAuthority}" }
+        val basePath = Uri.parse(base).path.orEmpty().trimEnd('/')
         val parser = Xml.newPullParser()
         parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
         parser.setInput(xml.reader())
@@ -102,7 +105,7 @@ class WebDavClient(private val server: Server) : RemoteClient {
                 }
                 XmlPullParser.END_TAG -> if (parser.name == "response" && inResponse) {
                     inResponse = false
-                    toItem(href, isDir, size)?.let(items::add)
+                    toItem(href, isDir, size, origin, basePath)?.let(items::add)
                 }
             }
             event = parser.next()
@@ -110,7 +113,7 @@ class WebDavClient(private val server: Server) : RemoteClient {
         return items
     }
 
-    private fun toItem(href: String, isDir: Boolean, size: Long): RemoteItem? {
+    private fun toItem(href: String, isDir: Boolean, size: Long, origin: String, basePath: String): RemoteItem? {
         if (href.isEmpty()) return null
         // href 可能是完整 URL，也可能只是路径
         val rawPath = if (href.startsWith("http")) Uri.parse(href).encodedPath.orEmpty() else href

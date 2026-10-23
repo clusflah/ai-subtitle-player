@@ -3,6 +3,7 @@ package com.aisub.player.media
 import android.content.Context
 import android.net.Uri
 import com.aisub.player.remote.AuthRegistry
+import com.aisub.player.remote.Endpoints
 import com.aisub.player.remote.cloud.CloudRegistry
 import com.aisub.player.remote.cloud.cloudHttp
 import okhttp3.Request
@@ -22,7 +23,7 @@ object RemoteFiles {
         val (realUrl, headers) = if (CloudRegistry.isCloud(url)) {
             CloudRegistry.resolve(url).let { it.url to it.headers }
         } else {
-            url to AuthRegistry.headersFor(url)
+            Endpoints.rewrite(url).let { it to AuthRegistry.headersFor(it) }
         }
         val req = Request.Builder().url(realUrl).apply {
             headers.forEach { (k, v) -> header(k, v) }
