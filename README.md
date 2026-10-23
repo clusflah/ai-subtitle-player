@@ -45,6 +45,33 @@
 - 详情页显示简介、海报、演职员、评分：优先读取视频旁的 NFO 和图片，缺的再从 TMDB、豆瓣、Bangumi、TheTVDB、Fanart.tv 补全
 - 文件重命名、移动、复制、删除、分享、多选；网络位置和网盘可新建文件夹、删除、下载（保留目录结构）
 
+## 截图
+
+| 视频 | 音频 | 浏览 | 更多 |
+|---|---|---|---|
+| <img src="docs/screenshots/home-video.jpg" width="200" alt="视频"> | <img src="docs/screenshots/home-audio.jpg" width="200" alt="音频"> | <img src="docs/screenshots/home-browse.jpg" width="200" alt="浏览"> | <img src="docs/screenshots/home-more.jpg" width="200" alt="更多"> |
+
+| 字幕面板（双语、拼音、朗读、角色） | 播放器「更多」菜单 | 在线下载字幕 | 影视详情 |
+|---|---|---|---|
+| <img src="docs/screenshots/player-subtitle-panel.jpg" width="200" alt="字幕面板（双语、拼音、朗读、角色）"> | <img src="docs/screenshots/player-more.jpg" width="200" alt="播放器「更多」菜单"> | <img src="docs/screenshots/player-online-subtitles.jpg" width="200" alt="在线下载字幕"> | <img src="docs/screenshots/detail.jpg" width="200" alt="影视详情"> |
+
+| 本地识别模型 | 翻译服务 | 拼音字幕预览 | 朗读设置 |
+|---|---|---|---|
+| <img src="docs/screenshots/settings-asr-local.jpg" width="200" alt="本地识别模型"> | <img src="docs/screenshots/settings-translate.jpg" width="200" alt="翻译服务"> | <img src="docs/screenshots/settings-subtitle-style.jpg" width="200" alt="拼音字幕预览"> | <img src="docs/screenshots/settings-tts.jpg" width="200" alt="朗读设置"> |
+
+<details>
+<summary>更多截图</summary>
+
+| 添加网盘与媒体服务器 | 云端识别（Azure） | 云端识别服务 | 目标语言 |
+|---|---|---|---|
+| <img src="docs/screenshots/net-add.jpg" width="200" alt="添加网盘与媒体服务器"> | <img src="docs/screenshots/settings-asr-azure.jpg" width="200" alt="云端识别（Azure）"> | <img src="docs/screenshots/settings-asr-cloud.jpg" width="200" alt="云端识别服务"> | <img src="docs/screenshots/settings-target-language.jpg" width="200" alt="目标语言"> |
+
+| 影视信息来源 | TheTVDB / Fanart.tv | 在线字幕来源 | 音轨与字幕 |
+|---|---|---|---|
+| <img src="docs/screenshots/settings-meta.jpg" width="200" alt="影视信息来源"> | <img src="docs/screenshots/settings-meta-2.jpg" width="200" alt="TheTVDB / Fanart.tv"> | <img src="docs/screenshots/settings-online-subtitles.jpg" width="200" alt="在线字幕来源"> | <img src="docs/screenshots/player-subtitle-panel-2.jpg" width="200" alt="音轨与字幕"> |
+
+</details>
+
 ## 快速上手
 
 1. **安装**：到 [Releases](https://github.com/clusflah/ai-subtitle-player/releases/latest) 下载 APK。大多数手机选 `Voxtitle-*-arm64-v8a.apk`，不确定就选 `universal`。需要 Android 8.0 及以上。
@@ -62,6 +89,8 @@
 在「设置 → 语音识别」选择引擎，并在下方「视频语言」里选择视频的语言（不确定选「自动」）。
 
 **本地模型**（免费、离线，首次使用时下载；国内网络慢可在设置里把下载地址换成镜像）
+
+<p><img src="docs/screenshots/settings-asr-local.jpg" width="240" alt="本地识别模型"> <img src="docs/screenshots/settings-asr-azure.jpg" width="240" alt="云端识别 Azure 配置"></p>
 
 | 模型 | 适合 | 大小 |
 |---|---|---|
@@ -88,6 +117,8 @@
 
 ### 字幕翻译
 
+<p><img src="docs/screenshots/settings-target-language.jpg" width="240" alt="目标语言"> <img src="docs/screenshots/settings-translate.jpg" width="240" alt="翻译服务与模型下拉"></p>
+
 在「设置 → 字幕翻译」选择服务、填 API Key，点「模型」输入框右侧的箭头可以从服务商**在线获取模型列表**下拉选择，也可以手动填。
 
 | 服务 | 说明 |
@@ -105,6 +136,8 @@
 
 ### 拼音标注
 
+<p><img src="docs/screenshots/settings-subtitle-style.jpg" width="240" alt="拼音字幕预览"></p>
+
 「设置 → 字幕样式 → 中文译文加拼音」，或播放页字幕面板里一键开关。视频字幕和字幕列表里，中文的每个字上方会标出带声调的拼音。
 
 - 需要 Android 10 及以上（使用系统自带的转换，不增加安装包体积）
@@ -112,6 +145,8 @@
 - 能读对「重庆」等少数多音词；大部分多音字取最常用读音，可能不准
 
 ### 朗读译文与多角色配音
+
+<p><img src="docs/screenshots/settings-tts.jpg" width="240" alt="朗读设置"> <img src="docs/screenshots/player-subtitle-panel.jpg" width="240" alt="播放页字幕面板"></p>
 
 **打开朗读**：「设置 → 朗读译文」，或播放页「字幕与音轨」→「朗读译文」。
 
@@ -152,11 +187,15 @@
 | 左右滑 | 拖动进度 |
 | 长按 | 2 倍速播放，松开恢复 |
 
+<p><img src="docs/screenshots/player-more.jpg" width="240" alt="播放器「更多」菜单"></p>
+
 右下角「更多」里有：锁定屏幕、睡眠计时器（定时或本集结束后暂停）、播放速度、转到时间、均衡器、仅播放声音、弹出播放器（画中画）、循环模式、视频信息、A-B 循环、保存播放列表。
 
 DVD / 蓝光 ISO 镜像自动用 VLC 内核播放，直接进入正片。普通视频播放失败时，可以在错误提示里选「换用 VLC 内核播放」。
 
 ### 网络位置与网盘
+
+<p><img src="docs/screenshots/home-browse.jpg" width="240" alt="浏览"> <img src="docs/screenshots/net-add.jpg" width="240" alt="添加网络位置"></p>
 
 在「浏览」标签添加：
 
@@ -171,6 +210,8 @@ DVD / 蓝光 ISO 镜像自动用 VLC 内核播放，直接进入正片。普通�
 文件和文件夹的「⋮」菜单可以重命名、删除（网盘移到回收站）、下载；右上角「⋮」可新建文件夹。下载保存到 `Download/Voxtitle`，保留目录结构，进度见通知栏。
 
 ### 影视信息
+
+<p><img src="docs/screenshots/detail.jpg" width="240" alt="影视详情"> <img src="docs/screenshots/settings-meta.jpg" width="240" alt="影视信息设置"></p>
 
 网络位置和网盘里点视频进入详情页；本地视频在「⋮」菜单里选「影视信息」。
 
