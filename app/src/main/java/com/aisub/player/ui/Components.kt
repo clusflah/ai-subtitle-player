@@ -93,7 +93,7 @@ fun SectionHeader(title: String, actionLabel: String? = null, onAction: (() -> U
     }
 }
 
-/** 白色圆角卡片，用背景层次与浅紫页面区分，不加边框和阴影。 */
+/** 白色圆角卡片，用背景层次与浅灰页面区分，不加边框和阴影。 */
 @Composable
 fun SurfaceCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Surface(

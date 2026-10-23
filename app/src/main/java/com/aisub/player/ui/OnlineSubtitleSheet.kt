@@ -134,7 +134,7 @@ fun OnlineSubtitleSheet(vm: MainViewModel, onDismiss: () -> Unit, onOpenSettings
 
             Box(Modifier.weight(1f).fillMaxWidth().padding(top = 8.dp)) {
                 when {
-                    searching -> CircularProgressIndicator(Modifier.align(Alignment.Center), color = PlayerAccent)
+                    searching -> CircularProgressIndicator(Modifier.align(Alignment.Center), color = Orange)
                     results?.isEmpty() == true -> Text(
                         "没有找到字幕，试试只保留片名（英文名通常更容易搜到）",
                         color = Color(0xFFB0B0B0), modifier = Modifier.align(Alignment.Center).padding(24.dp),
@@ -164,7 +164,7 @@ private fun ResultRow(sub: OnlineSubtitle, downloading: Boolean, onClick: () -> 
             Text(sub.title, color = Color.White, fontSize = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (sub.exactMatch) {
-                    Text("完全匹配", color = PlayerAccent, fontSize = 12.sp)
+                    Text("完全匹配", color = Orange, fontSize = 12.sp)
                     Spacer(Modifier.width(8.dp))
                 }
                 if (sub.language.isNotEmpty()) {
@@ -177,7 +177,7 @@ private fun ResultRow(sub: OnlineSubtitle, downloading: Boolean, onClick: () -> 
             }
         }
         Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-            if (downloading) CircularProgressIndicator(Modifier.size(24.dp), color = PlayerAccent, strokeWidth = 2.dp)
+            if (downloading) CircularProgressIndicator(Modifier.size(24.dp), color = Orange, strokeWidth = 2.dp)
             else Icon(AppIcons.Download, "下载", tint = Color.White)
         }
     }
