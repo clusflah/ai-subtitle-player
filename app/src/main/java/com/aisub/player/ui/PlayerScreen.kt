@@ -229,6 +229,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     var showMore by remember { mutableStateOf(false) }
     var showCues by remember { mutableStateOf(false) }
     var showOnline by remember { mutableStateOf(false) }
+    var showRoles by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<PlayerDialog?>(null) }
 
     LaunchedEffect(controls, interactions, isPlaying, showMore, showTracks) {
@@ -464,9 +465,21 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         SubtitleAction.ONLINE -> { showTracks = false; showOnline = true }
                         SubtitleAction.EXPORT -> dialog = PlayerDialog.EXPORT
                         SubtitleAction.ERROR -> dialog = PlayerDialog.ERROR
+                        SubtitleAction.ROLES -> { showTracks = false; showRoles = true }
                     }
                 },
             )
+        }
+    }
+
+    // ---- 角色与配音 ----
+    if (showRoles) {
+        ModalBottomSheet(
+            onDismissRequest = { showRoles = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = Color(0xFF111111),
+        ) {
+            Column(Modifier.verticalScroll(rememberScrollState())) { RolesPanel(vm, state) }
         }
     }
 
@@ -493,7 +506,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                 }
                 CueList(
-                    cues = state.cues, current = current, settings = state.settings,
+                    cues = state.cues, current = current, settings = state.settings, roles = state.roles,
                     onSeek = { player.seekTo(it.startMs + state.subtitleDelayMs); player.play() },
                     onRetranslate = { vm.retranslate(it.id) },
                     modifier = Modifier.weight(1f),
@@ -802,7 +815,7 @@ private fun enterPip(activity: Activity?) {
 
 // ---------------- 字幕与音轨面板 ----------------
 
-private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ONLINE, EXPORT, ERROR }
+private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ONLINE, EXPORT, ERROR, ROLES }
 
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
@@ -903,6 +916,16 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                     subtitle = "在中文译文的每个字上方标注拼音",
                 ) { vm.updateSettings(state.settings.copy(showPinyin = !state.settings.showPinyin)) }
             }
+            ActionRow(
+                AppIcons.Volume, if (state.settings.ttsEnabled) "停止朗读译文" else "朗读译文",
+                subtitle = "${state.settings.ttsEngine.label} · 跟随字幕时间朗读",
+                enabled = state.settings.ttsEnabled || state.cues.any { it.translation != null },
+            ) { vm.updateSettings(state.settings.copy(ttsEnabled = !state.settings.ttsEnabled)) }
+            ActionRow(
+                AppIcons.People, "角色与配音",
+                subtitle = if (state.roles.isEmpty()) "识别说话人，给每个角色配不同的语音" else "${state.roles.size} 个角色",
+                enabled = state.cues.isNotEmpty(),
+            ) { onSubtitleAction(SubtitleAction.ROLES) }
             HorizontalDivider(Modifier.padding(start = 24.dp, end = 24.dp, top = 8.dp), color = Color(0xFF333333))
             ActionRow(AppIcons.History, "字幕延迟", subtitle = if (state.subtitleDelayMs == 0L) null else "%+.1f 秒".format(state.subtitleDelayMs / 1000f)) {
                 onSubtitleAction(SubtitleAction.DELAY)
@@ -967,6 +990,7 @@ private fun CueList(
     cues: List<Cue>,
     current: Cue?,
     settings: AppSettings,
+    roles: List<com.aisub.player.subtitle.Role>,
     onSeek: (Cue) -> Unit,
     onRetranslate: (Cue) -> Unit,
     modifier: Modifier = Modifier,
@@ -990,7 +1014,11 @@ private fun CueList(
                 ) {
                     Box(Modifier.width(3.dp).fillMaxHeight().background(if (active) Orange else Color.Transparent))
                     Column(Modifier.padding(start = 13.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)) {
-                        Text("${formatTime(cue.startMs)} – ${formatTime(cue.endMs)}", fontSize = 11.sp, color = Color(0xFF888888))
+                        val speaker = cue.speaker?.let { id -> roles.firstOrNull { it.id == id }?.name }
+                        Text(
+                            "${formatTime(cue.startMs)} – ${formatTime(cue.endMs)}" + (speaker?.let { "  ·  $it" } ?: ""),
+                            fontSize = 11.sp, color = Color(0xFF888888),
+                        )
                         if (settings.showOriginal || cue.translation == null) Text(cue.text, color = Color.White, fontSize = 15.sp)
                         if (settings.showTranslation && cue.translation != null) {
                             if (settings.pinyinActive) PinyinText(cue.translation, Orange, 15.sp)

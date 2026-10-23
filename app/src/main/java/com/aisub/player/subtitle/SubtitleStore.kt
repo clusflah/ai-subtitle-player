@@ -34,6 +34,7 @@ class SubtitleStore(context: Context) {
                     endMs = o.getLong("end"),
                     text = o.getString("text"),
                     translation = o.optString("translation").takeIf { o.has("translation") },
+                    speaker = o.optString("speaker").takeIf { o.has("speaker") },
                 )
             }
         } catch (e: Exception) {
@@ -50,6 +51,7 @@ class SubtitleStore(context: Context) {
                 put("end", c.endMs)
                 put("text", c.text)
                 c.translation?.let { put("translation", it) }
+                c.speaker?.let { put("speaker", it) }
             })
         }
         val file = fileFor(video)
@@ -60,6 +62,40 @@ class SubtitleStore(context: Context) {
 
     fun delete(video: Uri) {
         fileFor(video).delete()
+        rolesFile(video).delete()
+    }
+
+    private fun rolesFile(video: Uri) = File(fileFor(video).path.removeSuffix(".json") + ".roles.json")
+
+    /** 角色表和配音选择，与字幕分开存，重新识别字幕时不会丢。 */
+    fun loadRoles(video: Uri): List<Role> {
+        val file = rolesFile(video)
+        if (!file.exists()) return emptyList()
+        return try {
+            val arr = JSONArray(file.readText())
+            List(arr.length()) { i ->
+                val o = arr.getJSONObject(i)
+                Role(
+                    id = o.getString("id"),
+                    name = o.optString("name"),
+                    gender = o.optString("gender", "unknown"),
+                    voice = o.optString("voice").takeIf { o.has("voice") },
+                    voiceEngine = o.optString("voiceEngine").takeIf { o.has("voiceEngine") },
+                )
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun saveRoles(video: Uri, roles: List<Role>) {
+        val arr = JSONArray(roles.map { r ->
+            JSONObject().put("id", r.id).put("name", r.name).put("gender", r.gender).apply {
+                r.voice?.let { put("voice", it) }
+                r.voiceEngine?.let { put("voiceEngine", it) }
+            }
+        })
+        rolesFile(video).writeText(arr.toString())
     }
 }
 

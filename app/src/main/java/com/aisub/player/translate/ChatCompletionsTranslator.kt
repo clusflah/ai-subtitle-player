@@ -52,6 +52,24 @@ class ChatCompletionsTranslator(
             PromptStyle.INDEX_TRANSLATE -> JSONArray()
                 .put(JSONObject().put("role", "user").put("content", TranslationPrompt.indexTranslate(lines, targetLanguage)))
         }
+        val content = complete(messages)
+        when (style) {
+            PromptStyle.CHAT -> TranslationPrompt.parse(content, lines.size)
+            PromptStyle.INDEX_TRANSLATE -> TranslationPrompt.parseKeyed(content, lines.size)
+        }
+    }
+
+    override suspend fun chat(system: String, user: String): String = withContext(Dispatchers.IO) {
+        if (style == PromptStyle.INDEX_TRANSLATE) throw TranslationException("Index-Translate 是专用翻译模型，不能识别角色，请换用通用大模型")
+        complete(
+            JSONArray()
+                .put(JSONObject().put("role", "system").put("content", system))
+                .put(JSONObject().put("role", "user").put("content", user)),
+        )
+    }
+
+    /** 发出一次 Chat Completions 请求，返回模型回复的文字。阻塞调用。 */
+    private fun complete(messages: JSONArray): String {
         val payload = JSONObject()
             .put("model", model)
             .put("temperature", temperature)
@@ -77,14 +95,10 @@ class ChatCompletionsTranslator(
             throw TranslationException("网络错误：${e.message}", e)
         }
 
-        val content = try {
+        return try {
             JSONObject(body).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
         } catch (e: Exception) {
             throw TranslationException("无法解析返回内容：${body.take(300)}", e)
-        }
-        when (style) {
-            PromptStyle.CHAT -> TranslationPrompt.parse(content, lines.size)
-            PromptStyle.INDEX_TRANSLATE -> TranslationPrompt.parseKeyed(content, lines.size)
         }
     }
 }

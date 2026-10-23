@@ -22,11 +22,18 @@ class ClaudeTranslator(apiKey: String, private val model: String) : Translator {
         context: List<String>,
         targetLanguage: String,
     ): List<String?> = withContext(Dispatchers.IO) {
+        TranslationPrompt.parse(complete(TranslationPrompt.system(targetLanguage), TranslationPrompt.user(lines, context)), lines.size)
+    }
+
+    override suspend fun chat(system: String, user: String): String = withContext(Dispatchers.IO) { complete(system, user) }
+
+    /** 发出一次请求，返回模型回复的文字。阻塞调用。 */
+    private fun complete(system: String, user: String): String {
         val builder = MessageCreateParams.builder()
             .model(model)
             .maxTokens(16000L)
-            .system(TranslationPrompt.system(targetLanguage))
-            .addUserMessage(TranslationPrompt.user(lines, context))
+            .system(system)
+            .addUserMessage(user)
 
         if (supportsEffort(model)) {
             // 字幕翻译不需要深度推理，低 effort 更快更省
@@ -45,10 +52,9 @@ class ClaudeTranslator(apiKey: String, private val model: String) : Translator {
         }
 
         if (response.stopReason().orElse(null) == BetaStopReason.REFUSAL) {
-            throw TranslationException("Claude 拒绝翻译这批字幕")
+            throw TranslationException("Claude 拒绝了这次请求")
         }
-        val text = response.content().mapNotNull { block -> block.text().orElse(null)?.text() }.joinToString("")
-        TranslationPrompt.parse(text, lines.size)
+        return response.content().mapNotNull { block -> block.text().orElse(null)?.text() }.joinToString("")
     }
 
     private fun supportsEffort(model: String) =

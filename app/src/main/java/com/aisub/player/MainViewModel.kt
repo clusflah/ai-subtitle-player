@@ -40,6 +40,15 @@ import com.aisub.player.subtitle.OnlineSubtitles
 import com.aisub.player.subtitle.decodeText
 import com.aisub.player.subtitle.writeSrt
 import com.aisub.player.translate.Translator
+import com.aisub.player.subtitle.Role
+import com.aisub.player.tts.AzureTts
+import com.aisub.player.tts.RoleDetector
+import com.aisub.player.tts.SystemTts
+import com.aisub.player.tts.TtsEngine
+import com.aisub.player.tts.TtsEngineType
+import com.aisub.player.tts.TtsReader
+import com.aisub.player.tts.TtsSnapshot
+import com.aisub.player.tts.TtsVoice
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -76,6 +85,10 @@ data class UiState(
     /** 播放失败的原因；null 表示正常 */
     val playbackError: String? = null,
     val settings: AppSettings = AppSettings(),
+    /** 当前视频识别出的角色（朗读时按角色分配语音） */
+    val roles: List<Role> = emptyList(),
+    /** 正在识别角色时的进度说明；null 表示没在识别 */
+    val roleStatus: String? = null,
 )
 
 enum class Task { TRANSCRIBE, TRANSLATE }
@@ -108,6 +121,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private var transcribeJob: Job? = null
     private var translateJob: Job? = null
+    private var roleJob: Job? = null
+
+    // ---- 朗读 ----
+    private val ttsEngines = HashMap<String, TtsEngine>()
+    private val voiceCache = HashMap<String, List<TtsVoice>>()
+    private var previewPlayer: android.media.MediaPlayer? = null
+    private val ttsReader = TtsReader(
+        app, viewModelScope,
+        player = { player },
+        snapshot = {
+            val s = _state.value
+            TtsSnapshot(
+                s.cues, s.roles, s.subtitleDelayMs, s.settings.ttsEngine, s.settings.ttsVoices[s.settings.ttsEngine],
+                s.settings.ttsLocale, s.settings.ttsDuckVolume,
+            )
+        },
+        engineFor = ::ttsEngine,
+        onError = { msg -> _state.update { it.copy(status = "朗读失败：$msg") } },
+    )
     private var queue: List<MediaEntry> = emptyList()
 
     private val listener = object : Player.Listener {
@@ -126,6 +158,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
+        if (_state.value.settings.ttsEnabled) ttsReader.start()
         exoPlayer.addListener(listener)
         // 内嵌字幕默认不显示（避免和 AI 字幕重叠），在字幕面板里手动选择
         exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
@@ -210,11 +243,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         cancelAll()
         val uri = Uri.parse(entry.uri)
         val cached = store.load(uri)
+        ttsReader.reset()
         _state.update {
             it.copy(
                 current = entry,
                 videoUri = uri,
                 cues = cached,
+                roles = store.loadRoles(uri),
+                roleStatus = null,
                 status = "",
                 progress = null,
                 error = null,
@@ -242,8 +278,137 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun updateSettings(s: AppSettings) {
+        val old = _state.value.settings
         settingsRepo.save(s)
         _state.update { it.copy(settings = s) }
+        if (old.ttsEngine != s.ttsEngine || old.ttsVoices != s.ttsVoices || old.ttsAzure() != s.ttsAzure() || old.targetLanguage != s.targetLanguage) {
+            ttsReader.reset()
+        }
+        if (s.ttsEnabled) ttsReader.start() else ttsReader.stop()
+    }
+
+    // ---------------- 朗读与角色 ----------------
+
+    /** 按引擎和配置缓存引擎实例，配置变了就新建。 */
+    @Synchronized
+    private fun ttsEngine(type: TtsEngineType): TtsEngine {
+        val settings = _state.value.settings
+        val (key, region, endpoint) = settings.ttsAzure()
+        val id = if (type == TtsEngineType.AZURE) "AZURE|$key|$region|$endpoint" else "SYSTEM"
+        return ttsEngines.getOrPut(id) {
+            when (type) {
+                TtsEngineType.AZURE -> AzureTts(key, region, endpoint)
+                TtsEngineType.SYSTEM -> SystemTts(getApplication())
+            }
+        }
+    }
+
+    /** 在线拉取（系统引擎为本机）当前目标语言可用的语音。 */
+    suspend fun ttsVoices(settings: AppSettings = _state.value.settings, refresh: Boolean = false): List<TtsVoice> {
+        val id = "${settings.ttsEngine}|${settings.ttsAzure()}|${settings.ttsLocale}"
+        if (!refresh) voiceCache[id]?.let { return it }
+        val voices = withContext(Dispatchers.IO) {
+            // 设置页里还没保存的改动也要生效：用传入的配置建一个临时引擎
+            val engine = if (settings == _state.value.settings) ttsEngine(settings.ttsEngine) else when (settings.ttsEngine) {
+                TtsEngineType.AZURE -> settings.ttsAzure().let { (k, r, e) -> AzureTts(k, r, e) }
+                TtsEngineType.SYSTEM -> ttsEngine(TtsEngineType.SYSTEM)
+            }
+            engine.voices(settings.ttsLocale)
+        }
+        voiceCache[id] = voices
+        return voices
+    }
+
+    /** 试听某个语音。 */
+    suspend fun previewVoice(voice: String?, settings: AppSettings = _state.value.settings) {
+        val sample = _state.value.cues.firstOrNull { !it.translation.isNullOrBlank() }?.translation
+            ?: sampleText(settings.ttsLocale)
+        val file = java.io.File(getApplication<Application>().cacheDir, "tts-preview." + if (settings.ttsEngine == TtsEngineType.AZURE) "mp3" else "wav")
+        withContext(Dispatchers.IO) {
+            val engine = if (settings.ttsEngine == TtsEngineType.AZURE) settings.ttsAzure().let { (k, r, e) -> AzureTts(k, r, e) }
+            else ttsEngine(TtsEngineType.SYSTEM)
+            engine.synthesize(sample, voice, settings.ttsLocale, file)
+        }
+        previewPlayer?.release()
+        previewPlayer = android.media.MediaPlayer().apply {
+            setDataSource(file.path)
+            prepare()
+            setOnCompletionListener { it.release(); if (previewPlayer === it) previewPlayer = null }
+            start()
+        }
+    }
+
+    private fun sampleText(locale: String?) = when {
+        locale == null -> "Hello, this is a voice preview."
+        locale.startsWith("zh") -> "你好，这是一段试听。"
+        locale.startsWith("ja") -> "こんにちは、これは試聴です。"
+        locale.startsWith("ko") -> "안녕하세요, 미리 듣기입니다."
+        else -> "Hello, this is a voice preview."
+    }
+
+    /** 用翻译服务的大模型识别每句台词的角色，并按性别自动分配语音。 */
+    fun detectRoles() {
+        val uri = _state.value.videoUri ?: return
+        if (roleJob?.isActive == true) return
+        val settings = _state.value.settings
+        val translator = settings.createTranslator() ?: run {
+            _state.update { it.copy(error = settings.translatorProblem() ?: "翻译服务配置不完整") }
+            return
+        }
+        val cues = _state.value.cues
+        if (cues.isEmpty()) return
+        roleJob = viewModelScope.launch {
+            try {
+                _state.update { it.copy(roleStatus = "正在识别角色…") }
+                val (roles, assigned) = RoleDetector.detect(translator, cues, _state.value.roles) { done, total ->
+                    _state.update { it.copy(roleStatus = "正在识别角色 $done/$total…") }
+                }
+                // 自动配音：拿不到语音列表时先不分配，用默认语音朗读
+                val voices = runCatching { ttsVoices() }.getOrDefault(emptyList())
+                val withVoices = RoleDetector.autoAssign(roles, voices, settings.ttsEngine.name)
+                _state.update { s ->
+                    s.copy(
+                        cues = s.cues.map { c -> c.copy(speaker = assigned[c.id]) },
+                        roles = withVoices,
+                        roleStatus = null,
+                        status = "识别出 ${withVoices.size} 个角色",
+                    )
+                }
+                store.save(uri, _state.value.cues)
+                store.saveRoles(uri, withVoices)
+                ttsReader.reset()
+            } catch (e: CancellationException) {
+                _state.update { it.copy(roleStatus = null) }
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(roleStatus = null, error = "识别角色失败：${e.message}") }
+            }
+        }
+    }
+
+    fun setRoleVoice(roleId: String, voice: String) {
+        val uri = _state.value.videoUri ?: return
+        val engine = _state.value.settings.ttsEngine.name
+        _state.update { s -> s.copy(roles = s.roles.map { if (it.id == roleId) it.copy(voice = voice, voiceEngine = engine) else it }) }
+        store.saveRoles(uri, _state.value.roles)
+        ttsReader.reset()
+    }
+
+    /** 当前引擎下按性别重新给所有角色分配语音。 */
+    fun reassignVoices() {
+        val uri = _state.value.videoUri ?: return
+        viewModelScope.launch {
+            try {
+                val voices = ttsVoices()
+                val engine = _state.value.settings.ttsEngine.name
+                val cleared = _state.value.roles.map { it.copy(voice = null, voiceEngine = null) }
+                _state.update { it.copy(roles = RoleDetector.autoAssign(cleared, voices, engine)) }
+                store.saveRoles(uri, _state.value.roles)
+                ttsReader.reset()
+            } catch (e: Exception) {
+                _state.update { it.copy(error = "获取语音列表失败：${e.message}") }
+            }
+        }
     }
 
     fun dismissError() = _state.update { it.copy(error = null, failedTask = null) }
@@ -573,6 +738,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        ttsReader.stop()
+        previewPlayer?.release()
+        ttsEngines.values.forEach { it.close() }
         savePosition()
         exoPlayer.release()
         vlcPlayer?.release()

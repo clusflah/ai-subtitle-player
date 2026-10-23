@@ -12,6 +12,7 @@
   - 云端：Azure、火山引擎豆包语音、阿里云 Fun-ASR、讯飞录音文件转写、ElevenLabs Scribe、Deepgram、OpenAI Whisper（及兼容接口）
   - 字幕按逐字/逐词时间戳切成短句，逐句显示
 - 字幕：中文译文可在每个字上方标注拼音（Android 10+）
+- 朗读：跟随字幕时间朗读译文（Azure 神经语音或系统 TTS），可用大模型识别说话角色，并为每个角色在线选择对应语言的语音
 - 翻译：Claude（官方 anthropic-java SDK）、DeepSeek、Gemini、Index-Translate（B 站开源翻译模型，公共接口免费）或任意 OpenAI 兼容接口（通义千问、Kimi、Ollama 等）
 
 ## 构建

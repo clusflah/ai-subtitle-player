@@ -3,6 +3,8 @@ package com.aisub.player
 import android.content.Context
 import com.aisub.player.asr.ModelManager
 import com.aisub.player.subtitle.Pinyin
+import com.aisub.player.tts.TtsEngineType
+import com.aisub.player.tts.ttsLocaleFor
 import com.aisub.player.translate.ChatCompletionsTranslator
 import com.aisub.player.translate.ClaudeTranslator
 import com.aisub.player.translate.PromptStyle
@@ -58,6 +60,17 @@ data class AppSettings(
     val followPlayback: Boolean = true,
     /** 中文译文的每个字上方标注拼音 */
     val showPinyin: Boolean = false,
+    /** 播放时跟随字幕时间朗读译文 */
+    val ttsEnabled: Boolean = false,
+    val ttsEngine: TtsEngineType = TtsEngineType.AZURE,
+    /** Azure 朗读的 Key、区域、接口地址；Key 留空时沿用语音识别里的 Azure 配置 */
+    val ttsAzureKey: String = "",
+    val ttsAzureRegion: String = "",
+    val ttsAzureEndpoint: String = "",
+    /** 各引擎的默认语音（旁白、未识别角色的台词用它）；空为该语言的第一个语音 */
+    val ttsVoices: Map<TtsEngineType, String> = emptyMap(),
+    /** 朗读时原声的音量 */
+    val ttsDuckVolume: Float = 0.3f,
     /** 在线字幕：OpenSubtitles.com 的 API Key 与账号（账号可不填，不登录每天限 5 次下载） */
     val osApiKey: String = "",
     val osUsername: String = "",
@@ -102,6 +115,15 @@ data class AppSettings(
 
     /** 当前是否给译文标拼音：开关打开、系统支持、目标语言是中文 */
     val pinyinActive: Boolean get() = showPinyin && Pinyin.available && targetIsChinese
+
+    /** 朗读用的 Azure 配置：朗读里没填 Key 时用语音识别的 Azure Key 和区域。 */
+    fun ttsAzure(): Triple<String, String, String> {
+        val key = ttsAzureKey.trim()
+        return if (key.isNotEmpty()) Triple(key, ttsAzureRegion.trim().ifEmpty { "eastasia" }, ttsAzureEndpoint.trim())
+        else Triple(asrValue(AsrEngine.AZURE, "key"), ttsAzureRegion.trim().ifEmpty { asrValue(AsrEngine.AZURE, "region") }, ttsAzureEndpoint.trim())
+    }
+
+    val ttsLocale: String? get() = ttsLocaleFor(targetLanguage)
 
     fun withConfig(p: Provider, c: ProviderConfig) = copy(providerConfigs = providerConfigs + (p to c))
 
@@ -175,6 +197,13 @@ class SettingsRepository(context: Context) {
             subtitleOffset = prefs.getInt("subtitleOffset", d.subtitleOffset),
             followPlayback = prefs.getBoolean("followPlayback", d.followPlayback),
             showPinyin = prefs.getBoolean("showPinyin", d.showPinyin),
+            ttsEnabled = prefs.getBoolean("ttsEnabled", d.ttsEnabled),
+            ttsEngine = runCatching { TtsEngineType.valueOf(prefs.getString("ttsEngine", d.ttsEngine.name)!!) }.getOrDefault(d.ttsEngine),
+            ttsAzureKey = prefs.getString("ttsAzureKey", "")!!,
+            ttsAzureRegion = prefs.getString("ttsAzureRegion", "")!!,
+            ttsAzureEndpoint = prefs.getString("ttsAzureEndpoint", "")!!,
+            ttsVoices = TtsEngineType.entries.mapNotNull { e -> prefs.getString("ttsVoice.${e.name}", null)?.takeIf { it.isNotEmpty() }?.let { e to it } }.toMap(),
+            ttsDuckVolume = prefs.getFloat("ttsDuckVolume", d.ttsDuckVolume),
             osApiKey = prefs.getString("osApiKey", "")!!,
             osUsername = prefs.getString("osUsername", "")!!,
             osPassword = prefs.getString("osPassword", "")!!,
@@ -207,6 +236,12 @@ class SettingsRepository(context: Context) {
             .putInt("subtitleOffset", s.subtitleOffset)
             .putBoolean("followPlayback", s.followPlayback)
             .putBoolean("showPinyin", s.showPinyin)
+            .putBoolean("ttsEnabled", s.ttsEnabled)
+            .putString("ttsEngine", s.ttsEngine.name)
+            .putString("ttsAzureKey", s.ttsAzureKey)
+            .putString("ttsAzureRegion", s.ttsAzureRegion)
+            .putString("ttsAzureEndpoint", s.ttsAzureEndpoint)
+            .putFloat("ttsDuckVolume", s.ttsDuckVolume)
             .putString("osApiKey", s.osApiKey)
             .putString("osUsername", s.osUsername)
             .putString("osPassword", s.osPassword)
@@ -221,6 +256,7 @@ class SettingsRepository(context: Context) {
             .putString("tvdbKey", s.tvdbKey)
             .putString("tvdbPin", s.tvdbPin)
             .putString("fanartKey", s.fanartKey)
+        for (e in TtsEngineType.entries) editor.putString("ttsVoice.${e.name}", s.ttsVoices[e].orEmpty())
         for ((p, c) in s.providerConfigs) {
             editor.putString("${p.name}.apiKey", c.apiKey)
                 .putString("${p.name}.model", c.model)
