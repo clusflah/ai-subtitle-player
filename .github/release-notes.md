@@ -1,4 +1,4 @@
-译幕 Voxtitle 是开源的安卓视频播放器：用语音识别给视频生成字幕，再用大模型翻译成双语字幕。这是改名后的首个公开正式版。
+译幕 Voxtitle 是开源的安卓视频播放器：用语音识别给视频生成字幕，大模型翻译成双语字幕，还能按角色配音朗读。完整介绍见 [README](https://github.com/clusflah/ai-subtitle-player#readme)。
 
 ## 下载哪个？
 
