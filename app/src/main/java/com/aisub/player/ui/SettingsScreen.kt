@@ -63,7 +63,9 @@ import com.aisub.player.AsrEngine
 import com.aisub.player.MainViewModel
 import com.aisub.player.Provider
 import com.aisub.player.ProviderConfig
+import com.aisub.player.asr.AsrLanguages
 import com.aisub.player.asr.ModelCatalog
+import com.aisub.player.asrLanguageWarning
 import com.aisub.player.subtitle.Pinyin
 import com.aisub.player.translate.ModelList
 import com.aisub.player.tts.TtsEngineType
@@ -78,10 +80,6 @@ private val PROVIDER_HINTS = mapOf(
     Provider.GEMINI to "Google AI Studio 的 API Key",
     Provider.INDEX_TRANSLATE to "B 站开源翻译模型，公共接口免费、无需 Key（预览版）",
     Provider.OPENAI_COMPAT to "兼容接口：通义千问、Kimi、Ollama 等",
-)
-
-private val ASR_LANGUAGES = listOf(
-    "auto" to "自动", "zh" to "中文", "en" to "英语", "ja" to "日语", "ko" to "韩语", "yue" to "粤语",
 )
 
 private val TARGET_LANGUAGES = listOf("简体中文", "繁體中文", "English", "日本語", "한국어")
@@ -131,7 +129,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             val asrProblem = s.asrProblem()
             CollapsibleCard(
                 "语音识别",
-                s.asrEngine.label + " · 视频语言：" + (ASR_LANGUAGES.firstOrNull { it.first == s.asrLanguage }?.second ?: s.asrLanguage) +
+                s.asrEngine.label + " · 视频语言：" + AsrLanguages.label(s.asrLanguage) +
                     (asrProblem?.let { " · $it" } ?: ""),
                 warn = asrProblem != null,
             ) {
@@ -169,10 +167,45 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 Column(Modifier.padding(16.dp)) {
                     Text("视频语言", style = MaterialTheme.typography.bodyLarge)
                     Text("选错会降低准确率；不确定时选「自动」", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    var custom by remember { mutableStateOf(!AsrLanguages.isCommon(s.asrLanguage)) }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ASR_LANGUAGES.forEach { (code, label) ->
-                            FilterChip(selected = s.asrLanguage == code, onClick = { s = s.copy(asrLanguage = code) }, label = { Text(label) })
+                        AsrLanguages.COMMON.forEach { (code, label) ->
+                            FilterChip(
+                                selected = !custom && s.asrLanguage == code,
+                                onClick = { custom = false; s = s.copy(asrLanguage = code) },
+                                label = { Text(label) },
+                            )
                         }
+                        FilterChip(selected = custom, onClick = { custom = true }, label = { Text("自定义…") })
+                    }
+                    if (custom) {
+                        var text by remember { mutableStateOf(if (AsrLanguages.isCommon(s.asrLanguage)) "" else s.asrLanguage) }
+                        val parsed = AsrLanguages.normalize(text)
+                        OutlinedTextField(
+                            value = text,
+                            onValueChange = { v ->
+                                text = v
+                                AsrLanguages.normalize(v)?.let { s = s.copy(asrLanguage = it) }
+                            },
+                            label = { Text("语言代码") },
+                            placeholder = { Text("如 sv、cs、he，可带地区：pt-BR、es-MX") },
+                            supportingText = {
+                                Text(
+                                    when {
+                                        text.isBlank() -> "ISO 639-1 两位字母代码（瑞典语 sv、捷克语 cs、希伯来语 he、马来语 ms…）"
+                                        parsed == null -> "格式不对：两三位字母，可加「-地区」"
+                                        else -> "识别为：" + AsrLanguages.label(parsed)
+                                    },
+                                )
+                            },
+                            isError = text.isNotBlank() && parsed == null,
+                            singleLine = true,
+                            colors = appFieldColors(),
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        )
+                    }
+                    s.asrLanguageWarning()?.let { warn ->
+                        Text(warn, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp))
                     }
                 }
             }

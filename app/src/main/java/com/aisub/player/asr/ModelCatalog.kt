@@ -23,7 +23,9 @@ data class LocalModel(
     val archive: String,
     /** 识别结果没有标点，需要再过一遍标点模型 */
     val needsPunctuation: Boolean = false,
-    /** dir：解压后的模型目录；language：应用里的语言代码（auto/zh/en/ja/ko/yue） */
+    /** 支持的语言（语言代码）；null 表示多语种、基本都支持 */
+    val languages: Set<String>? = null,
+    /** dir：解压后的模型目录；language：语言代码（"auto" 或 zh、en、ru 等，已去掉地区） */
     val build: (dir: File, language: String, threads: Int) -> OfflineModelConfig,
 )
 
@@ -31,11 +33,18 @@ object ModelCatalog {
 
     val PUNCTUATION_ARCHIVE = "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8.tar.bz2"
 
+    /** Parakeet TDT v3 支持的英语和 25 种欧洲语言 */
+    val EUROPEAN = setOf(
+        "en", "bg", "hr", "cs", "da", "nl", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt",
+        "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
+    )
+
     val all: List<LocalModel> = listOf(
         LocalModel(
             id = "sense-voice", label = "SenseVoice",
             description = "中/英/日/韩/粤，速度快，自带标点（推荐）", sizeMb = 160,
             archive = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2",
+            languages = setOf("zh", "en", "ja", "ko", "yue"),
         ) { dir, lang, threads ->
             OfflineModelConfig(
                 senseVoice = OfflineSenseVoiceModelConfig(
@@ -50,6 +59,7 @@ object ModelCatalog {
             id = "paraformer-zh", label = "Paraformer 中文",
             description = "阿里 FunASR，普通话准确率高（配标点模型）", sizeMb = 217 + 61,
             archive = "sherpa-onnx-paraformer-zh-int8-2025-10-07.tar.bz2", needsPunctuation = true,
+            languages = setOf("zh"),
         ) { dir, _, threads ->
             OfflineModelConfig(
                 paraformer = OfflineParaformerModelConfig(model = File(dir, "model.int8.onnx").path),
@@ -60,6 +70,7 @@ object ModelCatalog {
             id = "fire-red-asr2", label = "FireRedASR2 中英",
             description = "小红书开源，中文和方言效果强，模型较大", sizeMb = 496 + 61,
             archive = "sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25.tar.bz2", needsPunctuation = true,
+            languages = setOf("zh", "en", "yue"),
         ) { dir, _, threads ->
             OfflineModelConfig(
                 fireRedAsrCtc = OfflineFireRedAsrCtcModelConfig(model = File(dir, "model.int8.onnx").path),
@@ -101,6 +112,7 @@ object ModelCatalog {
             id = "parakeet-v3", label = "Parakeet TDT 0.6B v3",
             description = "NVIDIA，英语及 25 种欧洲语言，准确率高", sizeMb = 464,
             archive = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
+            languages = EUROPEAN,
         ) { dir, _, threads ->
             OfflineModelConfig(
                 transducer = OfflineTransducerModelConfig(
@@ -115,6 +127,7 @@ object ModelCatalog {
             id = "moonshine-base-en", label = "Moonshine base",
             description = "仅英语，体积小、速度快，适合低端机", sizeMb = 239,
             archive = "sherpa-onnx-moonshine-base-en-int8.tar.bz2",
+            languages = setOf("en"),
         ) { dir, _, threads ->
             OfflineModelConfig(
                 moonshine = OfflineMoonshineModelConfig(
@@ -130,6 +143,7 @@ object ModelCatalog {
             id = "dolphin-base", label = "Dolphin base",
             description = "东亚、东南亚多种语言及中文方言", sizeMb = 76 + 61,
             archive = "sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02.tar.bz2", needsPunctuation = true,
+            languages = setOf("zh", "yue", "ja", "ko", "th", "vi", "id", "ms", "my", "km", "lo", "tl", "fil", "hi", "bn", "ur", "ta", "ar", "fa", "ru", "uz", "kk", "ug", "mn"),
         ) { dir, _, threads ->
             OfflineModelConfig(
                 dolphin = OfflineDolphinModelConfig(model = File(dir, "model.int8.onnx").path),

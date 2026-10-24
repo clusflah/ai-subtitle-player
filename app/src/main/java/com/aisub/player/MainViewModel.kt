@@ -551,7 +551,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun createEngine(settings: AppSettings): SpeechEngine = when (settings.asrEngine) {
         AsrEngine.LOCAL -> {
             val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
-            Transcriber(ModelCatalog.byId(settings.localModel), models, settings.asrLanguage, threads)
+            Transcriber(ModelCatalog.byId(settings.localModel), models, com.aisub.player.asr.AsrLanguages.primary(settings.asrLanguage), threads)
         }
         else -> settings.createCloudEngine()
     }

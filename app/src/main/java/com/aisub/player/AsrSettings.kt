@@ -1,5 +1,6 @@
 package com.aisub.player
 
+import com.aisub.player.asr.AsrLanguages
 import com.aisub.player.asr.SpeechEngine
 import com.aisub.player.asr.cloud.AliyunFunAsrTranscriber
 import com.aisub.player.asr.cloud.AzureTranscriber
@@ -95,16 +96,38 @@ fun AppSettings.asrProblem(): String? {
 /** 创建云端识别引擎（本地引擎由 ViewModel 创建，需要模型文件）。 */
 fun AppSettings.createCloudEngine(): SpeechEngine {
     val v = { key: String -> asrValue(asrEngine, key) }
+    // 大多数接口只认语言代码；Azure 要 locale，Deepgram 认得带地区的写法（pt-BR、es-419）
+    val lang = AsrLanguages.primary(asrLanguage)
     return when (asrEngine) {
         AsrEngine.LOCAL -> error("本地引擎不在这里创建")
         AsrEngine.AZURE -> AzureTranscriber(
             v("endpoint").ifEmpty { AzureTranscriber.defaultEndpoint(v("region")) }, v("key"), AzureTranscriber.localesFor(asrLanguage),
         )
         AsrEngine.VOLC -> VolcEngineTranscriber(v("appKey"), v("accessKey"))
-        AsrEngine.ALIYUN -> AliyunFunAsrTranscriber(v("apiKey"), v("endpoint"), v("model"), asrLanguage)
-        AsrEngine.XFYUN -> XfyunTranscriber(v("appId"), v("secretKey"), asrLanguage)
-        AsrEngine.ELEVENLABS -> ElevenLabsTranscriber(v("apiKey"), v("model"), asrLanguage)
+        AsrEngine.ALIYUN -> AliyunFunAsrTranscriber(v("apiKey"), v("endpoint"), v("model"), lang)
+        AsrEngine.XFYUN -> XfyunTranscriber(v("appId"), v("secretKey"), lang)
+        AsrEngine.ELEVENLABS -> ElevenLabsTranscriber(v("apiKey"), v("model"), lang)
         AsrEngine.DEEPGRAM -> DeepgramTranscriber(v("apiKey"), v("model"), asrLanguage)
-        AsrEngine.OPENAI -> OpenAiTranscriber(v("apiKey"), v("baseUrl"), v("model"), asrLanguage)
+        AsrEngine.OPENAI -> OpenAiTranscriber(v("apiKey"), v("baseUrl"), v("model"), lang)
+    }
+}
+
+/**
+ * 当前引擎明显不支持所选语言时给出提示（仍会尝试识别，通常按自动检测处理，准确率会很低）。
+ */
+fun AppSettings.asrLanguageWarning(): String? {
+    val lang = AsrLanguages.primary(asrLanguage)
+    if (lang == "auto") return null
+    val name = AsrLanguages.label(asrLanguage)
+    return when (asrEngine) {
+        AsrEngine.LOCAL -> {
+            val model = com.aisub.player.asr.ModelCatalog.byId(localModel)
+            val supported = model.languages ?: return null
+            if (lang in supported) null
+            else "「${model.label}」不支持$name，识别效果会很差；建议换 Whisper、Qwen3-ASR" +
+                (if (lang in com.aisub.player.asr.ModelCatalog.EUROPEAN) "、Parakeet" else "") + "，或用云端服务"
+        }
+        AsrEngine.XFYUN -> if (lang in setOf("zh", "yue", "en", "ja", "ko")) null else "讯飞录音转写只支持中英日韩粤，$name 会按中文识别；建议换其他引擎"
+        else -> null
     }
 }

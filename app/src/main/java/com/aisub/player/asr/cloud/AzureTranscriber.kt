@@ -62,13 +62,6 @@ class AzureTranscriber(endpoint: String, private val apiKey: String, private val
         fun defaultEndpoint(region: String) = "https://${region.trim()}.api.cognitive.microsoft.com"
 
         /** 应用里的语言代码 → Azure locale。"auto" 返回空列表，由服务端识别。 */
-        fun localesFor(language: String): List<String> = when (language) {
-            "zh" -> listOf("zh-CN")
-            "en" -> listOf("en-US")
-            "ja" -> listOf("ja-JP")
-            "ko" -> listOf("ko-KR")
-            "yue" -> listOf("zh-HK")
-            else -> emptyList()
-        }
+        fun localesFor(language: String): List<String> = listOfNotNull(com.aisub.player.asr.AsrLanguages.azureLocale(language))
     }
 }

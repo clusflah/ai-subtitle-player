@@ -1058,7 +1058,7 @@ private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ON
 private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (SubtitleAction) -> Unit) {
     val player by vm.playerFlow.collectAsStateWithLifecycle()
     var audioOpen by remember { mutableStateOf(true) }
-    var subtitleOpen by remember { mutableStateOf(true) }
+    var aiOpen by remember { mutableStateOf(true) }
     var embeddedOpen by remember { mutableStateOf(true) }
     var version by remember { mutableIntStateOf(0) } // 选轨后刷新
 
@@ -1093,11 +1093,14 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
         }
         HorizontalDivider(color = Color(0xFF333333))
 
-        // 视频文件自带的字幕轨（MKV、蓝光、DVD 等）
+        // ---------------- 视频自带字幕：文件里的字幕轨，按原样显示 ----------------
         val textGroups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT } }
-        if (textGroups.isNotEmpty()) {
-            SheetHeader("视频自带字幕", embeddedOpen) { embeddedOpen = !embeddedOpen }
-            if (embeddedOpen) {
+        SheetHeader("视频自带字幕", embeddedOpen) { embeddedOpen = !embeddedOpen }
+        if (embeddedOpen) {
+            PanelHint("视频文件里的字幕轨，按字幕文件原样显示（ASS 的位置、字体、特效由文件决定）")
+            if (textGroups.isEmpty() && !vm.usingVlc) {
+                TrackRow("这个视频没有自带字幕", false, enabled = false) {}
+            } else {
                 val textDisabled = remember(version, player) { C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes }
                 TrackRow("不显示", textDisabled || textGroups.none { it.isSelected }) {
                     vm.extras.disableTrackType(C.TRACK_TYPE_TEXT)
@@ -1114,49 +1117,47 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                     }
                 }
             }
-            HorizontalDivider(color = Color(0xFF333333))
-        }
-
-        SheetHeader("字幕", subtitleOpen) { subtitleOpen = !subtitleOpen }
-        if (subtitleOpen) {
-            val gen = when {
-                state.transcribing -> "停止识别（${state.progress?.takeIf { it >= 0 }?.let { "${(it * 100).toInt()}%" } ?: "准备中"}）"
-                state.cues.isEmpty() -> "AI 生成字幕"
-                else -> "AI 重新识别字幕"
-            }
-            ActionRow(AppIcons.AutoAwesome, gen, subtitle = "用语音识别为当前视频生成带时间轴的字幕") { onSubtitleAction(SubtitleAction.GENERATE) }
-            // 视频自带文字字幕轨时，直接拿来翻译，比语音识别准
+            // 读出自带字幕的文字交给 AI 字幕，比语音识别准
             if (textGroups.isNotEmpty() || vm.usingVlc || state.extractingEmbedded) {
                 ActionRow(
-                    AppIcons.Subtitles,
-                    if (state.extractingEmbedded) "停止读取（${state.progress?.let { "${(it * 100).toInt()}%" } ?: "准备中"}）" else "使用视频自带字幕",
-                    subtitle = "把视频里的外语字幕轨读出来作为字幕，可以直接翻译、朗读",
+                    AppIcons.Translate,
+                    if (state.extractingEmbedded) "停止读取（${state.progress?.let { "${(it * 100).toInt()}%" } ?: "准备中"}）" else "提取出来翻译、朗读",
+                    subtitle = "把自带字幕的文字读进下面的 AI 字幕，可以翻译、朗读、导出",
                 ) { onSubtitleAction(SubtitleAction.EMBEDDED) }
             }
-            ActionRow(
-                AppIcons.Translate,
-                if (state.translating) "停止翻译" else "AI 翻译字幕",
-                subtitle = "翻译成${state.settings.targetLanguage}",
-                enabled = state.translating || state.cues.any { it.translation == null },
-            ) { onSubtitleAction(SubtitleAction.TRANSLATE) }
+        }
+        HorizontalDivider(color = Color(0xFF333333))
+
+        // ---------------- AI 字幕：识别、外挂文件或提取出的字幕，由本应用显示 ----------------
+        SheetHeader("AI 字幕", aiOpen) { aiOpen = !aiOpen }
+        if (aiOpen) {
+            PanelHint(
+                if (state.cues.isEmpty()) "语音识别、字幕文件或从视频提取的字幕，可以翻译、朗读，样式和位置可调"
+                else "当前 ${state.cues.size} 句" + (state.cues.count { it.translation != null }.takeIf { it > 0 }?.let { "，已翻译 $it 句" } ?: ""),
+            )
+
+            GroupLabel("获取字幕")
+            val gen = when {
+                state.transcribing -> "停止识别（${state.progress?.takeIf { it >= 0 }?.let { "${(it * 100).toInt()}%" } ?: "准备中"}）"
+                state.cues.isEmpty() -> "语音识别生成字幕"
+                else -> "重新语音识别"
+            }
+            ActionRow(AppIcons.AutoAwesome, gen, subtitle = "用语音识别为当前视频生成带时间轴的字幕") { onSubtitleAction(SubtitleAction.GENERATE) }
+            ActionRow(AppIcons.File, "选择字幕文件", subtitle = "SRT / VTT / ASS") { onSubtitleAction(SubtitleAction.IMPORT) }
+            ActionRow(AppIcons.Search, "在线下载字幕", subtitle = "射手网 / OpenSubtitles") { onSubtitleAction(SubtitleAction.ONLINE) }
             if (state.failedTask != null) {
                 ActionRow(AppIcons.Info, "上次${if (state.failedTask == Task.TRANSCRIBE) "识别" else "翻译"}失败，查看原因", tint = Color(0xFFFF6B5E)) {
                     onSubtitleAction(SubtitleAction.ERROR)
                 }
             }
-            ActionRow(AppIcons.ListIcon, "字幕列表", subtitle = if (state.cues.isEmpty()) "还没有字幕" else "${state.cues.size} 句，点击可跳转、长按可复制", enabled = state.cues.isNotEmpty()) {
-                onSubtitleAction(SubtitleAction.LIST)
-            }
-            SwitchRow(
-                AppIcons.Subtitles, "在画面上显示 AI 字幕",
-                subtitle = if (textGroups.isNotEmpty()) "视频自带字幕在上方「视频自带字幕」里单独开关" else "关掉后仍可翻译、朗读",
-                checked = state.settings.showAiSubtitles,
-            ) { vm.updateSettings(state.settings.copy(showAiSubtitles = it)) }
-            Box(Modifier.padding(horizontal = 24.dp, vertical = 8.dp)) {
-                DisplayModeSelector(state.settings.showOriginal, state.settings.showTranslation) { o, t ->
-                    vm.updateSettings(state.settings.copy(showOriginal = o, showTranslation = t))
-                }
-            }
+
+            GroupLabel("翻译与朗读")
+            ActionRow(
+                AppIcons.Translate,
+                if (state.translating) "停止翻译" else "翻译字幕",
+                subtitle = "翻译成${state.settings.targetLanguage}",
+                enabled = state.translating || state.cues.any { it.translation == null },
+            ) { onSubtitleAction(SubtitleAction.TRANSLATE) }
             if (Pinyin.available && state.settings.targetIsChinese) {
                 ActionRow(
                     AppIcons.Translate, if (state.settings.showPinyin) "关闭译文拼音" else "译文加拼音",
@@ -1173,16 +1174,40 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                 subtitle = if (state.roles.isEmpty()) "识别说话人，给每个角色配不同的语音" else "${state.roles.size} 个角色",
                 enabled = state.cues.isNotEmpty(),
             ) { onSubtitleAction(SubtitleAction.ROLES) }
-            HorizontalDivider(Modifier.padding(start = 24.dp, end = 24.dp, top = 8.dp), color = Color(0xFF333333))
+
+            GroupLabel("显示")
+            SwitchRow(AppIcons.Subtitles, "在画面上显示 AI 字幕", subtitle = "关掉后仍可翻译、朗读", checked = state.settings.showAiSubtitles) {
+                vm.updateSettings(state.settings.copy(showAiSubtitles = it))
+            }
+            Box(Modifier.padding(horizontal = 24.dp, vertical = 8.dp)) {
+                DisplayModeSelector(state.settings.showOriginal, state.settings.showTranslation) { o, t ->
+                    vm.updateSettings(state.settings.copy(showOriginal = o, showTranslation = t))
+                }
+            }
             ActionRow(AppIcons.Edit, "字幕样式", subtitle = "译文、原文两行分别调字号、颜色、底板和位置") { onSubtitleAction(SubtitleAction.STYLE) }
-            ActionRow(AppIcons.History, "字幕延迟", subtitle = if (state.subtitleDelayMs == 0L) null else "%+.1f 秒".format(state.subtitleDelayMs / 1000f)) {
+            ActionRow(AppIcons.History, "字幕延迟", subtitle = if (state.subtitleDelayMs == 0L) "字幕和声音对不上时调整" else "%+.1f 秒".format(state.subtitleDelayMs / 1000f)) {
                 onSubtitleAction(SubtitleAction.DELAY)
             }
-            ActionRow(AppIcons.File, "选择字幕文件", subtitle = "SRT / VTT / ASS") { onSubtitleAction(SubtitleAction.IMPORT) }
-            ActionRow(AppIcons.Search, "在线下载字幕", subtitle = "射手网 / OpenSubtitles") { onSubtitleAction(SubtitleAction.ONLINE) }
-            ActionRow(AppIcons.Download, "导出字幕", enabled = state.cues.isNotEmpty()) { onSubtitleAction(SubtitleAction.EXPORT) }
+
+            GroupLabel("列表与导出")
+            ActionRow(AppIcons.ListIcon, "字幕列表", subtitle = if (state.cues.isEmpty()) "还没有字幕" else "${state.cues.size} 句，点击可跳转、长按可复制", enabled = state.cues.isNotEmpty()) {
+                onSubtitleAction(SubtitleAction.LIST)
+            }
+            ActionRow(AppIcons.Download, "导出字幕", subtitle = "双语 / 仅译文 / 仅原文 SRT", enabled = state.cues.isNotEmpty()) { onSubtitleAction(SubtitleAction.EXPORT) }
         }
     }
+}
+
+/** 面板分组下的说明文字 */
+@Composable
+private fun PanelHint(text: String) {
+    Text(text, color = Color(0xFF999999), fontSize = 12.sp, modifier = Modifier.padding(start = 24.dp, end = 24.dp, bottom = 4.dp))
+}
+
+/** 分组里的小标题（获取字幕、显示…） */
+@Composable
+private fun GroupLabel(text: String) {
+    Text(text, color = Orange, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 12.dp, bottom = 2.dp))
 }
 
 @Composable
