@@ -135,9 +135,12 @@ class PlaybackFeatures(
         applyTrackDefaults()
         refreshSkipRanges()
         if (!VlcPlayer.needsVlc(e.title) && MkvChapters.isMatroska(e.title)) {
-            chapterJob = scope.launch(Dispatchers.IO) {
-                val list = runCatching { MkvChapters.read(authDataSourceFactory(app), Uri.parse(e.uri)) }
-                    .onFailure { android.util.Log.w("Voxtitle", "读取章节失败", it) }.getOrDefault(emptyList())
+            // 在 IO 线程读文件，回到主线程再更新（播放器只能在主线程访问）
+            chapterJob = scope.launch {
+                val list = withContext(Dispatchers.IO) {
+                    runCatching { MkvChapters.read(authDataSourceFactory(app), Uri.parse(e.uri)) }
+                        .onFailure { android.util.Log.w("Voxtitle", "读取章节失败", it) }.getOrDefault(emptyList())
+                }
                 if (entry == e) setChapters(list)
             }
         }
@@ -339,6 +342,9 @@ class PlaybackFeatures(
         try {
             _state.update { it.copy(detecting = "正在比对片头（${other.title}）…") }
             val found = mutableListOf<String>()
+            // 时长要在主线程读播放器，先取好再进后台
+            val da = durationOf(e)
+            val db = durationOf(other)
             withContext(Dispatchers.Default) {
                 val a = fingerprint(e, 0)
                 val b = fingerprint(other, 0)
@@ -348,8 +354,6 @@ class PlaybackFeatures(
                     found += "片头 ${formatMs(m.aStartMs)}–${formatMs(m.aEndMs)}"
                 }
                 _state.update { it.copy(detecting = "正在比对片尾…") }
-                val da = durationOf(e)
-                val db = durationOf(other)
                 if (da > SCAN_MS * 2 && db > SCAN_MS * 2) {
                     val ta = da - SCAN_MS
                     val tb = db - SCAN_MS
@@ -386,6 +390,7 @@ class PlaybackFeatures(
         return candidates.firstOrNull { it.uri != e.uri && PlaybackStore.seriesKey(it) == key }
     }
 
+    /** 在主线程调用（会读播放器） */
     private suspend fun durationOf(e: MediaEntry): Long {
         if (e.uri == entry?.uri) player().duration.takeIf { it > 0 }?.let { return it }
         if (e.durationMs > 0) return e.durationMs
