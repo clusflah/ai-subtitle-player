@@ -34,6 +34,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.Dp
 import com.aisub.player.media.Bookmark
+import io.github.peerless2012.ass.media.kt.withAssSupport
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -292,6 +293,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     useController = false
                     // 遮罩透明：画面背景本来就是黑色；VLC 内核不一定按 ExoPlayer 的方式通知首帧
                     setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    // ASS / SSA 字幕由 libass 画在字幕视图里的这一层上
+                    subtitleView?.withAssSupport(vm.assHandler)
                 }.also { playerView = it }
             },
             update = {

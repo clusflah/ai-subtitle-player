@@ -14,8 +14,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 25
-        versionName = "1.5.1"
+        versionCode = 26
+        versionName = "1.5.2"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用
@@ -90,6 +90,9 @@ android {
                 "META-INF/versions/**",
             )
         }
+        jniLibs {
+            pickFirsts += "lib/*/libc++_shared.so"
+        }
     }
 }
 
@@ -118,6 +121,9 @@ dependencies {
     implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1")
     // ISO（DVD / 蓝光镜像）以及 ExoPlayer 解不了的格式改用 VLC 内核
     implementation("org.videolan.android:libvlc-all:3.7.7")
+    // 视频自带的 ASS / SSA 字幕用 libass 渲染（位置、多行避让、特效和 Plex、VLC 一致；ExoPlayer 自带的只会把所有行堆在底部）
+    // 放在 VLC 后面：两者都带 libc++_shared.so，保留 VLC 那份（NDK 更新，向下兼容）
+    implementation("io.github.peerless2012:ass-media:0.5.1")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 

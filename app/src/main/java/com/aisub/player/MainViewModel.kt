@@ -17,6 +17,12 @@ import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
+import io.github.peerless2012.ass.media.AssHandler
+import io.github.peerless2012.ass.media.kt.withAssMkvSupport
+import io.github.peerless2012.ass.media.kt.withAssSupport
+import io.github.peerless2012.ass.media.parser.AssSubtitleParserFactory
+import io.github.peerless2012.ass.media.type.AssRenderType
 import com.aisub.player.media.AppStore
 import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.MediaProxy
@@ -122,10 +128,20 @@ enum class Task { TRANSCRIBE, TRANSLATE }
 @OptIn(UnstableApi::class)
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
+    /** 视频自带 ASS / SSA 字幕的 libass 渲染；播放页创建画面时把它的图层加到字幕视图上 */
+    val assHandler = AssHandler(AssRenderType.OVERLAY_OPEN_GL)
+
     /** 默认播放内核 */
-    val exoPlayer: ExoPlayer = ExoPlayer.Builder(app, renderersFactory(app))
-        .setMediaSourceFactory(DefaultMediaSourceFactory(authDataSourceFactory(app)))
-        .build()
+    val exoPlayer: ExoPlayer = run {
+        val assParsers = AssSubtitleParserFactory(assHandler)
+        val sources = DefaultMediaSourceFactory(authDataSourceFactory(app), DefaultExtractorsFactory().withAssMkvSupport(assParsers, assHandler))
+        sources.setSubtitleParserFactory(assParsers)
+        ExoPlayer.Builder(app)
+            .setRenderersFactory(renderersFactory(app).withAssSupport(assHandler))
+            .setMediaSourceFactory(sources)
+            .build()
+            .also(assHandler::init)
+    }
 
     /** VLC 内核：ISO 光盘镜像，或用户在 ExoPlayer 播放失败后手动切换。用到时才创建。 */
     private var vlcPlayer: VlcPlayer? = null
@@ -951,6 +967,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         savePosition()
         extras.release()
         exoPlayer.release()
+        assHandler.release()
         vlcPlayer?.release()
     }
 
