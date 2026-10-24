@@ -39,6 +39,7 @@ class ExoAudioDecoder(
 ) {
     fun decode(
         targetRate: Int = 16_000,
+        startMs: Long = 0,
         isActive: () -> Boolean,
         onProgress: (Float) -> Unit,
         onChunk: (FloatArray) -> Unit,
@@ -74,7 +75,7 @@ class ExoAudioDecoder(
                 }
             })
             player.volume = 0f
-            player.setMediaItem(MediaItem.fromUri(uri))
+            player.setMediaItem(MediaItem.fromUri(uri), startMs)
             player.prepare()
             player.play()
         }

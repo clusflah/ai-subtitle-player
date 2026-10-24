@@ -104,6 +104,11 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         invalidateState()
     }
 
+    /** 当前标题的章节（DVD / 蓝光、MKV 等）；VLC 开始播放后才有。 */
+    fun chapters(): List<Chapter> = runCatching {
+        mp.getChapters(-1).orEmpty().map { Chapter(it.timeOffset, (it.timeOffset + it.duration).takeIf { _ -> it.duration > 0 }, it.name.orEmpty()) }
+    }.getOrDefault(emptyList())
+
     /** VLC 的音轨、内嵌字幕轨转成 Media3 的 Tracks，播放页的音轨列表直接可用。 */
     private fun refreshTracks() {
         val groups = ArrayList<Tracks.Group>()

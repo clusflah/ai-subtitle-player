@@ -354,15 +354,8 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     Spacer(Modifier.height(8.dp))
                     DisplayModeSelector(s.showOriginal, s.showTranslation) { o, t -> s = s.copy(showOriginal = o, showTranslation = t) }
 
-                    Spacer(Modifier.height(16.dp))
-                    Text("字号 ${(s.subtitleScale * 100).toInt()}%", style = MaterialTheme.typography.bodyLarge)
-                    Slider(value = s.subtitleScale, onValueChange = { s = s.copy(subtitleScale = it) }, valueRange = 0.7f..1.8f, steps = 10)
-                    Text("离底部 ${s.subtitleOffset}dp", style = MaterialTheme.typography.bodyLarge)
-                    Slider(
-                        value = s.subtitleOffset.toFloat(), onValueChange = { s = s.copy(subtitleOffset = it.toInt()) },
-                        valueRange = 8f..160f,
-                    )
-                    SubtitlePreview(s)
+                    Spacer(Modifier.height(8.dp))
+                    SubtitleStyleEditor(s) { s = it }
                 }
                 CardDivider()
                 ListRow(
@@ -386,6 +379,41 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     subtitle = "自动滚动到正在播放的句子",
                     trailing = { Switch(checked = s.followPlayback, onCheckedChange = { s = s.copy(followPlayback = it) }) },
                     onClick = { s = s.copy(followPlayback = !s.followPlayback) },
+                )
+            }
+
+            // ---------------- 播放 ----------------
+            CollapsibleCard(
+                "播放",
+                listOfNotNull(
+                    s.preferredAudioLanguages.takeIf { it.isNotEmpty() }?.let { "音轨 " + (LANGUAGE_CHOICES.firstOrNull { c -> c.first == it }?.second ?: it) },
+                    s.preferredSubtitleLanguages.takeIf { it.isNotEmpty() }?.let { "字幕 " + (LANGUAGE_CHOICES.firstOrNull { c -> c.first == it }?.second ?: it) },
+                    if (s.autoSkip) "自动跳过片头片尾" else null,
+                ).joinToString(" · ").ifEmpty { "音轨、字幕选择与片头片尾" },
+            ) {
+                LanguageRow("首选音轨语言", s.preferredAudioLanguages) { s = s.copy(preferredAudioLanguages = it) }
+                CardDivider()
+                LanguageRow("首选视频自带字幕语言", s.preferredSubtitleLanguages) { s = s.copy(preferredSubtitleLanguages = it) }
+                CardDivider()
+                ListRow(
+                    title = "已有 AI / 外挂字幕时不开自带字幕",
+                    subtitle = "视频已经识别、导入或下载过字幕时，自带字幕保持关闭，避免两套字幕叠在一起",
+                    trailing = { Switch(checked = s.preferLoadedSubtitles, onCheckedChange = { s = s.copy(preferLoadedSubtitles = it) }) },
+                    onClick = { s = s.copy(preferLoadedSubtitles = !s.preferLoadedSubtitles) },
+                )
+                CardDivider()
+                ListRow(
+                    title = "自动跳过片头片尾",
+                    subtitle = "关掉后播到片头片尾只显示「跳过」按钮。在播放页「更多 → 片头片尾与跳过」里标记或管理",
+                    trailing = { Switch(checked = s.autoSkip, onCheckedChange = { s = s.copy(autoSkip = it) }) },
+                    onClick = { s = s.copy(autoSkip = !s.autoSkip) },
+                )
+                CardDivider()
+                ListRow(
+                    title = "自动识别片头片尾",
+                    subtitle = "从文件夹播放本地剧集时，和同一部剧的另一集比对声音找出片头片尾（每集只比一次）；网络文件流量大，需在播放页手动开始",
+                    trailing = { Switch(checked = s.autoDetectIntro, onCheckedChange = { s = s.copy(autoDetectIntro = it) }) },
+                    onClick = { s = s.copy(autoDetectIntro = !s.autoDetectIntro) },
                 )
             }
 
@@ -652,21 +680,22 @@ fun DisplayModeSelector(showOriginal: Boolean, showTranslation: Boolean, onChang
     }
 }
 
+/** 首选语言：常用语言里选一个，"跟随视频"为不指定 */
+private val LANGUAGE_CHOICES = listOf(
+    "" to "跟随视频默认", "zh" to "中文", "en" to "英语", "ja" to "日语", "ko" to "韩语",
+    "fr" to "法语", "de" to "德语", "es" to "西班牙语", "ru" to "俄语",
+)
+
 @Composable
-private fun SubtitlePreview(s: AppSettings) {
-    // 按 16:9 视频的大致比例缩小预览，位置随"离底部"同步变化
-    Box(
-        Modifier.fillMaxWidth().padding(top = 8.dp).height(150.dp)
-            .clip(MaterialTheme.shapes.medium)
-            .background(Color(0xFF263238)),
-        contentAlignment = Alignment.BottomCenter,
-    ) {
-        Column(Modifier.padding(bottom = (s.subtitleOffset / 2).dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            if (s.showTranslation) {
-                if (s.pinyinActive) PinyinText("这是一句翻译后的字幕", Color.White, (18 * s.subtitleScale).sp, center = true)
-                else Text("这是一句翻译后的字幕", color = Color.White, fontSize = (18 * s.subtitleScale).sp)
+private fun LanguageRow(title: String, value: String, onChange: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val label = LANGUAGE_CHOICES.firstOrNull { it.first == value }?.second ?: value
+    Box {
+        ListRow(title = title, subtitle = label, onClick = { open = true })
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            LANGUAGE_CHOICES.forEach { (code, name) ->
+                DropdownMenuItem(text = { Text(name) }, onClick = { onChange(code); open = false })
             }
-            if (s.showOriginal) Text("This is the original line.", color = Color(0xFFE0E0E0), fontSize = (14 * s.subtitleScale).sp)
         }
     }
 }

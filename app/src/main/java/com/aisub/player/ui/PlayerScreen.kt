@@ -20,8 +20,21 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.background
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.Dp
+import com.aisub.player.media.Bookmark
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -191,6 +204,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             wantsPlay = player.playWhenReady && player.playbackState != Player.STATE_IDLE && player.playbackState != Player.STATE_ENDED
             buffering = player.playbackState == Player.STATE_BUFFERING
             vm.checkAbLoop(positionMs)
+            vm.extras.checkSkip(positionMs)
             delay(100)
         }
     }
@@ -231,7 +245,21 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     var showCues by remember { mutableStateOf(false) }
     var showOnline by remember { mutableStateOf(false) }
     var showRoles by remember { mutableStateOf(false) }
+    var showNav by remember { mutableStateOf(false) }
+    var showBookmarks by remember { mutableStateOf(false) }
+    var showSkip by remember { mutableStateOf(false) }
+    var showStyle by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<PlayerDialog?>(null) }
+    /** 正在标记的跳过区间起点 */
+    var markStart by remember { mutableStateOf<Long?>(null) }
+    /** 手势横滑拖动进度时的目标位置，用于显示预览图 */
+    var gesturePreview by remember { mutableStateOf<Long?>(null) }
+    var renaming by remember { mutableStateOf<Bookmark?>(null) }
+    var playerView by remember { mutableStateOf<PlayerView?>(null) }
+    val extras by vm.extras.state.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(Unit) { vm.extras.events.collect { indicator = null to it } }
+    LaunchedEffect(gesturePreview) { gesturePreview?.let(vm.extras::requestThumbnail) ?: vm.extras.clearThumbnail() }
 
     LaunchedEffect(controls, interactions, isPlaying, showMore, showTracks) {
         if (controls && isPlaying && !showMore && !showTracks) {
@@ -264,7 +292,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     useController = false
                     // 遮罩透明：画面背景本来就是黑色；VLC 内核不一定按 ExoPlayer 的方式通知首帧
                     setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                }
+                }.also { playerView = it }
             },
             update = {
                 if (it.player !== player) it.player = player
@@ -286,8 +314,13 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         // ---- 字幕 ----
         SubtitleOverlay(
             cue = current, settings = state.settings,
-            modifier = Modifier.align(Alignment.BottomCenter)
-                .padding(bottom = (if (controls && !PipState.inPip) 150 else 0).dp + state.settings.subtitleOffset.dp, start = 16.dp, end = 16.dp),
+            // 暂停时底栏多一行逐帧、截图按钮，字幕再往上让一些
+            bottomPadding = when {
+                !controls || PipState.inPip -> 0
+                !wantsPlay && !audioOnly && state.current?.isVideo != false -> 210
+                else -> 150
+            }.dp + state.settings.subtitleOffset.dp,
+            topPadding = (if (controls && !PipState.inPip) 72 else 0).dp,
         )
         if (PipState.inPip) return@Box
 
@@ -320,6 +353,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             locked = locked,
             onTap = { controls = !controls; interactions++ },
             onIndicator = { indicator = it },
+            onSeekPreview = { gesturePreview = it },
             speed = { speed },
             player = player,
             onTogglePlay = vm::togglePlay,
@@ -338,6 +372,13 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     )
                 }
                 TaskChip(state, onClick = { showTracks = true }, modifier = Modifier.padding(start = 52.dp, bottom = 4.dp))
+                extras.detecting?.let { msg ->
+                    Text(
+                        msg, color = Color.White, fontSize = 12.sp,
+                        modifier = Modifier.padding(start = 52.dp, bottom = 4.dp).clip(RoundedCornerShape(50)).background(Color(0x5580DEEA))
+                            .clickable { showSkip = true }.padding(horizontal = 10.dp, vertical = 3.dp),
+                    )
+                }
             }
         }
 
@@ -346,16 +387,44 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             Column(Modifier.fillMaxWidth().background(Color(0x66000000)).navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
                 val duration = player.duration.takeIf { it > 0 } ?: 0L
                 var dragging by remember { mutableStateOf<Float?>(null) }
+                // 暂停时：逐帧、截图、书签
+                if (!wantsPlay && !audioOnly && state.current?.isVideo != false) {
+                    Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+                        FrameButton(AppIcons.SkipPrevious, "上一帧") { indicator = null to formatTime(vm.extras.stepFrame(false)); interactions++ }
+                        FrameButton(AppIcons.Image, "截图") {
+                            interactions++
+                            scope.launch {
+                                val pos = player.currentPosition
+                                val bmp = vm.extras.captureFrame(playerView?.videoSurfaceView)
+                                val ok = bmp != null && vm.extras.saveToGallery(bmp, pos)
+                                vm.extras.emit(if (ok) "截图已保存到相册 Pictures/译幕" else "截图失败")
+                            }
+                        }
+                        FrameButton(AppIcons.Star, "书签") { interactions++; scope.launch { vm.extras.addBookmark(playerView?.videoSurfaceView) } }
+                        FrameButton(AppIcons.SkipNext, "下一帧") { indicator = null to formatTime(vm.extras.stepFrame(true)); interactions++ }
+                    }
+                }
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                     Text(formatClock(dragging?.toLong() ?: positionMs), color = Color.White, fontSize = 14.sp)
                     Spacer(Modifier.weight(1f))
                     state.loopA?.let { Text(if (state.loopB != null) "A-B 循环中  " else "A 点已设置  ", color = Orange, fontSize = 13.sp) }
                     Text(formatClock(duration), color = Color.White, fontSize = 14.sp)
                 }
+                val fraction = if (duration > 0) ((dragging ?: positionMs.toFloat()) / duration).coerceIn(0f, 1f) else 0f
+                dragging?.let { ms ->
+                    SeekPreview(
+                        fraction, extras.thumbnail?.second, formatClock(ms.toLong()),
+                        extras.chapters.lastOrNull { it.startMs <= ms }?.title,
+                    )
+                }
                 SeekBar(
-                    fraction = if (duration > 0) ((dragging ?: positionMs.toFloat()) / duration).coerceIn(0f, 1f) else 0f,
-                    onDrag = { f -> dragging = f * duration; interactions++ },
-                    onDragEnd = { dragging?.let { player.seekTo(it.toLong()) }; dragging = null },
+                    fraction = fraction,
+                    durationMs = duration,
+                    chapters = extras.chapters.map { it.startMs },
+                    skips = extras.skipRanges.map { it.startMs to it.endMs },
+                    bookmarks = extras.bookmarks.map { it.positionMs },
+                    onDrag = { f -> dragging = f * duration; vm.extras.requestThumbnail((f * duration).toLong()); interactions++ },
+                    onDragEnd = { dragging?.let { player.seekTo(it.toLong()) }; dragging = null; vm.extras.clearThumbnail() },
                 )
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     BarButton(AppIcons.Subtitles, "字幕与音轨") { showTracks = true }
@@ -396,6 +465,27 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             ) { Icon(AppIcons.Lock, "解锁", tint = Color.White) }
         }
 
+        // ---- 横滑拖动进度时的画面预览 ----
+        if (gesturePreview != null) {
+            extras.thumbnail?.second?.let { bmp ->
+                Image(
+                    bmp.asImageBitmap(), null, contentScale = ContentScale.Fit,
+                    modifier = Modifier.align(Alignment.Center).offset(y = (-80).dp).width(200.dp).aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(8.dp)).background(Color.Black),
+                )
+            }
+        }
+
+        // ---- 片头片尾：没开自动跳过、或往回拖进区间时显示跳过按钮 ----
+        extras.activeSkip?.let { r ->
+            TextButton(
+                onClick = vm.extras::skipActive,
+                modifier = Modifier.align(Alignment.BottomEnd)
+                    .padding(end = 24.dp, bottom = (if (!controls || locked) 48 else if (!wantsPlay) 250 else 190).dp)
+                    .clip(RoundedCornerShape(8.dp)).background(Color(0xCC000000)),
+            ) { Text("跳过${r.kind.short} »", color = Color.White, fontSize = 15.sp) }
+        }
+
         // ---- 中央提示 ----
         indicator?.let { (icon, text) ->
             Row(
@@ -425,6 +515,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         MoreAction.SLEEP -> dialog = PlayerDialog.SLEEP
                         MoreAction.SPEED -> dialog = PlayerDialog.SPEED
                         MoreAction.GOTO -> dialog = PlayerDialog.GOTO
+                        MoreAction.NAVIGATE -> showNav = true
+                        MoreAction.BOOKMARKS -> showBookmarks = true
+                        MoreAction.SKIP -> showSkip = true
                         MoreAction.EQUALIZER -> openEqualizer(context, (player as? androidx.media3.exoplayer.ExoPlayer)?.audioSessionId ?: 0)
                         MoreAction.AUDIO_ONLY -> {
                             audioOnly = !audioOnly
@@ -471,6 +564,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         SubtitleAction.ERROR -> dialog = PlayerDialog.ERROR
                         SubtitleAction.ROLES -> { showTracks = false; showRoles = true }
                         SubtitleAction.EMBEDDED -> if (state.extractingEmbedded) vm.cancelAll() else vm.extractEmbeddedSubtitles()
+                        SubtitleAction.STYLE -> { showTracks = false; showStyle = true }
                     }
                 },
             )
@@ -509,6 +603,64 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             containerColor = Color(0xFF111111),
         ) {
             Column(Modifier.verticalScroll(rememberScrollState())) { RolesPanel(vm, state) }
+        }
+    }
+
+    // ---- 章节与片段 ----
+    if (showNav) {
+        ModalBottomSheet(onDismissRequest = { showNav = false }, containerColor = Color(0xFF111111)) {
+            NavigatorSheet(vm, positionMs) { ms -> player.seekTo(ms); showNav = false }
+        }
+    }
+
+    // ---- 书签与关键帧 ----
+    if (showBookmarks) {
+        ModalBottomSheet(onDismissRequest = { showBookmarks = false }, containerColor = Color(0xFF111111)) {
+            BookmarksSheet(
+                vm,
+                onAdd = { scope.launch { vm.extras.addBookmark(playerView?.videoSurfaceView) } },
+                onSeek = { ms -> player.seekTo(ms); showBookmarks = false },
+                onRename = { renaming = it },
+            )
+        }
+    }
+    renaming?.let { b ->
+        TextInputDialog("书签备注", "备注", confirm = "保存", initial = b.note, onDismiss = { renaming = null }) { note ->
+            vm.extras.renameBookmark(b, note)
+            renaming = null
+        }
+    }
+
+    // ---- 片头片尾与跳过 ----
+    if (showSkip) {
+        ModalBottomSheet(
+            onDismissRequest = { showSkip = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = Color(0xFF111111),
+        ) {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                SkipSheet(
+                    vm, positionMs, markStart,
+                    onMarkStart = { markStart = positionMs; showSkip = false; indicator = null to "已记下起点，播放到结尾后再打开这里" },
+                    onMarkEnd = { kind -> markStart?.let { vm.extras.markRange(kind, it, positionMs) }; markStart = null },
+                    onCancelMark = { markStart = null },
+                    onSeek = { ms -> player.seekTo(ms) },
+                )
+            }
+        }
+    }
+
+    // ---- 字幕样式（边调边看） ----
+    if (showStyle) {
+        ModalBottomSheet(
+            onDismissRequest = { showStyle = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = Color(0xFF111111),
+        ) {
+            Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, bottom = 24.dp)) {
+                Text("字幕样式", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                SubtitleStyleEditor(state.settings) { vm.updateSettings(it) }
+            }
         }
     }
 
@@ -587,9 +739,52 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 /** 导出模式在选择后、文件选择器返回前暂存。 */
 private var pendingExport = SrtMode.BILINGUAL
 
-/** VLC 风格的细进度条：灰色细线 + 橙色已播放段 + 小圆点；点按或拖动跳转。 */
+/** 拖动进度条时浮在上方的预览：画面、时间、所在章节，跟着手指左右移动。 */
 @Composable
-private fun SeekBar(fraction: Float, onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
+private fun SeekPreview(fraction: Float, image: android.graphics.Bitmap?, time: String, chapter: String?) {
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+        val w = 168.dp
+        val x = (maxWidth * fraction - w / 2).coerceIn(0.dp, (maxWidth - w).coerceAtLeast(0.dp))
+        Column(
+            Modifier.offset(x = x).width(w).clip(RoundedCornerShape(8.dp)).background(Color(0xCC000000)),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Color(0xFF222222)), contentAlignment = Alignment.Center) {
+                if (image != null) Image(image.asImageBitmap(), null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                else CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
+            }
+            Text(time, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 2.dp))
+            if (!chapter.isNullOrBlank()) Text(chapter, color = Color(0xFFCCCCCC), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 6.dp))
+            Spacer(Modifier.height(4.dp))
+        }
+    }
+}
+
+@Composable
+private fun FrameButton(icon: ImageVector, label: String, onClick: () -> Unit) {
+    Column(
+        Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(icon, label, tint = Color.White, modifier = Modifier.size(24.dp))
+        Text(label, color = Color.White, fontSize = 11.sp)
+    }
+}
+
+/**
+ * VLC 风格的细进度条：灰色细线 + 橙色已播放段 + 小圆点；点按或拖动跳转。
+ * 线上标出章节（白色刻度）、片头片尾等跳过区间（浅色段）和书签（黄点）。
+ */
+@Composable
+private fun SeekBar(
+    fraction: Float,
+    durationMs: Long,
+    chapters: List<Long>,
+    skips: List<Pair<Long, Long>>,
+    bookmarks: List<Long>,
+    onDrag: (Float) -> Unit,
+    onDragEnd: () -> Unit,
+) {
     var widthPx by remember { mutableFloatStateOf(1f) }
     Box(
         Modifier.fillMaxWidth().height(32.dp)
@@ -607,6 +802,24 @@ private fun SeekBar(fraction: Float, onDrag: (Float) -> Unit, onDragEnd: () -> U
         contentAlignment = Alignment.CenterStart,
     ) {
         Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color(0x55FFFFFF)))
+        if (durationMs > 0) {
+            Canvas(Modifier.fillMaxWidth().height(12.dp)) {
+                val cy = size.height / 2
+                for ((s, e) in skips) {
+                    val x0 = s.toFloat() / durationMs * size.width
+                    val x1 = e.toFloat() / durationMs * size.width
+                    drawRect(Color(0x8880DEEA), topLeft = Offset(x0, cy - 1.5.dp.toPx()), size = Size((x1 - x0).coerceAtLeast(2f), 3.dp.toPx()))
+                }
+                for (c in chapters) {
+                    if (c <= 0) continue
+                    val x = c.toFloat() / durationMs * size.width
+                    drawRect(Color.White, topLeft = Offset(x - 1f, cy - 4.dp.toPx()), size = Size(2.dp.toPx(), 8.dp.toPx()))
+                }
+                for (b in bookmarks) {
+                    drawCircle(Color(0xFFFFE066), radius = 3.dp.toPx(), center = Offset(b.toFloat() / durationMs * size.width, cy - 5.dp.toPx()))
+                }
+            }
+        }
         Box(Modifier.fillMaxWidth(fraction).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Orange))
         Box(
             Modifier.offset { IntOffset((fraction * widthPx - 8.dp.toPx()).roundToInt(), 0) }
@@ -646,33 +859,16 @@ private fun TaskChip(state: UiState, onClick: () -> Unit, modifier: Modifier = M
     }
 }
 
+/** 画面上的 AI 字幕。译文行、原文行的样式和位置见 [StyledSubtitleLines]。 */
 @Composable
-private fun SubtitleOverlay(cue: Cue?, settings: AppSettings, modifier: Modifier = Modifier) {
+private fun BoxScope.SubtitleOverlay(cue: Cue?, settings: AppSettings, bottomPadding: Dp, topPadding: Dp) {
     if (cue == null || !settings.showAiSubtitles) return
     // 原文已是目标语言时译文和原文相同，只显示一行
     val lines = if (cue.translation == cue.text) listOf(cue.text to true) else buildList {
         if (settings.showTranslation && cue.translation != null) add(cue.translation to true)
         if (settings.showOriginal || cue.translation == null) add(cue.text to false)
     }
-    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        for ((text, primary) in lines) {
-            if (primary && settings.pinyinActive) {
-                PinyinText(
-                    text, Color.White, (18 * settings.subtitleScale).sp, fontWeight = FontWeight.Medium, center = true,
-                    modifier = Modifier.background(Color(0x99000000)).padding(horizontal = 6.dp, vertical = 2.dp),
-                )
-                continue
-            }
-            Text(
-                text = text,
-                color = if (primary) Color.White else Color(0xFFE0E0E0),
-                fontSize = ((if (primary) 18 else 14) * settings.subtitleScale).sp,
-                fontWeight = if (primary) FontWeight.Medium else FontWeight.Normal,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.background(Color(0x99000000)).padding(horizontal = 6.dp, vertical = 2.dp),
-            )
-        }
-    }
+    StyledSubtitleLines(lines, settings, bottomPadding, topPadding)
 }
 
 /**
@@ -684,6 +880,7 @@ private fun GestureLayer(
     locked: Boolean,
     onTap: () -> Unit,
     onIndicator: (Pair<ImageVector?, String>) -> Unit,
+    onSeekPreview: (Long?) -> Unit,
     speed: () -> Float,
     player: Player,
     onTogglePlay: () -> Unit,
@@ -744,8 +941,9 @@ private fun GestureLayer(
                     onDragEnd = {
                         if (dragMode == DragMode.SEEK) player.seekTo(seekTarget)
                         dragMode = DragMode.NONE
+                        onSeekPreview(null)
                     },
-                    onDragCancel = { dragMode = DragMode.NONE },
+                    onDragCancel = { dragMode = DragMode.NONE; onSeekPreview(null) },
                     onDrag = { change, delta ->
                         change.consume()
                         accX += delta.x
@@ -763,6 +961,7 @@ private fun GestureLayer(
                                 seekTarget = (seekTarget + (delta.x / size.width * 120_000).toLong()).coerceIn(0, duration)
                                 val diff = seekTarget - player.currentPosition
                                 onIndicator(null to "${if (diff >= 0) "+" else "-"}${formatDuration(abs(diff).coerceAtLeast(1000))}  ${formatClock(seekTarget)}")
+                                onSeekPreview(seekTarget)
                             }
                             DragMode.BRIGHTNESS -> {
                                 brightness = (brightness - delta.y / size.height).coerceIn(0.01f, 1f)
@@ -784,7 +983,7 @@ private fun GestureLayer(
 
 // ---------------- 更多菜单 ----------------
 
-private enum class MoreAction { LOCK, SLEEP, SPEED, GOTO, EQUALIZER, AUDIO_ONLY, PIP, REPEAT, INFO, AB_LOOP, SAVE_PLAYLIST, SETTINGS }
+private enum class MoreAction { LOCK, SLEEP, SPEED, GOTO, NAVIGATE, BOOKMARKS, SKIP, EQUALIZER, AUDIO_ONLY, PIP, REPEAT, INFO, AB_LOOP, SAVE_PLAYLIST, SETTINGS }
 
 @Composable
 private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAction: (MoreAction) -> Unit) {
@@ -793,6 +992,9 @@ private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAct
         Triple(MoreAction.SLEEP, AppIcons.Timer, "睡眠计时器" + if (state.sleepAt != null) "（已开启）" else ""),
         Triple(MoreAction.SPEED, AppIcons.Speed, "播放速度"),
         Triple(MoreAction.GOTO, AppIcons.AccessTime, "转到时间"),
+        Triple(MoreAction.NAVIGATE, AppIcons.GridView, "章节与片段"),
+        Triple(MoreAction.BOOKMARKS, AppIcons.Star, "书签与关键帧"),
+        Triple(MoreAction.SKIP, AppIcons.SkipNext, "片头片尾与跳过"),
         Triple(MoreAction.EQUALIZER, AppIcons.Equalizer, "均衡器"),
         Triple(MoreAction.AUDIO_ONLY, AppIcons.MusicNote, if (audioOnly) "恢复视频画面" else "作为音频播放"),
         Triple(MoreAction.PIP, AppIcons.Pip, "弹出播放器"),
@@ -846,7 +1048,7 @@ private fun enterPip(activity: Activity?) {
 
 // ---------------- 字幕与音轨面板 ----------------
 
-private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ONLINE, EXPORT, ERROR, ROLES, EMBEDDED }
+private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ONLINE, EXPORT, ERROR, ROLES, EMBEDDED, STYLE }
 
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
@@ -860,10 +1062,14 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
         SheetHeader("音频", audioOpen) { audioOpen = !audioOpen }
         if (audioOpen) {
+            Text(
+                "选过的音轨和字幕按视频记住，下次打开自动选好；首选语言在「设置 → 播放」里改",
+                color = Color(0xFF999999), fontSize = 12.sp, modifier = Modifier.padding(horizontal = 24.dp),
+            )
             val groups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO } }
             val disabled = remember(version, state.current?.uri) { C.TRACK_TYPE_AUDIO in player.trackSelectionParameters.disabledTrackTypes }
             TrackRow("禁用轨道", disabled) {
-                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true).build()
+                vm.extras.disableTrackType(C.TRACK_TYPE_AUDIO)
                 version++
             }
             if (groups.isEmpty()) TrackRow("没有音轨", false, enabled = false) {}
@@ -876,10 +1082,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                         f.channelCount.takeIf { it > 0 }?.let { "${it} 声道" },
                     ).joinToString(" · ")
                     TrackRow(name, !disabled && group.isTrackSelected(i)) {
-                        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
-                            .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
-                            .build()
+                        vm.extras.selectTrack(C.TRACK_TYPE_AUDIO, group, i)
                         version++
                     }
                 }
@@ -894,7 +1097,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
             if (embeddedOpen) {
                 val textDisabled = remember(version, player) { C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes }
                 TrackRow("不显示", textDisabled || textGroups.none { it.isSelected }) {
-                    player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+                    vm.extras.disableTrackType(C.TRACK_TYPE_TEXT)
                     version++
                 }
                 textGroups.forEachIndexed { gi, group ->
@@ -902,10 +1105,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                         val f = group.getTrackFormat(i)
                         val name = f.label ?: f.language?.takeIf { it != "und" }?.let { java.util.Locale.forLanguageTag(it).displayLanguage } ?: "字幕 ${gi + 1}"
                         TrackRow(name, !textDisabled && group.isTrackSelected(i)) {
-                            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                                .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, i))
-                                .build()
+                            vm.extras.selectTrack(C.TRACK_TYPE_TEXT, group, i)
                             version++
                         }
                     }
@@ -971,6 +1171,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                 enabled = state.cues.isNotEmpty(),
             ) { onSubtitleAction(SubtitleAction.ROLES) }
             HorizontalDivider(Modifier.padding(start = 24.dp, end = 24.dp, top = 8.dp), color = Color(0xFF333333))
+            ActionRow(AppIcons.Edit, "字幕样式", subtitle = "译文、原文两行分别调字号、颜色、底板和位置") { onSubtitleAction(SubtitleAction.STYLE) }
             ActionRow(AppIcons.History, "字幕延迟", subtitle = if (state.subtitleDelayMs == 0L) null else "%+.1f 秒".format(state.subtitleDelayMs / 1000f)) {
                 onSubtitleAction(SubtitleAction.DELAY)
             }

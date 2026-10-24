@@ -2,6 +2,7 @@ package com.aisub.player
 
 import android.content.Context
 import com.aisub.player.asr.ModelManager
+import com.aisub.player.subtitle.LineStyle
 import com.aisub.player.subtitle.Pinyin
 import com.aisub.player.tts.TtsEngineType
 import com.aisub.player.tts.ttsLocaleFor
@@ -56,8 +57,26 @@ data class AppSettings(
     val subtitleScale: Float = 1f,
     /** 字幕离视频底部的距离（dp） */
     val subtitleOffset: Int = 40,
+    /** 译文行、原文行各自的字号、颜色、底板、粗细 */
+    val translationStyle: LineStyle = LineStyle.TRANSLATION,
+    val originalStyle: LineStyle = LineStyle.ORIGINAL,
+    /** 双语时原文在上面（默认译文在上） */
+    val originalOnTop: Boolean = false,
+    /** 上下两行之间的距离（dp） */
+    val subtitleLineGap: Int = 2,
+    /** 上面那行单独放到画面顶部时离顶部的距离（dp）；-1 为紧挨着下面那行 */
+    val topLineFromTop: Int = -1,
     /** 字幕列表自动滚动到当前句 */
     val followPlayback: Boolean = true,
+    /** 播放到片头、片尾或自定义跳过区间时自动跳过；关掉时只显示"跳过"按钮 */
+    val autoSkip: Boolean = true,
+    /** 没有片头片尾记录时，和同一部剧的另一集比对声音自动找出来 */
+    val autoDetectIntro: Boolean = true,
+    /** 首选音轨、视频自带字幕的语言（ISO 639 代码，逗号分隔，如 "ja,en"）；空为跟随视频默认 */
+    val preferredAudioLanguages: String = "",
+    val preferredSubtitleLanguages: String = "",
+    /** 视频已有 AI / 外挂字幕时，不自动打开视频自带字幕 */
+    val preferLoadedSubtitles: Boolean = true,
     /** 在画面上显示 AI 字幕（识别、导入或从视频提取的字幕）；关掉后仍可翻译、朗读 */
     val showAiSubtitles: Boolean = true,
     /** 下载版：链接下载的最高分辨率，0 为不限 */
@@ -201,7 +220,17 @@ class SettingsRepository(context: Context) {
             showTranslation = prefs.getBoolean("showTranslation", d.showTranslation),
             subtitleScale = prefs.getFloat("subtitleScale", d.subtitleScale),
             subtitleOffset = prefs.getInt("subtitleOffset", d.subtitleOffset),
+            translationStyle = LineStyle.decode(prefs.getString("translationStyle", null), d.translationStyle),
+            originalStyle = LineStyle.decode(prefs.getString("originalStyle", null), d.originalStyle),
+            originalOnTop = prefs.getBoolean("originalOnTop", d.originalOnTop),
+            subtitleLineGap = prefs.getInt("subtitleLineGap", d.subtitleLineGap),
+            topLineFromTop = prefs.getInt("topLineFromTop", d.topLineFromTop),
             followPlayback = prefs.getBoolean("followPlayback", d.followPlayback),
+            autoSkip = prefs.getBoolean("autoSkip", d.autoSkip),
+            autoDetectIntro = prefs.getBoolean("autoDetectIntro", d.autoDetectIntro),
+            preferredAudioLanguages = prefs.getString("preferredAudioLanguages", d.preferredAudioLanguages)!!,
+            preferredSubtitleLanguages = prefs.getString("preferredSubtitleLanguages", d.preferredSubtitleLanguages)!!,
+            preferLoadedSubtitles = prefs.getBoolean("preferLoadedSubtitles", d.preferLoadedSubtitles),
             showPinyin = prefs.getBoolean("showPinyin", d.showPinyin),
             showAiSubtitles = prefs.getBoolean("showAiSubtitles", d.showAiSubtitles),
             dlQuality = prefs.getInt("dlQuality", d.dlQuality),
@@ -243,7 +272,17 @@ class SettingsRepository(context: Context) {
             .putBoolean("showTranslation", s.showTranslation)
             .putFloat("subtitleScale", s.subtitleScale)
             .putInt("subtitleOffset", s.subtitleOffset)
+            .putString("translationStyle", s.translationStyle.encode())
+            .putString("originalStyle", s.originalStyle.encode())
+            .putBoolean("originalOnTop", s.originalOnTop)
+            .putInt("subtitleLineGap", s.subtitleLineGap)
+            .putInt("topLineFromTop", s.topLineFromTop)
             .putBoolean("followPlayback", s.followPlayback)
+            .putBoolean("autoSkip", s.autoSkip)
+            .putBoolean("autoDetectIntro", s.autoDetectIntro)
+            .putString("preferredAudioLanguages", s.preferredAudioLanguages)
+            .putString("preferredSubtitleLanguages", s.preferredSubtitleLanguages)
+            .putBoolean("preferLoadedSubtitles", s.preferLoadedSubtitles)
             .putBoolean("showPinyin", s.showPinyin)
             .putBoolean("showAiSubtitles", s.showAiSubtitles)
             .putInt("dlQuality", s.dlQuality)

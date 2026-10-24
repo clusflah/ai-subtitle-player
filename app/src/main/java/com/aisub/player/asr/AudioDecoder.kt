@@ -32,22 +32,24 @@ class AudioDecoder(
      * @param onChunk 每块重采样后的音频
      * @param onProgress 0..1 的解码进度
      * @param isActive 返回 false 时提前停止（用于取消）
+     * @param startMs 从这个位置开始解码（找片尾时只解最后几分钟）
      */
     fun decode(
         targetRate: Int = 16_000,
+        startMs: Long = 0,
         isActive: () -> Boolean,
         onProgress: (Float) -> Unit,
         onChunk: (FloatArray) -> Unit,
     ) {
         try {
-            decodeWithMediaCodec(targetRate, isActive, onProgress, onChunk)
+            decodeWithMediaCodec(targetRate, startMs, isActive, onProgress, onChunk)
         } catch (e: Exception) {
             // 系统解析器有时会直接丢掉自己不支持的音轨（例如 MKV 里的 AC3），表现为"没有音轨"，
             // 所以这两种情况都再用 ExoPlayer + FFmpeg 试一次
             if (e !is UnsupportedBySystem && e !is NoAudioTrackException) throw e
             val factory = fallbackDataSource ?: throw e
             var gotAudio = false
-            ExoAudioDecoder(context, uri, factory).decode(targetRate, isActive, onProgress) { chunk ->
+            ExoAudioDecoder(context, uri, factory).decode(targetRate, startMs, isActive, onProgress) { chunk ->
                 gotAudio = true
                 onChunk(chunk)
             }
@@ -57,6 +59,7 @@ class AudioDecoder(
 
     private fun decodeWithMediaCodec(
         targetRate: Int,
+        startMs: Long,
         isActive: () -> Boolean,
         onProgress: (Float) -> Unit,
         onChunk: (FloatArray) -> Unit,
@@ -87,6 +90,7 @@ class AudioDecoder(
             val trackIndex = audioTracks.firstOrNull { codecs.findDecoderForFormat(extractor.getTrackFormat(it)) != null }
                 ?: throw UnsupportedBySystem("音轨格式 ${extractor.getTrackFormat(audioTracks[0]).getString(MediaFormat.KEY_MIME)} 系统不支持")
             extractor.selectTrack(trackIndex)
+            if (startMs > 0) extractor.seekTo(startMs * 1000, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             val inFormat = extractor.getTrackFormat(trackIndex)
             val durationUs = if (inFormat.containsKey(MediaFormat.KEY_DURATION)) inFormat.getLong(MediaFormat.KEY_DURATION) else 0L
             val mime = inFormat.getString(MediaFormat.KEY_MIME)!!

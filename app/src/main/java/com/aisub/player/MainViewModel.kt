@@ -176,9 +176,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     )
     private var queue: List<MediaEntry> = emptyList()
 
+    /** 进度条缩略图、章节、片头片尾、轨道记忆、逐帧与书签 */
+    val extras = PlaybackFeatures(
+        app, viewModelScope, exoPlayer,
+        player = { player },
+        settings = { _state.value.settings },
+        queue = { queue },
+        hasLoadedSubtitles = { _state.value.cues.isNotEmpty() },
+    )
+
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             if (!usingVlc) queue.getOrNull(exoPlayer.currentMediaItemIndex)?.let(::onEntryChanged)
+        }
+
+        override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+            extras.onTracksChanged(tracks)
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -194,9 +207,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     init {
         if (_state.value.settings.ttsEnabled) ttsReader.start()
         exoPlayer.addListener(listener)
-        // 内嵌字幕默认不显示（避免和 AI 字幕重叠），在字幕面板里手动选择
-        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+        // 内嵌字幕默认不显示（避免和 AI 字幕重叠），除非设置了首选字幕语言
+        extras.applyTrackDefaults()
     }
 
     private fun vlc(): VlcPlayer = vlcPlayer ?: VlcPlayer(getApplication(), proxy).also {
@@ -294,6 +306,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 failedTask = null,
             )
         }
+        extras.onEntryChanged(entry)
         library.recordHistory(entry, 0)
     }
 
@@ -322,6 +335,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             ttsReader.reset()
         }
         if (s.ttsEnabled) ttsReader.start() else ttsReader.stop()
+        if (old.preferredAudioLanguages != s.preferredAudioLanguages || old.preferredSubtitleLanguages != s.preferredSubtitleLanguages) {
+            extras.applyTrackDefaults()
+        }
     }
 
     // ---------------- 朗读与角色 ----------------
@@ -933,6 +949,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         previewPlayer?.release()
         ttsEngines.values.forEach { it.close() }
         savePosition()
+        extras.release()
         exoPlayer.release()
         vlcPlayer?.release()
     }
