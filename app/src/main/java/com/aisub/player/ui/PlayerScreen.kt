@@ -65,6 +65,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -260,6 +261,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     var renaming by remember { mutableStateOf<Bookmark?>(null) }
     /** 字幕列表里正在编辑的一句 */
     var editing by remember { mutableStateOf<Cue?>(null) }
+    var showChannels by remember { mutableStateOf(false) }
+    val isLive = state.current?.isLive == true
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     val extras by vm.extras.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -324,7 +327,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             // 暂停时底栏多一行逐帧、截图按钮，字幕再往上让一些
             bottomPadding = when {
                 !controls || PipState.inPip -> 0
-                !wantsPlay && !audioOnly && state.current?.isVideo != false -> 210
+                !wantsPlay && !audioOnly && state.current?.isVideo != false && !isLive -> 210
                 else -> 150
             }.dp + state.settings.subtitleOffset.dp,
             topPadding = (if (controls && !PipState.inPip) 72 else 0).dp,
@@ -377,6 +380,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         state.current?.title ?: "", color = Color.White, fontSize = 20.sp,
                         maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 12.dp),
                     )
+                    // 直播：打开频道列表切台
+                    if (isLive && vm.queueSize > 1) {
+                        TextButton(onClick = { showChannels = true }) {
+                            Icon(AppIcons.ListIcon, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("频道", color = Color.White)
+                        }
+                    }
                 }
                 TaskChip(state, onClick = { showTracks = true }, modifier = Modifier.padding(start = 52.dp, bottom = 4.dp))
                 extras.detecting?.let { msg ->
@@ -395,7 +406,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 val duration = player.duration.takeIf { it > 0 } ?: 0L
                 var dragging by remember { mutableStateOf<Float?>(null) }
                 // 暂停时：逐帧、截图、书签
-                if (!wantsPlay && !audioOnly && state.current?.isVideo != false) {
+                if (!wantsPlay && !audioOnly && state.current?.isVideo != false && !isLive) {
                     Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
                         FrameButton(AppIcons.SkipPrevious, "上一帧") { indicator = null to formatTime(vm.extras.stepFrame(false)); interactions++ }
                         FrameButton(AppIcons.Image, "截图") {
@@ -412,11 +423,18 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                 }
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                    Text(formatClock(dragging?.toLong() ?: positionMs), color = Color.White, fontSize = 14.sp)
-                    Spacer(Modifier.weight(1f))
-                    state.loopA?.let { Text(if (state.loopB != null) "A-B 循环中  " else "A 点已设置  ", color = Orange, fontSize = 13.sp) }
-                    Text(formatClock(duration), color = Color.White, fontSize = 14.sp)
+                    if (isLive) {
+                        Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Spacer(Modifier.weight(1f))
+                    } else {
+                        Text(formatClock(dragging?.toLong() ?: positionMs), color = Color.White, fontSize = 14.sp)
+                        Spacer(Modifier.weight(1f))
+                        state.loopA?.let { Text(if (state.loopB != null) "A-B 循环中  " else "A 点已设置  ", color = Orange, fontSize = 13.sp) }
+                        Text(formatClock(duration), color = Color.White, fontSize = 14.sp)
+                    }
                 }
+                // 真正的直播流没有时长、不能拖；有些"直播源"其实是点播流，仍然显示进度条
+                val seekable = !isLive || (!player.isCurrentMediaItemLive && duration > 0)
                 val fraction = if (duration > 0) ((dragging ?: positionMs.toFloat()) / duration).coerceIn(0f, 1f) else 0f
                 dragging?.let { ms ->
                     SeekPreview(
@@ -424,7 +442,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         extras.chapters.lastOrNull { it.startMs <= ms }?.title,
                     )
                 }
-                SeekBar(
+                if (seekable) SeekBar(
                     fraction = fraction,
                     durationMs = duration,
                     chapters = extras.chapters.map { it.startMs },
@@ -432,7 +450,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     bookmarks = extras.bookmarks.map { it.positionMs },
                     onDrag = { f -> dragging = f * duration; vm.extras.requestThumbnail((f * duration).toLong()); interactions++ },
                     onDragEnd = { dragging?.let { player.seekTo(it.toLong()) }; dragging = null; vm.extras.clearThumbnail() },
-                )
+                ) else Spacer(Modifier.height(12.dp))
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     BarButton(AppIcons.Subtitles, "字幕与音轨") { showTracks = true }
                     Spacer(Modifier.weight(1f))
@@ -611,6 +629,33 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             containerColor = Color(0xFF111111),
         ) {
             Column(Modifier.verticalScroll(rememberScrollState())) { RolesPanel(vm, state) }
+        }
+    }
+
+    // ---- 直播频道列表 ----
+    if (showChannels) {
+        ModalBottomSheet(onDismissRequest = { showChannels = false }, containerColor = Color(0xFF111111)) {
+            val channels = vm.queueEntries
+            val currentIndex = channels.indexOfFirst { it.uri == state.current?.uri }
+            val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 3).coerceAtLeast(0))
+            Text("频道", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+            LazyColumn(Modifier.fillMaxHeight(0.75f), state = listState) {
+                itemsIndexed(channels) { i, c ->
+                    val active = i == currentIndex
+                    Row(
+                        Modifier.fillMaxWidth().background(if (active) Color(0x33F28C00) else Color.Transparent)
+                            .clickable { vm.playQueueIndex(i); showChannels = false }.padding(horizontal = 20.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        NetImage(c.logo.ifEmpty { null }, Modifier.size(width = 56.dp, height = 34.dp), contentScale = ContentScale.Fit, maxSize = 200, fallback = AppIcons.Live, background = false)
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(c.title, color = if (active) Orange else Color.White, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (c.folder.isNotBlank()) Text(c.folder, color = Color(0xFF888888), fontSize = 12.sp, maxLines = 1)
+                        }
+                    }
+                }
+            }
         }
     }
 

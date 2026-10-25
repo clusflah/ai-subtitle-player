@@ -14,8 +14,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 29
-        versionName = "1.5.5"
+        versionCode = 30
+        versionName = "1.6.0"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用
@@ -117,6 +117,10 @@ dependencies {
 
     implementation("androidx.media3:media3-exoplayer:1.9.0")
     implementation("androidx.media3:media3-ui:1.9.0")
+    // 直播与串流：HLS（m3u8）、DASH、RTSP
+    implementation("androidx.media3:media3-exoplayer-hls:1.9.0")
+    implementation("androidx.media3:media3-exoplayer-dash:1.9.0")
+    implementation("androidx.media3:media3-exoplayer-rtsp:1.9.0")
     // AC3、E-AC3、DTS、TrueHD 等手机系统通常不支持的音频格式，用 FFmpeg 软解（Jellyfin 预编译，版本需与 Media3 一致）
     implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1")
     // ISO（DVD / 蓝光镜像）以及 ExoPlayer 解不了的格式改用 VLC 内核

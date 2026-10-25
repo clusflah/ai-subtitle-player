@@ -12,6 +12,9 @@ data class MediaEntry(
     val folder: String = "",
     /** 文件大小（字节）；未知为 0 */
     val sizeBytes: Long = 0,
+    /** 直播频道：不续播进度、不截缩略图；logo 是频道台标地址 */
+    val isLive: Boolean = false,
+    val logo: String = "",
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("uri", uri)
@@ -20,6 +23,8 @@ data class MediaEntry(
         .put("duration", durationMs)
         .put("folder", folder)
         .put("size", sizeBytes)
+        .put("live", isLive)
+        .put("logo", logo)
 
     companion object {
         fun fromJson(o: JSONObject) = MediaEntry(
@@ -29,6 +34,8 @@ data class MediaEntry(
             durationMs = o.optLong("duration"),
             folder = o.optString("folder"),
             sizeBytes = o.optLong("size"),
+            isLive = o.optBoolean("live"),
+            logo = o.optString("logo"),
         )
 
         private val VIDEO_EXT = setOf(

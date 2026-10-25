@@ -7,6 +7,8 @@ sealed interface Screen {
     data object Player : Screen
     data object History : Screen
     data object Settings : Screen
+    /** 直播：M3U / TXT 直播源的频道列表 */
+    data object Live : Screen
     /** 下载版：分享链接后的下载进度页 */
     data object Link : Screen
     data class LocalFolder(val path: String, val title: String) : Screen

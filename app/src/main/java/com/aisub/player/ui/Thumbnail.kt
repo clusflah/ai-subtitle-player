@@ -12,6 +12,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -92,6 +93,11 @@ object HistoryThumbs {
 /** 视频缩略图；没有缩略图（音频、还没播过的网络视频）时显示类型图标。 */
 @Composable
 fun MediaThumbnail(entry: MediaEntry, modifier: Modifier = Modifier) {
+    // 直播频道显示台标
+    if (entry.isLive) {
+        NetImage(entry.logo.ifEmpty { null }, modifier.background(MaterialTheme.colorScheme.surfaceVariant).padding(12.dp), contentScale = ContentScale.Fit, fallback = AppIcons.Live)
+        return
+    }
     val context = LocalContext.current
     val thumbVersion = if (HistoryThumbs.needed(entry.uri)) HistoryThumbs.version else 0
     val image by produceState<ImageBitmap?>(null, entry.uri, thumbVersion) {

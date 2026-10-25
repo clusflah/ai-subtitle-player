@@ -302,6 +302,7 @@ fun HomeScreen(
                     onSettings = openSettings,
                     onAbout = { dialog = HomeDialog.About },
                     onStream = { dialog = HomeDialog.Stream },
+                    onLive = { nav.push(Screen.Live) },
                     onLink = if (main.linkDownloader != null) ({ dialog = HomeDialog.Link }) else null,
                     onHistory = { nav.push(Screen.History) },
                     onPlayHistory = { item -> play(listOf(item.entry), 0) },
@@ -608,6 +609,7 @@ private fun MoreTab(
     onSettings: () -> Unit,
     onAbout: () -> Unit,
     onStream: () -> Unit,
+    onLive: () -> Unit,
     onLink: (() -> Unit)?,
     onHistory: () -> Unit,
     onPlayHistory: (HistoryItem) -> Unit,
@@ -629,6 +631,8 @@ private fun MoreTab(
 
         SectionHeader("工具")
         SurfaceCard {
+            ListRow("直播", "添加 M3U / TXT 直播源，按分组看电视直播", AppIcons.Live, onClick = onLive)
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             if (onLink != null) {
                 ListRow("从链接下载", "下载视频网站的视频，自动准备字幕后播放（也可以在其他 App 里分享给译幕）", AppIcons.Download, onClick = onLink)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)

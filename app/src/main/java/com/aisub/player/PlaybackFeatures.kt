@@ -182,7 +182,9 @@ class PlaybackFeatures(
      */
     fun saveHistoryThumbnail(onlyIfMissing: Boolean = false) {
         val e = entry ?: return
-        if (!e.isVideo || !com.aisub.player.ui.HistoryThumbs.needed(e.uri) || VlcPlayer.needsVlc(e.title)) return
+        // 直播用台标，不截图（直播流取帧要连上直播源，又慢又不一定成功）
+        if (!e.isVideo || e.isLive || player().isCurrentMediaItemLive) return
+        if (!com.aisub.player.ui.HistoryThumbs.needed(e.uri) || VlcPlayer.needsVlc(e.title)) return
         if (onlyIfMissing && com.aisub.player.ui.HistoryThumbs.file(app, e.uri).exists()) return
         // 开头几秒常是黑场，太靠前时改取全片约 10% 处
         val d = player().duration

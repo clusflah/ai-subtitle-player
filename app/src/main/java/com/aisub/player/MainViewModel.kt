@@ -282,7 +282,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (entries.isEmpty()) return
         savePosition()
         val start = entries[index.coerceIn(entries.indices)]
-        val resume = library.positionOf(start.uri)
+        // 直播没有"上次看到哪"，总是从最新画面开始
+        val resume = if (start.isLive) 0L else library.positionOf(start.uri)
             .takeIf { start.durationMs <= 0 || it < start.durationMs - 10_000 } ?: 0L
         // 光盘镜像只能用 VLC 内核播放
         if (VlcPlayer.needsVlc(start.title)) {
@@ -340,7 +341,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val entry = _state.value.current ?: return
         if (player.mediaItemCount == 0) return
         val duration = player.duration.takeIf { it > 0 } ?: entry.durationMs
-        library.recordHistory(entry.copy(durationMs = duration), player.currentPosition)
+        library.recordHistory(entry.copy(durationMs = if (entry.isLive) 0 else duration), if (entry.isLive) 0 else player.currentPosition)
         extras.saveHistoryThumbnail()
     }
 
@@ -935,6 +936,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     val queueSize get() = queue.size
 
+    /** 当前播放队列（直播时就是频道列表） */
+    val queueEntries: List<MediaEntry> get() = queue
+
+    /** 切到队列里的第 index 个（直播切台）。直播从最新画面开始。 */
+    fun playQueueIndex(index: Int) {
+        if (usingVlc || index !in queue.indices) return
+        exoPlayer.seekToDefaultPosition(index)
+        exoPlayer.play()
+    }
+
     /** 设置页的"测试连接"：用 1 秒静音请求一次识别服务。返回给用户看的结果。 */
     suspend fun testAsr(settings: AppSettings): String = withContext(Dispatchers.IO) {
         settings.asrProblem()?.let { return@withContext it }
@@ -1012,7 +1023,8 @@ internal fun authDataSourceFactory(app: Application): DataSource.Factory {
         } else {
             // 双地址服务器：换成当前能连上的内网 / 外网地址
             val routed = Endpoints.rewrite(uri)
-            val headers = AuthRegistry.headersFor(routed)
+            // 直播频道要求的 User-Agent / Referer 也在这里带上
+            val headers = AuthRegistry.headersFor(routed) + com.aisub.player.live.LiveHeaders.headersFor(routed)
             val s = if (routed == uri) spec else spec.withUri(Uri.parse(routed))
             if (headers.isEmpty()) s else s.withAdditionalHeaders(headers)
         }

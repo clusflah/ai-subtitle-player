@@ -18,6 +18,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import com.aisub.player.ui.FileDetailScreen
 import com.aisub.player.ui.ImageViewerScreen
+import com.aisub.player.ui.LiveScreen
 import com.aisub.player.ui.LocalOpenDetail
 import com.aisub.player.ui.toRemoteItem
 import androidx.core.content.ContextCompat
@@ -96,6 +97,7 @@ class MainActivity : ComponentActivity() {
                             },
                         )
                         Screen.History -> HistoryScreen(lib, back, play)
+                        Screen.Live -> LiveScreen(back, play)
                         is Screen.LocalFolder -> LocalFolderScreen(
                             lib, screen.path, screen.title, back,
                             openFolder = { path, title -> nav.push(Screen.LocalFolder(path, title)) },
