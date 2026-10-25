@@ -26,6 +26,8 @@ class LanguageCheckTest {
         assertEquals("ja", LanguageCheck.script("今日はいい天気ですね"))
         assertEquals("ko", LanguageCheck.script("안녕하세요"))
         assertEquals("latin", LanguageCheck.script("Where are you going?"))
+        assertEquals("other", LanguageCheck.script("сначала русская"))
+        assertEquals("other", LanguageCheck.script("مرحبا"))
         assertNull(LanguageCheck.script("♪ ♪ 123 ..."))
     }
 
@@ -56,6 +58,9 @@ class LanguageCheckTest {
         assertTrue(same("Bonjour Paris", "en", asr = "en"))
         // 法语目标：拉丁字母分不清是哪种语言，照常翻译
         assertFalse(same("Bonjour", "fr"))
+        // 俄语等其他文字照常翻译
+        assertFalse(same("сначала русская", "zh-CN"))
+        assertFalse(same("и теперь американская", "en"))
     }
 
     @Test

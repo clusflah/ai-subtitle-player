@@ -346,7 +346,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (_state.value.current?.uri == entry.uri) return
         cancelAll()
         val uri = Uri.parse(entry.uri)
-        val cached = store.load(uri)
+        // 旧版把俄语等非拉丁文字误判成「不用翻译」、原文直接当了译文，这里清掉让它重新翻译
+        val cached = store.load(uri).let { cues ->
+            val s = _state.value.settings
+            cues.map {
+                if (it.translation == it.text && !LanguageCheck.alreadyTarget(it.text, s.ttsLocale, s.asrLanguage, ChineseScript::variant))
+                    it.copy(translation = null) else it
+            }
+        }
         ttsReader.reset()
         _state.update {
             it.copy(

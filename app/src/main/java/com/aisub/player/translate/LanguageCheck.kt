@@ -9,28 +9,32 @@ import android.os.Build
  */
 object LanguageCheck {
 
-    /** 一句话主要用的文字：zh / ja / ko / latin；没有任何文字（♪、数字、标点）返回 null。 */
+    /**
+     * 一句话主要用的文字：zh / ja / ko / latin / other（西里尔、阿拉伯、泰文等其他文字）；
+     * 没有任何文字（♪、数字、标点）返回 null。
+     */
     fun script(text: String): String? {
         var han = 0
         var kana = 0
         var hangul = 0
         var latin = 0
+        var other = 0
         text.codePoints().forEach { cp ->
             when (Character.UnicodeScript.of(cp)) {
                 Character.UnicodeScript.HAN -> han++
                 Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA -> kana++
                 Character.UnicodeScript.HANGUL -> hangul++
                 Character.UnicodeScript.LATIN -> latin++
-                else -> {}
+                else -> if (Character.isLetter(cp)) other++
             }
         }
         return when {
-            han + kana + hangul + latin == 0 -> null
+            han + kana + hangul + latin + other == 0 -> null
             kana > 0 -> "ja"
             hangul > 0 && hangul >= han -> "ko"
-            han > 0 && han * 2 >= latin -> "zh"
-            latin > 0 -> "latin"
-            else -> null
+            han > 0 && han * 2 >= latin + other -> "zh"
+            latin >= other -> "latin"
+            else -> "other"
         }
     }
 
@@ -52,7 +56,8 @@ object LanguageCheck {
             }
             "ja" -> target == "ja"
             "ko" -> target == "ko"
-            else -> target == "en" && looksEnglish(text, asrLanguage)
+            "latin" -> target == "en" && looksEnglish(text, asrLanguage)
+            else -> false
         }
     }
 
