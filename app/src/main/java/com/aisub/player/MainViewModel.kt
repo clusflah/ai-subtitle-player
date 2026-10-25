@@ -44,6 +44,7 @@ import com.aisub.player.download.LinkStage
 import com.aisub.player.download.PlatformSubtitles
 import com.aisub.player.media.MediaLibrary
 import com.aisub.player.subtitle.EmbeddedSubtitles
+import com.aisub.player.subtitle.SidecarSrt
 import com.aisub.player.subtitle.SrtMode
 import com.aisub.player.subtitle.SubtitleParser
 import com.aisub.player.subtitle.SubtitleStore
@@ -69,6 +70,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -595,6 +598,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val count = _state.value.cues.size
                 _state.update { it.copy(status = "识别完成，共 $count 条字幕", progress = null) }
                 store.save(uri, _state.value.cues)
+                saveSidecar()
             } catch (e: CancellationException) {
                 _state.update { it.copy(status = "已取消", progress = null) }
                 throw e
@@ -649,6 +653,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(translating = false) }
                 updateAutoAdvance()
                 _state.value.videoUri?.let { store.save(it, _state.value.cues) }
+                saveSidecar()
             }
         }
     }
@@ -742,13 +747,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         _state.value.videoUri?.let { store.save(it, _state.value.cues) }
+        saveSidecar()
         ttsReader.reset()
     }
 
     fun deleteCue(cueId: Int) {
         _state.update { s -> s.copy(cues = s.cues.filter { it.id != cueId }) }
         _state.value.videoUri?.let { store.save(it, _state.value.cues) }
+        saveSidecar()
         ttsReader.reset()
+    }
+
+    private val sidecarLock = Mutex()
+
+    /** 开了「在视频旁保存字幕文件」时，把当前字幕写到本地视频旁边的同名 .srt */
+    private fun saveSidecar() {
+        val s = _state.value
+        val entry = s.current ?: return
+        if (!s.settings.autoSaveSrt || s.cues.isEmpty()) return
+        val cues = s.cues
+        viewModelScope.launch(Dispatchers.IO) {
+            sidecarLock.withLock {
+                try {
+                    SidecarSrt.write(getApplication(), entry, cues)
+                } catch (e: Exception) {
+                    android.util.Log.w("Voxtitle", "保存字幕文件失败", e)
+                    _state.update { it.copy(status = "没能在视频旁保存字幕：${e.message}") }
+                }
+            }
+        }
     }
 
     // ---------------- 播放器"更多"菜单 ----------------

@@ -238,6 +238,13 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     onClick = { s = s.copy(autoTranslate = !s.autoTranslate) },
                 )
                 CardDivider()
+                ListRow(
+                    title = "在视频旁保存字幕文件",
+                    subtitle = "识别、翻译或编辑后，在本地视频的文件夹里存一个同名的双语 .srt，别的播放器打开视频也能显示；网络视频不保存",
+                    trailing = { Switch(checked = s.autoSaveSrt, onCheckedChange = { s = s.copy(autoSaveSrt = it) }) },
+                    onClick = { s = s.copy(autoSaveSrt = !s.autoSaveSrt) },
+                )
+                CardDivider()
                 Provider.entries.forEachIndexed { i, p ->
                     if (i > 0) CardDivider(inset = 64.dp)
                     val selected = s.provider == p

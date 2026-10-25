@@ -51,6 +51,8 @@ data class AppSettings(
     /** 各云端识别引擎的配置（Key、区域等），键见 AsrEngine.fields */
     val asrConfigs: Map<AsrEngine, Map<String, String>> = emptyMap(),
     val autoTranslate: Boolean = true,
+    /** 识别、翻译、编辑后在本地视频旁边写一个同名 .srt，给别的播放器用 */
+    val autoSaveSrt: Boolean = false,
     val showOriginal: Boolean = true,
     val showTranslation: Boolean = true,
     /** 字幕字号倍率（视频上的字幕） */
@@ -216,6 +218,7 @@ class SettingsRepository(context: Context) {
             modelBaseUrl = prefs.getString("modelBaseUrl", d.modelBaseUrl)!!,
             asrConfigs = loadAsrConfigs(),
             autoTranslate = prefs.getBoolean("autoTranslate", d.autoTranslate),
+            autoSaveSrt = prefs.getBoolean("autoSaveSrt", d.autoSaveSrt),
             showOriginal = prefs.getBoolean("showOriginal", d.showOriginal),
             showTranslation = prefs.getBoolean("showTranslation", d.showTranslation),
             subtitleScale = prefs.getFloat("subtitleScale", d.subtitleScale),
@@ -268,6 +271,7 @@ class SettingsRepository(context: Context) {
             .putString("localModel", s.localModel)
             .putString("modelBaseUrl", s.modelBaseUrl)
             .putBoolean("autoTranslate", s.autoTranslate)
+            .putBoolean("autoSaveSrt", s.autoSaveSrt)
             .putBoolean("showOriginal", s.showOriginal)
             .putBoolean("showTranslation", s.showTranslation)
             .putFloat("subtitleScale", s.subtitleScale)
