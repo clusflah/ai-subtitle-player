@@ -34,6 +34,9 @@ import com.aisub.player.ui.Navigator
 import com.aisub.player.ui.PlayerScreen
 import com.aisub.player.ui.PipState
 import com.aisub.player.ui.PlaylistDetailScreen
+import com.aisub.player.ui.ServerDetailScreen
+import com.aisub.player.ui.ServerHomeScreen
+import com.aisub.player.ui.ServerLibraryScreen
 import com.aisub.player.ui.RemoteFolderScreen
 import com.aisub.player.ui.Screen
 import com.aisub.player.ui.SettingsScreen
@@ -118,6 +121,28 @@ class MainActivity : ComponentActivity() {
                             settings = ui.settings,
                         )
                         is Screen.PlaylistDetail -> PlaylistDetailScreen(lib, screen.id, back, play)
+                        is Screen.ServerHome -> ServerHomeScreen(
+                            lib, screen.serverId, screen.title, back,
+                            openLibrary = { s ->
+                                // 音乐、照片库还是按文件夹浏览
+                                if (s.type == "movie" || s.type == "show") nav.push(Screen.ServerLibrary(screen.serverId, s.key, s.title))
+                                else {
+                                    val browser = lib.server(screen.serverId)?.let { lib.client(it) as? com.aisub.player.remote.cloud.MediaBrowser }
+                                    nav.push(Screen.Remote(screen.serverId, browser?.folderPath(s) ?: s.key, s.title))
+                                }
+                            },
+                            openItem = { nav.push(Screen.ServerDetail(screen.serverId, it.ratingKey)) },
+                            openFolders = { nav.push(Screen.Remote(screen.serverId, "", screen.title)) },
+                        )
+                        is Screen.ServerLibrary -> ServerLibraryScreen(
+                            lib, screen.serverId, screen.sectionKey, screen.title, back,
+                            openItem = { nav.push(Screen.ServerDetail(screen.serverId, it.ratingKey)) },
+                        )
+                        is Screen.ServerDetail -> ServerDetailScreen(
+                            lib, screen.serverId, screen.ratingKey, back,
+                            openItem = { nav.push(Screen.ServerDetail(screen.serverId, it.ratingKey)) },
+                            play = play,
+                        )
                         is Screen.FileDetail -> FileDetailScreen(
                             main, lib, screen.serverId, screen.item, screen.queue, screen.index, screen.folder, back,
                             play = play,

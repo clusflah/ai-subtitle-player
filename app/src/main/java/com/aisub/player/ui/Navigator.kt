@@ -15,6 +15,10 @@ sealed interface Screen {
     /** path：WebDAV/OpenList 是目录路径，网盘是目录 ID；title 用于标题栏 */
     data class Remote(val serverId: String, val path: String, val title: String) : Screen
     data class PlaylistDetail(val id: String) : Screen
+    /** 媒体服务器（Plex、Emby / Jellyfin）官方客户端风格：服务器首页、媒体库、条目详情 */
+    data class ServerHome(val serverId: String, val title: String) : Screen
+    data class ServerLibrary(val serverId: String, val sectionKey: String, val title: String) : Screen
+    data class ServerDetail(val serverId: String, val ratingKey: String) : Screen
     /**
      * 文件详情：文件信息 + TMDB 简介 + 豆瓣评分。serverId 为 null 表示本地文件；
      * queue / index 是点「播放」时的播放队列（同一文件夹里的媒体，方便连播下一集）。

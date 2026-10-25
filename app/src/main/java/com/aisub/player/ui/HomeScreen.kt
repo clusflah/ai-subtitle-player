@@ -275,7 +275,11 @@ fun HomeScreen(
                     state = state,
                     onRequestPermission = onRequestPermission,
                     openLocal = { path, title -> nav.push(Screen.LocalFolder(path, title)) },
-                    openRemote = { s -> nav.push(Screen.Remote(s.id, s.rootPath, s.name)) },
+                    openRemote = { s ->
+                        // Plex、Emby / Jellyfin 用官方客户端那样的首页；首页菜单里还能切回按文件夹浏览
+                        if (s.type == com.aisub.player.remote.ServerType.PLEX || s.type == com.aisub.player.remote.ServerType.EMBY) nav.push(Screen.ServerHome(s.id, s.name))
+                        else nav.push(Screen.Remote(s.id, s.rootPath, s.name))
+                    },
                     pickFile = { pickFile.launch(arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream")) },
                     addSource = { dialog = HomeDialog.AddSource },
                     serverMenu = { s ->

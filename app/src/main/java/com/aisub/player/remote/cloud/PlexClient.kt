@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit
  * 服务器有多个地址（局域网、公网、中继），按顺序试，记住能连上的那个。
  * creds：token（服务器访问令牌）/ connections（地址列表）/ client_id；定位符："" 根目录、"s:<key>" 媒体库、"m:<ratingKey>" 剧集/季。
  */
-class PlexClient(server: Server) : CloudClient(server) {
+class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
 
     private val token get() = creds.optString("token")
 
@@ -37,8 +37,16 @@ class PlexClient(server: Server) : CloudClient(server) {
             try {
                 val req = Request.Builder().url(base + path)
                     .header("X-Plex-Token", token).header("Accept", "application/json")
-                    .header("X-Plex-Client-Identifier", creds.optString("client_id")).build()
+                    .header("X-Plex-Client-Identifier", creds.optString("client_id"))
+                    // 服务器的「正在播放」和设备列表里显示这些
+                    .header("X-Plex-Product", PRODUCT)
+                    .header("X-Plex-Platform", "Android")
+                    .header("X-Plex-Device-Name", android.os.Build.MODEL)
+                    .header("X-Plex-Language", "zh")
+                    .build()
+                val started = System.currentTimeMillis()
                 val json = probeHttp.newCall(req).execute().use { resp ->
+                    android.util.Log.d("Voxtitle", "Plex ${path.substringBefore('?')} → ${resp.code}，${System.currentTimeMillis() - started}ms")
                     if (resp.code == 401) throw IOException("Plex 登录已失效，请重新登录")
                     if (!resp.isSuccessful) throw IOException("Plex 请求失败 HTTP ${resp.code}")
                     resp.json()
@@ -90,9 +98,11 @@ class PlexClient(server: Server) : CloudClient(server) {
             val part = m.optJSONArray("Media")?.optJSONObject(0)?.optJSONArray("Part")?.optJSONObject(0) ?: continue
             val ext = part.optString("container").ifEmpty { part.optString("file").substringAfterLast('.', "mkv") }
             val fileName = "${title.replace('/', '_')}.$ext"
+            val url = playUri(part.optString("key"), fileName)
+            ServerProgress.register(url, ServerProgress.Entry(server.id, m.optString("ratingKey"), m.optLong("duration"), m.optLong("viewOffset")))
             out += RemoteItem(
                 fileName, part.optString("key"), isDir = false, size = part.optLong("size"),
-                playUrl = playUri(part.optString("key"), fileName), meta = info,
+                playUrl = url, meta = info,
             )
         }
     }
@@ -143,6 +153,121 @@ class PlexClient(server: Server) : CloudClient(server) {
         )
     }
 
+    // ---------------- 官方客户端风格的浏览 ----------------
+
+    val serverName: String get() = creds.optString("server_name").ifEmpty { server.name }
+
+    override suspend fun sections(): List<ServerSection> = withContext(Dispatchers.IO) {
+        get("/library/sections").optJSONArray("Directory").objects()
+            .map { ServerSection(it.optString("key"), it.optString("title"), it.optString("type")) }
+    }
+
+    /** 首页的各行：继续观看、最近添加……空的行不要 */
+    override suspend fun hubs(): List<ServerHub> = withContext(Dispatchers.IO) {
+        get("/hubs?count=16&excludeFields=summary").optJSONArray("Hub").objects().mapNotNull { h ->
+            val items = h.optJSONArray("Metadata").objects().map(::item)
+            if (items.isEmpty()) return@mapNotNull null
+            val id = h.optString("hubIdentifier")
+            ServerHub(id, HUB_TITLES[id] ?: h.optString("title"), items)
+        }
+    }
+
+    override fun folderPath(section: ServerSection) = "s:" + section.key
+
+    /** 媒体库里的全部条目 */
+    override suspend fun library(sectionKey: String, sort: LibrarySort, unwatchedOnly: Boolean): List<ServerItem> = withContext(Dispatchers.IO) {
+        val s = when (sort) {
+            LibrarySort.NAME -> "titleSort"
+            LibrarySort.ADDED -> "addedAt:desc"
+            LibrarySort.RELEASED -> "originallyAvailableAt:desc"
+            LibrarySort.RATING -> "audienceRating:desc"
+        }
+        val q = "sort=$s" + if (unwatchedOnly) "&unwatched=1" else ""
+        get("/library/sections/$sectionKey/all?$q").optJSONArray("Metadata").objects().map(::item)
+    }
+
+    /** 条目详情（简介、演职员、类型等都在这里） */
+    override suspend fun item(ratingKey: String): ServerItem? = withContext(Dispatchers.IO) {
+        get("/library/metadata/$ratingKey").optJSONArray("Metadata").objects().firstOrNull()?.let(::item)
+    }
+
+    /** 子条目：剧集的各季、季的各集、专辑的曲目 */
+    override suspend fun children(ratingKey: String): List<ServerItem> = withContext(Dispatchers.IO) {
+        get("/library/metadata/$ratingKey/children").optJSONArray("Metadata").objects().map(::item)
+    }
+
+    /** 标为已看 / 未看（剧集、季会连带所有集） */
+    override suspend fun setWatched(ratingKey: String, watched: Boolean) = withContext(Dispatchers.IO) {
+        get("/:/${if (watched) "scrobble" else "unscrobble"}?identifier=com.plexapp.plugins.library&key=$ratingKey")
+        Unit
+    }
+
+    /**
+     * 报告播放进度，服务器据此更新「继续观看」，播放超过九成且停止时自动标为已看。
+     * state：playing / paused / stopped。
+     */
+    override fun timeline(ratingKey: String, state: String, timeMs: Long, durationMs: Long) {
+        get("/:/timeline?ratingKey=$ratingKey&key=${Uri.encode("/library/metadata/$ratingKey")}&state=$state&time=$timeMs&duration=$durationMs")
+    }
+
+    private fun item(m: JSONObject): ServerItem {
+        val type = m.optString("type")
+        val rk = m.optString("ratingKey")
+        fun tags(name: String) = m.optJSONArray(name).objects().map { it.optString("tag") }.filter { it.isNotEmpty() }
+        val media = m.optJSONArray("Media")?.optJSONObject(0)
+        val part = media?.optJSONArray("Part")?.optJSONObject(0)
+        val showTitle = m.optString("grandparentTitle").ifEmpty { null }
+        val title = m.optString("title")
+        val fileName = part?.let {
+            val ext = it.optString("container").ifEmpty { it.optString("file").substringAfterLast('.', "mkv") }
+            val base = when (type) {
+                "episode" -> "${showTitle ?: ""} - S%02dE%02d - $title".format(m.optInt("parentIndex"), m.optInt("index"))
+                "movie" -> if (m.has("year")) "$title (${m.optInt("year")})" else title
+                "track" -> listOfNotNull(showTitle, title).joinToString(" - ")
+                else -> title
+            }
+            "${base.replace('/', '_')}.$ext"
+        }
+        val playUrl = part?.let { p -> playUri(p.optString("key"), fileName!!) }
+        val duration = m.optLong("duration")
+        val offset = m.optLong("viewOffset")
+        playUrl?.let { ServerProgress.register(it, ServerProgress.Entry(server.id, rk, duration, offset)) }
+        val wide = type == "episode" || type == "clip"
+        return ServerItem(
+            ratingKey = rk, type = type, title = title,
+            year = m.optInt("year").takeIf { it > 0 } ?: m.optInt("parentYear").takeIf { it > 0 },
+            summary = m.optString("summary"),
+            thumb = if (wide) photo(m.optString("thumb"), 480, 270) else photo(m.optString("thumb").ifEmpty { m.optString("parentThumb") }, 300, 450),
+            showThumb = photo(m.optString("grandparentThumb").ifEmpty { m.optString("parentThumb") }, 300, 450),
+            art = photo(m.optString("art").ifEmpty { m.optString("grandparentArt") }, 1280, 720),
+            durationMs = duration, viewOffsetMs = offset, viewCount = m.optInt("viewCount"),
+            leafCount = m.optInt("leafCount"), viewedLeafCount = m.optInt("viewedLeafCount"), childCount = m.optInt("childCount"),
+            index = m.optInt("index").takeIf { m.has("index") }, parentIndex = m.optInt("parentIndex").takeIf { m.has("parentIndex") },
+            parentTitle = m.optString("parentTitle").ifEmpty { null }, grandparentTitle = showTitle,
+            parentRatingKey = m.optString("parentRatingKey").ifEmpty { null },
+            grandparentRatingKey = m.optString("grandparentRatingKey").ifEmpty { null },
+            rating = (m.optDouble("audienceRating", 0.0).takeIf { it > 0 } ?: m.optDouble("rating", 0.0)).takeIf { it > 0 },
+            contentRating = m.optString("contentRating").ifEmpty { null },
+            studio = m.optString("studio").ifEmpty { null },
+            genres = tags("Genre"), directors = tags("Director"),
+            roles = m.optJSONArray("Role").objects().map {
+                ServerRole(it.optString("tag"), it.optString("role").ifEmpty { null }, it.optString("thumb").ifEmpty { null })
+            },
+            videoInfo = media?.let { md ->
+                listOfNotNull(
+                    md.optString("videoResolution").ifEmpty { null }?.let { r -> if (r.all(Char::isDigit)) "${r}p" else r.uppercase() },
+                    md.optString("videoCodec").ifEmpty { null }?.uppercase(),
+                    md.optString("audioCodec").ifEmpty { null }?.uppercase(),
+                    md.optInt("audioChannels").takeIf { it > 0 }?.let { c -> if (c == 6) "5.1" else if (c == 8) "7.1" else "${c}ch" },
+                ).joinToString(" · ").ifEmpty { null }
+            },
+            fileName = fileName, playUrl = playUrl, sizeBytes = part?.optLong("size") ?: 0,
+        )
+    }
+
+    private fun JSONArray?.objects(): List<JSONObject> =
+        if (this == null) emptyList() else (0 until length()).mapNotNull { optJSONObject(it) }
+
     /** 原始文件地址，令牌放在地址里。 */
     override fun resolve(fileRef: String): ResolvedLink {
         if (baseUrl == null) get("/identity")
@@ -151,10 +276,22 @@ class PlexClient(server: Server) : CloudClient(server) {
 
     companion object {
         private val FOLDER_TYPES = setOf("show", "season", "artist", "album", "collection", "photo")
+
+        /** 首页各行的中文名（服务器给的名字按服务器语言，多半是英文） */
+        private val HUB_TITLES = mapOf(
+            "home.continue" to "继续观看",
+            "home.ondeck" to "接着看",
+            "home.movies.recent" to "最近添加的电影",
+            "home.television.recent" to "最近添加的剧集",
+            "home.music.recent" to "最近添加的音乐",
+            "home.videos.recent" to "最近添加的视频",
+            "home.photos.recent" to "最近添加的照片",
+            "home.playlists" to "播放列表",
+        )
         private const val PRODUCT = "Voxtitle"
 
         /** 探测服务器地址时超时要短，局域网地址在外网时连不上 */
-        private val probeHttp = cloudHttp.newBuilder().connectTimeout(5, TimeUnit.SECONDS).build()
+        private val probeHttp = cloudHttp.newBuilder().connectTimeout(5, TimeUnit.SECONDS).callTimeout(30, TimeUnit.SECONDS).build()
 
         private fun plexTv(url: String, clientId: String, token: String? = null, post: Boolean = false): Request =
             Request.Builder().url(url)

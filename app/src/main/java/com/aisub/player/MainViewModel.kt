@@ -33,6 +33,8 @@ import com.aisub.player.media.VlcPlayer
 import com.aisub.player.remote.AuthRegistry
 import com.aisub.player.remote.Endpoints
 import com.aisub.player.remote.cloud.CloudRegistry
+import com.aisub.player.remote.cloud.MediaBrowser
+import com.aisub.player.remote.cloud.ServerProgress
 import com.aisub.player.asr.AudioDecoder
 import com.aisub.player.asr.LocalModel
 import com.aisub.player.asr.ModelCatalog
@@ -271,7 +273,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            // 自动连播下一集：上一集算看完，告诉 Plex
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) _state.value.current?.let { prev ->
+                ServerProgress.find(prev.uri)?.let { p -> reportPlex(prev.uri, "stopped", p.durationMs, p.durationMs) }
+            }
             if (!usingVlc) queue.getOrNull(exoPlayer.currentMediaItemIndex)?.let(::onEntryChanged)
+        }
+
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            reportPlexNow(if (isPlaying) "playing" else "paused")
         }
 
         override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
@@ -295,6 +305,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         exoPlayer.addListener(listener)
         // 内嵌字幕默认不显示（避免和 AI 字幕重叠），除非设置了首选字幕语言
         extras.applyTrackDefaults()
+        // 媒体服务器：播放时每 10 秒报一次进度
+        viewModelScope.launch {
+            while (true) {
+                delay(10_000)
+                if (player.isPlaying) reportPlexNow("playing")
+            }
+        }
         // 换了播放内核（ExoPlayer ↔ VLC）或读到歌曲信息时，更新媒体会话：通知栏、锁屏显示歌名、歌手和封面
         viewModelScope.launch {
             kotlinx.coroutines.flow.combine(_player, music.state) { p, m -> p to m }
@@ -418,8 +435,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 上次看到的位置；快看完的从头开始。直播没有"上次看到哪"，总是从最新画面开始。 */
-    private fun resumePosition(e: MediaEntry): Long =
-        if (e.isLive) 0L else library.positionOf(e.uri).takeIf { e.durationMs <= 0 || it < e.durationMs - 10_000 } ?: 0L
+    private fun resumePosition(e: MediaEntry): Long {
+        if (e.isLive) return 0L
+        // 媒体服务器的条目以服务器记的进度为准（在别的设备上看过也能接着看）
+        ServerProgress.find(e.uri)?.let { p ->
+            return p.viewOffsetMs.takeIf { it > 0 && (p.durationMs <= 0 || it < p.durationMs - 10_000) } ?: 0L
+        }
+        return library.positionOf(e.uri).takeIf { e.durationMs <= 0 || it < e.durationMs - 10_000 } ?: 0L
+    }
+
+    // ---- 媒体服务器（Plex、Emby / Jellyfin）：把播放进度报给服务器，官方客户端里的「继续观看」「已看」跟着更新 ----
+
+    private fun reportPlex(uri: String, state: String, positionMs: Long, durationMs: Long) {
+        val p = ServerProgress.find(uri) ?: return
+        val duration = durationMs.takeIf { it > 0 } ?: p.durationMs
+        ServerProgress.updateOffset(uri, if (state == "stopped" && duration > 0 && positionMs >= duration * 0.9) 0 else positionMs)
+        val server = CloudRegistry.serverLookup(p.serverId) ?: return
+        val client = CloudRegistry.client(server) as? MediaBrowser ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { client.timeline(p.ratingKey, state, positionMs, duration) }
+                .onFailure { android.util.Log.w("Voxtitle", "进度上报失败", it) }
+        }
+    }
+
+    private fun reportPlexNow(state: String) {
+        val e = _state.value.current ?: return
+        if (player.mediaItemCount == 0) return
+        reportPlex(e.uri, state, player.currentPosition.coerceAtLeast(0), player.duration)
+    }
 
     private fun onEntryChanged(entry: MediaEntry) {
         if (_state.value.current?.uri == entry.uri) return
@@ -474,6 +517,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val duration = player.duration.takeIf { it > 0 } ?: entry.durationMs
         library.recordHistory(entry.copy(durationMs = if (entry.isLive) 0 else duration), if (entry.isLive) 0 else player.currentPosition)
         extras.saveHistoryThumbnail()
+        reportPlexNow(if (player.isPlaying) "playing" else "stopped")
     }
 
     /** 只给当前视频选语音语言，不改设置里的默认语言 */
