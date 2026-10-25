@@ -385,6 +385,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 topPadding = 56.dp, bottomPadding = 140.dp,
                 onTap = { controls = !controls; interactions++ },
                 onSeek = { player.seekTo(it); interactions++ },
+                // 在封面上左右滑切歌（队列里不止一首时）
+                onSwipe = if (vm.queueSize > 1 && !vm.usingVlc) { next ->
+                    vm.skipInQueue(next)
+                    indicator = (if (next) AppIcons.SkipNext else AppIcons.SkipPrevious) to (if (next) "下一首" else "上一首")
+                } else null,
                 onAction = { action ->
                     when (action) {
                         MusicAction.SEARCH_LYRICS -> musicSearch = false
@@ -408,12 +413,12 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         state.current?.title ?: "", color = Color.White, fontSize = 20.sp,
                         maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 12.dp),
                     )
-                    // 直播：打开频道列表切台
-                    if (isLive && vm.queueSize > 1) {
+                    // 播放队列（直播时是频道列表），点一项切过去
+                    if (vm.queueSize > 1 && !vm.usingVlc) {
                         TextButton(onClick = { showChannels = true }) {
                             Icon(AppIcons.ListIcon, null, tint = Color.White, modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text("频道", color = Color.White)
+                            Text(if (isLive) "频道" else "列表", color = Color.White)
                         }
                     }
                 }
@@ -662,13 +667,13 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         }
     }
 
-    // ---- 直播频道列表 ----
+    // ---- 播放队列 / 直播频道列表 ----
     if (showChannels) {
         ModalBottomSheet(onDismissRequest = { showChannels = false }) {
             val channels = vm.queueEntries
             val currentIndex = channels.indexOfFirst { it.uri == state.current?.uri }
             val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 3).coerceAtLeast(0))
-            Text("频道", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+            Text(if (isLive) "频道" else "播放列表（${currentIndex + 1} / ${channels.size}）", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
             LazyColumn(Modifier.fillMaxHeight(0.75f), state = listState) {
                 itemsIndexed(channels) { i, c ->
                     val active = i == currentIndex
@@ -677,7 +682,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             .clickable { vm.playQueueIndex(i); showChannels = false }.padding(horizontal = 20.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        NetImage(c.logo.ifEmpty { null }, Modifier.size(width = 56.dp, height = 34.dp), contentScale = ContentScale.Fit, maxSize = 200, fallback = AppIcons.Live, background = false)
+                        NetImage(
+                            c.logo.ifEmpty { null }, Modifier.size(width = 56.dp, height = 34.dp), contentScale = ContentScale.Fit, maxSize = 200,
+                            fallback = when { c.isLive -> AppIcons.Live; c.isVideo -> AppIcons.Movie; else -> AppIcons.MusicNote }, background = false,
+                        )
                         Spacer(Modifier.width(14.dp))
                         Column(Modifier.weight(1f)) {
                             Text(c.title, color = if (active) Orange else MaterialTheme.colorScheme.onSurface, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1112,7 +1120,7 @@ private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAct
         Triple(MoreAction.SKIP, AppIcons.SkipNext, "片头片尾与跳过"),
         Triple(MoreAction.EQUALIZER, AppIcons.Equalizer, "均衡器"),
         Triple(MoreAction.AUDIO_ONLY, AppIcons.MusicNote, if (audioOnly) "恢复视频画面" else "作为音频播放"),
-        Triple(MoreAction.PIP, AppIcons.Pip, "弹出播放器"),
+        Triple(MoreAction.PIP, AppIcons.Pip, "悬浮窗播放"),
         Triple(MoreAction.REPEAT, AppIcons.Repeat, "循环模式：${repeatLabel(repeatMode)}"),
         Triple(MoreAction.INFO, AppIcons.Info, "视频信息"),
         Triple(MoreAction.AB_LOOP, AppIcons.Repeat, if (state.loopA == null) "A-B 循环" else if (state.loopB == null) "A-B 循环：设置 B 点" else "关闭 A-B 循环"),

@@ -1,6 +1,9 @@
 package com.aisub.player
 
 import android.app.Application
+import android.app.PendingIntent
+import android.content.Intent
+import androidx.media3.session.MediaSession
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -76,6 +79,7 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -147,6 +151,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         ExoPlayer.Builder(app)
             .setRenderersFactory(renderersFactory(app).withAssSupport(assHandler))
             .setMediaSourceFactory(sources)
+            // 后台播放需要：来电、别的应用放声音时暂停，拔耳机暂停，锁屏后播放网络文件不断
+            .setAudioAttributes(
+                androidx.media3.common.AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),
+                true,
+            )
+            .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
             .also(assHandler::init)
     }
@@ -160,6 +171,52 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val playerFlow: StateFlow<Player> = _player.asStateFlow()
     val player: Player get() = _player.value
     val usingVlc: Boolean get() = player !== exoPlayer
+
+    /** 媒体会话：通知栏、锁屏、耳机按键控制播放；切换内核时跟着换播放器 */
+    private val session: MediaSession = MediaSession.Builder(app, exoPlayer)
+        .setSessionActivity(
+            PendingIntent.getActivity(
+                app, 0, Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            ),
+        )
+        .build()
+        .also { PlaybackService.session = it }
+
+    /** 音乐的歌名、歌手、专辑、封面，给通知栏和锁屏用；不是音乐时返回 null */
+    private fun musicMetadata(m: com.aisub.player.music.MusicState): MediaMetadata? {
+        val tags = m.tags ?: return null
+        val artwork = m.cover?.let { bmp ->
+            java.io.ByteArrayOutputStream().also { bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, it) }.toByteArray()
+        }
+        return MediaMetadata.Builder()
+            .setTitle(tags.title)
+            .setArtist(tags.artist)
+            .setAlbumTitle(tags.album)
+            .apply { artwork?.let { setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER) } }
+            .build()
+    }
+
+    /** 开始播放时启动后台播放服务（应用在前台时才能启动），之后由 Media3 管理前台通知 */
+    private fun startPlaybackService() {
+        val app = getApplication<Application>()
+        runCatching { app.startService(Intent(app, PlaybackService::class.java)) }
+            .onFailure { android.util.Log.w("Voxtitle", "无法启动后台播放服务", it) }
+    }
+
+    /** 切到后台时是否继续播放：音乐看设置，视频选了「继续播放声音」时继续 */
+    fun keepPlayingInBackground(): Boolean {
+        val e = _state.value.current ?: return false
+        if (!player.playWhenReady) return false
+        val s = _state.value.settings
+        return if (e.isVideo || e.isLive) s.videoLeaveAction == VideoLeaveAction.AUDIO else s.musicBackground
+    }
+
+    /** 离开应用时是否自动进入画中画（悬浮窗）：正在播放视频且设置里选了悬浮窗 */
+    fun wantsAutoPip(): Boolean {
+        val e = _state.value.current ?: return false
+        return (e.isVideo || e.isLive) && player.playWhenReady && _state.value.settings.videoLeaveAction == VideoLeaveAction.PIP
+    }
 
     private val settingsRepo = SettingsRepository(app)
     private val store = SubtitleStore(app)
@@ -238,6 +295,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         exoPlayer.addListener(listener)
         // 内嵌字幕默认不显示（避免和 AI 字幕重叠），除非设置了首选字幕语言
         extras.applyTrackDefaults()
+        // 换了播放内核（ExoPlayer ↔ VLC）或读到歌曲信息时，更新媒体会话：通知栏、锁屏显示歌名、歌手和封面
+        viewModelScope.launch {
+            kotlinx.coroutines.flow.combine(_player, music.state) { p, m -> p to m }
+                .distinctUntilChanged { a, b -> a.first === b.first && a.second.tags == b.second.tags && a.second.cover === b.second.cover }
+                .collect { (p, m) -> session.player = SessionPlayer(p, musicMetadata(m)) }
+        }
     }
 
     private fun vlc(): VlcPlayer = vlcPlayer ?: VlcPlayer(getApplication(), proxy).also {
@@ -301,6 +364,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(playbackError = null) }
         v.prepare()
         v.play()
+        startPlaybackService()
         _player.value = v
         onEntryChanged(entry)
     }
@@ -335,9 +399,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (entries.isEmpty()) return
         savePosition()
         val start = entries[index.coerceIn(entries.indices)]
-        // 直播没有"上次看到哪"，总是从最新画面开始
-        val resume = if (start.isLive) 0L else library.positionOf(start.uri)
-            .takeIf { start.durationMs <= 0 || it < start.durationMs - 10_000 } ?: 0L
+        val resume = resumePosition(start)
         // 光盘镜像只能用 VLC 内核播放
         if (VlcPlayer.needsVlc(start.title)) {
             playWithVlc(start, resume)
@@ -351,8 +413,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(playbackError = null) }
         exoPlayer.prepare()
         exoPlayer.play()
+        startPlaybackService()
         onEntryChanged(start)
     }
+
+    /** 上次看到的位置；快看完的从头开始。直播没有"上次看到哪"，总是从最新画面开始。 */
+    private fun resumePosition(e: MediaEntry): Long =
+        if (e.isLive) 0L else library.positionOf(e.uri).takeIf { e.durationMs <= 0 || it < e.durationMs - 10_000 } ?: 0L
 
     private fun onEntryChanged(entry: MediaEntry) {
         if (_state.value.current?.uri == entry.uri) return
@@ -1034,11 +1101,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 当前播放队列（直播时就是频道列表） */
     val queueEntries: List<MediaEntry> get() = queue
 
-    /** 切到队列里的第 index 个（直播切台）。直播从最新画面开始。 */
+    /** 切到队列里的第 index 个。直播从最新画面开始，其他的从上次看到的地方继续。 */
     fun playQueueIndex(index: Int) {
         if (usingVlc || index !in queue.indices) return
-        exoPlayer.seekToDefaultPosition(index)
+        val e = queue[index]
+        savePosition()
+        if (e.isLive) exoPlayer.seekToDefaultPosition(index) else exoPlayer.seekTo(index, resumePosition(e))
         exoPlayer.play()
+    }
+
+    /**
+     * 上一个 / 下一个，按队列顺序（跟随循环、随机播放设置）。
+     * restartFirst 时「上一个」在播放超过 3 秒时先回到开头，和常见音乐播放器的按钮一样。
+     */
+    fun skipInQueue(next: Boolean, restartFirst: Boolean = false) {
+        if (usingVlc) return
+        if (!next && restartFirst && exoPlayer.currentPosition > 3000 && _state.value.current?.isLive != true) {
+            exoPlayer.seekTo(0)
+            return
+        }
+        val target = if (next) exoPlayer.nextMediaItemIndex else exoPlayer.previousMediaItemIndex
+        if (target != C.INDEX_UNSET) playQueueIndex(target)
     }
 
     /** 设置页的"测试连接"：用 1 秒静音请求一次识别服务。返回给用户看的结果。 */
@@ -1094,6 +1177,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         ttsEngines.values.forEach { it.close() }
         savePosition()
         extras.release()
+        PlaybackService.session = null
+        session.release()
+        getApplication<Application>().let { it.stopService(Intent(it, PlaybackService::class.java)) }
         exoPlayer.release()
         assHandler.release()
         vlcPlayer?.release()

@@ -4,7 +4,11 @@ import android.content.res.Configuration
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
+import kotlin.math.abs
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -84,6 +88,8 @@ fun MusicView(
     onTap: () -> Unit,
     onSeek: (Long) -> Unit,
     onAction: (MusicAction) -> Unit,
+    /** 在封面上左右滑：true 为下一首；null 表示不能切 */
+    onSwipe: ((Boolean) -> Unit)? = null,
 ) {
     val tags = music.tags ?: return
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -99,7 +105,7 @@ fun MusicView(
         }
         val header: @Composable (Modifier) -> Unit = { mod ->
             Column(mod, horizontalAlignment = Alignment.CenterHorizontally) {
-                Cover(music, Modifier.fillMaxWidth().aspectRatio(1f))
+                Cover(music, Modifier.fillMaxWidth().aspectRatio(1f), onSwipe)
                 Spacer(Modifier.height(16.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -134,8 +140,27 @@ fun MusicView(
 }
 
 @Composable
-private fun Cover(music: MusicState, modifier: Modifier) {
-    Box(modifier.clip(RoundedCornerShape(12.dp)).background(Color(0xFF2A2A2A)), contentAlignment = Alignment.Center) {
+private fun Cover(music: MusicState, modifier: Modifier, onSwipe: ((Boolean) -> Unit)?) {
+    val threshold = with(LocalDensity.current) { 60.dp.toPx() }
+    // 拖动时封面跟着手指走一点，松手超过阈值就切歌
+    var dragX by remember { mutableStateOf(0f) }
+    val swipe = if (onSwipe == null) Modifier else Modifier.pointerInput(onSwipe) {
+        detectHorizontalDragGestures(
+            onDragEnd = {
+                if (abs(dragX) > threshold) onSwipe(dragX < 0)
+                dragX = 0f
+            },
+            onDragCancel = { dragX = 0f },
+        ) { change, amount ->
+            change.consume()
+            dragX += amount
+        }
+    }
+    Box(
+        modifier.then(swipe).graphicsLayer { translationX = dragX * 0.4f }
+            .clip(RoundedCornerShape(12.dp)).background(Color(0xFF2A2A2A)),
+        contentAlignment = Alignment.Center,
+    ) {
         val cover = music.cover
         if (cover != null) Image(cover.asImageBitmap(), "封面", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         else Icon(AppIcons.MusicNote, null, tint = Color(0xFF777777), modifier = Modifier.size(72.dp))

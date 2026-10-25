@@ -167,9 +167,24 @@ class MainActivity : ComponentActivity() {
         nav.push(Screen.Player)
     }
 
+    /** 按 Home 或切到别的应用：播放视频且设置为悬浮窗时，缩成画中画继续播放。 */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (nav.current != Screen.Player || !main.wantsAutoPip()) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val size = main.player.videoSize
+        val ratio = if (size.width > 0 && size.height > 0) {
+            // 系统只接受 1:2.39 到 2.39:1 之间的比例
+            val r = (size.width * size.pixelWidthHeightRatio / size.height).coerceIn(1 / 2.39f, 2.39f)
+            android.util.Rational((r * 1000).toInt(), 1000)
+        } else android.util.Rational(16, 9)
+        runCatching { enterPictureInPictureMode(android.app.PictureInPictureParams.Builder().setAspectRatio(ratio).build()) }
+    }
+
+    /** 应用不可见了（回桌面、锁屏、关掉悬浮窗）：按设置决定继续播放还是暂停。 */
     override fun onStop() {
         super.onStop()
-        main.player.pause()
         main.savePosition()
+        if (!main.keepPlayingInBackground()) main.player.pause()
     }
 }

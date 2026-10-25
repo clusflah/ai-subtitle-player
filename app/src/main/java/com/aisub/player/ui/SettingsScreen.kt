@@ -457,6 +457,26 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 )
                 CardDivider()
                 ListRow(
+                    title = "音乐后台播放",
+                    subtitle = "播放音乐时回桌面、切到别的应用或锁屏，继续播放；通知栏、锁屏、耳机按键可以暂停和切歌",
+                    trailing = { Switch(checked = s.musicBackground, onCheckedChange = { s = s.copy(musicBackground = it) }) },
+                    onClick = { s = s.copy(musicBackground = !s.musicBackground) },
+                )
+                CardDivider()
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                    Text("播放视频时离开应用", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "回桌面或切到别的应用时：暂停；继续播放声音（锁屏也继续）；或者缩成悬浮窗继续看，悬浮窗可拖动、双击放大",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        com.aisub.player.VideoLeaveAction.entries.forEach { a ->
+                            FilterChip(selected = s.videoLeaveAction == a, onClick = { s = s.copy(videoLeaveAction = a) }, label = { Text(a.label) })
+                        }
+                    }
+                }
+                CardDivider()
+                ListRow(
                     title = "音乐自动在线获取歌词和封面",
                     subtitle = "歌曲没有内嵌歌词、封面时，按歌名和歌手到 LRCLIB、网易云音乐、iTunes 查找（会把歌名、歌手发给这些网站）",
                     trailing = { Switch(checked = s.musicOnlineLookup, onCheckedChange = { s = s.copy(musicOnlineLookup = it) }) },

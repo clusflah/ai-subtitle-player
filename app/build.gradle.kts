@@ -14,8 +14,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 35
-        versionName = "1.7.0"
+        versionCode = 36
+        versionName = "1.8.0"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用
@@ -117,6 +117,8 @@ dependencies {
 
     implementation("androidx.media3:media3-exoplayer:1.9.0")
     implementation("androidx.media3:media3-ui:1.9.0")
+    // 后台播放：媒体会话、通知栏与锁屏控制、耳机按键
+    implementation("androidx.media3:media3-session:1.9.0")
     // 直播与串流：HLS（m3u8）、DASH、RTSP
     implementation("androidx.media3:media3-exoplayer-hls:1.9.0")
     implementation("androidx.media3:media3-exoplayer-dash:1.9.0")

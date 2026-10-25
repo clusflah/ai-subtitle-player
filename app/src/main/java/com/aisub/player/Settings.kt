@@ -39,6 +39,13 @@ enum class Provider(
 
 data class ProviderConfig(val apiKey: String = "", val model: String = "", val baseUrl: String = "")
 
+/** 播放视频时切到别的应用、回桌面或锁屏怎么办 */
+enum class VideoLeaveAction(val label: String) {
+    PAUSE("暂停"),
+    AUDIO("继续播放声音"),
+    PIP("悬浮窗（画中画）"),
+}
+
 data class AppSettings(
     val provider: Provider = Provider.CLAUDE,
     val providerConfigs: Map<Provider, ProviderConfig> = emptyMap(),
@@ -55,6 +62,10 @@ data class AppSettings(
     val autoSaveSrt: Boolean = false,
     /** 播放音乐时，没有内嵌歌词、封面就在线查找 */
     val musicOnlineLookup: Boolean = true,
+    /** 播放音乐时切到后台、锁屏继续播放 */
+    val musicBackground: Boolean = true,
+    /** 播放视频时离开应用 */
+    val videoLeaveAction: VideoLeaveAction = VideoLeaveAction.PAUSE,
     val showOriginal: Boolean = true,
     val showTranslation: Boolean = true,
     /** 字幕字号倍率（视频上的字幕） */
@@ -222,6 +233,9 @@ class SettingsRepository(context: Context) {
             autoTranslate = prefs.getBoolean("autoTranslate", d.autoTranslate),
             autoSaveSrt = prefs.getBoolean("autoSaveSrt", d.autoSaveSrt),
             musicOnlineLookup = prefs.getBoolean("musicOnlineLookup", d.musicOnlineLookup),
+            musicBackground = prefs.getBoolean("musicBackground", d.musicBackground),
+            videoLeaveAction = runCatching { VideoLeaveAction.valueOf(prefs.getString("videoLeaveAction", d.videoLeaveAction.name)!!) }
+                .getOrDefault(d.videoLeaveAction),
             showOriginal = prefs.getBoolean("showOriginal", d.showOriginal),
             showTranslation = prefs.getBoolean("showTranslation", d.showTranslation),
             subtitleScale = prefs.getFloat("subtitleScale", d.subtitleScale),
@@ -276,6 +290,8 @@ class SettingsRepository(context: Context) {
             .putBoolean("autoTranslate", s.autoTranslate)
             .putBoolean("autoSaveSrt", s.autoSaveSrt)
             .putBoolean("musicOnlineLookup", s.musicOnlineLookup)
+            .putBoolean("musicBackground", s.musicBackground)
+            .putString("videoLeaveAction", s.videoLeaveAction.name)
             .putBoolean("showOriginal", s.showOriginal)
             .putBoolean("showTranslation", s.showTranslation)
             .putFloat("subtitleScale", s.subtitleScale)
