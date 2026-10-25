@@ -145,6 +145,10 @@ class PlaybackFeatures(
             }
         }
         maybeAutoDetect(e)
+        scope.launch {
+            delay(15_000)
+            if (entry == e) saveHistoryThumbnail(onlyIfMissing = true)
+        }
     }
 
     /** 播放器报告轨道变化：VLC 的章节这时才拿得到；记住的轨道这时才能应用。 */
@@ -166,6 +170,28 @@ class PlaybackFeatures(
         runCatching { grabber?.close() }
         grabber = null
         grabDispatcher.close()
+    }
+
+    // ---------------- 播放历史的缩略图 ----------------
+
+    private var historyThumbJob: Job? = null
+
+    /**
+     * 给网络视频截一张缩略图（播放历史、继续观看显示用）。离开播放页时用当前位置截，
+     * 让卡片显示看到的地方；开播一会儿后没有缩略图的也先截一张，防止应用被直接关掉。
+     */
+    fun saveHistoryThumbnail(onlyIfMissing: Boolean = false) {
+        val e = entry ?: return
+        if (!e.isVideo || !com.aisub.player.ui.HistoryThumbs.needed(e.uri) || VlcPlayer.needsVlc(e.title)) return
+        if (onlyIfMissing && com.aisub.player.ui.HistoryThumbs.file(app, e.uri).exists()) return
+        // 开头几秒常是黑场，太靠前时改取全片约 10% 处
+        val d = player().duration
+        val pos = player().currentPosition.let { p -> if (p < 5_000 && d > 0) d / 10 else p }
+        historyThumbJob?.cancel()
+        historyThumbJob = scope.launch {
+            val bmp = withContext(grabDispatcher) { if (entry == e) grabber()?.frameAt(pos, maxWidth = 480) else null } ?: return@launch
+            withContext(Dispatchers.IO) { runCatching { com.aisub.player.ui.HistoryThumbs.save(app, e.uri, bmp) } }
+        }
     }
 
     // ---------------- 1. 缩略图与片段 ----------------

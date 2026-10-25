@@ -33,6 +33,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.Dp
+import com.aisub.player.asr.AsrLanguages
+import com.aisub.player.asrLanguageWarning
 import com.aisub.player.media.Bookmark
 import io.github.peerless2012.ass.media.kt.withAssSupport
 import kotlinx.coroutines.launch
@@ -161,7 +163,7 @@ private val RESIZE_MODES = listOf(
 )
 
 /** 播放页里弹出的对话框。 */
-private enum class PlayerDialog { SPEED, SLEEP, GOTO, DELAY, INFO, EXPORT, SAVE_PLAYLIST, ERROR }
+private enum class PlayerDialog { SPEED, SLEEP, GOTO, DELAY, INFO, EXPORT, SAVE_PLAYLIST, ERROR, ASR_LANGUAGE }
 
 /** 画中画状态，由 MainActivity 更新。 */
 object PipState {
@@ -568,6 +570,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         SubtitleAction.ROLES -> { showTracks = false; showRoles = true }
                         SubtitleAction.EMBEDDED -> if (state.extractingEmbedded) vm.cancelAll() else vm.extractEmbeddedSubtitles()
                         SubtitleAction.STYLE -> { showTracks = false; showStyle = true }
+                        SubtitleAction.ASR_LANGUAGE -> dialog = PlayerDialog.ASR_LANGUAGE
                     }
                 },
             )
@@ -730,6 +733,12 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             "保存播放列表", "名称（当前队列 ${vm.queueSize} 项）", confirm = "保存",
             onDismiss = { dialog = null },
         ) { name -> vm.saveQueueAsPlaylist(name); indicator = AppIcons.PlaylistAdd to "已保存"; dialog = null }
+        PlayerDialog.ASR_LANGUAGE -> AsrLanguageDialog(
+            state.settings.asrLanguage, onDismiss = { dialog = null },
+        ) { code ->
+            vm.updateSettings(state.settings.copy(asrLanguage = code))
+            dialog = null
+        }
         PlayerDialog.ERROR -> AlertDialog(
             onDismissRequest = { dialog = null },
             confirmButton = { TextButton(onClick = { dialog = null }) { Text("知道了") } },
@@ -1051,7 +1060,7 @@ private fun enterPip(activity: Activity?) {
 
 // ---------------- 字幕与音轨面板 ----------------
 
-private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ONLINE, EXPORT, ERROR, ROLES, EMBEDDED, STYLE }
+private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ONLINE, EXPORT, ERROR, ROLES, EMBEDDED, STYLE, ASR_LANGUAGE }
 
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
@@ -1143,6 +1152,14 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                 else -> "重新语音识别"
             }
             ActionRow(AppIcons.AutoAwesome, gen, subtitle = "用语音识别为当前视频生成带时间轴的字幕") { onSubtitleAction(SubtitleAction.GENERATE) }
+            // 识别前先选视频里说的语言，选错会降低准确率
+            val langWarning = state.settings.asrLanguageWarning()
+            ActionRow(
+                AppIcons.Volume, "语音语言：" + AsrLanguages.label(state.settings.asrLanguage),
+                subtitle = langWarning ?: "视频里说的是什么语言；不确定选「自动」",
+                tint = if (langWarning != null) Color(0xFFFF9E80) else Color.White,
+                enabled = !state.transcribing,
+            ) { onSubtitleAction(SubtitleAction.ASR_LANGUAGE) }
             ActionRow(AppIcons.File, "选择字幕文件", subtitle = "SRT / VTT / ASS") { onSubtitleAction(SubtitleAction.IMPORT) }
             ActionRow(AppIcons.Search, "在线下载字幕", subtitle = "射手网 / OpenSubtitles") { onSubtitleAction(SubtitleAction.ONLINE) }
             if (state.failedTask != null) {
@@ -1351,6 +1368,48 @@ private fun ChoiceDialog(title: String, options: List<String>, selected: Int, on
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+/** 选择语音识别的语言：常用语言直接点选，其他语言填代码。和「设置 → 语音识别 → 视频语言」是同一项。 */
+@Composable
+private fun AsrLanguageDialog(current: String, onDismiss: () -> Unit, onPick: (String) -> Unit) {
+    var custom by remember { mutableStateOf(if (AsrLanguages.isCommon(current)) "" else current) }
+    val parsed = AsrLanguages.normalize(custom)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("语音语言") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                AsrLanguages.COMMON.forEach { (code, label) ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable { onPick(code) }.padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(Modifier.width(36.dp)) { if (code == current) Icon(AppIcons.Check, null, tint = Orange) }
+                        Text(label, fontSize = 16.sp)
+                    }
+                }
+                OutlinedTextField(
+                    custom, { custom = it }, singleLine = true,
+                    label = { Text("其他语言代码") },
+                    placeholder = { Text("如 sv、cs、pt-BR") },
+                    supportingText = {
+                        Text(
+                            when {
+                                custom.isBlank() -> "ISO 639-1 代码，可带地区"
+                                parsed == null -> "格式不对：两三位字母，可加「-地区」"
+                                else -> "识别为：" + AsrLanguages.label(parsed)
+                            },
+                        )
+                    },
+                    isError = custom.isNotBlank() && parsed == null,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { parsed?.let(onPick) }, enabled = parsed != null) { Text("使用这个代码") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
 

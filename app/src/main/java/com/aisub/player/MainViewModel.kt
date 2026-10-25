@@ -341,6 +341,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (player.mediaItemCount == 0) return
         val duration = player.duration.takeIf { it > 0 } ?: entry.durationMs
         library.recordHistory(entry.copy(durationMs = duration), player.currentPosition)
+        extras.saveHistoryThumbnail()
     }
 
     fun updateSettings(s: AppSettings) {
