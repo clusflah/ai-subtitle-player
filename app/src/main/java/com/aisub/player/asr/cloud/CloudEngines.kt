@@ -1,5 +1,6 @@
 package com.aisub.player.asr.cloud
 
+import com.aisub.player.asr.AsrLanguages
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -146,7 +147,11 @@ class XfyunTranscriber(private val appId: String, private val secretKey: String,
     }
 
     override fun recognize(wav: ByteArray, chunkStartMs: Long, chunkEndMs: Long): List<Recognized> {
-        val lang = when (language) { "en" -> "en"; "ja" -> "ja"; "ko" -> "ko"; "yue" -> "cn_cantonese"; else -> "cn" }
+        // 西南官话（四川、重庆、云南、贵州）是方言，需要在讯飞控制台开通
+        val lang = when (language) {
+            AsrLanguages.SICHUAN -> "cn_xinanese"
+            else -> when (AsrLanguages.primary(language)) { "en" -> "en"; "ja" -> "ja"; "ko" -> "ko"; "yue" -> "cn_cantonese"; else -> "cn" }
+        }
         val upload = execute({
             Request.Builder().url(
                 signed("https://raasr.xfyun.cn/v2/api/upload")
@@ -250,7 +255,7 @@ class ElevenLabsTranscriber(private val apiKey: String, private val model: Strin
  */
 class DeepgramTranscriber(private val apiKey: String, private val model: String, private val language: String) : ChunkedCloudEngine() {
     override fun recognize(wav: ByteArray, chunkStartMs: Long, chunkEndMs: Long): List<Recognized> {
-        val m = model.ifBlank { if (language in setOf("zh", "yue")) "nova-2" else "nova-3" }
+        val m = model.ifBlank { if (language in setOf("zh", "yue", AsrLanguages.SICHUAN)) "nova-2" else "nova-3" }
         val url = "https://api.deepgram.com/v1/listen".toHttpUrl().newBuilder()
             .addQueryParameter("model", m)
             .addQueryParameter("smart_format", "true")
@@ -258,7 +263,7 @@ class DeepgramTranscriber(private val apiKey: String, private val model: String,
             .apply {
                 when (language) {
                     "auto" -> addQueryParameter("detect_language", "true")
-                    "zh" -> addQueryParameter("language", "zh-CN")
+                    "zh", AsrLanguages.SICHUAN -> addQueryParameter("language", "zh-CN")
                     "yue" -> addQueryParameter("language", "zh-HK")
                     else -> addQueryParameter("language", language)
                 }

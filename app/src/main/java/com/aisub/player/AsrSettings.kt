@@ -105,7 +105,7 @@ fun AppSettings.createCloudEngine(): SpeechEngine {
         )
         AsrEngine.VOLC -> VolcEngineTranscriber(v("appKey"), v("accessKey"))
         AsrEngine.ALIYUN -> AliyunFunAsrTranscriber(v("apiKey"), v("endpoint"), v("model"), lang)
-        AsrEngine.XFYUN -> XfyunTranscriber(v("appId"), v("secretKey"), lang)
+        AsrEngine.XFYUN -> XfyunTranscriber(v("appId"), v("secretKey"), asrLanguage)
         AsrEngine.ELEVENLABS -> ElevenLabsTranscriber(v("apiKey"), v("model"), lang)
         AsrEngine.DEEPGRAM -> DeepgramTranscriber(v("apiKey"), v("model"), asrLanguage)
         AsrEngine.OPENAI -> OpenAiTranscriber(v("apiKey"), v("baseUrl"), v("model"), lang)
@@ -119,6 +119,17 @@ fun AppSettings.asrLanguageWarning(): String? {
     val lang = AsrLanguages.primary(asrLanguage)
     if (lang == "auto") return null
     val name = AsrLanguages.label(asrLanguage)
+    if (asrLanguage == AsrLanguages.SICHUAN) return when (asrEngine) {
+        // Azure 有 zh-CN-sichuan；豆包大模型自动识别方言
+        AsrEngine.AZURE, AsrEngine.VOLC -> null
+        AsrEngine.XFYUN -> "讯飞需要在控制台开通「西南官话」方言，否则会报错"
+        AsrEngine.LOCAL -> {
+            val model = com.aisub.player.asr.ModelCatalog.byId(localModel)
+            if (model.id in setOf("qwen3-asr", "dolphin-base", "fire-red-asr2")) null
+            else "「${model.label}」不认识四川话，会按普通话识别；建议换 Qwen3-ASR、Dolphin 或 FireRedASR2，或用 Azure、讯飞、豆包"
+        }
+        else -> "${asrEngine.label}没有四川话选项，会按普通话识别；建议换 Azure、讯飞、豆包，或本地 Qwen3-ASR、Dolphin"
+    }
     return when (asrEngine) {
         AsrEngine.LOCAL -> {
             val model = com.aisub.player.asr.ModelCatalog.byId(localModel)

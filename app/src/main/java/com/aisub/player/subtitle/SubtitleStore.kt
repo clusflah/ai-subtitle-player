@@ -63,7 +63,16 @@ class SubtitleStore(context: Context) {
     fun delete(video: Uri) {
         fileFor(video).delete()
         rolesFile(video).delete()
+        languageFile(video).delete()
     }
+
+    private fun languageFile(video: Uri) = File(fileFor(video).path.removeSuffix(".json") + ".lang")
+
+    /** 在播放页给这个视频单独选的语音语言；null 表示没选过，用设置里的默认语言。 */
+    fun loadAsrLanguage(video: Uri): String? =
+        languageFile(video).takeIf { it.exists() }?.readText()?.trim()?.ifEmpty { null }
+
+    fun saveAsrLanguage(video: Uri, code: String) = languageFile(video).writeText(code)
 
     private fun rolesFile(video: Uri) = File(fileFor(video).path.removeSuffix(".json") + ".roles.json")
 

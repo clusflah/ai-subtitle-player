@@ -27,6 +27,10 @@ class AsrLanguagesTest {
         assertEquals("ru-RU", AsrLanguages.azureLocale("ru"))
         assertEquals("pt-PT", AsrLanguages.azureLocale("pt-pt"))
         assertEquals("zh-HK", AsrLanguages.azureLocale("yue"))
+        assertEquals("zh-CN-sichuan", AsrLanguages.azureLocale(AsrLanguages.SICHUAN))
+        // 其他引擎拿到 zh，按普通话识别
+        assertEquals("zh", AsrLanguages.primary(AsrLanguages.SICHUAN))
+        assertEquals(AsrLanguages.SICHUAN, AsrLanguages.normalize("zh_Sichuan"))
         assertNull(AsrLanguages.azureLocale("auto"))
         assertNull(AsrLanguages.azureLocale("xx"))
     }
@@ -34,6 +38,7 @@ class AsrLanguagesTest {
     @Test
     fun labels() {
         assertEquals("俄语", AsrLanguages.label("ru"))
+        assertEquals("四川话", AsrLanguages.label(AsrLanguages.SICHUAN))
         assertEquals("xq", AsrLanguages.label("xq"))
     }
 }

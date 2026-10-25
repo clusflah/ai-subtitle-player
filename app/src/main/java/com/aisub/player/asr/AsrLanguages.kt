@@ -8,8 +8,11 @@ import java.util.Locale
  * 各引擎拿到的是 [primary]（去掉地区、小写）；Azure 需要完整 locale，见 [azureLocale]。
  */
 object AsrLanguages {
+    /** 四川话（西南官话）。其他引擎按 [primary] 拿到 zh，即按普通话识别。 */
+    const val SICHUAN = "zh-sichuan"
+
     val COMMON: List<Pair<String, String>> = listOf(
-        "auto" to "自动", "zh" to "中文", "yue" to "粤语", "en" to "英语", "ja" to "日语", "ko" to "韩语",
+        "auto" to "自动", "zh" to "中文", "yue" to "粤语", SICHUAN to "四川话", "en" to "英语", "ja" to "日语", "ko" to "韩语",
         "ru" to "俄语", "fr" to "法语", "de" to "德语", "es" to "西班牙语", "pt" to "葡萄牙语", "it" to "意大利语",
         "th" to "泰语", "vi" to "越南语", "id" to "印尼语", "ar" to "阿拉伯语", "hi" to "印地语", "tr" to "土耳其语",
         "uk" to "乌克兰语", "pl" to "波兰语", "nl" to "荷兰语",
@@ -37,6 +40,7 @@ object AsrLanguages {
     /** Azure 的 locale；常用语言用默认地区，自填了地区的照用；不认识时返回 null（交给服务端自动识别）。 */
     fun azureLocale(code: String): String? {
         if (code == "auto") return null
+        if (code == SICHUAN) return "zh-CN-sichuan"
         if ('-' in code) {
             val (l, r) = code.split('-', limit = 2)
             return if (l == "yue") "zh-HK" else "$l-${r.uppercase()}"

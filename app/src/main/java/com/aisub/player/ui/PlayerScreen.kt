@@ -795,9 +795,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             onDismiss = { dialog = null },
         ) { name -> vm.saveQueueAsPlaylist(name); indicator = AppIcons.PlaylistAdd to "已保存"; dialog = null }
         PlayerDialog.ASR_LANGUAGE -> AsrLanguageDialog(
-            state.settings.asrLanguage, onDismiss = { dialog = null },
+            state.asrSettings.asrLanguage, onDismiss = { dialog = null },
         ) { code ->
-            vm.updateSettings(state.settings.copy(asrLanguage = code))
+            vm.setVideoAsrLanguage(code)
             dialog = null
         }
         PlayerDialog.ERROR -> AlertDialog(
@@ -1215,10 +1215,10 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
             }
             ActionRow(AppIcons.AutoAwesome, gen, subtitle = "用语音识别为当前视频生成带时间轴的字幕") { onSubtitleAction(SubtitleAction.GENERATE) }
             // 识别前先选视频里说的语言，选错会降低准确率
-            val langWarning = state.settings.asrLanguageWarning()
+            val langWarning = state.asrSettings.asrLanguageWarning()
             ActionRow(
-                AppIcons.Volume, "语音语言：" + AsrLanguages.label(state.settings.asrLanguage),
-                subtitle = langWarning ?: "视频里说的是什么语言；不确定选「自动」",
+                AppIcons.Volume, "语音语言：" + AsrLanguages.label(state.asrSettings.asrLanguage),
+                subtitle = langWarning ?: "只对这个视频生效，其他视频用设置里的默认语言；不确定选「自动」",
                 tint = if (langWarning != null) Color(0xFFFF9E80) else MaterialTheme.colorScheme.onSurface,
                 enabled = !state.transcribing,
             ) { onSubtitleAction(SubtitleAction.ASR_LANGUAGE) }
@@ -1515,7 +1515,7 @@ private fun AsrLanguageDialog(current: String, onDismiss: () -> Unit, onPick: (S
     val parsed = AsrLanguages.normalize(custom)
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("语音语言") },
+        title = { Text("这个视频的语音语言") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 AsrLanguages.COMMON.forEach { (code, label) ->

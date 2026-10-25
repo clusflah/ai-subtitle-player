@@ -112,7 +112,12 @@ data class UiState(
     val choosingEmbedded: Boolean = false,
     /** 下载版：正在从分享的链接下载的任务 */
     val linkTask: LinkTask? = null,
-)
+    /** 在播放页给当前视频单独选的语音语言；null 表示用设置里的默认语言 */
+    val videoAsrLanguage: String? = null,
+) {
+    /** 当前视频识别时用的设置：语音语言换成这个视频单独选的 */
+    val asrSettings: AppSettings get() = videoAsrLanguage?.let { settings.copy(asrLanguage = it) } ?: settings
+}
 
 /** 链接下载任务的状态。done 时界面跳到播放页。 */
 data class LinkTask(
@@ -346,11 +351,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (_state.value.current?.uri == entry.uri) return
         cancelAll()
         val uri = Uri.parse(entry.uri)
+        val videoLanguage = store.loadAsrLanguage(uri)
         // 旧版把俄语等非拉丁文字误判成「不用翻译」、原文直接当了译文，这里清掉让它重新翻译
         val cached = store.load(uri).let { cues ->
             val s = _state.value.settings
+            val asrLanguage = videoLanguage ?: s.asrLanguage
             cues.map {
-                if (it.translation == it.text && !LanguageCheck.alreadyTarget(it.text, s.ttsLocale, s.asrLanguage, ChineseScript::variant))
+                if (it.translation == it.text && !LanguageCheck.alreadyTarget(it.text, s.ttsLocale, asrLanguage, ChineseScript::variant))
                     it.copy(translation = null) else it
             }
         }
@@ -361,6 +368,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 videoUri = uri,
                 cues = cached,
                 roles = store.loadRoles(uri),
+                videoAsrLanguage = videoLanguage,
                 roleStatus = null,
                 extractingEmbedded = false,
                 embeddedTracks = null,
@@ -391,6 +399,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val duration = player.duration.takeIf { it > 0 } ?: entry.durationMs
         library.recordHistory(entry.copy(durationMs = if (entry.isLive) 0 else duration), if (entry.isLive) 0 else player.currentPosition)
         extras.saveHistoryThumbnail()
+    }
+
+    /** 只给当前视频选语音语言，不改设置里的默认语言 */
+    fun setVideoAsrLanguage(code: String) {
+        val uri = _state.value.videoUri ?: return
+        store.saveAsrLanguage(uri, code)
+        _state.update { it.copy(videoAsrLanguage = code) }
     }
 
     fun updateSettings(s: AppSettings) {
@@ -545,7 +560,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.value.current?.takeIf { VlcPlayer.needsVlc(it.title) }?.let {
                     throw IllegalStateException("光盘镜像（ISO）暂不支持 AI 识别字幕，可以用「在线下载字幕」或选择字幕文件")
                 }
-                val settings = _state.value.settings
+                val settings = _state.value.asrSettings
                 settings.asrProblem()?.let { throw IllegalStateException(it) }
                 val localModel = ModelCatalog.byId(settings.localModel)
                 if (settings.asrEngine == AsrEngine.LOCAL && !models.isReady(localModel)) {
@@ -643,7 +658,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         while (true) {
             // 原文已经是目标语言（或没有文字）的句子不发给大模型，原文直接当译文
             val target = _state.value.settings.ttsLocale
-            val asrLanguage = _state.value.settings.asrLanguage
+            val asrLanguage = _state.value.asrSettings.asrLanguage
             val same = _state.value.cues
                 .filter { it.translation == null && LanguageCheck.alreadyTarget(it.text, target, asrLanguage, ChineseScript::variant) }
                 .map { it.id }.toSet()
