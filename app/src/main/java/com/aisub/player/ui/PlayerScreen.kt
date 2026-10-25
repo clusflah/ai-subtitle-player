@@ -258,6 +258,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     /** 手势横滑拖动进度时的目标位置，用于显示预览图 */
     var gesturePreview by remember { mutableStateOf<Long?>(null) }
     var renaming by remember { mutableStateOf<Bookmark?>(null) }
+    /** 字幕列表里正在编辑的一句 */
+    var editing by remember { mutableStateOf<Cue?>(null) }
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     val extras by vm.extras.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -696,9 +698,21 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     cues = state.cues, current = current, settings = state.settings, roles = state.roles,
                     onSeek = { player.seekTo(it.startMs + state.subtitleDelayMs); player.play() },
                     onRetranslate = { vm.retranslate(it.id) },
+                    onEdit = { editing = it },
+                    onDelete = { vm.deleteCue(it.id); indicator = null to "已删除这句" },
                     modifier = Modifier.weight(1f),
                 )
             }
+        }
+    }
+    editing?.let { cue ->
+        CueEditDialog(
+            cue, positionMs - state.subtitleDelayMs,
+            onDismiss = { editing = null },
+            onDelete = { vm.deleteCue(cue.id); editing = null },
+        ) { text, translation, start, end ->
+            vm.editCue(cue.id, text, translation, start, end)
+            editing = null
         }
     }
 
@@ -1207,7 +1221,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
             }
 
             GroupLabel("列表与导出")
-            ActionRow(AppIcons.ListIcon, "字幕列表", subtitle = if (state.cues.isEmpty()) "还没有字幕" else "${state.cues.size} 句，点击可跳转、长按可复制", enabled = state.cues.isNotEmpty()) {
+            ActionRow(AppIcons.ListIcon, "字幕列表", subtitle = if (state.cues.isEmpty()) "还没有字幕" else "${state.cues.size} 句，点击跳转，可编辑、复制、删除", enabled = state.cues.isNotEmpty()) {
                 onSubtitleAction(SubtitleAction.LIST)
             }
             ActionRow(AppIcons.Download, "导出字幕", subtitle = "双语 / 仅译文 / 仅原文 SRT", enabled = state.cues.isNotEmpty()) { onSubtitleAction(SubtitleAction.EXPORT) }
@@ -1299,6 +1313,8 @@ private fun CueList(
     roles: List<com.aisub.player.subtitle.Role>,
     onSeek: (Cue) -> Unit,
     onRetranslate: (Cue) -> Unit,
+    onEdit: (Cue) -> Unit,
+    onDelete: (Cue) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -1319,7 +1335,7 @@ private fun CueList(
                         .combinedClickable(onClick = { onSeek(cue) }, onLongClick = { menu = true }),
                 ) {
                     Box(Modifier.width(3.dp).fillMaxHeight().background(if (active) Orange else Color.Transparent))
-                    Column(Modifier.padding(start = 13.dp, end = 16.dp, top = 8.dp, bottom = 8.dp)) {
+                    Column(Modifier.weight(1f).padding(start = 13.dp, end = 4.dp, top = 8.dp, bottom = 8.dp)) {
                         val speaker = cue.speaker?.let { id -> roles.firstOrNull { it.id == id }?.name }
                         Text(
                             "${formatTime(cue.startMs)} – ${formatTime(cue.endMs)}" + (speaker?.let { "  ·  $it" } ?: ""),
@@ -1332,15 +1348,20 @@ private fun CueList(
                             else Text(cue.translation, color = Orange, fontSize = 15.sp)
                         }
                     }
+                    IconButton(onClick = { onEdit(cue) }, modifier = Modifier.align(Alignment.CenterVertically)) {
+                        Icon(AppIcons.Edit, "编辑这句", tint = Color(0xFF777777), modifier = Modifier.size(18.dp))
+                    }
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text("从这里播放") }, onClick = { menu = false; onSeek(cue) })
+                    DropdownMenuItem(text = { Text("编辑这句") }, onClick = { menu = false; onEdit(cue) })
                     DropdownMenuItem(text = { Text("复制原文") }, onClick = { menu = false; clipboard.setText(AnnotatedString(cue.text)) })
                     cue.translation?.let { t ->
                         DropdownMenuItem(text = { Text("复制译文") }, onClick = { menu = false; clipboard.setText(AnnotatedString(t)) })
                         DropdownMenuItem(text = { Text("复制双语") }, onClick = { menu = false; clipboard.setText(AnnotatedString("${cue.text}\n$t")) })
                     }
                     DropdownMenuItem(text = { Text("重新翻译这句") }, onClick = { menu = false; onRetranslate(cue) })
+                    DropdownMenuItem(text = { Text("删除这句", color = Color(0xFFFF6B5E)) }, onClick = { menu = false; onDelete(cue) })
                 }
             }
         }
@@ -1369,6 +1390,74 @@ private fun ChoiceDialog(title: String, options: List<String>, selected: Int, on
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+/**
+ * 编辑一句字幕：原文、译文、起止时间。时间可以手填，也可以点「用当前位置」取播放进度。
+ * 译文清空表示去掉译文，之后可以重新翻译。
+ */
+@Composable
+private fun CueEditDialog(
+    cue: Cue,
+    positionMs: Long,
+    onDismiss: () -> Unit,
+    onDelete: () -> Unit,
+    onSave: (text: String, translation: String?, startMs: Long, endMs: Long) -> Unit,
+) {
+    var text by remember { mutableStateOf(cue.text) }
+    var translation by remember { mutableStateOf(cue.translation.orEmpty()) }
+    var start by remember { mutableStateOf(formatTime(cue.startMs)) }
+    var end by remember { mutableStateOf(formatTime(cue.endMs)) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    val startMs = parseCueTime(start)
+    val endMs = parseCueTime(end)
+    val timeError = when {
+        startMs == null || endMs == null -> "时间格式：分:秒.十分之一秒，如 01:23.4 或 1:02:03.4"
+        endMs <= startMs -> "结束时间要晚于开始时间"
+        else -> null
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("编辑字幕") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(text, { text = it }, label = { Text("原文") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    translation, { translation = it }, label = { Text("译文") },
+                    placeholder = { Text("留空表示去掉译文") }, modifier = Modifier.fillMaxWidth(),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(start, { start = it }, label = { Text("开始") }, singleLine = true, isError = startMs == null, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { start = formatTime(positionMs.coerceAtLeast(0)) }) { Text("用当前位置", fontSize = 12.sp) }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(end, { end = it }, label = { Text("结束") }, singleLine = true, isError = endMs == null, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { end = formatTime(positionMs.coerceAtLeast(0)) }) { Text("用当前位置", fontSize = 12.sp) }
+                }
+                timeError?.let { Text(it, color = Color(0xFFFF6B5E), fontSize = 12.sp) }
+                TextButton(onClick = { if (confirmDelete) onDelete() else confirmDelete = true }) {
+                    Text(if (confirmDelete) "再点一次确认删除" else "删除这句", color = Color(0xFFFF6B5E))
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(text.trim(), translation.trim().ifEmpty { null }, startMs!!, endMs!!) },
+                enabled = timeError == null && text.isNotBlank(),
+            ) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+/** 解析字幕时间："01:23.4"、"1:02:03.45"、"83.5"（秒）→ 毫秒 */
+private fun parseCueTime(s: String): Long? {
+    val parts = s.trim().replace('：', ':').replace(',', '.').split(':')
+    if (parts.isEmpty() || parts.size > 3) return null
+    val seconds = parts.last().toDoubleOrNull()?.takeIf { it >= 0 } ?: return null
+    var total = 0L
+    for (p in parts.dropLast(1)) total = total * 60 + (p.toLongOrNull()?.takeIf { it >= 0 } ?: return null)
+    return total * 60_000 + (seconds * 1000).roundToInt()
 }
 
 /** 选择语音识别的语言：常用语言直接点选，其他语言填代码。和「设置 → 语音识别 → 视频语言」是同一项。 */

@@ -666,6 +666,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * 手动修改一句：原文、译文、起止时间。译文为 null 表示清除（之后可以重新翻译）。
+     * 改了时间后按开始时间重新排序，字幕显示用二分查找依赖这个顺序。
+     */
+    fun editCue(cueId: Int, text: String, translation: String?, startMs: Long, endMs: Long) {
+        _state.update { s ->
+            s.copy(
+                cues = s.cues.map { if (it.id == cueId) it.copy(text = text, translation = translation, startMs = startMs, endMs = endMs) else it }
+                    .sortedBy { it.startMs },
+            )
+        }
+        _state.value.videoUri?.let { store.save(it, _state.value.cues) }
+        ttsReader.reset()
+    }
+
+    fun deleteCue(cueId: Int) {
+        _state.update { s -> s.copy(cues = s.cues.filter { it.id != cueId }) }
+        _state.value.videoUri?.let { store.save(it, _state.value.cues) }
+        ttsReader.reset()
+    }
+
     // ---------------- 播放器"更多"菜单 ----------------
 
     fun setSubtitleDelay(ms: Long) = _state.update { it.copy(subtitleDelayMs = ms) }
