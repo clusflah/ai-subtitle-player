@@ -288,6 +288,8 @@ fun HomeScreen(
                             MenuAction("删除") { lib.deleteServer(s.id) },
                         )
                     },
+                    openLive = { nav.push(Screen.Live) },
+                    openStream = { dialog = HomeDialog.Stream },
                 )
                 Tab.PLAYLISTS -> PlaylistsTab(
                     state = state,
@@ -301,8 +303,6 @@ fun HomeScreen(
                     state = state,
                     onSettings = openSettings,
                     onAbout = { dialog = HomeDialog.About },
-                    onStream = { dialog = HomeDialog.Stream },
-                    onLive = { nav.push(Screen.Live) },
                     onLink = if (main.linkDownloader != null) ({ dialog = HomeDialog.Link }) else null,
                     onHistory = { nav.push(Screen.History) },
                     onPlayHistory = { item -> play(listOf(item.entry), 0) },
@@ -471,6 +471,8 @@ private fun BrowseTab(
     pickFile: () -> Unit,
     addSource: () -> Unit,
     serverMenu: (Server) -> List<MenuAction>,
+    openLive: () -> Unit,
+    openStream: () -> Unit,
 ) {
     val all = remember(state.videos, state.audios) { state.videos + state.audios }
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
@@ -518,6 +520,13 @@ private fun BrowseTab(
                     onClick = { openRemote(s) },
                 )
             }
+        }
+
+        SectionHeader("直播与串流")
+        SurfaceCard {
+            ListRow("直播", "添加 M3U / TXT 直播源，按分组看电视直播", AppIcons.Live, onClick = openLive)
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            ListRow("新建串流", "播放网络地址（http、rtsp、m3u8 等）", AppIcons.Link, onClick = openStream)
         }
     }
 }
@@ -608,8 +617,6 @@ private fun MoreTab(
     state: LibraryState,
     onSettings: () -> Unit,
     onAbout: () -> Unit,
-    onStream: () -> Unit,
-    onLive: () -> Unit,
     onLink: (() -> Unit)?,
     onHistory: () -> Unit,
     onPlayHistory: (HistoryItem) -> Unit,
@@ -631,14 +638,10 @@ private fun MoreTab(
 
         SectionHeader("工具")
         SurfaceCard {
-            ListRow("直播", "添加 M3U / TXT 直播源，按分组看电视直播", AppIcons.Live, onClick = onLive)
-            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             if (onLink != null) {
                 ListRow("从链接下载", "下载视频网站的视频，自动准备字幕后播放（也可以在其他 App 里分享给译幕）", AppIcons.Download, onClick = onLink)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             }
-            ListRow("新建串流", "播放网络地址（http、rtsp、m3u8 等）", AppIcons.Link, onClick = onStream)
-            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             ListRow("设置", "语音识别、字幕翻译、字幕样式", AppIcons.Settings, onClick = onSettings)
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             ListRow("关于", null, AppIcons.Info, onClick = onAbout)

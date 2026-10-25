@@ -568,12 +568,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         }
     }
 
+    // 面板、对话框跟随系统亮色 / 暗色（画面和控制栏保持黑底）
+    AppTheme {
     // ---- 字幕与音轨面板 ----
     if (showTracks) {
         ModalBottomSheet(
             onDismissRequest = { showTracks = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = Color(0xFF111111),
+            
         ) {
             TrackPanel(
                 vm = vm, state = state,
@@ -605,13 +607,13 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             title = { Text("选择字幕轨") },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
-                    Text("选一条作为字幕，之后可以翻译成${state.settings.targetLanguage}", fontSize = 13.sp, color = Color(0xFFB0B0B0))
+                    Text("选一条作为字幕，之后可以翻译成${state.settings.targetLanguage}", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     tracks.forEach { t ->
                         Column(Modifier.fillMaxWidth().clickable { vm.useEmbeddedTrack(t) }.padding(vertical = 10.dp)) {
                             Text(t.title, fontSize = 16.sp)
                             Text(
                                 "${t.cues.size} 句 · " + t.cues.first().let { c -> listOfNotNull(c.translation, c.text).joinToString(" / ") }.take(60),
-                                fontSize = 12.sp, color = Color(0xFF999999), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
@@ -626,7 +628,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         ModalBottomSheet(
             onDismissRequest = { showRoles = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = Color(0xFF111111),
+            
         ) {
             Column(Modifier.verticalScroll(rememberScrollState())) { RolesPanel(vm, state) }
         }
@@ -634,11 +636,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     // ---- 直播频道列表 ----
     if (showChannels) {
-        ModalBottomSheet(onDismissRequest = { showChannels = false }, containerColor = Color(0xFF111111)) {
+        ModalBottomSheet(onDismissRequest = { showChannels = false }) {
             val channels = vm.queueEntries
             val currentIndex = channels.indexOfFirst { it.uri == state.current?.uri }
             val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 3).coerceAtLeast(0))
-            Text("频道", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+            Text("频道", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
             LazyColumn(Modifier.fillMaxHeight(0.75f), state = listState) {
                 itemsIndexed(channels) { i, c ->
                     val active = i == currentIndex
@@ -650,8 +652,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         NetImage(c.logo.ifEmpty { null }, Modifier.size(width = 56.dp, height = 34.dp), contentScale = ContentScale.Fit, maxSize = 200, fallback = AppIcons.Live, background = false)
                         Spacer(Modifier.width(14.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(c.title, color = if (active) Orange else Color.White, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (c.folder.isNotBlank()) Text(c.folder, color = Color(0xFF888888), fontSize = 12.sp, maxLines = 1)
+                            Text(c.title, color = if (active) Orange else MaterialTheme.colorScheme.onSurface, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (c.folder.isNotBlank()) Text(c.folder, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1)
                         }
                     }
                 }
@@ -661,14 +663,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     // ---- 章节与片段 ----
     if (showNav) {
-        ModalBottomSheet(onDismissRequest = { showNav = false }, containerColor = Color(0xFF111111)) {
+        ModalBottomSheet(onDismissRequest = { showNav = false }) {
             NavigatorSheet(vm, positionMs) { ms -> player.seekTo(ms); showNav = false }
         }
     }
 
     // ---- 书签与关键帧 ----
     if (showBookmarks) {
-        ModalBottomSheet(onDismissRequest = { showBookmarks = false }, containerColor = Color(0xFF111111)) {
+        ModalBottomSheet(onDismissRequest = { showBookmarks = false }) {
             BookmarksSheet(
                 vm,
                 onAdd = { scope.launch { vm.extras.addBookmark(playerView?.videoSurfaceView) } },
@@ -689,7 +691,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         ModalBottomSheet(
             onDismissRequest = { showSkip = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = Color(0xFF111111),
+            
         ) {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 SkipSheet(
@@ -708,10 +710,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         ModalBottomSheet(
             onDismissRequest = { showStyle = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = Color(0xFF111111),
+            
         ) {
             Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, bottom = 24.dp)) {
-                Text("字幕样式", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                Text("字幕样式", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Medium)
                 SubtitleStyleEditor(state.settings) { vm.updateSettings(it) }
             }
         }
@@ -727,12 +729,12 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         ModalBottomSheet(
             onDismissRequest = { showCues = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
-            containerColor = Color(0xFF111111),
+            
         ) {
             Column(Modifier.fillMaxHeight(0.85f)) {
                 Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("字幕列表", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
-                    Text("${state.cues.size} 句", color = Color(0xFFB0B0B0), fontSize = 13.sp)
+                    Text("字幕列表", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                    Text("${state.cues.size} 句", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                 }
                 Box(Modifier.padding(16.dp)) {
                     DisplayModeSelector(state.settings.showOriginal, state.settings.showTranslation) { o, t ->
@@ -805,6 +807,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             text = { Text(state.error ?: "") },
         )
     }
+    } // AppTheme
 }
 
 /** 导出模式在选择后、文件选择器返回前暂存。 */
@@ -1135,7 +1138,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
         if (audioOpen) {
             Text(
                 "选过的音轨和字幕按视频记住，下次打开自动选好；首选语言在「设置 → 播放」里改",
-                color = Color(0xFF999999), fontSize = 12.sp, modifier = Modifier.padding(horizontal = 24.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 24.dp),
             )
             val groups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO } }
             val disabled = remember(version, state.current?.uri) { C.TRACK_TYPE_AUDIO in player.trackSelectionParameters.disabledTrackTypes }
@@ -1159,7 +1162,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                 }
             }
         }
-        HorizontalDivider(color = Color(0xFF333333))
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
         // ---------------- 视频自带字幕：文件里的字幕轨，按原样显示 ----------------
         val textGroups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT } }
@@ -1194,7 +1197,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                 ) { onSubtitleAction(SubtitleAction.EMBEDDED) }
             }
         }
-        HorizontalDivider(color = Color(0xFF333333))
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
         // ---------------- AI 字幕：识别、外挂文件或提取出的字幕，由本应用显示 ----------------
         SheetHeader("AI 字幕", aiOpen) { aiOpen = !aiOpen }
@@ -1216,7 +1219,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
             ActionRow(
                 AppIcons.Volume, "语音语言：" + AsrLanguages.label(state.settings.asrLanguage),
                 subtitle = langWarning ?: "视频里说的是什么语言；不确定选「自动」",
-                tint = if (langWarning != null) Color(0xFFFF9E80) else Color.White,
+                tint = if (langWarning != null) Color(0xFFFF9E80) else MaterialTheme.colorScheme.onSurface,
                 enabled = !state.transcribing,
             ) { onSubtitleAction(SubtitleAction.ASR_LANGUAGE) }
             ActionRow(AppIcons.File, "选择字幕文件", subtitle = "SRT / VTT / ASS") { onSubtitleAction(SubtitleAction.IMPORT) }
@@ -1277,7 +1280,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
 /** 面板分组下的说明文字 */
 @Composable
 private fun PanelHint(text: String) {
-    Text(text, color = Color(0xFF999999), fontSize = 12.sp, modifier = Modifier.padding(start = 24.dp, end = 24.dp, bottom = 4.dp))
+    Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(start = 24.dp, end = 24.dp, bottom = 4.dp))
 }
 
 /** 分组里的小标题（获取字幕、显示…） */
@@ -1292,8 +1295,8 @@ private fun SheetHeader(title: String, open: Boolean, onClick: () -> Unit) {
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title, color = Color.White, fontSize = 20.sp, modifier = Modifier.weight(1f))
-        Icon(if (open) AppIcons.ArrowDropUp else AppIcons.ArrowDropDown, null, tint = Color.White)
+        Text(title, color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, modifier = Modifier.weight(1f))
+        Icon(if (open) AppIcons.ArrowDropUp else AppIcons.ArrowDropDown, null, tint = MaterialTheme.colorScheme.onSurface)
     }
 }
 
@@ -1303,8 +1306,8 @@ private fun TrackRow(label: String, selected: Boolean, enabled: Boolean = true, 
         Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick).heightIn(min = 56.dp).padding(horizontal = 24.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.width(48.dp)) { if (selected) Icon(AppIcons.Check, null, tint = Color.White) }
-        Text(label, color = if (enabled) Color.White else Color(0xFF888888), fontSize = 17.sp)
+        Box(Modifier.width(48.dp)) { if (selected) Icon(AppIcons.Check, null, tint = MaterialTheme.colorScheme.onSurface) }
+        Text(label, color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 17.sp)
     }
 }
 
@@ -1314,11 +1317,11 @@ private fun SwitchRow(icon: ImageVector, label: String, subtitle: String?, check
         Modifier.fillMaxWidth().clickable { onChange(!checked) }.heightIn(min = 56.dp).padding(horizontal = 24.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, null, tint = Color.White, modifier = Modifier.size(26.dp))
+        Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(26.dp))
         Spacer(Modifier.width(24.dp))
         Column(Modifier.weight(1f)) {
-            Text(label, color = Color.White, fontSize = 17.sp)
-            if (subtitle != null) Text(subtitle, color = Color(0xFF999999), fontSize = 13.sp)
+            Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 17.sp)
+            if (subtitle != null) Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
         }
         Switch(checked = checked, onCheckedChange = onChange)
     }
@@ -1330,10 +1333,10 @@ private fun ActionRow(
     label: String,
     subtitle: String? = null,
     enabled: Boolean = true,
-    tint: Color = Color.White,
+    tint: Color = MaterialTheme.colorScheme.onSurface,
     onClick: () -> Unit,
 ) {
-    val color = if (enabled) tint else Color(0xFF777777)
+    val color = if (enabled) tint else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
     Row(
         Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick).heightIn(min = 56.dp).padding(horizontal = 24.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1342,7 +1345,7 @@ private fun ActionRow(
         Spacer(Modifier.width(24.dp))
         Column {
             Text(label, color = color, fontSize = 17.sp)
-            if (subtitle != null) Text(subtitle, color = Color(0xFF999999), fontSize = 13.sp)
+            if (subtitle != null) Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
         }
     }
 }
@@ -1384,17 +1387,17 @@ private fun CueList(
                         val speaker = cue.speaker?.let { id -> roles.firstOrNull { it.id == id }?.name }
                         Text(
                             "${formatTime(cue.startMs)} – ${formatTime(cue.endMs)}" + (speaker?.let { "  ·  $it" } ?: ""),
-                            fontSize = 11.sp, color = Color(0xFF888888),
+                            fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         val sameText = cue.translation == cue.text
-                        if (!sameText && (settings.showOriginal || cue.translation == null)) Text(cue.text, color = Color.White, fontSize = 15.sp)
+                        if (!sameText && (settings.showOriginal || cue.translation == null)) Text(cue.text, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp)
                         if ((settings.showTranslation || sameText) && cue.translation != null) {
                             if (settings.pinyinActive) PinyinText(cue.translation, Orange, 15.sp)
                             else Text(cue.translation, color = Orange, fontSize = 15.sp)
                         }
                     }
                     IconButton(onClick = { onEdit(cue) }, modifier = Modifier.align(Alignment.CenterVertically)) {
-                        Icon(AppIcons.Edit, "编辑这句", tint = Color(0xFF777777), modifier = Modifier.size(18.dp))
+                        Icon(AppIcons.Edit, "编辑这句", tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f), modifier = Modifier.size(18.dp))
                     }
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -1574,7 +1577,7 @@ private fun DelayDialog(delayMs: Long, onChange: (Long) -> Unit, onDismiss: () -
         text = {
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
                 Text("%+.1f 秒".format(delayMs / 1000f), fontSize = 28.sp, fontWeight = FontWeight.Medium)
-                Text("字幕比声音早就调大，晚就调小", fontSize = 13.sp, color = Color(0xFF999999))
+                Text("字幕比声音早就调大，晚就调小", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     listOf(-1000L, -100L, 100L, 1000L).forEach { step ->
@@ -1614,7 +1617,7 @@ private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 rows.forEach { (k, value) ->
                     Column {
-                        Text(k, fontSize = 12.sp, color = Color(0xFF999999))
+                        Text(k, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(value, fontSize = 14.sp)
                     }
                 }

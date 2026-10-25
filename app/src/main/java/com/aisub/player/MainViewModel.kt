@@ -212,6 +212,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         override fun onPlayerError(error: PlaybackException) {
             android.util.Log.e("Voxtitle", "播放失败", error)
+            if (retryLiveAsOtherType(error)) return
             _state.update { it.copy(playbackError = describePlaybackError(error)) }
         }
 
@@ -236,7 +237,47 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         .setUri(e.uri)
         .setMediaId(e.uri)
         .setMediaMetadata(MediaMetadata.Builder().setTitle(e.title).build())
+        .apply { if (e.isLive) setMimeType(liveMimeFor(e.uri)) }
         .build()
+
+    /**
+     * 直播流的类型。很多直播源的地址是 live.php?id=xxx 这种，看不出是 HLS，
+     * 播放器会当成普通视频文件解析失败。地址看不出类型时先当 HLS；打不开再换成普通流重试一次（见 [retryLiveAsOtherType]）。
+     */
+    private val liveMime = HashMap<String, String?>()
+    private val liveRetried = HashSet<String>()
+
+    private fun liveMimeFor(uri: String): String? = liveMime.getOrPut(uri) {
+        val u = Uri.parse(uri)
+        val ext = u.lastPathSegment?.substringAfterLast('.', "")?.lowercase().orEmpty()
+        when {
+            u.scheme == "rtsp" || u.scheme == "rtmp" -> null
+            androidx.media3.common.util.Util.inferContentType(u) != C.CONTENT_TYPE_OTHER -> null // m3u8 / mpd 交给播放器自己判断
+            ext in setOf("flv", "ts", "mp4", "mkv", "mp3", "aac", "m4a", "webm", "mov") -> null
+            else -> androidx.media3.common.MimeTypes.APPLICATION_M3U8
+        }
+    }
+
+    /** 直播打不开且是解析错误：换一种类型（HLS ↔ 普通流）重试一次。返回是否已重试。 */
+    private fun retryLiveAsOtherType(error: PlaybackException): Boolean {
+        val entry = _state.value.current?.takeIf { it.isLive } ?: return false
+        if (usingVlc || entry.uri in liveRetried) return false
+        val parsing = error.errorCode in setOf(
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+            PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+            PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
+        )
+        if (!parsing) return false
+        liveRetried += entry.uri
+        liveMime[entry.uri] = if (liveMimeFor(entry.uri) == null) androidx.media3.common.MimeTypes.APPLICATION_M3U8 else null
+        val index = exoPlayer.currentMediaItemIndex
+        android.util.Log.i("Voxtitle", "直播换类型重试：${entry.uri} → ${liveMime[entry.uri] ?: "普通流"}")
+        exoPlayer.replaceMediaItem(index, itemOf(entry))
+        exoPlayer.prepare()
+        exoPlayer.play()
+        return true
+    }
 
     /** 用 VLC 内核播放一个文件（不带播放队列）。 */
     private fun playWithVlc(entry: MediaEntry, positionMs: Long) {

@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -60,7 +61,7 @@ import com.aisub.player.media.SkipSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-private val Muted = Color(0xFF999999)
+private val Muted: Color @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant
 
 // ---------------- 章节与片段 ----------------
 
@@ -95,7 +96,7 @@ fun NavigatorSheet(vm: MainViewModel, positionMs: Long, onSeek: (Long) -> Unit) 
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(formatMs(c.startMs), color = if (active) Orange else Muted, fontSize = 13.sp, modifier = Modifier.width(72.dp))
-                    Text(c.title.ifEmpty { "第 ${i + 1} 章" }, color = Color.White, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(c.title.ifEmpty { "第 ${i + 1} 章" }, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
         }
@@ -175,7 +176,7 @@ fun SkipSheet(
         SheetTitle("片头片尾与跳过")
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("自动跳过", color = Color.White, fontSize = 16.sp)
+                Text("自动跳过", color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp)
                 Text("关掉后播到这些区间只显示「跳过」按钮", color = Muted, fontSize = 12.sp)
             }
             Switch(state.settings.autoSkip, { vm.updateSettings(state.settings.copy(autoSkip = it)) })
@@ -185,7 +186,7 @@ fun SkipSheet(
         extras.skipRanges.forEach { r ->
             Row(Modifier.fillMaxWidth().clickable { onSeek(r.startMs) }.heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("${r.kind.label}  ${formatMs(r.startMs)} – ${formatMs(r.endMs)}", color = Color.White, fontSize = 15.sp)
+                    Text("${r.kind.label}  ${formatMs(r.startMs)} – ${formatMs(r.endMs)}", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp)
                     Text(r.source.label + if (r.series) " · 整部剧" else " · 仅本集", color = Muted, fontSize = 12.sp)
                 }
                 if (r.source != SkipSource.CHAPTER) TextButton(onClick = { vm.extras.removeRange(r) }) { Text("删除", color = Color(0xFFFF6B5E)) }
@@ -198,7 +199,7 @@ fun SkipSheet(
                 TextButton(onClick = onMarkStart) { Text("在 ${formatMs(positionMs)} 标记起点", color = Orange) }
             }
         } else {
-            Text("起点 ${formatMs(markStart)}，终点 ${formatMs(positionMs)}。这段是：", color = Color.White, fontSize = 14.sp)
+            Text("起点 ${formatMs(markStart)}，终点 ${formatMs(positionMs)}。这段是：", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(onClick = { onMarkEnd(SkipKind.INTRO) }) { Text("片头" + if (series) "（整部剧）" else "", color = Orange) }
                 TextButton(onClick = { onMarkEnd(SkipKind.OUTRO) }) { Text("片尾" + if (series) "（整部剧）" else "", color = Orange) }
@@ -211,7 +212,7 @@ fun SkipSheet(
         Spacer(Modifier.height(12.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("自动识别片头片尾", color = Color.White, fontSize = 16.sp)
+                Text("自动识别片头片尾", color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp)
                 Text(
                     extras.detecting ?: "和播放列表里同一部剧的另一集比对声音，找出两集都有的片段；MKV 章节名里有 OP / ED 时直接用章节",
                     color = Muted, fontSize = 12.sp,
@@ -227,17 +228,17 @@ fun SkipSheet(
 
 @Composable
 private fun SheetTitle(text: String, modifier: Modifier = Modifier) {
-    Text(text, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = modifier.padding(vertical = 8.dp))
+    Text(text, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = modifier.padding(vertical = 8.dp))
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Thumb(image: ImageBitmap?, label: String, onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
     Column(Modifier.clip(RoundedCornerShape(8.dp)).combinedClickable(onClick = onClick, onLongClick = onLongClick)) {
-        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Color(0xFF222222)), contentAlignment = Alignment.Center) {
+        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
             if (image != null) Image(image, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f))
-            else Icon(AppIcons.Movie, null, tint = Color(0xFF555555))
+            else Icon(AppIcons.Movie, null, tint = MaterialTheme.colorScheme.outlineVariant)
         }
-        Text(label, color = Color.White, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp))
+        Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp))
     }
 }

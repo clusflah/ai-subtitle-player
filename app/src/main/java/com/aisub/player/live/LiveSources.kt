@@ -43,6 +43,30 @@ class LiveSources(private val context: Context) {
         File(dir, "$id.txt").delete()
     }
 
+    // ---- 收藏的频道：存完整信息，换了直播源也还在 ----
+
+    fun favorites(): List<LiveChannel> = try {
+        val arr = JSONArray(prefs.getString("favorites", "[]"))
+        List(arr.length()) { i ->
+            arr.getJSONObject(i).let {
+                LiveChannel(
+                    it.getString("name"), it.getString("url"), it.optString("group"), it.optString("logo"),
+                    it.optString("tvgId"), it.optString("ua"), it.optString("ref"),
+                )
+            }
+        }
+    } catch (e: Exception) {
+        emptyList()
+    }
+
+    fun setFavorites(list: List<LiveChannel>) = prefs.edit().putString(
+        "favorites",
+        JSONArray(list.map {
+            JSONObject().put("name", it.name).put("url", it.url).put("group", it.group).put("logo", it.logo)
+                .put("tvgId", it.tvgId).put("ua", it.userAgent).put("ref", it.referrer)
+        }).toString(),
+    ).apply()
+
     var lastSourceId: String?
         get() = prefs.getString("last", null)
         set(v) = prefs.edit().putString("last", v).apply()

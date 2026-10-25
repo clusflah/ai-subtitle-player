@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -99,10 +100,10 @@ fun OnlineSubtitleSheet(vm: MainViewModel, onDismiss: () -> Unit, onOpenSettings
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = Color(0xFF111111),
+        
     ) {
         Column(Modifier.fillMaxHeight(0.9f).padding(horizontal = 16.dp)) {
-            Text("在线下载字幕", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+            Text("在线下载字幕", color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, fontWeight = FontWeight.Medium)
             Spacer(Modifier.height(12.dp))
 
             if (sources.isEmpty()) {
@@ -127,7 +128,7 @@ fun OnlineSubtitleSheet(vm: MainViewModel, onDismiss: () -> Unit, onOpenSettings
             if (source == OnlineSubtitleSource.OPENSUBTITLES) {
                 Text(
                     "本地视频会附带文件哈希，标着「完全匹配」的字幕时间轴最准",
-                    color = Color(0xFF999999), fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp),
                 )
             }
             error?.let { Text(it, color = Color(0xFFFF6B5E), fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp)) }
@@ -137,7 +138,7 @@ fun OnlineSubtitleSheet(vm: MainViewModel, onDismiss: () -> Unit, onOpenSettings
                     searching -> CircularProgressIndicator(Modifier.align(Alignment.Center), color = Orange)
                     results?.isEmpty() == true -> Text(
                         "没有找到字幕，试试只保留片名（英文名通常更容易搜到）",
-                        color = Color(0xFFB0B0B0), modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.Center).padding(24.dp),
                     )
                     results != null -> LazyColumn {
                         items(results!!, key = { it.source.name + it.id }) { sub ->
@@ -148,7 +149,7 @@ fun OnlineSubtitleSheet(vm: MainViewModel, onDismiss: () -> Unit, onOpenSettings
                 }
             }
             if (source == OnlineSubtitleSource.ASSRT) {
-                Text("字幕服务由 assrt.net 提供", color = Color(0xFF777777), fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
+                Text("字幕服务由 assrt.net 提供", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f), fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
             }
         }
     }
@@ -161,7 +162,7 @@ private fun ResultRow(sub: OnlineSubtitle, downloading: Boolean, onClick: () -> 
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text(sub.title, color = Color.White, fontSize = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(sub.title, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (sub.exactMatch) {
                     Text("完全匹配", color = Orange, fontSize = 12.sp)
@@ -173,12 +174,12 @@ private fun ResultRow(sub: OnlineSubtitle, downloading: Boolean, onClick: () -> 
                 }
             }
             if (sub.info.isNotEmpty()) {
-                Text(sub.info, color = Color(0xFF999999), fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(sub.info, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
         }
         Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
             if (downloading) CircularProgressIndicator(Modifier.size(24.dp), color = Orange, strokeWidth = 2.dp)
-            else Icon(AppIcons.Download, "下载", tint = Color.White)
+            else Icon(AppIcons.Download, "下载", tint = MaterialTheme.colorScheme.onSurface)
         }
     }
 }
@@ -186,15 +187,15 @@ private fun ResultRow(sub: OnlineSubtitle, downloading: Boolean, onClick: () -> 
 @Composable
 private fun NoSourceHint(onOpenSettings: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("还没有配置字幕来源。两个都是免费的，填一个就能用：", color = Color.White, fontSize = 15.sp)
+        Text("还没有配置字幕来源。两个都是免费的，填一个就能用：", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp)
         Text(
             "• 射手网（中文字幕多）：在 assrt.net 注册后，到「用户面板」复制 API Token",
-            color = Color(0xFFCCCCCC), fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp,
         )
         Text(
             "• OpenSubtitles（外语片多）：在 opensubtitles.com 注册后，到 opensubtitles.com/consumers 新建一个 API Key；" +
                 "可再填账号密码，不填每天限 5 次下载",
-            color = Color(0xFFCCCCCC), fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp,
         )
         Button(onClick = onOpenSettings) { Text("去设置填写") }
     }

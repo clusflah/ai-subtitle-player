@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisub.player.live.LiveSource
+import com.aisub.player.live.LiveState
 import com.aisub.player.live.LiveViewModel
 import com.aisub.player.media.MediaEntry
 
@@ -77,7 +78,7 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
             }
         },
     ) {
-        if (state.sources.isEmpty()) {
+        if (state.sources.isEmpty() && state.favorites.isEmpty()) {
             EmptyState(
                 "还没有直播源\n支持 M3U / M3U8 播放列表和「频道名,地址」TXT 格式",
                 buttonText = "添加直播源", icon = AppIcons.Live,
@@ -101,16 +102,29 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
                     colors = appFieldColors(),
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
                 )
-                // 分组
-                if (state.groups.isNotEmpty()) {
+                // 分组（收藏排在最前）
+                if (state.groups.isNotEmpty() || state.favorites.isNotEmpty()) {
                     LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (state.favorites.isNotEmpty()) item {
+                            FilterChip(
+                                state.group == LiveState.FAVORITES, { vm.setGroup(LiveState.FAVORITES) },
+                                label = { Text("★ 收藏 ${state.favorites.size}") },
+                            )
+                        }
                         item { FilterChip(state.group == null, { vm.setGroup(null) }, label = { Text("全部") }) }
                         items(state.groups) { g -> FilterChip(state.group == g, { vm.setGroup(g) }, label = { Text(g, maxLines = 1) }) }
                     }
                 }
                 val visible = state.visible
                 if (visible.isEmpty() && !state.loading) {
-                    EmptyState(if (state.channels.isEmpty()) "这个源还没有频道" else "没有符合的频道", icon = AppIcons.Live)
+                    EmptyState(
+                        when {
+                            state.group == LiveState.FAVORITES -> "没有符合的收藏频道"
+                            state.channels.isEmpty() -> "这个源还没有频道"
+                            else -> "没有符合的频道"
+                        },
+                        icon = AppIcons.Live,
+                    )
                 }
                 LazyColumn(contentPadding = PaddingValues(vertical = 4.dp)) {
                     itemsIndexed(visible, key = { i, c -> "$i|${c.url}" }) { i, c ->
@@ -126,9 +140,16 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
                             Spacer(Modifier.width(14.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(c.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                if (c.group.isNotBlank() && state.group == null) {
+                                if (c.group.isNotBlank() && (state.group == null || state.group == LiveState.FAVORITES)) {
                                     Text(c.group, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                                 }
+                            }
+                            val fav = state.isFavorite(c)
+                            IconButton(onClick = { vm.toggleFavorite(c) }) {
+                                Icon(
+                                    AppIcons.Star, if (fav) "取消收藏" else "收藏",
+                                    tint = if (fav) Orange else MaterialTheme.colorScheme.outlineVariant,
+                                )
                             }
                         }
                     }

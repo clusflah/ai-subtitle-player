@@ -19,17 +19,25 @@ data class LiveState(
     val channels: List<LiveChannel> = emptyList(),
     val loading: Boolean = false,
     val error: String? = null,
-    /** 当前分组；null 为全部 */
+    /** 当前分组；null 为全部，[FAVORITES] 为收藏 */
     val group: String? = null,
     val query: String = "",
+    val favorites: List<LiveChannel> = emptyList(),
 ) {
     val groups: List<String> get() = channels.map { it.group }.filter { it.isNotBlank() }.distinct()
 
+    fun isFavorite(c: LiveChannel) = favorites.any { it.url == c.url }
+
     /** 按分组和搜索词筛过的频道 */
     val visible: List<LiveChannel>
-        get() = channels.filter { c ->
-            (group == null || c.group == group) && (query.isBlank() || c.name.contains(query.trim(), ignoreCase = true))
+        get() = (if (group == FAVORITES) favorites else channels).filter { c ->
+            (group == null || group == FAVORITES || c.group == group) && (query.isBlank() || c.name.contains(query.trim(), ignoreCase = true))
         }
+
+    companion object {
+        /** 「收藏」这个特殊分组 */
+        const val FAVORITES = "\u0000favorites"
+    }
 }
 
 /** 直播页：直播源列表、当前源的频道、分组和搜索。 */
@@ -41,7 +49,8 @@ class LiveViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         val sources = store.list()
-        _state.update { it.copy(sources = sources) }
+        val favorites = store.favorites()
+        _state.update { it.copy(sources = sources, favorites = favorites, group = if (favorites.isNotEmpty()) LiveState.FAVORITES else null) }
         (sources.firstOrNull { it.id == store.lastSourceId } ?: sources.firstOrNull())?.let { select(it) }
     }
 
@@ -49,7 +58,7 @@ class LiveViewModel(app: Application) : AndroidViewModel(app) {
     fun select(source: LiveSource, refresh: Boolean = true) {
         store.lastSourceId = source.id
         val cached = store.cached(source)
-        _state.update { it.copy(selected = source, channels = cached.orEmpty(), group = null, error = null) }
+        _state.update { it.copy(selected = source, channels = cached.orEmpty(), group = it.group?.takeIf { g -> g == LiveState.FAVORITES }, error = null) }
         if (refresh || cached == null) refresh()
     }
 
@@ -61,7 +70,7 @@ class LiveViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val channels = withContext(Dispatchers.IO) { store.fetch(source) }
                 if (_state.value.selected?.id == source.id) {
-                    _state.update { s -> s.copy(channels = channels, group = s.group?.takeIf { g -> channels.any { it.group == g } }) }
+                    _state.update { s -> s.copy(channels = channels, group = s.group?.takeIf { g -> g == LiveState.FAVORITES || channels.any { it.group == g } }) }
                 }
             } catch (e: Exception) {
                 val hasCache = _state.value.channels.isNotEmpty()
@@ -87,11 +96,21 @@ class LiveViewModel(app: Application) : AndroidViewModel(app) {
     fun remove(source: LiveSource) {
         store.remove(source.id)
         val sources = store.list()
-        _state.update { it.copy(sources = sources, selected = null, channels = emptyList(), error = null) }
+        _state.update { it.copy(sources = sources, selected = null, channels = emptyList(), error = null, group = it.group?.takeIf { g -> g == LiveState.FAVORITES }) }
         sources.firstOrNull()?.let { select(it, refresh = false) }
     }
 
     fun setGroup(group: String?) = _state.update { it.copy(group = group) }
+
+    /** 收藏 / 取消收藏一个频道 */
+    fun toggleFavorite(c: LiveChannel) {
+        val list = _state.value.favorites
+        val updated = if (list.any { it.url == c.url }) list.filter { it.url != c.url } else list + c
+        store.setFavorites(updated)
+        _state.update { s ->
+            s.copy(favorites = updated, group = if (s.group == LiveState.FAVORITES && updated.isEmpty()) null else s.group)
+        }
+    }
 
     fun setQuery(q: String) = _state.update { it.copy(query = q) }
 
