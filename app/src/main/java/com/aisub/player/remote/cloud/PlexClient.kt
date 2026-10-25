@@ -178,6 +178,38 @@ class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
 
     override fun folderPath(section: ServerSection) = "s:" + section.key
 
+    /**
+     * directStream=0：视频强制转码成 H.264（4K HEVC、杜比视界在老手机上解不了）。
+     * 先问服务器的 decision，转不了时把原因说清楚（例如杜比视界 Profile 5 Plex 不支持转码），否则 start 只返回 400。
+     */
+    override fun transcodeUrl(ratingKey: String): String {
+        if (baseUrl == null) get("/identity")
+        val session = UUID.randomUUID().toString()
+        val q = listOf(
+            "path" to "/library/metadata/$ratingKey", "mediaIndex" to "0", "partIndex" to "0", "protocol" to "hls",
+            "fastSeek" to "1", "directPlay" to "0", "directStream" to "0", "directStreamAudio" to "1",
+            "videoQuality" to "100", "videoResolution" to "1920x1080", "maxVideoBitrate" to "12000", "subtitles" to "none",
+            "session" to session, "X-Plex-Session-Identifier" to session,
+            "X-Plex-Client-Identifier" to creds.optString("client_id"),
+            "X-Plex-Product" to PRODUCT, "X-Plex-Platform" to "Android", "X-Plex-Token" to token,
+        ).joinToString("&") { (k, v) -> "$k=${Uri.encode(v)}" }
+        val decision = probeHttp.newCall(
+            Request.Builder().url("$baseUrl/video/:/transcode/universal/decision?$q").header("Accept", "application/json").build(),
+        ).execute().use { it.json() }.optJSONObject("MediaContainer") ?: JSONObject()
+        val code = decision.optInt("transcodeDecisionCode")
+        if (code != 0 && code !in 1000..1999) {
+            val text = decision.optString("transcodeDecisionText")
+            throw IOException(
+                when {
+                    text.contains("DoVi", ignoreCase = true) -> "这个文件是杜比视界 Profile 5，Plex 服务器也转不了"
+                    text.contains("transcoder", ignoreCase = true) -> "Plex 服务器没开启转码，或者性能不够"
+                    else -> "Plex 服务器转不了这个文件（$text）"
+                },
+            )
+        }
+        return "$baseUrl/video/:/transcode/universal/start.m3u8?$q"
+    }
+
     /** 媒体库里的全部条目 */
     override suspend fun library(sectionKey: String, sort: LibrarySort, unwatchedOnly: Boolean): List<ServerItem> = withContext(Dispatchers.IO) {
         val s = when (sort) {

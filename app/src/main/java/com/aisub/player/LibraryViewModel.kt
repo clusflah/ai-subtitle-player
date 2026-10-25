@@ -1,6 +1,8 @@
 package com.aisub.player
 
 import android.app.Application
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aisub.player.media.AppStore
@@ -51,6 +53,23 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _state = MutableStateFlow(LibraryState())
     val state: StateFlow<LibraryState> = _state.asStateFlow()
+
+    // ---- 首页界面状态：进播放页再回来时还是原来的标签和滚动位置 ----
+
+    /** 当前标签（HomeScreen 里 Tab 的序号） */
+    var homeTab by androidx.compose.runtime.mutableIntStateOf(0)
+
+    /** 「本机」标签显示视频还是音乐 */
+    var localShowsVideo by androidx.compose.runtime.mutableStateOf(true)
+
+    private val listStates = HashMap<String, androidx.compose.foundation.lazy.LazyListState>()
+    private val gridStates = HashMap<String, androidx.compose.foundation.lazy.grid.LazyGridState>()
+
+    fun listState(key: String) = listStates.getOrPut(key) { androidx.compose.foundation.lazy.LazyListState() }
+    fun gridState(key: String) = gridStates.getOrPut(key) { androidx.compose.foundation.lazy.grid.LazyGridState() }
+
+    /** 首页各媒体服务器的「继续观看」，上次读到的先显示，避免每次回首页都闪一下 */
+    val serverContinue = androidx.compose.runtime.mutableStateMapOf<String, List<com.aisub.player.remote.cloud.ServerItem>>()
 
     init {
         reloadStored()

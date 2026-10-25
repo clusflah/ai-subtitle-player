@@ -20,6 +20,12 @@ interface MediaBrowser {
 
     /** 媒体库按文件夹浏览时的定位符 */
     fun folderPath(section: ServerSection): String
+
+    /**
+     * 请服务器转码成 1080p H.264 的 HLS 地址（手机解不了原片画面时用，阻塞调用）。
+     * 返回的流从头开始，播放器自己跳到当前位置。
+     */
+    fun transcodeUrl(ratingKey: String): String
 }
 
 enum class LibrarySort(val label: String) { NAME("名称"), ADDED("最近添加"), RELEASED("上映日期"), RATING("评分") }

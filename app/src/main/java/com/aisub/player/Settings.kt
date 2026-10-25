@@ -24,15 +24,16 @@ enum class Provider(
     /** 是否允许用户修改 Base URL（自定义服务商必须填，其余预置） */
     val editableBaseUrl: Boolean,
 ) {
+    // 免费的排第一（设置页按这个顺序列出）
+    INDEX_TRANSLATE(
+        "Index-Translate（免费）", "https://index-translate.bilibili.com/v1", "Index-Translate-35B-A3B",
+        needsApiKey = false, editableBaseUrl = false,
+    ),
     CLAUDE("Claude", "", ClaudeTranslator.DEFAULT_MODEL, needsApiKey = true, editableBaseUrl = false),
     DEEPSEEK("DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", needsApiKey = true, editableBaseUrl = false),
     GEMINI(
         "Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash",
         needsApiKey = true, editableBaseUrl = false,
-    ),
-    INDEX_TRANSLATE(
-        "Index-Translate", "https://index-translate.bilibili.com/v1", "Index-Translate-35B-A3B",
-        needsApiKey = false, editableBaseUrl = false,
     ),
     OPENAI_COMPAT("自定义", "https://api.openai.com/v1", "", needsApiKey = false, editableBaseUrl = true),
 }
@@ -47,7 +48,8 @@ enum class VideoLeaveAction(val label: String) {
 }
 
 data class AppSettings(
-    val provider: Provider = Provider.CLAUDE,
+    // 默认用免费、不用 Key 的翻译，装好就能用
+    val provider: Provider = Provider.INDEX_TRANSLATE,
     val providerConfigs: Map<Provider, ProviderConfig> = emptyMap(),
     val targetLanguage: String = "简体中文",
     val asrEngine: AsrEngine = AsrEngine.LOCAL,

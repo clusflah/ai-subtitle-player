@@ -16,6 +16,9 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import com.aisub.player.ui.FileDetailScreen
 import com.aisub.player.ui.ImageViewerScreen
 import com.aisub.player.ui.LiveScreen
@@ -34,8 +37,11 @@ import com.aisub.player.ui.Navigator
 import com.aisub.player.ui.PlayerScreen
 import com.aisub.player.ui.PipState
 import com.aisub.player.ui.NowPlayingBar
+import com.aisub.player.ui.OnboardingScreen
 import com.aisub.player.ui.PlaylistDetailScreen
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -77,8 +83,27 @@ class MainActivity : ComponentActivity() {
                 ActivityResultContracts.RequestMultiplePermissions()
             ) { result -> lib.onPermission(result.values.any { it }) }
 
+            // 第一次打开先看说明，再申请权限；已经授权过的老用户直接进
+            val appPrefs = remember { getSharedPreferences("app", MODE_PRIVATE) }
+            var onboarding by remember { mutableStateOf(!appPrefs.getBoolean("onboarded", false) && !hasMediaPermission()) }
             LaunchedEffect(Unit) {
-                if (hasMediaPermission()) lib.onPermission(true) else permissionLauncher.launch(mediaPermissions)
+                if (hasMediaPermission()) lib.onPermission(true) else if (!onboarding) permissionLauncher.launch(mediaPermissions)
+            }
+            if (onboarding) {
+                AppTheme {
+                    OnboardingScreen(
+                        onStart = {
+                            appPrefs.edit().putBoolean("onboarded", true).apply()
+                            onboarding = false
+                            permissionLauncher.launch(mediaPermissions)
+                        },
+                        onLater = {
+                            appPrefs.edit().putBoolean("onboarded", true).apply()
+                            onboarding = false
+                        },
+                    )
+                }
+                return@setContent
             }
 
             val play: (List<MediaEntry>, Int) -> Unit = { list, i ->
@@ -94,7 +119,8 @@ class MainActivity : ComponentActivity() {
             val openDetail: (MediaEntry) -> Unit = { e -> nav.push(Screen.FileDetail(null, e.toRemoteItem(), listOf(e), 0)) }
             AppTheme {
                 CompositionLocalProvider(LocalOpenDetail provides openDetail) {
-                  Box(Modifier.fillMaxSize()) {
+                  Column(Modifier.fillMaxSize().background(androidx.compose.material3.MaterialTheme.colorScheme.background)) {
+                   Box(Modifier.weight(1f)) {
                     when (val screen = nav.current) {
                         Screen.Home -> HomeScreen(lib, main, nav) { permissionLauncher.launch(mediaPermissions) }
                         Screen.Player -> PlayerScreen(main, onBack = back, onOpenSettings = { nav.push(Screen.Settings) })
@@ -162,12 +188,11 @@ class MainActivity : ComponentActivity() {
                             openDetail = { item -> nav.push(Screen.FileDetail(screen.serverId, item)) },
                         )
                     }
-                    // 音乐在播放页外继续放时，底部的「正在播放」小条，点它回到播放页
-                    if (nav.current != Screen.Player) NowPlayingBar(
-                        main,
-                        bottomPadding = if (nav.current == Screen.Home) 80.dp else 12.dp,
-                        onOpen = { nav.push(Screen.Player) },
-                        modifier = Modifier.align(Alignment.BottomCenter),
+                   }
+                    // 音乐在播放页外继续放时，页面底部的「正在播放」小条（占自己的位置，不盖住列表），点它回到播放页。
+                    // 首页的小条放在底部标签栏上面，由 HomeScreen 自己显示
+                    if (nav.current != Screen.Player && nav.current != Screen.Home) NowPlayingBar(
+                        main, bottomPadding = 8.dp, onOpen = { nav.push(Screen.Player) },
                     )
                   }
                 }

@@ -298,7 +298,7 @@ fun VideoCard(
         }
         Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.Top) {
             Text(
-                entry.title, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                entry.displayTitle, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f).padding(start = 2.dp, top = 4.dp),
             )
@@ -335,7 +335,7 @@ fun MediaRow(
             IconBadge(AppIcons.MusicNote, size = 40.dp)
         }
         Column(Modifier.weight(1f).padding(start = 12.dp)) {
-            Text(entry.title, style = MaterialTheme.typography.bodyLarge)
+            Text(entry.displayTitle, style = MaterialTheme.typography.bodyLarge)
             val info = subtitle ?: listOf(formatDuration(entry.durationMs), if (entry.sizeBytes > 0) formatSize(entry.sizeBytes) else "")
                 .filter { it.isNotEmpty() }.joinToString(" · ")
             if (info.isNotEmpty()) Text(info, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)

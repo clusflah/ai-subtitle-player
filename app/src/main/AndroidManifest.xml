@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 识别、翻译进度显示在通知栏（Android 13 起要用户允许） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 读取手机里的视频和音频（媒体库） -->
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />

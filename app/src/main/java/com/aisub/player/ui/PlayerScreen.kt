@@ -35,6 +35,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.Dp
 import com.aisub.player.asr.AsrLanguages
 import com.aisub.player.asrLanguageWarning
+import com.aisub.player.PLAYBACK_ERROR_DETAIL
 import com.aisub.player.media.Bookmark
 import io.github.peerless2012.ass.media.kt.withAssSupport
 import kotlinx.coroutines.launch
@@ -297,6 +298,20 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     /** 正在搜索：true 为封面，false 为歌词 */
     var musicSearch by remember { mutableStateOf<Boolean?>(null) }
     var editingSong by remember { mutableStateOf(false) }
+
+    // ---- AI 字幕：本地模型还没下载时先确认（约 160MB 起） ----
+    var confirmDownload by remember { mutableStateOf<com.aisub.player.asr.LocalModel?>(null) }
+    // 第一次生成字幕时顺便请求通知权限，进度显示在通知栏（不给也照常识别）
+    val notifyPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    val startGenerate: () -> Unit = {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) notifyPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        val model = vm.modelToDownload()
+        if (model != null) confirmDownload = model else vm.generateSubtitles()
+    }
+    /** 本视频不再显示「生成字幕」提示 */
+    var aiChipDismissed by remember(state.current?.uri) { mutableStateOf(false) }
     val lyricsImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch { indicator = null to (if (vm.music.importLyrics(uri)) "已导入歌词" else "无法读取这个歌词文件") }
     }
@@ -348,23 +363,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         )
         if (PipState.inPip) return@Box
 
-        // ---- 缓冲 / 出错提示 ----
-        val playbackError = state.playbackError
-        if (playbackError != null) {
-            Column(
-                Modifier.align(Alignment.Center).padding(32.dp).clip(RoundedCornerShape(12.dp)).background(Color(0xCC000000)).padding(20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text("无法播放", color = Color.White, fontSize = 18.sp)
-                Spacer(Modifier.height(8.dp))
-                Text(playbackError, color = Color(0xFFCCCCCC), fontSize = 13.sp)
-                Spacer(Modifier.height(12.dp))
-                Row {
-                    TextButton(onClick = { vm.togglePlay() }) { Text("重试", color = Orange) }
-                    if (!vm.usingVlc) TextButton(onClick = { vm.switchToVlc() }) { Text("换用 VLC 内核播放", color = Orange) }
-                }
-            }
-        } else if (buffering && wantsPlay) {
+        // ---- 缓冲提示（出错提示在手势层上面，按钮才点得到） ----
+        if (state.playbackError == null && buffering && wantsPlay) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator(color = Orange)
                 Spacer(Modifier.height(8.dp))
@@ -382,6 +382,51 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             player = player,
             onTogglePlay = vm::togglePlay,
         )
+
+        // ---- 出错提示：先说人话和办法，技术细节点开才看 ----
+        state.playbackError?.let { error ->
+            val (summary, detail) = error.split(PLAYBACK_ERROR_DETAIL, limit = 2).let { it[0] to it.getOrNull(1) }
+            var showDetail by remember(error) { mutableStateOf(false) }
+            Column(
+                Modifier.align(Alignment.Center).padding(24.dp).clip(RoundedCornerShape(12.dp)).background(Color(0xDD000000)).padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text("无法播放", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(8.dp))
+                Text(summary, color = Color(0xFFDDDDDD), fontSize = 14.sp)
+                if (detail != null) {
+                    if (showDetail) Text(detail, color = Color(0xFF999999), fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
+                    TextButton(onClick = { showDetail = !showDetail }) {
+                        Text(if (showDetail) "收起详细信息" else "详细信息", color = Color(0xFF999999), fontSize = 12.sp)
+                    }
+                }
+                Row {
+                    TextButton(onClick = { vm.togglePlay() }) { Text("重试", color = Orange) }
+                    if (!vm.usingVlc) TextButton(onClick = { vm.switchToVlc() }) { Text("兼容模式播放", color = Orange) }
+                }
+            }
+        }
+
+        // ---- 画面出不来（手机解不了这种格式）：说明原因，给出办法 ----
+        state.videoProblem?.let { msg ->
+            Column(
+                Modifier.align(Alignment.Center).padding(24.dp).clip(RoundedCornerShape(12.dp)).background(Color(0xDD000000)).padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(msg, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    if (vm.canTranscode) "可以请服务器转成手机能放的 1080p 格式，或者用兼容模式（VLC 内核）播放" else "可以用兼容模式（VLC 内核）播放，杜比视界的颜色可能偏紫偏绿",
+                    color = Color(0xFFCCCCCC), fontSize = 13.sp,
+                )
+                Spacer(Modifier.height(10.dp))
+                Row {
+                    if (vm.canTranscode) TextButton(onClick = vm::playTranscoded) { Text("服务器转码播放", color = Orange) }
+                    if (!vm.usingVlc) TextButton(onClick = vm::switchToVlc) { Text("兼容模式播放", color = Orange) }
+                    TextButton(onClick = vm::dismissVideoProblem) { Text("只听声音", color = Color(0xFFCCCCCC)) }
+                }
+            }
+        }
 
         // ---- 音乐：封面、歌词（盖在手势层上，歌词才能滑动、点击） ----
         if (isMusic && !audioOnly && state.playbackError == null) {
@@ -416,7 +461,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回", tint = Color.White) }
                     Text(
-                        state.current?.title ?: "", color = Color.White, fontSize = 20.sp,
+                        music.tags?.title?.takeIf { isMusic } ?: state.current?.displayTitle ?: "", color = Color.White, fontSize = 20.sp,
                         maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 12.dp),
                     )
                     // 播放队列（直播时是频道列表），点一项切过去
@@ -429,6 +474,24 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                 }
                 TaskChip(state, onClick = { showTracks = true }, modifier = Modifier.padding(start = 52.dp, bottom = 4.dp))
+                // 没有字幕的视频：一键生成（识别 + 翻译），不用去面板里找
+                val noSubtitles = state.cues.isEmpty() && !state.transcribing && !state.extractingEmbedded && state.playbackError == null
+                if (noSubtitles && state.current?.isVideo == true && !isLive && !aiChipDismissed) {
+                    Row(Modifier.padding(start = 52.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            Modifier.clip(RoundedCornerShape(50)).background(Orange).clickable { startGenerate() }
+                                .padding(start = 10.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(AppIcons.AutoAwesome, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("生成${state.settings.targetLanguage}字幕", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        }
+                        IconButton(onClick = { aiChipDismissed = true }, modifier = Modifier.size(28.dp)) {
+                            Icon(AppIcons.Close, "不用了", tint = Color(0xCCFFFFFF), modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
                 extras.detecting?.let { msg ->
                     Text(
                         msg, color = Color.White, fontSize = 12.sp,
@@ -517,6 +580,46 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                     Spacer(Modifier.weight(1f))
                     BarButton(AppIcons.MoreHoriz, "更多") { showMore = true }
+                }
+            }
+        }
+
+        // ---- 第一次播放视频 / 音乐时说明手势（各显示一次） ----
+        val tipsKey = when {
+            isMusic -> "tips.music"
+            state.current?.isVideo == true && !isLive -> "tips.video"
+            else -> null
+        }
+        val tipsPrefs = remember { context.getSharedPreferences("app", Context.MODE_PRIVATE) }
+        var tipsShown by remember(tipsKey) { mutableStateOf(tipsKey == null || tipsPrefs.getBoolean(tipsKey, false)) }
+        if (!tipsShown && tipsKey != null && state.playbackError == null) {
+            val tips = if (isMusic) listOf(
+                "在封面上左右滑" to "上一首 / 下一首",
+                "点一句歌词" to "跳到那里",
+                "「⋮」菜单" to "搜索歌词、换封面、改歌名",
+            ) else listOf(
+                "双击左边 / 右边" to "后退 / 前进 10 秒",
+                "左右滑动" to "拖动进度",
+                "左半边上下滑" to "调亮度",
+                "右半边上下滑" to "调音量",
+                "长按画面" to "临时 2 倍速",
+            )
+            Box(
+                Modifier.fillMaxSize().background(Color(0xCC000000))
+                    .clickable { tipsShown = true; tipsPrefs.edit().putBoolean(tipsKey, true).apply() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(Modifier.padding(32.dp)) {
+                    Text("手势操作", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(16.dp))
+                    tips.forEach { (gesture, effect) ->
+                        Row(Modifier.padding(vertical = 6.dp)) {
+                            Text(gesture, color = Orange, fontSize = 15.sp, modifier = Modifier.width(140.dp))
+                            Text(effect, color = Color.White, fontSize = 15.sp)
+                        }
+                    }
+                    Spacer(Modifier.height(20.dp))
+                    Text("点任意处关闭", color = Color(0xFFAAAAAA), fontSize = 13.sp)
                 }
             }
         }
@@ -613,14 +716,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     if (showTracks) {
         ModalBottomSheet(
             onDismissRequest = { showTracks = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
             
         ) {
             TrackPanel(
                 vm = vm, state = state,
                 onSubtitleAction = { action ->
                     when (action) {
-                        SubtitleAction.GENERATE -> if (state.transcribing) vm.cancelAll() else vm.generateSubtitles()
+                        SubtitleAction.GENERATE -> if (state.transcribing) vm.cancelAll() else startGenerate()
                         SubtitleAction.TRANSLATE -> if (state.translating) vm.cancelAll() else vm.startTranslation()
                         SubtitleAction.LIST -> { showTracks = false; showCues = true }
                         SubtitleAction.DELAY -> dialog = PlayerDialog.DELAY
@@ -694,7 +797,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         )
                         Spacer(Modifier.width(14.dp))
                         Column(Modifier.weight(1f)) {
-                            Text(c.title, color = if (active) Orange else MaterialTheme.colorScheme.onSurface, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(c.displayTitle, color = if (active) Orange else MaterialTheme.colorScheme.onSurface, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             if (c.folder.isNotBlank()) Text(c.folder, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1)
                         }
                     }
@@ -803,6 +906,22 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             vm.editCue(cue.id, text, translation, start, end)
             editing = null
         }
+    }
+
+    // ---- 先下载识别模型 ----
+    confirmDownload?.let { model ->
+        AlertDialog(
+            onDismissRequest = { confirmDownload = null },
+            title = { Text("先下载识别模型") },
+            text = {
+                Text(
+                    "在手机上识别语音要先下载「${model.label}」模型（约 ${model.sizeMb} MB），只下一次，之后识别不用联网、免费。建议连着 Wi-Fi。\n\n" +
+                        "也可以在「设置 → 语音识别」换成云端识别，不用下载，但要填对应服务的 Key。",
+                )
+            },
+            confirmButton = { TextButton(onClick = { confirmDownload = null; vm.generateSubtitles() }) { Text("下载并开始") } },
+            dismissButton = { TextButton(onClick = { confirmDownload = null }) { Text("取消") } },
+        )
     }
 
     // ---- 音乐：编辑歌曲信息 ----
@@ -1125,35 +1244,59 @@ private enum class MoreAction { LOCK, SLEEP, SPEED, GOTO, NAVIGATE, BOOKMARKS, S
 
 @Composable
 private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAction: (MoreAction) -> Unit) {
-    val items = listOf(
+    // 最常用的四个放在最上面一排，其余按用途分组
+    val quick = listOf(
+        Triple(MoreAction.SPEED, AppIcons.Speed, "倍速"),
         Triple(MoreAction.LOCK, AppIcons.Lock, "锁定"),
-        Triple(MoreAction.SLEEP, AppIcons.Timer, "睡眠计时器" + if (state.sleepAt != null) "（已开启）" else ""),
-        Triple(MoreAction.SPEED, AppIcons.Speed, "播放速度"),
-        Triple(MoreAction.GOTO, AppIcons.AccessTime, "转到时间"),
-        Triple(MoreAction.NAVIGATE, AppIcons.GridView, "章节与片段"),
-        Triple(MoreAction.BOOKMARKS, AppIcons.Star, "书签与关键帧"),
-        Triple(MoreAction.SKIP, AppIcons.SkipNext, "片头片尾与跳过"),
-        Triple(MoreAction.EQUALIZER, AppIcons.Equalizer, "均衡器"),
-        Triple(MoreAction.AUDIO_ONLY, AppIcons.MusicNote, if (audioOnly) "恢复视频画面" else "作为音频播放"),
-        Triple(MoreAction.PIP, AppIcons.Pip, "悬浮窗播放"),
-        Triple(MoreAction.REPEAT, AppIcons.Repeat, "循环模式：${repeatLabel(repeatMode)}"),
-        Triple(MoreAction.INFO, AppIcons.Info, "视频信息"),
-        Triple(MoreAction.AB_LOOP, AppIcons.Repeat, if (state.loopA == null) "A-B 循环" else if (state.loopB == null) "A-B 循环：设置 B 点" else "关闭 A-B 循环"),
-        Triple(MoreAction.SAVE_PLAYLIST, AppIcons.PlaylistAdd, "保存播放列表"),
-        Triple(MoreAction.SETTINGS, AppIcons.Settings, "字幕与 AI 设置"),
+        Triple(MoreAction.PIP, AppIcons.Pip, "悬浮窗"),
+        Triple(MoreAction.SLEEP, AppIcons.Timer, if (state.sleepAt != null) "定时中" else "定时关闭"),
+    )
+    val groups = listOf(
+        "播放" to listOf(
+            Triple(MoreAction.REPEAT, AppIcons.Repeat, "循环：${repeatLabel(repeatMode)}"),
+            Triple(MoreAction.AB_LOOP, AppIcons.Repeat, if (state.loopA == null) "A-B 循环" else if (state.loopB == null) "A-B 循环：设置 B 点" else "关闭 A-B 循环"),
+            Triple(MoreAction.GOTO, AppIcons.AccessTime, "转到时间"),
+            Triple(MoreAction.AUDIO_ONLY, AppIcons.MusicNote, if (audioOnly) "恢复视频画面" else "只播放声音"),
+        ),
+        "跳转" to listOf(
+            Triple(MoreAction.NAVIGATE, AppIcons.GridView, "章节与片段"),
+            Triple(MoreAction.BOOKMARKS, AppIcons.Star, "书签与关键帧"),
+            Triple(MoreAction.SKIP, AppIcons.SkipNext, "片头片尾与跳过"),
+        ),
+        "其他" to listOf(
+            Triple(MoreAction.EQUALIZER, AppIcons.Equalizer, "均衡器"),
+            Triple(MoreAction.INFO, AppIcons.Info, "视频信息"),
+            Triple(MoreAction.SAVE_PLAYLIST, AppIcons.PlaylistAdd, "保存为播放列表"),
+            Triple(MoreAction.SETTINGS, AppIcons.Settings, "设置"),
+        ),
     )
     Column(
         Modifier.fillMaxHeight().width(300.dp).background(Color(0xF2111111))
             .statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(vertical = 16.dp),
     ) {
-        items.forEach { (action, icon, label) ->
-            Row(
-                Modifier.fillMaxWidth().clickable { onAction(action) }.heightIn(min = 56.dp).padding(horizontal = 24.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(icon, null, tint = Color.White, modifier = Modifier.size(28.dp))
-                Spacer(Modifier.width(24.dp))
-                Text(label, color = Color.White, fontSize = 17.sp)
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+            quick.forEach { (action, icon, label) ->
+                Column(
+                    Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).clickable { onAction(action) }.padding(vertical = 10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(icon, null, tint = Color.White, modifier = Modifier.size(26.dp))
+                    Spacer(Modifier.height(6.dp))
+                    Text(label, color = Color(0xFFDDDDDD), fontSize = 12.sp)
+                }
+            }
+        }
+        groups.forEach { (title, items) ->
+            Text(title, color = Color(0xFF999999), fontSize = 12.sp, modifier = Modifier.padding(start = 24.dp, top = 16.dp, bottom = 2.dp))
+            items.forEach { (action, icon, label) ->
+                Row(
+                    Modifier.fillMaxWidth().clickable { onAction(action) }.heightIn(min = 50.dp).padding(horizontal = 24.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(icon, null, tint = Color.White, modifier = Modifier.size(24.dp))
+                    Spacer(Modifier.width(22.dp))
+                    Text(label, color = Color.White, fontSize = 16.sp)
+                }
             }
         }
     }
@@ -1192,77 +1335,13 @@ private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ON
 @Composable
 private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (SubtitleAction) -> Unit) {
     val player by vm.playerFlow.collectAsStateWithLifecycle()
-    var audioOpen by remember { mutableStateOf(true) }
+    // 只有一条音轨时不用选，默认收起
+    var audioOpen by remember(state.current?.uri) { mutableStateOf(player.currentTracks.groups.count { it.type == C.TRACK_TYPE_AUDIO } > 1) }
     var aiOpen by remember { mutableStateOf(true) }
     var embeddedOpen by remember { mutableStateOf(true) }
     var version by remember { mutableIntStateOf(0) } // 选轨后刷新
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
-        SheetHeader("音频", audioOpen) { audioOpen = !audioOpen }
-        if (audioOpen) {
-            Text(
-                "选过的音轨和字幕按视频记住，下次打开自动选好；首选语言在「设置 → 播放」里改",
-                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 24.dp),
-            )
-            val groups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO } }
-            val disabled = remember(version, state.current?.uri) { C.TRACK_TYPE_AUDIO in player.trackSelectionParameters.disabledTrackTypes }
-            TrackRow("禁用轨道", disabled) {
-                vm.extras.disableTrackType(C.TRACK_TYPE_AUDIO)
-                version++
-            }
-            if (groups.isEmpty()) TrackRow("没有音轨", false, enabled = false) {}
-            groups.forEachIndexed { gi, group ->
-                for (i in 0 until group.length) {
-                    val f = group.getTrackFormat(i)
-                    val name = listOfNotNull(
-                        f.label ?: f.language?.takeIf { it != "und" }?.let { java.util.Locale.forLanguageTag(it).displayLanguage } ?: "Track ${gi + 1}",
-                        f.sampleMimeType?.substringAfter('/')?.uppercase(),
-                        f.channelCount.takeIf { it > 0 }?.let { "${it} 声道" },
-                    ).joinToString(" · ")
-                    TrackRow(name, !disabled && group.isTrackSelected(i)) {
-                        vm.extras.selectTrack(C.TRACK_TYPE_AUDIO, group, i)
-                        version++
-                    }
-                }
-            }
-        }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
-        // ---------------- 视频自带字幕：文件里的字幕轨，按原样显示 ----------------
-        val textGroups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT } }
-        SheetHeader("视频自带字幕", embeddedOpen) { embeddedOpen = !embeddedOpen }
-        if (embeddedOpen) {
-            PanelHint("视频文件里的字幕轨，按字幕文件原样显示（ASS 的位置、字体、特效由文件决定）")
-            if (textGroups.isEmpty() && !vm.usingVlc) {
-                TrackRow("这个视频没有自带字幕", false, enabled = false) {}
-            } else {
-                val textDisabled = remember(version, player) { C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes }
-                TrackRow("不显示", textDisabled || textGroups.none { it.isSelected }) {
-                    vm.extras.disableTrackType(C.TRACK_TYPE_TEXT)
-                    version++
-                }
-                textGroups.forEachIndexed { gi, group ->
-                    for (i in 0 until group.length) {
-                        val f = group.getTrackFormat(i)
-                        val name = f.label ?: f.language?.takeIf { it != "und" }?.let { java.util.Locale.forLanguageTag(it).displayLanguage } ?: "字幕 ${gi + 1}"
-                        TrackRow(name, !textDisabled && group.isTrackSelected(i)) {
-                            vm.extras.selectTrack(C.TRACK_TYPE_TEXT, group, i)
-                            version++
-                        }
-                    }
-                }
-            }
-            // 读出自带字幕的文字交给 AI 字幕，比语音识别准
-            if (textGroups.isNotEmpty() || vm.usingVlc || state.extractingEmbedded) {
-                ActionRow(
-                    AppIcons.Translate,
-                    if (state.extractingEmbedded) "停止读取（${state.progress?.let { "${(it * 100).toInt()}%" } ?: "准备中"}）" else "提取出来翻译、朗读",
-                    subtitle = "把自带字幕的文字读进下面的 AI 字幕，可以翻译、朗读、导出",
-                ) { onSubtitleAction(SubtitleAction.EMBEDDED) }
-            }
-        }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-
         // ---------------- AI 字幕：识别、外挂文件或提取出的字幕，由本应用显示 ----------------
         SheetHeader("AI 字幕", aiOpen) { aiOpen = !aiOpen }
         if (aiOpen) {
@@ -1338,7 +1417,96 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
             }
             ActionRow(AppIcons.Download, "导出字幕", subtitle = "双语 / 仅译文 / 仅原文 SRT", enabled = state.cues.isNotEmpty()) { onSubtitleAction(SubtitleAction.EXPORT) }
         }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+        // ---------------- 视频自带字幕：文件里的字幕轨，按原样显示 ----------------
+        val textGroups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT } }
+        SheetHeader("视频自带字幕", embeddedOpen) { embeddedOpen = !embeddedOpen }
+        if (embeddedOpen) {
+            PanelHint("视频文件里的字幕轨，按字幕文件原样显示（ASS 的位置、字体、特效由文件决定）")
+            if (textGroups.isEmpty() && !vm.usingVlc) {
+                TrackRow("这个视频没有自带字幕", false, enabled = false) {}
+            } else {
+                val textDisabled = remember(version, player) { C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes }
+                TrackRow("不显示", textDisabled || textGroups.none { it.isSelected }) {
+                    vm.extras.disableTrackType(C.TRACK_TYPE_TEXT)
+                    version++
+                }
+                // 同名的轨道（例如两条「Canadian」）后面加「第 n 条」，分得清
+                val names = textGroups.flatMapIndexed { gi, g -> (0 until g.length).map { subtitleTrackName(g.getTrackFormat(it), gi) } }
+                val seen = HashMap<String, Int>()
+                textGroups.forEachIndexed { gi, group ->
+                    for (i in 0 until group.length) {
+                        val f = group.getTrackFormat(i)
+                        val base = subtitleTrackName(f, gi)
+                        val n = (seen[base] ?: 0) + 1
+                        seen[base] = n
+                        val name = if (names.count { it == base } > 1) "$base（第 $n 条）" else base
+                        TrackRow(name, !textDisabled && group.isTrackSelected(i)) {
+                            vm.extras.selectTrack(C.TRACK_TYPE_TEXT, group, i)
+                            version++
+                        }
+                    }
+                }
+            }
+            // 读出自带字幕的文字交给 AI 字幕，比语音识别准
+            if (textGroups.isNotEmpty() || vm.usingVlc || state.extractingEmbedded) {
+                ActionRow(
+                    AppIcons.Translate,
+                    if (state.extractingEmbedded) "停止读取（${state.progress?.let { "${(it * 100).toInt()}%" } ?: "准备中"}）" else "翻译自带字幕",
+                    subtitle = "读出自带字幕的文字，翻译成${state.settings.targetLanguage}，也能朗读、导出（比语音识别准）",
+                ) { onSubtitleAction(SubtitleAction.EMBEDDED) }
+            }
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+        SheetHeader("音频", audioOpen) { audioOpen = !audioOpen }
+        if (audioOpen) {
+            Text(
+                "选过的音轨和字幕按视频记住，下次打开自动选好；首选语言在「设置 → 播放」里改",
+                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 24.dp),
+            )
+            val groups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO } }
+            val disabled = remember(version, state.current?.uri) { C.TRACK_TYPE_AUDIO in player.trackSelectionParameters.disabledTrackTypes }
+            TrackRow("不播放声音", disabled) {
+                vm.extras.disableTrackType(C.TRACK_TYPE_AUDIO)
+                version++
+            }
+            if (groups.isEmpty()) TrackRow("没有音轨", false, enabled = false) {}
+            groups.forEachIndexed { gi, group ->
+                for (i in 0 until group.length) {
+                    val f = group.getTrackFormat(i)
+                    val name = listOfNotNull(
+                        f.label ?: f.language?.takeIf { it != "und" }?.let { java.util.Locale.forLanguageTag(it).displayLanguage } ?: "Track ${gi + 1}",
+                        f.sampleMimeType?.substringAfter('/')?.uppercase(),
+                        f.channelCount.takeIf { it > 0 }?.let { "${it} 声道" },
+                    ).joinToString(" · ")
+                    TrackRow(name, !disabled && group.isTrackSelected(i)) {
+                        vm.extras.selectTrack(C.TRACK_TYPE_AUDIO, group, i)
+                        version++
+                    }
+                }
+            }
+        }
     }
+}
+
+/** 自带字幕轨的名字：语言 + 强制 / SDH / 格式，方便区分同语言的几条 */
+private fun subtitleTrackName(f: androidx.media3.common.Format, groupIndex: Int): String {
+    val base = f.label ?: f.language?.takeIf { it != "und" }?.let { java.util.Locale.forLanguageTag(it).displayLanguage } ?: "字幕 ${groupIndex + 1}"
+    val tags = buildList {
+        if (f.selectionFlags and C.SELECTION_FLAG_FORCED != 0) add("强制")
+        if (f.roleFlags and C.ROLE_FLAG_DESCRIBES_MUSIC_AND_SOUND != 0) add("SDH")
+        // 新版 Media3 解析后 sampleMimeType 统一成 cues，原始格式在 codecs 里
+        when (f.codecs ?: f.sampleMimeType) {
+            "text/x-ssa" -> add("ASS")
+            "application/x-subrip" -> add("SRT")
+            "text/vtt" -> add("VTT")
+            "application/pgs" -> add("图形字幕")
+            "application/vobsub" -> add("图形字幕")
+        }
+    }
+    return if (tags.isEmpty()) base else "$base · ${tags.joinToString(" · ")}"
 }
 
 /** 面板分组下的说明文字 */

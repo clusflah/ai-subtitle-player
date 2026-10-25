@@ -201,6 +201,16 @@ class EmbyClient(server: Server) : CloudClient(server), MediaBrowser {
 
     override fun folderPath(section: ServerSection) = section.key
 
+    override fun transcodeUrl(ratingKey: String): String {
+        val q = listOf(
+            "MediaSourceId" to ratingKey, "VideoCodec" to "h264", "AudioCodec" to "aac,mp3", "MaxWidth" to "1920",
+            "MaxStreamingBitrate" to "12000000", "TranscodingMaxAudioChannels" to "2", "SegmentContainer" to "ts",
+            "DeviceId" to creds.optString("device_id").ifEmpty { "voxtitle" }, "PlaySessionId" to UUID.randomUUID().toString(),
+            "api_key" to token,
+        ).joinToString("&") { (k, v) -> "$k=${android.net.Uri.encode(v)}" }
+        return "$base/Videos/$ratingKey/master.m3u8?$q"
+    }
+
     override suspend fun library(sectionKey: String, sort: LibrarySort, unwatchedOnly: Boolean): List<ServerItem> = withContext(Dispatchers.IO) {
         val (by, order) = when (sort) {
             LibrarySort.NAME -> "SortName" to "Ascending"

@@ -32,6 +32,11 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -51,6 +56,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -83,12 +89,15 @@ import com.aisub.player.media.formatDuration
 import com.aisub.player.remote.Server
 import com.aisub.player.remote.ServerType
 
+/**
+ * 底部四个标签：首页汇总「继续看」（本机和各媒体服务器），本机放手机里的视频和音乐，
+ * 浏览是各种来源（本机文件夹、网盘、媒体服务器、直播），我的放播放列表、最近播放和设置。
+ */
 private enum class Tab(val label: String, val icon: ImageVector) {
-    VIDEO("视频", AppIcons.Movie),
-    AUDIO("音频", AppIcons.MusicNote),
+    HOME("首页", AppIcons.Home),
+    LOCAL("本机", AppIcons.Phone),
     BROWSE("浏览", AppIcons.Folder),
-    PLAYLISTS("播放列表", AppIcons.QueueMusic),
-    MORE("更多", AppIcons.MoreHoriz),
+    ME("我的", AppIcons.Person),
 }
 
 /** 首页里需要弹出的对话框。 */
@@ -114,7 +123,9 @@ fun HomeScreen(
 ) {
     val state by lib.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    var tab by rememberSaveable { mutableStateOf(Tab.VIDEO) }
+    // 标签和本机页的视频 / 音乐存在 ViewModel 里，进播放页再回来不会跳回第一个标签
+    val tab = Tab.entries[lib.homeTab.coerceIn(Tab.entries.indices)]
+    val localVideo = lib.localShowsVideo
     var searching by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     var dialog by remember { mutableStateOf<HomeDialog?>(null) }
@@ -145,7 +156,7 @@ fun HomeScreen(
 
     // 多选：长按进入，返回键或右上角关闭退出
     var selected by remember { mutableStateOf(emptySet<String>()) }
-    val selectable = (if (tab == Tab.VIDEO) state.videos else if (tab == Tab.AUDIO) state.audios else emptyList())
+    val selectable = if (tab == Tab.LOCAL) (if (localVideo) state.videos else state.audios) else emptyList()
     val selectedEntries = selectable.filter { it.uri in selected }
     BackHandler(enabled = selected.isNotEmpty()) { selected = emptySet() }
     val toggle: (MediaEntry) -> Unit = { e -> selected = if (e.uri in selected) selected - e.uri else selected + e.uri }
@@ -188,23 +199,12 @@ fun HomeScreen(
                             modifier = Modifier.fillMaxWidth(),
                         )
                     } else {
-                        Column {
-                            Text("译幕", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                when (tab) {
-                                    Tab.VIDEO -> "AI 字幕 · 翻译 · 朗读"
-                                    Tab.AUDIO -> "音频也能识别和翻译"
-                                    Tab.BROWSE -> "本机、局域网和网盘"
-                                    Tab.PLAYLISTS -> "播放列表"
-                                    Tab.MORE -> "最近播放和工具"
-                                },
-                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
+                        // 标题就是当前标签的名字，一行，把地方留给内容
+                        Text(if (tab == Tab.HOME) "译幕" else tab.label, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                     }
                 },
                 actions = {
-                    val mediaTab = tab == Tab.VIDEO || tab == Tab.AUDIO
+                    val mediaTab = tab == Tab.LOCAL
                     if (mediaTab) {
                         IconButton(onClick = {
                             searching = !searching
@@ -216,15 +216,15 @@ fun HomeScreen(
                         IconButton(onClick = { menu = true }) { Icon(AppIcons.MoreVert, "更多") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             if (mediaTab) {
-                                val page = if (tab == Tab.VIDEO) "video" else "audio"
-                                val current = if (tab == Tab.VIDEO) state.videoSort else state.audioSort
+                                val page = if (localVideo) "video" else "audio"
+                                val current = if (localVideo) state.videoSort else state.audioSort
                                 SortOrder.entries.forEach { o ->
                                     DropdownMenuItem(
                                         text = { Text((if (o == current) "✓ " else "    ") + "按${o.label}排序") },
                                         onClick = { menu = false; lib.setSort(page, o) },
                                     )
                                 }
-                                if (tab == Tab.VIDEO) {
+                                if (localVideo) {
                                     DropdownMenuItem(
                                         text = { Text(if (state.videoGrid) "    列表视图" else "    网格视图") },
                                         onClick = { menu = false; lib.setVideoGrid(!state.videoGrid) },
@@ -242,13 +242,16 @@ fun HomeScreen(
             }
         },
         bottomBar = {
+          Column {
+            // 音乐在后台放着时的「正在播放」小条，放在标签栏上面，占自己的位置
+            NowPlayingBar(main, bottomPadding = 4.dp, onOpen = { nav.push(Screen.Player) }, navigationBarInset = false)
             AnimatedVisibility(barVisible, enter = slideInVertically { it }, exit = slideOutVertically { it }) {
                 NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest, tonalElevation = 0.dp) {
                     Tab.entries.forEach { t ->
                         NavigationBarItem(
                             selected = tab == t,
                             onClick = {
-                                tab = t
+                                lib.homeTab = t.ordinal
                                 selected = emptySet()
                                 searching = false
                                 query = ""
@@ -265,21 +268,46 @@ fun HomeScreen(
                     }
                 }
             }
+          }
         },
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize().nestedScroll(scrollWatcher)) {
+            val openServer: (Server) -> Unit = { s ->
+                // Plex、Emby / Jellyfin 用官方客户端那样的首页；首页菜单里还能切回按文件夹浏览
+                if (s.type == ServerType.PLEX || s.type == ServerType.EMBY) nav.push(Screen.ServerHome(s.id, s.name))
+                else nav.push(Screen.Remote(s.id, s.rootPath, s.name))
+            }
             when (tab) {
-                Tab.VIDEO -> MediaTab(state, isVideo = true, query, onRequestPermission, lib::refreshMedia, play, entryMenu, selected, toggle)
-                Tab.AUDIO -> MediaTab(state, isVideo = false, query, onRequestPermission, lib::refreshMedia, play, entryMenu, selected, toggle)
+                Tab.HOME -> HomeTab(
+                    lib, state, play,
+                    openServer = openServer,
+                    openServerItem = { s, item -> nav.push(Screen.ServerDetail(s.id, item.ratingKey)) },
+                    goLocal = { lib.homeTab = Tab.LOCAL.ordinal },
+                    goBrowse = { lib.homeTab = Tab.BROWSE.ordinal },
+                    addSource = { dialog = HomeDialog.AddSource },
+                )
+                Tab.LOCAL -> Column {
+                    // 视频 / 音乐 切换
+                    Row(Modifier.padding(horizontal = 12.dp, vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(true to "视频", false to "音乐").forEach { (video, label) ->
+                            FilterChip(
+                                selected = localVideo == video,
+                                onClick = { lib.localShowsVideo = video; selected = emptySet() },
+                                label = { Text(label + " " + (if (video) state.videos.size else state.audios.size)) },
+                            )
+                        }
+                    }
+                    MediaTab(
+                        state, isVideo = localVideo, query, onRequestPermission, lib::refreshMedia, play, entryMenu, selected, toggle,
+                        listState = lib.listState(if (localVideo) "local.video" else "local.audio"),
+                        gridState = lib.gridState("local.video"),
+                    )
+                }
                 Tab.BROWSE -> BrowseTab(
                     state = state,
                     onRequestPermission = onRequestPermission,
                     openLocal = { path, title -> nav.push(Screen.LocalFolder(path, title)) },
-                    openRemote = { s ->
-                        // Plex、Emby / Jellyfin 用官方客户端那样的首页；首页菜单里还能切回按文件夹浏览
-                        if (s.type == com.aisub.player.remote.ServerType.PLEX || s.type == com.aisub.player.remote.ServerType.EMBY) nav.push(Screen.ServerHome(s.id, s.name))
-                        else nav.push(Screen.Remote(s.id, s.rootPath, s.name))
-                    },
+                    openRemote = openServer,
                     pickFile = { pickFile.launch(arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream")) },
                     addSource = { dialog = HomeDialog.AddSource },
                     serverMenu = { s ->
@@ -295,21 +323,18 @@ fun HomeScreen(
                     openLive = { nav.push(Screen.Live) },
                     openStream = { dialog = HomeDialog.Stream },
                 )
-                Tab.PLAYLISTS -> PlaylistsTab(
-                    state = state,
-                    onOpen = { nav.push(Screen.PlaylistDetail(it.id)) },
-                    onPlay = { p -> if (p.items.isNotEmpty()) play(p.items, 0) },
-                    onNew = { dialog = HomeDialog.NewPlaylist },
-                    onFromHistory = lib::playlistFromHistory,
-                    onDelete = { lib.deletePlaylist(it.id) },
-                )
-                Tab.MORE -> MoreTab(
+                Tab.ME -> MeTab(
                     state = state,
                     onSettings = openSettings,
                     onAbout = { dialog = HomeDialog.About },
                     onLink = if (main.linkDownloader != null) ({ dialog = HomeDialog.Link }) else null,
                     onHistory = { nav.push(Screen.History) },
                     onPlayHistory = { item -> play(listOf(item.entry), 0) },
+                    onOpenPlaylist = { nav.push(Screen.PlaylistDetail(it.id)) },
+                    onPlayPlaylist = { p -> if (p.items.isNotEmpty()) play(p.items, 0) },
+                    onNewPlaylist = { dialog = HomeDialog.NewPlaylist },
+                    onPlaylistFromHistory = lib::playlistFromHistory,
+                    onDeletePlaylist = { lib.deletePlaylist(it.id) },
                 )
             }
         }
@@ -394,6 +419,8 @@ private fun MediaTab(
     menu: (MediaEntry) -> List<MenuAction>,
     selected: Set<String> = emptySet(),
     onToggle: (MediaEntry) -> Unit = {},
+    listState: androidx.compose.foundation.lazy.LazyListState = androidx.compose.foundation.lazy.rememberLazyListState(),
+    gridState: androidx.compose.foundation.lazy.grid.LazyGridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState(),
 ) {
     val selecting = selected.isNotEmpty()
     if (!state.hasPermission) {
@@ -425,7 +452,7 @@ private fun MediaTab(
     }?.takeIf { q.isEmpty() }
 
     if (isVideo && state.videoGrid) {
-        LazyVerticalGrid(GridCells.Adaptive(160.dp), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+        LazyVerticalGrid(GridCells.Adaptive(160.dp), state = gridState, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
             if (resume != null) item(span = { GridItemSpan(maxLineSpan) }) { ResumeCard(resume) { play(listOf(resume.entry), 0) } }
             itemsIndexed(list, key = { _, e -> e.uri }) { i, e ->
                 VideoCard(e, menu(e), selected = if (selecting) e.uri in selected else null, onLongClick = { onToggle(e) }) {
@@ -434,7 +461,7 @@ private fun MediaTab(
             }
         }
     } else {
-        LazyColumn(contentPadding = PaddingValues(vertical = 4.dp)) {
+        LazyColumn(state = listState, contentPadding = PaddingValues(vertical = 4.dp)) {
             if (resume != null) item { ResumeCard(resume) { play(listOf(resume.entry), 0) } }
             itemsIndexed(list, key = { _, e -> e.uri }) { i, e ->
                 MediaRow(e, menu(e), selected = if (selecting) e.uri in selected else null, onLongClick = { onToggle(e) }) {
@@ -458,7 +485,7 @@ private fun ResumeCard(item: HistoryItem, onClick: () -> Unit) {
             MediaThumbnail(item.entry, Modifier.size(width = 96.dp, height = 54.dp).clip(MaterialTheme.shapes.small))
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                 Text("继续${if (item.entry.isVideo) "观看" else "收听"}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                Text(item.entry.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
+                Text(item.entry.displayTitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
                 Text("看到 ${formatDuration(item.positionMs)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Icon(AppIcons.PlayArrow, "继续播放", tint = MaterialTheme.colorScheme.primary)
@@ -570,62 +597,159 @@ private fun AddSourceDialog(onDismiss: () -> Unit, onPick: (ServerType) -> Unit)
     )
 }
 
+/** 首页：继续看（本机）、各媒体服务器的继续观看、本机最近添加的视频。 */
 @Composable
-private fun PlaylistsTab(
+private fun HomeTab(
+    lib: LibraryViewModel,
     state: LibraryState,
-    onOpen: (Playlist) -> Unit,
-    onPlay: (Playlist) -> Unit,
-    onNew: () -> Unit,
-    onFromHistory: () -> Unit,
-    onDelete: (Playlist) -> Unit,
+    play: (List<MediaEntry>, Int) -> Unit,
+    openServer: (Server) -> Unit,
+    openServerItem: (Server, com.aisub.player.remote.cloud.ServerItem) -> Unit,
+    goLocal: () -> Unit,
+    goBrowse: () -> Unit,
+    addSource: () -> Unit,
 ) {
-    if (state.playlists.isEmpty()) {
-        EmptyState(
-            "还没有播放列表\n在视频或音频的「⋮」菜单里也可以加入列表",
-            "新建播放列表", icon = AppIcons.QueueMusic, onButton = onNew,
-            secondaryText = if (state.history.isNotEmpty()) "用最近播放生成一个" else null,
-            onSecondary = onFromHistory,
-        )
-        return
+    val mediaServers = state.servers.filter { it.type == ServerType.PLEX || it.type == ServerType.EMBY }
+    val resume = remember(state.history, mediaServers) {
+        // Plex、Emby 的条目在它们自己那一行里显示（进度以服务器为准），这里不重复
+        val serverIds = mediaServers.map { it.id }.toSet()
+        state.history.filter { h ->
+            val fromServer = h.entry.uri.startsWith("cloud://") && android.net.Uri.parse(h.entry.uri).host in serverIds
+            !fromServer && !h.entry.isLive && h.positionMs > 10_000 && (h.entry.durationMs <= 0 || h.positionMs < h.entry.durationMs - 30_000)
+        }.take(12)
     }
-    LazyColumn(contentPadding = PaddingValues(bottom = 16.dp)) {
-        item { SectionHeader("${state.playlists.size} 个播放列表", actionLabel = "新建", onAction = onNew) }
-        items(state.playlists, key = { it.id }) { p ->
-            Surface(
-                onClick = { onOpen(p) },
-                color = MaterialTheme.colorScheme.surfaceContainerLowest,
-                shape = MaterialTheme.shapes.large,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
-            ) {
-                Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    val cover = p.items.firstOrNull()
-                    if (cover != null) MediaThumbnail(cover, Modifier.size(56.dp).clip(MaterialTheme.shapes.medium))
-                    else IconBadge(AppIcons.QueueMusic, size = 56.dp)
-                    Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                        Text(p.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        val updated = if (p.updatedAt > 0) " · " + DateUtils.getRelativeTimeSpanString(p.updatedAt) + "更新" else ""
-                        Text("${p.items.size} 项$updated", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    val recentVideos = remember(state.videos) { state.videos.sortedBy(SortOrder.RECENT).take(12) }
+    LazyColumn(state = lib.listState("home"), contentPadding = PaddingValues(bottom = 24.dp)) {
+        if (resume.isNotEmpty()) {
+            item { SectionHeader("继续观看") }
+            item {
+                LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(resume, key = { it.entry.uri }) { h -> ResumeTile(h) { play(listOf(h.entry), 0) } }
+                }
+            }
+        }
+        items(mediaServers, key = { it.id }) { s -> ServerContinueRow(lib, s, onOpen = { openServer(s) }, onItem = { openServerItem(s, it) }) }
+        if (recentVideos.isNotEmpty()) {
+            item { SectionHeader("最近添加 · 本机视频", actionLabel = "全部", onAction = goLocal) }
+            item {
+                LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(recentVideos, key = { it.uri }) { e ->
+                        Box(Modifier.width(170.dp)) { VideoCard(e, emptyList()) { play(recentVideos, recentVideos.indexOf(e)) } }
                     }
-                    IconButton(onClick = { onPlay(p) }, enabled = p.items.isNotEmpty()) {
-                        Icon(AppIcons.PlayArrow, "播放全部", tint = MaterialTheme.colorScheme.primary)
-                    }
-                    OverflowMenu(listOf(MenuAction("删除") { onDelete(p) }))
+                }
+            }
+        }
+        if (resume.isEmpty() && mediaServers.isEmpty() && recentVideos.isEmpty()) item {
+            Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                IconBadge(AppIcons.Movie, size = 72.dp)
+                Spacer(Modifier.height(16.dp))
+                Text("还没有可以看的内容", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "看手机里的视频，或者添加 NAS、网盘、Plex / Emby 媒体服务器",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(16.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = goBrowse) { Text("浏览文件") }
+                    Button(onClick = addSource) { Text("添加媒体服务器") }
                 }
             }
         }
     }
 }
 
+/** 「继续观看」卡片：横版画面 + 进度条 + 名字 */
 @Composable
-private fun MoreTab(
+private fun ResumeTile(item: HistoryItem, onClick: () -> Unit) {
+    Column(Modifier.width(180.dp).clip(MaterialTheme.shapes.medium).clickable(onClick = onClick)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(MaterialTheme.shapes.medium)) {
+            MediaThumbnail(item.entry, Modifier.fillMaxSize())
+            val d = item.entry.durationMs
+            if (d > 0) {
+                Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color(0x66000000))) {
+                    Box(Modifier.fillMaxWidth((item.positionMs.toFloat() / d).coerceIn(0f, 1f)).height(3.dp).background(Orange))
+                }
+            }
+        }
+        Text(item.entry.displayTitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 4.dp))
+        Text(
+            "看到 ${formatDuration(item.positionMs)}", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** 一个媒体服务器的继续观看（读不到时只显示入口） */
+@Composable
+private fun ServerContinueRow(
+    lib: LibraryViewModel,
+    server: Server,
+    onOpen: () -> Unit,
+    onItem: (com.aisub.player.remote.cloud.ServerItem) -> Unit,
+) {
+    val items = lib.serverContinue[server.id]
+    LaunchedEffect(server.id) {
+        val browser = lib.client(server) as? com.aisub.player.remote.cloud.MediaBrowser ?: return@LaunchedEffect
+        runCatching { browser.hubs() }.getOrNull()?.let { hubs ->
+            lib.serverContinue[server.id] = hubs.filter { it.id == "home.continue" || it.id == "home.ondeck" }
+                .flatMap { it.items }.distinctBy { it.ratingKey }.take(12)
+        }
+    }
+    Column {
+        SectionHeader(server.name, actionLabel = "进入", onAction = onOpen)
+        if (items.isNullOrEmpty()) {
+            SurfaceCard { ListRow(server.name, "${server.type.label} · 点「进入」浏览媒体库", AppIcons.Cloud, onClick = onOpen) }
+        } else {
+            LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(items, key = { it.ratingKey }) { item -> WideCard(item, Modifier.width(180.dp)) { onItem(item) } }
+            }
+        }
+    }
+}
+
+/** 我的：播放列表、最近播放、工具。 */
+@Composable
+private fun MeTab(
     state: LibraryState,
     onSettings: () -> Unit,
     onAbout: () -> Unit,
     onLink: (() -> Unit)?,
     onHistory: () -> Unit,
     onPlayHistory: (HistoryItem) -> Unit,
+    onOpenPlaylist: (Playlist) -> Unit,
+    onPlayPlaylist: (Playlist) -> Unit,
+    onNewPlaylist: () -> Unit,
+    onPlaylistFromHistory: () -> Unit,
+    onDeletePlaylist: (Playlist) -> Unit,
 ) {
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
+        SectionHeader("播放列表", actionLabel = "新建", onAction = onNewPlaylist)
+        SurfaceCard {
+            if (state.playlists.isEmpty()) {
+                ListRow(
+                    "还没有播放列表", "在视频或音频的「⋮」菜单里加入；或者用最近播放生成一个", AppIcons.QueueMusic, mutedIcon = true,
+                    onClick = if (state.history.isNotEmpty()) onPlaylistFromHistory else onNewPlaylist,
+                )
+            }
+            state.playlists.forEachIndexed { i, p ->
+                if (i > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                val updated = if (p.updatedAt > 0) " · " + DateUtils.getRelativeTimeSpanString(p.updatedAt) + "更新" else ""
+                ListRow(
+                    p.name, "${p.items.size} 项$updated", AppIcons.QueueMusic,
+                    trailing = {
+                        Row {
+                            IconButton(onClick = { onPlayPlaylist(p) }, enabled = p.items.isNotEmpty()) {
+                                Icon(AppIcons.PlayArrow, "播放全部", tint = MaterialTheme.colorScheme.primary)
+                            }
+                            OverflowMenu(listOf(MenuAction("删除") { onDeletePlaylist(p) }))
+                        }
+                    },
+                    onClick = { onOpenPlaylist(p) },
+                )
+            }
+        }
+
         SectionHeader("最近播放", actionLabel = if (state.history.isNotEmpty()) "全部" else null, onAction = onHistory)
         if (state.history.isEmpty()) {
             Text(
@@ -646,7 +770,7 @@ private fun MoreTab(
                 ListRow("从链接下载", "下载视频网站的视频，自动准备字幕后播放（也可以在其他 App 里分享给译幕）", AppIcons.Download, onClick = onLink)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             }
-            ListRow("设置", "语音识别、字幕翻译、字幕样式", AppIcons.Settings, onClick = onSettings)
+            ListRow("设置", "语音识别、字幕翻译、播放、朗读", AppIcons.Settings, onClick = onSettings)
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             ListRow("关于", null, AppIcons.Info, onClick = onAbout)
         }

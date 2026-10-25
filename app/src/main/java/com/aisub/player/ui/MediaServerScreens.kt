@@ -178,7 +178,7 @@ private fun PosterCard(item: ServerItem, modifier: Modifier, onClick: () -> Unit
 
 /** 横版卡片：继续观看、单集 */
 @Composable
-private fun WideCard(item: ServerItem, modifier: Modifier, onClick: () -> Unit) {
+internal fun WideCard(item: ServerItem, modifier: Modifier, onClick: () -> Unit) {
     Column(modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onClick)) {
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(6.dp))) {
             NetImage(if (item.type == "episode") item.thumb else item.art ?: item.thumb, Modifier.fillMaxSize(), maxSize = 600)

@@ -44,6 +44,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -86,16 +87,24 @@ private val TARGET_LANGUAGES = listOf("简体中文", "繁體中文", "English",
 
 /**
  * 设置页：按工作流程分组（语音识别 → 字幕翻译 → 字幕样式…），每组可折叠，收起时显示当前配置摘要；
- * 组内只展开当前选中服务的配置项；每个服务可单独测试连接；顶部"保存"统一保存。
+ * 组内只展开当前选中服务的配置项；每个服务可单独测试连接。改动即时保存，不用点「保存」。
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
     val initial = remember { vm.state.value.settings }
     var s by remember { mutableStateOf(initial) }
-    var confirmDiscard by remember { mutableStateOf(false) }
-    val dirty = s != initial
-    val leave = { if (dirty) confirmDiscard = true else onBack() }
+    // 改了就存（输入框连续打字时稍等一下再存）
+    LaunchedEffect(s) {
+        if (s != vm.state.value.settings) {
+            kotlinx.coroutines.delay(400)
+            vm.updateSettings(s)
+        }
+    }
+    val leave = {
+        if (s != vm.state.value.settings) vm.updateSettings(s)
+        onBack()
+    }
     BackHandler(onBack = leave)
 
     // 连接测试结果：键为 "asr:<引擎>" 或 "tr:<服务商>"
@@ -117,9 +126,6 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
                 navigationIcon = { IconButton(onClick = leave) { Icon(AppIcons.ArrowBack, "返回") } },
                 title = { Text("设置") },
-                actions = {
-                    TextButton(onClick = { vm.updateSettings(s); onBack() }, enabled = dirty) { Text("保存") }
-                },
             )
         },
     ) { padding ->
@@ -508,16 +514,6 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 TtsSettings(s, vm) { s = it }
             }
         }
-    }
-
-    if (confirmDiscard) {
-        AlertDialog(
-            onDismissRequest = { confirmDiscard = false },
-            title = { Text("放弃修改？") },
-            text = { Text("设置有改动还没保存。") },
-            confirmButton = { TextButton(onClick = { vm.updateSettings(s); onBack() }) { Text("保存") } },
-            dismissButton = { TextButton(onClick = { confirmDiscard = false; onBack() }) { Text("放弃") } },
-        )
     }
 }
 

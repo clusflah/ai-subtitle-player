@@ -16,6 +16,9 @@ data class MediaEntry(
     val isLive: Boolean = false,
     val logo: String = "",
 ) {
+    /** 显示用的名字：去掉 .mkv、.mp3 这类扩展名 */
+    val displayTitle: String get() = if (isMediaName(title)) title.substringBeforeLast('.') else title
+
     fun toJson(): JSONObject = JSONObject()
         .put("uri", uri)
         .put("title", title)

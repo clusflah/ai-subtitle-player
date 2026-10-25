@@ -45,7 +45,14 @@ import kotlinx.coroutines.delay
  * 点小条回到播放页；关闭是暂停并收起，下次开始播放时再出现。
  */
 @Composable
-fun NowPlayingBar(main: MainViewModel, bottomPadding: Dp, onOpen: () -> Unit, modifier: Modifier = Modifier) {
+fun NowPlayingBar(
+    main: MainViewModel,
+    bottomPadding: Dp,
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
+    /** 放在页面最底下时要让开系统导航栏；放在首页底部标签栏上面时不用 */
+    navigationBarInset: Boolean = true,
+) {
     val state by main.state.collectAsStateWithLifecycle()
     val music by main.music.state.collectAsStateWithLifecycle()
     val player by main.playerFlow.collectAsStateWithLifecycle()
@@ -65,7 +72,7 @@ fun NowPlayingBar(main: MainViewModel, bottomPadding: Dp, onOpen: () -> Unit, mo
     if (entry == null || !main.playingMusic || dismissed || player.mediaItemCount == 0 || state.playbackError != null) return
     val cover: ImageBitmap? = remember(music.cover) { music.cover?.asImageBitmap() }
     Surface(
-        modifier.navigationBarsPadding().padding(start = 10.dp, end = 10.dp, bottom = bottomPadding).fillMaxWidth(),
+        (if (navigationBarInset) modifier.navigationBarsPadding() else modifier).padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = bottomPadding).fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
         tonalElevation = 6.dp,
         shadowElevation = 6.dp,
@@ -79,7 +86,7 @@ fun NowPlayingBar(main: MainViewModel, bottomPadding: Dp, onOpen: () -> Unit, mo
                 }
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(music.tags?.title ?: entry.title, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(music.tags?.title ?: entry.displayTitle, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     music.tags?.artist?.let {
                         Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }

@@ -101,7 +101,10 @@ fun MediaThumbnail(entry: MediaEntry, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val thumbVersion = if (HistoryThumbs.needed(entry.uri)) HistoryThumbs.version else 0
     val image by produceState<ImageBitmap?>(null, entry.uri, thumbVersion) {
-        value = if (entry.isVideo) withContext(Dispatchers.IO) { ThumbCache.load(context, entry.uri) } else null
+        value = withContext(Dispatchers.IO) {
+            if (entry.isVideo) ThumbCache.load(context, entry.uri)
+            else com.aisub.player.music.MusicFeatures.thumbnail(context, entry.uri)?.asImageBitmap()
+        }
     }
     Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
         val img = image

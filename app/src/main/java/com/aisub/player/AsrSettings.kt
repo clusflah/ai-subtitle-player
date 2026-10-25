@@ -21,7 +21,7 @@ data class AsrField(
 )
 
 enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrField> = emptyList()) {
-    LOCAL("本地模型", "在手机上离线识别，免费；可选多种模型"),
+    LOCAL("手机上识别（免费）", "在手机上离线识别，不花钱、不联网；第一次要下载模型，可选多种"),
     AZURE(
         "Azure", "微软 Azure 语音快速转写，多语种",
         listOf(

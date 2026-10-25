@@ -123,6 +123,10 @@ data class UiState(
     val linkTask: LinkTask? = null,
     /** 在播放页给当前视频单独选的语音语言；null 表示用设置里的默认语言 */
     val videoAsrLanguage: String? = null,
+    /** 有声音但画面出不来时的说明（多半是手机解不了这种格式）；null 表示正常 */
+    val videoProblem: String? = null,
+    /** 正在播放服务器转码后的流 */
+    val transcoding: Boolean = false,
 ) {
     /** 当前视频识别时用的设置：语音语言换成这个视频单独选的 */
     val asrSettings: AppSettings get() = videoAsrLanguage?.let { settings.copy(asrLanguage = it) } ?: settings
@@ -215,6 +219,80 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return if (e.isVideo || e.isLive) s.videoLeaveAction == VideoLeaveAction.AUDIO else s.musicBackground
     }
 
+    // ---- 画面出不来：手机解不了这种格式时提示，并可请服务器转码 ----
+
+    private var sawFirstFrame = false
+    private var frameWatch: Job? = null
+
+    /** 视频开始播放后 6 秒还没出第一帧（或解码器明说不支持），就提示 */
+    private fun watchFirstFrame() {
+        if (usingVlc || sawFirstFrame || frameWatch?.isActive == true) return
+        val e = _state.value.current?.takeIf { it.isVideo && !it.isLive } ?: return
+        frameWatch = viewModelScope.launch {
+            delay(6000)
+            // 解码器说不支持时，ExoPlayer 干脆不选视频轨、只放声音，所以看「有视频轨」而不是「选中了视频轨」
+            val video = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO }
+            if (sawFirstFrame || video.isEmpty() || _state.value.current?.uri != e.uri || !exoPlayer.isPlaying) return@launch
+            // 用户自己选了「作为音频播放」（关掉视频轨）时不提示
+            if (C.TRACK_TYPE_VIDEO in exoPlayer.trackSelectionParameters.disabledTrackTypes) return@launch
+            val f = exoPlayer.videoFormat ?: video.first().getTrackFormat(0)
+            val codec = when (f.sampleMimeType) {
+                "video/hevc" -> "HEVC"
+                "video/avc" -> "H.264"
+                "video/av01" -> "AV1"
+                "video/x-vnd.on2.vp9" -> "VP9"
+                "video/dolby-vision" -> "杜比视界"
+                else -> f.sampleMimeType?.substringAfter('/')?.uppercase()
+            }
+            // 宽银幕的 4K 是 3840×1606 这样，按宽度算
+            val size = if (f.width >= 3800 || f.height >= 2000) "4K" else if (f.height > 0) "${f.height}p" else null
+            val desc = listOfNotNull(size, codec).joinToString(" ").ifEmpty { "这个视频" }
+            _state.update { it.copy(videoProblem = "这台手机放不了 $desc 的画面，声音照常播放") }
+        }
+    }
+
+    /** 当前视频来自 Plex / Emby / Jellyfin，可以请服务器转码 */
+    val canTranscode: Boolean
+        get() = !_state.value.transcoding && _state.value.current?.let { it.uri != transcodeFailedUri && ServerProgress.find(it.uri) != null } == true
+
+    /** 服务器说转不了的视频，不再显示「服务器转码播放」 */
+    private var transcodeFailedUri: String? = null
+
+    /** 换成服务器转码的 1080p H.264 流，从当前位置接着放 */
+    fun playTranscoded() {
+        val e = _state.value.current ?: return
+        val p = ServerProgress.find(e.uri) ?: return
+        val server = CloudRegistry.serverLookup(p.serverId) ?: return
+        val browser = CloudRegistry.client(server) as? MediaBrowser ?: return
+        val position = exoPlayer.currentPosition
+        val index = exoPlayer.currentMediaItemIndex
+        viewModelScope.launch {
+            val url = runCatching { withContext(Dispatchers.IO) { browser.transcodeUrl(p.ratingKey) } }.getOrElse {
+                transcodeFailedUri = e.uri
+                _state.update { s -> s.copy(videoProblem = "画面放不了，而且${it.message}") }
+                return@launch
+            }
+            sawFirstFrame = false
+            _state.update { it.copy(videoProblem = null, transcoding = true, playbackError = null) }
+            exoPlayer.replaceMediaItem(
+                index,
+                itemOf(e).buildUpon().setUri(url).setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build(),
+            )
+            exoPlayer.seekTo(index, position)
+            exoPlayer.prepare()
+            exoPlayer.play()
+        }
+    }
+
+    fun dismissVideoProblem() = _state.update { it.copy(videoProblem = null) }
+
+    /** 生成字幕前要先下载的本地识别模型（已经下好、或用云端识别时为 null） */
+    fun modelToDownload(): LocalModel? {
+        val s = _state.value.asrSettings
+        if (s.asrEngine != AsrEngine.LOCAL) return null
+        return ModelCatalog.byId(s.localModel).takeIf { !models.isReady(it) }
+    }
+
     /** 正在放的是音乐（不是视频、直播） */
     val playingMusic: Boolean get() = _state.value.current?.let { !it.isVideo && !it.isLive } == true
 
@@ -289,6 +367,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             reportPlexNow(if (isPlaying) "playing" else "paused")
+            if (isPlaying) watchFirstFrame()
+        }
+
+        override fun onRenderedFirstFrame() {
+            sawFirstFrame = true
+            frameWatch?.cancel()
+            _state.update { it.copy(videoProblem = null) }
         }
 
         override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
@@ -312,6 +397,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         exoPlayer.addListener(listener)
         // 内嵌字幕默认不显示（避免和 AI 字幕重叠），除非设置了首选字幕语言
         extras.applyTrackDefaults()
+        // 识别、翻译的进度放到通知栏，离开播放页也看得到
+        viewModelScope.launch {
+            val notifier = TaskNotifier(app)
+            var wasBusy = false
+            _state.collect { s ->
+                val busy = s.transcribing || s.translating || s.extractingEmbedded
+                val title = s.current?.displayTitle.orEmpty()
+                if (busy) {
+                    val step = s.status.ifEmpty { if (s.translating) "正在翻译字幕…" else "正在识别字幕…" }
+                    notifier.progress(title, step, s.progress)
+                } else if (wasBusy) {
+                    notifier.done(title, if (s.error == null && s.cues.isNotEmpty()) "字幕准备好了" else null)
+                }
+                wasBusy = busy
+            }
+        }
         // 媒体服务器：播放时每 10 秒报一次进度
         viewModelScope.launch {
             while (true) {
@@ -474,6 +575,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun onEntryChanged(entry: MediaEntry) {
         if (_state.value.current?.uri == entry.uri) return
         cancelAll()
+        sawFirstFrame = false
+        frameWatch?.cancel()
+        _state.update { it.copy(videoProblem = null, transcoding = false) }
         val uri = Uri.parse(entry.uri)
         val videoLanguage = store.loadAsrLanguage(uri)
         // 旧版把俄语等非拉丁文字误判成「不用翻译」、原文直接当了译文，这里清掉让它重新翻译
@@ -1272,32 +1376,39 @@ internal fun renderersFactory(app: Application) = DefaultRenderersFactory(app)
     .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
     .setEnableDecoderFallback(true)
 
-/** 把播放器错误翻译成用户能看懂的话，附上错误码方便反馈。 */
+/** 出错提示里「人话」和技术细节的分隔，播放页只默认显示前半部分 */
+internal const val PLAYBACK_ERROR_DETAIL = "\n\u0001"
+
+/** 播放出错的说明：原因 + 怎么办；错误码和异常信息放在分隔符后面（点「详细信息」才显示）。 */
 internal fun describePlaybackError(e: PlaybackException): String {
     val reason = when (e.errorCode) {
         PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
-        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "网络连接失败或超时"
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "连不上，网络断了或者太慢。检查网络后点「重试」；NAS 在家里的话，出门时要用外网地址"
         PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> {
-            val code = (e.cause as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode
-            "服务器拒绝了请求" + (code?.let { "（HTTP $it）" } ?: "") + "，可能是登录过期或链接失效"
+            when ((e.cause as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode) {
+                401, 403 -> "服务器不让访问，多半是登录过期了。到「浏览」里对这个位置选「重新登录」"
+                404 -> "服务器上已经没有这个文件了，可能被删除或改名"
+                else -> "服务器出错了，稍后再试；一直这样的话检查服务器或链接是否还有效"
+            }
         }
-        PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "找不到文件"
-        PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE -> "文件不完整或已损坏（可能没下载完）"
-        PlaybackException.ERROR_CODE_IO_NO_PERMISSION -> "没有读取这个文件的权限"
+        PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> "找不到这个文件，可能已经被删除或移动。从列表里重新打开试试"
+        PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE -> "文件不完整或已损坏，可能没下载完"
+        PlaybackException.ERROR_CODE_IO_NO_PERMISSION -> "没有读取这个文件的权限。到系统设置里给译幕「音乐和视频」权限"
         PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
-        PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED -> "不支持或已损坏的视频封装格式"
+        PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED -> "这种文件格式默认内核打不开，或者文件已损坏。点「兼容模式播放」试试"
         PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
         PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
         PlaybackException.ERROR_CODE_DECODING_FAILED,
         PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
-        PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES -> "手机无法解码这个视频的画面或声音格式"
+        PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES -> "这台手机解不了这个视频的画面或声音格式。点「兼容模式播放」试试"
         PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
-        PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED -> "音频输出失败"
-        else -> "播放出错"
+        PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED -> "声音输出失败，可能被别的应用占用了。点「重试」"
+        else -> "播放出错了。点「重试」，不行的话用兼容模式播放"
     }
     val detail = generateSequence(e.cause) { it.cause }.mapNotNull { it.message }.firstOrNull()?.take(200)
     return buildString {
-        append(reason).append("\n错误码：").append(e.errorCodeName)
+        append(reason)
+        append(PLAYBACK_ERROR_DETAIL).append("错误码：").append(e.errorCodeName)
         if (!detail.isNullOrBlank()) append("\n").append(detail)
     }
 }

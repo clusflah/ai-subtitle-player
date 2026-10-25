@@ -277,6 +277,26 @@ class MusicFeatures(
     private fun lyricsFile(e: MediaEntry) = File(lyricsDir, key(e) + ".lrc")
     private fun coverFile(e: MediaEntry) = File(coverDir, key(e) + ".img")
 
+    companion object {
+        /** 列表、最近播放里的歌曲封面：在线找到或手动选过的，没有就用系统媒体库的（内嵌或文件夹封面） */
+        fun thumbnail(context: android.content.Context, uri: String, maxPx: Int = 300): Bitmap? {
+            val key = MessageDigest.getInstance("SHA-1").digest(uri.toByteArray()).joinToString("") { "%02x".format(it) }
+            val file = File(File(context.filesDir, "covers"), "$key.img")
+            if (file.exists()) {
+                val bytes = runCatching { file.readBytes() }.getOrNull()
+                if (bytes != null) {
+                    val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                    var sample = 1
+                    while (maxOf(opts.outWidth, opts.outHeight) / (sample * 2) >= maxPx) sample *= 2
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })?.let { return it }
+                }
+            }
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || !uri.startsWith("content://media/")) return null
+            return runCatching { context.contentResolver.loadThumbnail(Uri.parse(uri), Size(maxPx, maxPx), null) }.getOrNull()
+        }
+    }
+
     /** 解码图片，长边缩到 1024 以内。 */
     private fun decode(bytes: ByteArray): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
