@@ -178,7 +178,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val session: MediaSession = MediaSession.Builder(app, exoPlayer)
         .setSessionActivity(
             PendingIntent.getActivity(
-                app, 0, Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                // 点通知栏、锁屏的播放控件回到播放页
+                app, 0, Intent(app, MainActivity::class.java).setAction(MainActivity.ACTION_OPEN_PLAYER).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             ),
         )
@@ -213,6 +214,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val s = _state.value.settings
         return if (e.isVideo || e.isLive) s.videoLeaveAction == VideoLeaveAction.AUDIO else s.musicBackground
     }
+
+    /** 正在放的是音乐（不是视频、直播） */
+    val playingMusic: Boolean get() = _state.value.current?.let { !it.isVideo && !it.isLive } == true
+
+    /** 从播放页返回时音乐是否继续放（跟随「音乐后台播放」设置） */
+    fun keepMusicPlayingOutsidePlayer(): Boolean = playingMusic && _state.value.settings.musicBackground
 
     /** 离开应用时是否自动进入画中画（悬浮窗）：正在播放视频且设置里选了悬浮窗 */
     fun wantsAutoPip(): Boolean {

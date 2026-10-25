@@ -83,6 +83,13 @@ class EmbyClient(server: Server) : CloudClient(server), MediaBrowser {
             // 名字带上扩展名，列表和下载时才能识别为视频 / 音频
             val ext = (source?.optString("Container") ?: it.optString("Container")).substringBefore(',').ifEmpty { if (isAudio) "mp3" else "mkv" }
             val fileName = "${name.replace('/', '_')}.$ext"
+            if (isAudio) ServerProgress.register(
+                playUri("$id|Audio", fileName),
+                ServerProgress.Entry(
+                    server.id, id, it.optLong("RunTimeTicks") / 10_000, 0, title = it.optString("Name"),
+                    artist = it.optString("AlbumArtist").ifEmpty { null }, album = it.optString("Album").ifEmpty { null },
+                ),
+            )
             items += RemoteItem(
                 fileName, id, isDir = false, size = source?.optLong("Size") ?: 0,
                 playUrl = playUri("$id|${if (isAudio) "Audio" else "Videos"}", fileName), meta = meta,
@@ -299,7 +306,13 @@ class EmbyClient(server: Server) : CloudClient(server), MediaBrowser {
         val durationMs = it.optLong("RunTimeTicks") / 10_000
         val offsetMs = (user?.optLong("PlaybackPositionTicks") ?: 0) / 10_000
         val playUrl = fileName?.let { f -> playUri("$id|${if (isAudio) "Audio" else "Videos"}", f) }
-        playUrl?.let { u -> ServerProgress.register(u, ServerProgress.Entry(server.id, id, durationMs, offsetMs)) }
+        playUrl?.let { u ->
+            ServerProgress.register(u, ServerProgress.Entry(
+                server.id, id, durationMs, offsetMs, title = name,
+                artist = it.optString("AlbumArtist").ifEmpty { it.optJSONArray("Artists")?.optString(0).orEmpty() }.ifEmpty { null }.takeIf { type == "track" },
+                album = it.optString("Album").ifEmpty { null }.takeIf { type == "track" },
+            ))
+        }
         return ServerItem(
             ratingKey = id, type = type, title = name, year = year,
             summary = it.optString("Overview"),

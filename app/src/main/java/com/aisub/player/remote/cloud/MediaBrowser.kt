@@ -92,7 +92,16 @@ data class ServerItem(
  * 浏览时登记；viewOffset 是服务器上记的进度，用来「继续播放」。
  */
 object ServerProgress {
-    data class Entry(val serverId: String, val ratingKey: String, val durationMs: Long, val viewOffsetMs: Long)
+    /** title / artist / album：服务器整理好的歌曲信息，文件里没写标签时音乐页面用它 */
+    data class Entry(
+        val serverId: String,
+        val ratingKey: String,
+        val durationMs: Long,
+        val viewOffsetMs: Long,
+        val title: String? = null,
+        val artist: String? = null,
+        val album: String? = null,
+    )
 
     private val byUri = ConcurrentHashMap<String, Entry>()
 

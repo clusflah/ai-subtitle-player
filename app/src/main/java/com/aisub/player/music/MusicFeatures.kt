@@ -78,11 +78,17 @@ class MusicFeatures(
             // 等播放器读出音轨的元数据；VLC 内核或读得慢时改用系统接口
             val metadata = withTimeoutOrNull(2500) { ready.await() }
             val duration = player().duration.takeIf { it > 0 } ?: 0L
-            val tags = withContext(Dispatchers.IO) {
+            val fileTags = withContext(Dispatchers.IO) {
                 if (!metadata.isNullOrEmpty()) TrackTags.fromMetadata(e.title, duration, metadata)
                 else (if (FileOps.isLocal(e)) TrackTags.fromRetriever(app, Uri.parse(e.uri), e.title) else null)
                     ?: TrackTags.fromMetadata(e.title, duration, emptyList())
             }
+            // Plex、Emby 的歌：文件里没写歌手、专辑时用服务器整理好的
+            val server = com.aisub.player.remote.cloud.ServerProgress.find(e.uri)
+            val tags = if (server == null) fileTags else fileTags.copy(
+                artist = fileTags.artist ?: server.artist,
+                album = fileTags.album ?: server.album,
+            )
             rawTags = tags
             val shown = withContext(Dispatchers.IO) { applySavedInfo(e, tags) }
             _state.update { it.copy(tags = shown, edited = shown !== tags) }

@@ -99,7 +99,11 @@ class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
             val ext = part.optString("container").ifEmpty { part.optString("file").substringAfterLast('.', "mkv") }
             val fileName = "${title.replace('/', '_')}.$ext"
             val url = playUri(part.optString("key"), fileName)
-            ServerProgress.register(url, ServerProgress.Entry(server.id, m.optString("ratingKey"), m.optLong("duration"), m.optLong("viewOffset")))
+            ServerProgress.register(url, ServerProgress.Entry(
+                server.id, m.optString("ratingKey"), m.optLong("duration"), m.optLong("viewOffset"),
+                title = m.optString("title"), artist = m.optString("originalTitle").ifEmpty { m.optString("grandparentTitle") }.ifEmpty { null }.takeIf { type == "track" },
+                album = m.optString("parentTitle").ifEmpty { null }.takeIf { type == "track" },
+            ))
             out += RemoteItem(
                 fileName, part.optString("key"), isDir = false, size = part.optLong("size"),
                 playUrl = url, meta = info,
@@ -231,7 +235,13 @@ class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
         val playUrl = part?.let { p -> playUri(p.optString("key"), fileName!!) }
         val duration = m.optLong("duration")
         val offset = m.optLong("viewOffset")
-        playUrl?.let { ServerProgress.register(it, ServerProgress.Entry(server.id, rk, duration, offset)) }
+        playUrl?.let {
+            ServerProgress.register(it, ServerProgress.Entry(
+                server.id, rk, duration, offset, title = title,
+                artist = (m.optString("originalTitle").ifEmpty { showTitle.orEmpty() }).ifEmpty { null }.takeIf { type == "track" },
+                album = m.optString("parentTitle").ifEmpty { null }.takeIf { type == "track" },
+            ))
+        }
         val wide = type == "episode" || type == "clip"
         return ServerItem(
             ratingKey = rk, type = type, title = title,

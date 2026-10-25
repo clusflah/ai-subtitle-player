@@ -310,11 +310,15 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     useController = false
                     // 遮罩透明：画面背景本来就是黑色；VLC 内核不一定按 ExoPlayer 的方式通知首帧
                     setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    // ASS / SSA 字幕由 libass 画在字幕视图里的这一层上
-                    subtitleView?.withAssSupport(vm.assHandler)
                 }.also { playerView = it }
             },
             update = {
+                // ASS / SSA 字幕由 libass 画在字幕视图里的这一层上。只给视频挂：
+                // 音乐在后台放着时回到播放页，libass 的字幕视图还没准备好就被要求绘制，会让播放出错
+                if (state.current?.isVideo != false && it.tag != "ass") {
+                    it.subtitleView?.withAssSupport(vm.assHandler)
+                    it.tag = "ass"
+                }
                 if (it.player !== player) it.player = player
                 it.resizeMode = RESIZE_MODES[resizeIndex].first
                 // 视频自带字幕和 AI 字幕同时显示时，把自带字幕抬高，避免叠在一起

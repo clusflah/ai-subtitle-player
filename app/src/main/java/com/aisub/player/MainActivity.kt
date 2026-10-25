@@ -33,7 +33,13 @@ import com.aisub.player.ui.LocalFolderScreen
 import com.aisub.player.ui.Navigator
 import com.aisub.player.ui.PlayerScreen
 import com.aisub.player.ui.PipState
+import com.aisub.player.ui.NowPlayingBar
 import com.aisub.player.ui.PlaylistDetailScreen
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import com.aisub.player.ui.ServerDetailScreen
 import com.aisub.player.ui.ServerHomeScreen
 import com.aisub.player.ui.ServerLibraryScreen
@@ -88,6 +94,7 @@ class MainActivity : ComponentActivity() {
             val openDetail: (MediaEntry) -> Unit = { e -> nav.push(Screen.FileDetail(null, e.toRemoteItem(), listOf(e), 0)) }
             AppTheme {
                 CompositionLocalProvider(LocalOpenDetail provides openDetail) {
+                  Box(Modifier.fillMaxSize()) {
                     when (val screen = nav.current) {
                         Screen.Home -> HomeScreen(lib, main, nav) { permissionLauncher.launch(mediaPermissions) }
                         Screen.Player -> PlayerScreen(main, onBack = back, onOpenSettings = { nav.push(Screen.Settings) })
@@ -155,14 +162,22 @@ class MainActivity : ComponentActivity() {
                             openDetail = { item -> nav.push(Screen.FileDetail(screen.serverId, item)) },
                         )
                     }
+                    // 音乐在播放页外继续放时，底部的「正在播放」小条，点它回到播放页
+                    if (nav.current != Screen.Player) NowPlayingBar(
+                        main,
+                        bottomPadding = if (nav.current == Screen.Home) 80.dp else 12.dp,
+                        onOpen = { nav.push(Screen.Player) },
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    )
+                  }
                 }
             }
         }
     }
 
-    /** 离开播放页：暂停并记住进度，刷新首页的历史。 */
+    /** 离开播放页：视频暂停；音乐（开了后台播放时）继续放，底部显示「正在播放」小条。 */
     private fun leavePlayer() {
-        main.player.pause()
+        if (!main.keepMusicPlayingOutsidePlayer()) main.player.pause()
         main.savePosition()
         lib.reloadStored()
     }
@@ -184,6 +199,10 @@ class MainActivity : ComponentActivity() {
             val url = com.aisub.player.download.extractUrl(text) ?: return
             main.downloadLink(url)
             if (nav.current != Screen.Link) nav.push(Screen.Link)
+            return
+        }
+        if (intent?.action == ACTION_OPEN_PLAYER) {
+            if (main.state.value.current != null && nav.current != Screen.Player) nav.push(Screen.Player)
             return
         }
         if (intent?.action != Intent.ACTION_VIEW) return
@@ -211,5 +230,10 @@ class MainActivity : ComponentActivity() {
         super.onStop()
         main.savePosition()
         if (!main.keepPlayingInBackground()) main.player.pause()
+    }
+
+    companion object {
+        /** 通知栏、锁屏播放控件点进来：打开播放页 */
+        const val ACTION_OPEN_PLAYER = "com.aisub.player.OPEN_PLAYER"
     }
 }
