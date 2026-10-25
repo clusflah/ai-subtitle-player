@@ -296,6 +296,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     val isMusic = music.tags != null && !isLive
     /** 正在搜索：true 为封面，false 为歌词 */
     var musicSearch by remember { mutableStateOf<Boolean?>(null) }
+    var editingSong by remember { mutableStateOf(false) }
     val lyricsImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch { indicator = null to (if (vm.music.importLyrics(uri)) "已导入歌词" else "无法读取这个歌词文件") }
     }
@@ -379,7 +380,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         )
 
         // ---- 音乐：封面、歌词（盖在手势层上，歌词才能滑动、点击） ----
-        if (isMusic && !audioOnly) {
+        if (isMusic && !audioOnly && state.playbackError == null) {
             MusicView(
                 music, positionMs,
                 topPadding = 56.dp, bottomPadding = 140.dp,
@@ -392,6 +393,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 } else null,
                 onAction = { action ->
                     when (action) {
+                        MusicAction.EDIT_INFO -> editingSong = true
                         MusicAction.SEARCH_LYRICS -> musicSearch = false
                         MusicAction.SEARCH_COVER -> musicSearch = true
                         MusicAction.IMPORT_LYRICS -> lyricsImportLauncher.launch(arrayOf("*/*"))
@@ -798,6 +800,15 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             editing = null
         }
     }
+
+    // ---- 音乐：编辑歌曲信息 ----
+    if (editingSong) SongInfoDialog(
+        music = music,
+        search = { t, a -> vm.music.searchSongs(t, a) },
+        onSave = { t, a, al, c -> vm.music.saveInfo(t, a, al, c); indicator = null to "已保存歌曲信息" },
+        onReset = { vm.music.resetInfo() },
+        onDismiss = { editingSong = false },
+    )
 
     // ---- 音乐：搜索歌词 / 更换封面 ----
     musicSearch?.let { covers ->

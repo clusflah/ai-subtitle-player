@@ -71,6 +71,15 @@ object MusicLookup {
         return (lrclibSearch(title, artist) + neteaseSearch(title, artist)).sortedByDescending { score(it, tags) }
     }
 
+    /** 编辑歌曲信息时的在线匹配：歌名、歌手、专辑、时长，三个来源合在一起，去重后最像的排前面。 */
+    fun searchSongs(title: String, artist: String?, durationMs: Long): List<SongCandidate> {
+        val tags = TrackTags(title, artist, durationMs = durationMs)
+        return (neteaseSearch(title, artist) + itunesSearch(title, artist) + lrclibSearch(title, artist))
+            .filter { it.title.isNotBlank() }
+            .distinctBy { norm(it.title) + "|" + norm(it.artist) + "|" + norm(it.album) }
+            .sortedByDescending { score(it, tags) }
+    }
+
     /** 手动换封面：带封面的结果。 */
     fun searchCovers(title: String, artist: String?): List<SongCandidate> {
         val tags = TrackTags(title, artist)

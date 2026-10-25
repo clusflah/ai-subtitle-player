@@ -73,7 +73,7 @@ import com.aisub.player.music.SongCandidate
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-enum class MusicAction { SEARCH_LYRICS, IMPORT_LYRICS, LYRICS_EARLIER, LYRICS_LATER, SEARCH_COVER }
+enum class MusicAction { EDIT_INFO, SEARCH_LYRICS, IMPORT_LYRICS, LYRICS_EARLIER, LYRICS_LATER, SEARCH_COVER }
 
 /**
  * 播放音乐时的画面：封面、歌名歌手、跟着播放滚动的歌词（点一句跳过去）。
@@ -176,6 +176,8 @@ private fun MusicMenu(music: MusicState, onAction: (MusicAction) -> Unit) {
             val item = { label: String, action: MusicAction ->
                 @Composable { DropdownMenuItem(text = { Text(label) }, onClick = { open = false; onAction(action) }) }
             }
+            item("编辑歌曲信息", MusicAction.EDIT_INFO)()
+            HorizontalDivider()
             item("搜索歌词", MusicAction.SEARCH_LYRICS)()
             item("导入歌词文件（LRC）", MusicAction.IMPORT_LYRICS)()
             if (music.lyrics?.synced == true) {
@@ -324,5 +326,117 @@ fun MusicSearchDialog(
         },
         confirmButton = { TextButton(onClick = { run() }, enabled = !busy && title.isNotBlank()) { Text("搜索") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
+}
+
+/**
+ * 编辑歌曲信息：改歌名、歌手、专辑，或者「在线匹配」从搜索结果里挑一条自动填好（可顺便换封面）。
+ * 改动只存在译幕里，不改音乐文件。
+ */
+@Composable
+fun SongInfoDialog(
+    music: MusicState,
+    search: suspend (String, String) -> List<SongCandidate>,
+    onSave: suspend (title: String, artist: String, album: String, coverFrom: SongCandidate?) -> Unit,
+    onReset: suspend () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val tags = music.tags ?: return
+    var title by remember { mutableStateOf(tags.title) }
+    var artist by remember { mutableStateOf(tags.artist.orEmpty()) }
+    var album by remember { mutableStateOf(tags.album.orEmpty()) }
+    var results by remember { mutableStateOf<List<SongCandidate>?>(null) }
+    var picked by remember { mutableStateOf<SongCandidate?>(null) }
+    var useCover by remember { mutableStateOf(true) }
+    var busy by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("编辑歌曲信息") },
+        text = {
+            Column {
+                OutlinedTextField(title, { title = it }, label = { Text("歌名") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(artist, { artist = it }, label = { Text("歌手") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(album, { album = it }, label = { Text("专辑") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                if (picked?.coverUrl != null) {
+                    Row(
+                        Modifier.fillMaxWidth().clickable { useCover = !useCover }.padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        androidx.compose.material3.Checkbox(useCover, { useCover = it })
+                        Text("同时使用这首的封面", fontSize = 14.sp)
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        enabled = !busy && title.isNotBlank(),
+                        onClick = {
+                            scope.launch {
+                                busy = true
+                                message = null
+                                results = search(title.trim(), artist.trim())
+                                busy = false
+                                if (results.isNullOrEmpty()) message = "没有找到，试试只填歌名，或换个写法"
+                            }
+                        },
+                    ) { Text("在线匹配") }
+                    Text("按上面的歌名、歌手搜索，点一条自动填好", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                when {
+                    busy -> Box(Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = Orange) }
+                    message != null -> Text(message!!, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                    results != null -> LazyColumn(Modifier.heightIn(max = 280.dp)) {
+                        itemsIndexed(results.orEmpty()) { _, c ->
+                            Row(
+                                Modifier.fillMaxWidth()
+                                    .background(if (c == picked) Color(0x33F28C00) else Color.Transparent)
+                                    .clickable {
+                                        picked = c
+                                        title = c.title
+                                        artist = c.artist
+                                        if (c.album.isNotBlank()) album = c.album
+                                    }.padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                NetImage(c.coverUrl, Modifier.size(44.dp).clip(RoundedCornerShape(4.dp)), maxSize = 160, fallback = AppIcons.MusicNote)
+                                Spacer(Modifier.size(10.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(c.title, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        listOfNotNull(
+                                            c.artist.ifEmpty { null }, c.album.ifEmpty { null },
+                                            c.durationMs.takeIf { it > 0 }?.let { "%d:%02d".format(it / 60000, it / 1000 % 60) },
+                                        ).joinToString(" · "),
+                                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Text(c.source, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+                Text(
+                    "只改译幕里显示的信息（以及用它查歌词、封面），不会修改音乐文件",
+                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = !busy && title.isNotBlank(), onClick = {
+                scope.launch {
+                    busy = true
+                    onSave(title, artist, album, picked?.takeIf { useCover })
+                    busy = false
+                    onDismiss()
+                }
+            }) { Text("保存") }
+        },
+        dismissButton = {
+            Row {
+                if (music.edited) TextButton(onClick = { scope.launch { onReset(); onDismiss() } }) { Text("恢复文件里的") }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        },
     )
 }

@@ -38,6 +38,8 @@ data class MusicState(
     val lyrics: Lyrics? = null,
     /** 正在查找或没找到时的提示；有歌词时为 null */
     val lyricsStatus: String? = null,
+    /** 歌名、歌手、专辑是用户改过的（存在译幕里） */
+    val edited: Boolean = false,
 )
 
 /**
@@ -81,10 +83,57 @@ class MusicFeatures(
                 else (if (FileOps.isLocal(e)) TrackTags.fromRetriever(app, Uri.parse(e.uri), e.title) else null)
                     ?: TrackTags.fromMetadata(e.title, duration, emptyList())
             }
-            _state.update { it.copy(tags = tags) }
-            launch { loadCover(e, tags) }
-            loadLyrics(e, tags)
+            rawTags = tags
+            val shown = withContext(Dispatchers.IO) { applySavedInfo(e, tags) }
+            _state.update { it.copy(tags = shown, edited = shown !== tags) }
+            launch { loadCover(e, shown) }
+            loadLyrics(e, shown)
         }
+    }
+
+    // ---------------- 编辑歌曲信息 ----------------
+
+    /** 文件里读到的标签，「恢复」时用 */
+    private var rawTags: TrackTags? = null
+
+    private fun infoFile(e: MediaEntry) = File(infoDir, key(e) + ".json")
+    private val infoDir get() = File(app.filesDir, "music_info").apply { mkdirs() }
+
+    /** 用户改过的歌名、歌手、专辑盖在文件标签上；没改过原样返回 */
+    private fun applySavedInfo(e: MediaEntry, tags: TrackTags): TrackTags {
+        val o = runCatching { org.json.JSONObject(infoFile(e).readText()) }.getOrNull() ?: return tags
+        fun s(k: String) = o.optString(k).trim().takeIf { it.isNotEmpty() }
+        return tags.copy(title = s("title") ?: tags.title, artist = s("artist"), album = s("album"))
+    }
+
+    suspend fun searchSongs(title: String, artist: String?): List<SongCandidate> = withContext(Dispatchers.IO) {
+        MusicLookup.searchSongs(title, artist?.takeIf { it.isNotBlank() }, _state.value.tags?.durationMs ?: 0)
+    }
+
+    /**
+     * 保存改好的歌曲信息（只存在译幕里，不改音乐文件）。
+     * coverFrom 不为空时顺便用它的封面；还没有歌词时按新信息重新在线找。
+     */
+    suspend fun saveInfo(title: String, artist: String, album: String, coverFrom: SongCandidate?) {
+        val e = entry ?: return
+        val old = _state.value.tags ?: return
+        val tags = old.copy(title = title.trim().ifEmpty { old.title }, artist = artist.trim().ifEmpty { null }, album = album.trim().ifEmpty { null })
+        withContext(Dispatchers.IO) {
+            infoFile(e).writeText(
+                org.json.JSONObject().put("title", tags.title).put("artist", tags.artist.orEmpty()).put("album", tags.album.orEmpty()).toString(),
+            )
+        }
+        _state.update { it.copy(tags = tags, edited = true) }
+        coverFrom?.takeIf { it.coverUrl != null }?.let { applyCover(it) }
+        if (_state.value.lyrics == null && settings().musicOnlineLookup) loadLyrics(e, tags)
+    }
+
+    /** 不用改过的信息，恢复成文件里的标签 */
+    suspend fun resetInfo() {
+        val e = entry ?: return
+        val raw = rawTags ?: return
+        withContext(Dispatchers.IO) { infoFile(e).delete() }
+        _state.update { it.copy(tags = raw.copy(cover = it.tags?.cover), edited = false) }
     }
 
     fun onTracksChanged(tracks: Tracks) {

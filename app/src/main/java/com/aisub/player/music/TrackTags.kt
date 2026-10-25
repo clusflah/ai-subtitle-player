@@ -49,7 +49,7 @@ data class TrackTags(
             val mm = b.build()
             return withFallback(
                 fileName, mm.title?.toString(), (mm.artist ?: mm.albumArtist)?.toString(), mm.albumTitle?.toString(),
-                durationMs, mm.artworkData, lyrics,
+                durationMs, mm.artworkData, lyrics?.let(::fixGbk),
             )
         }
 
@@ -74,21 +74,54 @@ data class TrackTags(
 
         private val LYRIC_KEYS = setOf("LYRICS", "UNSYNCEDLYRICS", "UNSYNCED LYRICS", "SYNCEDLYRICS")
 
-        /** 标签里没有歌名时，从「歌手 - 歌名.mp3」这样的文件名里拆。 */
+        /** 标签里没有歌名（或是坏的）时，从「歌手 - 歌名.mp3」这样的文件名里拆。 */
         private fun withFallback(
             fileName: String, title: String?, artist: String?, album: String?, durationMs: Long, cover: ByteArray?, lyrics: String?,
         ): TrackTags {
-            val base = fileName.substringBeforeLast('.').trim()
-            val parts = base.split(Regex("""\s+-\s+|\s*–\s*"""), limit = 2)
-            val fromName = if (parts.size == 2) parts[0].trim() to parts[1].trim() else null
+            val (nameTitle, nameArtist) = parseFileName(fileName)
             return TrackTags(
-                title = title?.trim()?.takeIf { it.isNotEmpty() } ?: fromName?.second ?: base.replace(Regex("""^\d{1,3}[.\s_-]+"""), ""),
-                artist = artist?.trim()?.takeIf { it.isNotEmpty() && !it.equals("<unknown>", true) } ?: fromName?.first,
-                album = album?.trim()?.takeIf { it.isNotEmpty() },
+                title = valid(title) ?: nameTitle,
+                artist = valid(artist) ?: nameArtist,
+                album = valid(album),
                 durationMs = durationMs,
                 cover = cover,
                 lyrics = lyrics,
             )
+        }
+
+        /** 括号里的音质 / 格式说明：[FLAC]、(320K)、【无损】（参考 MediaOrganizer） */
+        private val QUALITY = Regex(
+            """(?i)[\[(【{（][^\])】}）]*(flac|wav|ape|mp3|aac|alac|dsd|hi-?res|\d+\s*bit|\d+(\.\d+)?\s*khz|\d{3}\s*k(bps)?|lossless|无损|web)[^\])】}）]*[\])】}）]""",
+        )
+        private val TRACK_NO = Regex("""^(?:track\s*)?\d{1,3}(?:\s*[-._、)\]]\s*|\s+)""", RegexOption.IGNORE_CASE)
+
+        /** 文件名拆成（歌名，歌手）：去掉音轨号和音质说明，「歌手 - 歌名」拆开。 */
+        internal fun parseFileName(fileName: String): Pair<String, String?> {
+            val base = fileName.substringBeforeLast('.').replace(QUALITY, " ").replace(Regex("""\s+"""), " ").trim()
+                .replace(TRACK_NO, "").trim().ifEmpty { fileName.substringBeforeLast('.') }
+            val parts = base.split(Regex("""\s+[-–—]\s+"""), limit = 2)
+            return if (parts.size == 2) parts[1].trim() to parts[0].trim() else base to null
+        }
+
+        /** 未知艺术家、Track 01 这类占位值（参考 MediaOrganizer） */
+        private val BAD_VALUE = Regex("""(?i)^(unknown( artist| album)?|<unknown>|未知(艺术家|歌手|专辑)?|track\s*\d+|音轨\s*\d+|various( artists)?)$""")
+
+        /**
+         * 标签值能不能用：空的、占位的、全是问号（不支持中文的工具写坏了）的不要；
+         * 按 Latin-1 读出来的 GBK 乱码（「¹âÁÁ」）转回中文。
+         */
+        internal fun valid(s: String?): String? {
+            val t = s?.trim()?.trim('\u0000')?.takeIf { it.isNotEmpty() } ?: return null
+            if (BAD_VALUE.matches(t)) return null
+            if (t.all { it == '?' || it == '？' || it == '�' || it.isWhitespace() }) return null
+            return fixGbk(t)
+        }
+
+        /** 国内老 MP3 常把 GBK 当 Latin-1 写进去：全是 Latin-1 字符、有高位字符，按 GBK 能解出汉字就用 GBK */
+        internal fun fixGbk(s: String): String {
+            if (s.any { it.code > 0xFF } || s.none { it.code >= 0x80 }) return s
+            val gbk = runCatching { String(s.toByteArray(Charsets.ISO_8859_1), Charset.forName("GBK")) }.getOrNull() ?: return s
+            return if (gbk.contains('�') || gbk.none { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.HAN }) s else gbk
         }
 
         /** ID3 USLT：编码(1) + 语言(3) + 描述（以 0 结尾）+ 歌词正文。 */

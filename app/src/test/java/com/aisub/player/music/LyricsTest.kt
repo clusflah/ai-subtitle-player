@@ -74,6 +74,31 @@ class LyricsTest {
     }
 
     @Test
+    fun badTagValues() {
+        assertNull(TrackTags.valid("??"))
+        assertNull(TrackTags.valid("？？ "))
+        assertNull(TrackTags.valid("未知艺术家"))
+        assertNull(TrackTags.valid("Track 03"))
+        assertEquals("光亮", TrackTags.valid(" 光亮 "))
+        // GBK 被当成 Latin-1 读出来的乱码转回中文
+        val garbled = String("光亮".toByteArray(java.nio.charset.Charset.forName("GBK")), Charsets.ISO_8859_1)
+        assertEquals("光亮", TrackTags.valid(garbled))
+        // 真正的西文不动
+        assertEquals("Café", TrackTags.valid("Café"))
+    }
+
+    @Test
+    fun fileNames() {
+        assertEquals("光亮" to "周深", TrackTags.parseFileName("周深 - 光亮.mp3"))
+        assertEquals("光亮" to "周深", TrackTags.parseFileName("03. 周深 - 光亮 [FLAC].flac"))
+        assertEquals("晴天" to null, TrackTags.parseFileName("01 晴天.mp3"))
+        // 坏标签退回文件名
+        val t = TrackTags.fromMetadata("周深 - 光亮.mp3", 0, emptyList())
+        assertEquals("光亮", t.title)
+        assertEquals("周深", t.artist)
+    }
+
+    @Test
     fun usltFrame() {
         // 编码 3（UTF-8）+ 语言 chi + 空描述 + 正文
         val data = byteArrayOf(3) + "chi".toByteArray() + byteArrayOf(0) + "[00:01.00]你好".toByteArray()
