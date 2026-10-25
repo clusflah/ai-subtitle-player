@@ -455,6 +455,13 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     trailing = { Switch(checked = s.autoDetectIntro, onCheckedChange = { s = s.copy(autoDetectIntro = it) }) },
                     onClick = { s = s.copy(autoDetectIntro = !s.autoDetectIntro) },
                 )
+                CardDivider()
+                ListRow(
+                    title = "音乐自动在线获取歌词和封面",
+                    subtitle = "歌曲没有内嵌歌词、封面时，按歌名和歌手到 LRCLIB、网易云音乐、iTunes 查找（会把歌名、歌手发给这些网站）",
+                    trailing = { Switch(checked = s.musicOnlineLookup, onCheckedChange = { s = s.copy(musicOnlineLookup = it) }) },
+                    onClick = { s = s.copy(musicOnlineLookup = !s.musicOnlineLookup) },
+                )
             }
 
             // ---------------- 视频下载（下载版） ----------------

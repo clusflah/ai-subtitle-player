@@ -41,6 +41,7 @@
 - 倍速、睡眠计时器、A-B 循环、均衡器、仅播放声音、画中画、锁屏、跳转到指定时间
 - ExoPlayer 内核为主；DVD / 蓝光 ISO 镜像和疑难格式自动换用 VLC 内核
 - 播放队列、播放列表、播放历史，记住每个视频的播放进度
+- 播放音乐时显示封面和滚动歌词：读取内嵌歌词、封面，没有时自动从 LRCLIB、网易云音乐、iTunes 查找，也可以手动搜索、导入 LRC
 
 **媒体来源**
 - 手机媒体库、系统文件选择器、网络串流地址（HLS / DASH / RTSP）
@@ -211,6 +212,17 @@
 
 DVD / 蓝光 ISO 镜像自动用 VLC 内核播放，直接进入正片。普通视频播放失败时，可以在错误提示里选「换用 VLC 内核播放」。
 
+### 音乐：歌词与封面
+
+播放音频文件时，画面换成封面、歌名歌手和歌词（点画面空白处显示 / 隐藏控制栏）。
+
+- **歌词**：依次使用手动选过或在线找到后保存的歌词、内嵌歌词（MP3 的 ID3 USLT、FLAC / OGG 的 LYRICS 标签、M4A 的 ©lyr）、歌曲旁的同名 `.lrc`（Android 11 起通常读不到别的应用放的文件，可用「导入歌词文件」）。都没有时按歌名、歌手、时长到 [LRCLIB](https://lrclib.net) 和网易云音乐查找
+- **显示**：带时间的 LRC 跟着播放滚动、高亮当前句，点一句跳到那里；手动滑动后 4 秒内不自动滚。纯文本歌词整篇显示。支持一行多个时间、`[offset:]`，逐字时间会去掉
+- **封面**：依次使用保存的封面、内嵌封面、系统媒体库给的封面（含歌曲文件夹里的 `cover.jpg`、`folder.jpg`、`AlbumArt.jpg` 等）。都没有时到网易云音乐、iTunes 查找
+- **右侧「⋮」菜单**：搜索歌词（可改歌名、歌手，结果标明来源、是否滚动歌词）、导入歌词文件、歌词整体提前 / 延后 0.5 秒（会保存）、更换封面（从搜索结果里挑）
+- 歌名、歌手取自标签；没有标签时从「歌手 - 歌名.mp3」这样的文件名拆出来
+- 「设置 → 播放 → 音乐自动在线获取歌词和封面」可以关掉自动查找（会把歌名、歌手发给上述网站）；手动搜索不受影响。网易云音乐用的是非官方接口，可能失效
+
 ### 电视直播
 
 「浏览 → 直播与串流 → 直播」添加直播源：填播放列表网址，或选手机里的 M3U / TXT 文件。
@@ -324,6 +336,7 @@ cd ai-subtitle-player
 | `subtitle/` | 字幕数据、缓存、SRT/VTT/ASS 解析与导出、在线字幕、拼音、双行字幕样式 |
 | `remote/` | WebDAV、OpenList、内外网双地址、`cloud/` 各网盘与媒体服务器 |
 | `meta/` | 文件名解析、NFO、TMDB / 豆瓣 / Bangumi / TheTVDB / Fanart.tv |
+| `music/` | 音乐标签、内嵌歌词与封面、LRC 解析、在线歌词与封面查找（LRCLIB / 网易云音乐 / iTunes） |
 | `media/` | 媒体库、播放列表与历史、下载、VLC 内核、本机中转；取画面、MKV 章节、声音指纹、按视频记住的跳过区间 / 轨道 / 书签 |
 | `ui/` | Jetpack Compose 界面 |
 
@@ -339,6 +352,7 @@ cd ai-subtitle-player
 ## 致谢
 
 - 播放：[Media3 ExoPlayer](https://github.com/androidx/media)、[libVLC](https://code.videolan.org/videolan/vlc-android)
+- 歌词：[LRCLIB](https://lrclib.net)
 - 识别：[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)、SenseVoice、Silero VAD 等开源模型
 - 网盘接入参考并移植自 [OpenList](https://github.com/OpenListTeam/OpenList)（AGPL-3.0）、[OpenList-APIPages](https://github.com/OpenListTeam/OpenList-APIPages)（AGPL-3.0）与 [115driver](https://github.com/SheltonZhu/115driver)
 - 影视信息来源参考 [MediaOrganizer](https://github.com/clusflah/MediaOrganizer)

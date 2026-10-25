@@ -53,6 +53,8 @@ data class AppSettings(
     val autoTranslate: Boolean = true,
     /** 识别、翻译、编辑后在本地视频旁边写一个同名 .srt，给别的播放器用 */
     val autoSaveSrt: Boolean = false,
+    /** 播放音乐时，没有内嵌歌词、封面就在线查找 */
+    val musicOnlineLookup: Boolean = true,
     val showOriginal: Boolean = true,
     val showTranslation: Boolean = true,
     /** 字幕字号倍率（视频上的字幕） */
@@ -219,6 +221,7 @@ class SettingsRepository(context: Context) {
             asrConfigs = loadAsrConfigs(),
             autoTranslate = prefs.getBoolean("autoTranslate", d.autoTranslate),
             autoSaveSrt = prefs.getBoolean("autoSaveSrt", d.autoSaveSrt),
+            musicOnlineLookup = prefs.getBoolean("musicOnlineLookup", d.musicOnlineLookup),
             showOriginal = prefs.getBoolean("showOriginal", d.showOriginal),
             showTranslation = prefs.getBoolean("showTranslation", d.showTranslation),
             subtitleScale = prefs.getFloat("subtitleScale", d.subtitleScale),
@@ -272,6 +275,7 @@ class SettingsRepository(context: Context) {
             .putString("modelBaseUrl", s.modelBaseUrl)
             .putBoolean("autoTranslate", s.autoTranslate)
             .putBoolean("autoSaveSrt", s.autoSaveSrt)
+            .putBoolean("musicOnlineLookup", s.musicOnlineLookup)
             .putBoolean("showOriginal", s.showOriginal)
             .putBoolean("showTranslation", s.showTranslation)
             .putFloat("subtitleScale", s.subtitleScale)

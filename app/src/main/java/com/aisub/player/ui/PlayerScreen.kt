@@ -291,6 +291,15 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         if (uri != null) vm.importSubtitles(uri)
     }
 
+    // ---- 音乐：封面和歌词 ----
+    val music by vm.music.state.collectAsStateWithLifecycle()
+    val isMusic = music.tags != null && !isLive
+    /** 正在搜索：true 为封面，false 为歌词 */
+    var musicSearch by remember { mutableStateOf<Boolean?>(null) }
+    val lyricsImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch { indicator = null to (if (vm.music.importLyrics(uri)) "已导入歌词" else "无法读取这个歌词文件") }
+    }
+
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         // ---- 画面 ----
         AndroidView(
@@ -321,8 +330,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             }
         }
 
-        // ---- 字幕 ----
-        SubtitleOverlay(
+        // ---- 字幕（音乐有歌词时不显示，避免和歌词重复） ----
+        if (!(isMusic && music.lyrics != null)) SubtitleOverlay(
             cue = current, settings = state.settings,
             // 暂停时底栏多一行逐帧、截图按钮，字幕再往上让一些
             bottomPadding = when {
@@ -368,6 +377,25 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             player = player,
             onTogglePlay = vm::togglePlay,
         )
+
+        // ---- 音乐：封面、歌词（盖在手势层上，歌词才能滑动、点击） ----
+        if (isMusic && !audioOnly) {
+            MusicView(
+                music, positionMs,
+                topPadding = 56.dp, bottomPadding = 140.dp,
+                onTap = { controls = !controls; interactions++ },
+                onSeek = { player.seekTo(it); interactions++ },
+                onAction = { action ->
+                    when (action) {
+                        MusicAction.SEARCH_LYRICS -> musicSearch = false
+                        MusicAction.SEARCH_COVER -> musicSearch = true
+                        MusicAction.IMPORT_LYRICS -> lyricsImportLauncher.launch(arrayOf("*/*"))
+                        MusicAction.LYRICS_EARLIER -> { vm.music.shiftLyrics(-500); indicator = null to "歌词提前 0.5 秒" }
+                        MusicAction.LYRICS_LATER -> { vm.music.shiftLyrics(500); indicator = null to "歌词延后 0.5 秒" }
+                    }
+                },
+            )
+        }
 
         // ---- 顶部：返回 + 标题 + 任务状态 ----
         AnimatedVisibility(controls && !locked, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.TopCenter)) {
@@ -761,6 +789,19 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             vm.editCue(cue.id, text, translation, start, end)
             editing = null
         }
+    }
+
+    // ---- 音乐：搜索歌词 / 更换封面 ----
+    musicSearch?.let { covers ->
+        val tags = music.tags
+        MusicSearchDialog(
+            covers = covers,
+            initialTitle = tags?.title.orEmpty(),
+            initialArtist = tags?.artist.orEmpty(),
+            search = { t, a -> if (covers) vm.music.searchCovers(t, a) else vm.music.searchLyrics(t, a) },
+            onPick = { c -> if (covers) vm.music.applyCover(c) else vm.music.applyLyrics(c) },
+            onDismiss = { musicSearch = null },
+        )
     }
 
     // ---- 对话框 ----

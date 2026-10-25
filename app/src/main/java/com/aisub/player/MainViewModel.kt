@@ -209,6 +209,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         hasLoadedSubtitles = { _state.value.cues.isNotEmpty() },
     )
 
+    /** 音乐的歌词与封面 */
+    val music = com.aisub.player.music.MusicFeatures(app, viewModelScope, player = { player }, settings = { _state.value.settings })
+
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             if (!usingVlc) queue.getOrNull(exoPlayer.currentMediaItemIndex)?.let(::onEntryChanged)
@@ -216,6 +219,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
             extras.onTracksChanged(tracks)
+            music.onTracksChanged(tracks)
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -383,6 +387,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         extras.onEntryChanged(entry)
+        music.onEntryChanged(entry)
         library.recordHistory(entry, 0)
     }
 

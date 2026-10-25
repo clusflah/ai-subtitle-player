@@ -84,6 +84,9 @@ object ChineseScript {
     private val toHans: Transliterator? by lazy { create("Traditional-Simplified") }
     private val toHant: Transliterator? by lazy { create("Simplified-Traditional") }
 
+    /** 繁体转简体；系统不支持时原样返回。 */
+    fun toSimplified(text: String): String = toHans?.let { s -> synchronized(s) { s.transliterate(text) } } ?: text
+
     private fun create(id: String) =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) runCatching { Transliterator.getInstance(id) }.getOrNull() else null
 
