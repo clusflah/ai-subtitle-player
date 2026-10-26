@@ -317,6 +317,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var translateJob: Job? = null
     private var roleJob: Job? = null
     private var embeddedJob: Job? = null
+    /** 读出的自带字幕轨载入后一定翻译（播放页的「翻译成…字幕」按钮），不看自动翻译设置 */
+    private var translateEmbedded = false
     private var linkJob: Job? = null
 
     /** 下载版才有；标准版为 null */
@@ -778,7 +780,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun dismissError() = _state.update { it.copy(error = null, failedTask = null) }
 
     /** 识别整段音轨。边识别边出字幕，开启自动翻译时同时翻译。 */
-    fun generateSubtitles() {
+    /** @param alsoTranslate 不看自动翻译设置，识别的同时一定翻译（播放页的一键字幕按钮） */
+    fun generateSubtitles(alsoTranslate: Boolean = false) {
         val uri = _state.value.videoUri ?: return
         if (transcribeJob?.isActive == true) return
         translateJob?.cancel()
@@ -800,7 +803,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val engineName = if (settings.asrEngine == AsrEngine.LOCAL) localModel.label else settings.asrEngine.label
                 _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f) }
-                if (settings.autoTranslate && settings.createTranslator() != null) startTranslation()
+                if ((settings.autoTranslate || alsoTranslate) && settings.createTranslator() != null) startTranslation()
 
                 // 云端引擎大部分时间在等网络，放到 IO 线程池
                 val dispatcher = if (settings.asrEngine == AsrEngine.LOCAL) Dispatchers.Default else Dispatchers.IO
@@ -1070,10 +1073,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * 读取视频自带的文字字幕轨。只有一条可用时直接用；有多条时放进 embeddedTracks 让用户选，
      * 选中后调用 [useEmbeddedTrack]。
+     * @param translate 载入后一定翻译，不看自动翻译设置
      */
-    fun extractEmbeddedSubtitles() {
+    fun extractEmbeddedSubtitles(translate: Boolean = false) {
         val uri = _state.value.videoUri ?: return
         if (embeddedJob?.isActive == true) return
+        translateEmbedded = translate
         _state.value.embeddedTracks?.let { tracks -> offerEmbedded(tracks); return }
         transcribeJob?.cancel()
         _state.update { it.copy(extractingEmbedded = true, status = "正在读取视频自带的字幕…", progress = 0f, error = null) }
@@ -1199,10 +1204,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         store.save(video, track.cues)
         val settings = _state.value.settings
-        if (settings.autoTranslate && settings.createTranslator() != null && track.cues.any { it.translation == null }) startTranslation()
+        val translate = translateEmbedded
+        translateEmbedded = false
+        if (track.cues.none { it.translation == null }) return
+        // 点「翻译」进来的：翻译没配置好时也调用，好提示出原因
+        if (translate || (settings.autoTranslate && settings.createTranslator() != null)) startTranslation()
     }
 
-    fun dismissEmbeddedChoice() = _state.update { it.copy(choosingEmbedded = false) }
+    fun dismissEmbeddedChoice() {
+        translateEmbedded = false
+        _state.update { it.copy(choosingEmbedded = false) }
+    }
 
     private fun applySubtitleText(video: Uri, text: String): Int {
         val cues = SubtitleParser.parse(text)
