@@ -755,8 +755,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     if (showTracks) {
         ModalBottomSheet(
             onDismissRequest = { showTracks = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
-            
+            // 三项默认收起，面板按内容高度打开；横屏时半屏放不下三项标题，所以不用半展开
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
             TrackPanel(
                 vm = vm, state = state,
@@ -1376,10 +1376,11 @@ private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ON
 @Composable
 private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (SubtitleAction) -> Unit) {
     val player by vm.playerFlow.collectAsStateWithLifecycle()
-    // 只有一条音轨时不用选，默认收起
-    var audioOpen by remember(state.current?.uri) { mutableStateOf(player.currentTracks.groups.count { it.type == C.TRACK_TYPE_AUDIO } > 1) }
-    var aiOpen by remember { mutableStateOf(true) }
-    var embeddedOpen by remember { mutableStateOf(true) }
+    // 三项默认收起，打开面板先看到全部，点哪项展开哪项
+    var audioOpen by remember(state.current?.uri) { mutableStateOf(false) }
+    // 识别、翻译进行中时（例如点了顶部的任务进度）展开 AI 字幕，进度和停止按钮在里面
+    var aiOpen by remember { mutableStateOf(state.transcribing || state.translating || state.extractingEmbedded) }
+    var embeddedOpen by remember { mutableStateOf(false) }
     var version by remember { mutableIntStateOf(0) } // 选轨后刷新
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
