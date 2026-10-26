@@ -220,6 +220,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     }
     val current = state.cues.cueAt(positionMs - state.subtitleDelayMs)
 
+    // ---- 播放视频时不自动锁屏；暂停、播完、听音乐时按系统设置熄屏 ----
+    val view = androidx.compose.ui.platform.LocalView.current
+    val keepScreenOn = wantsPlay && state.current?.isVideo == true
+    DisposableEffect(view, keepScreenOn) {
+        view.keepScreenOn = keepScreenOn
+        onDispose { view.keepScreenOn = false }
+    }
+
     // ---- 横屏隐藏系统栏；离开页面恢复方向、系统栏、亮度 ----
     DisposableEffect(landscape) {
         activity?.window?.let { w ->
