@@ -312,6 +312,20 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     }
     /** 本视频不再显示「生成字幕」提示 */
     var aiChipDismissed by remember(state.current?.uri) { mutableStateOf(false) }
+    /** 正在显示视频自带的字幕轨（不在 state.cues 里，由播放器直接渲染） */
+    var embeddedTextShown by remember(player) { mutableStateOf(false) }
+    DisposableEffect(player) {
+        val p = player
+        fun update(tracks: androidx.media3.common.Tracks) {
+            embeddedTextShown = tracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.isSelected }
+        }
+        update(p.currentTracks)
+        val listener = object : Player.Listener {
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) = update(tracks)
+        }
+        p.addListener(listener)
+        onDispose { p.removeListener(listener) }
+    }
     val lyricsImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) scope.launch { indicator = null to (if (vm.music.importLyrics(uri)) "已导入歌词" else "无法读取这个歌词文件") }
     }
@@ -474,8 +488,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                 }
                 TaskChip(state, onClick = { showTracks = true }, modifier = Modifier.padding(start = 52.dp, bottom = 4.dp))
-                // 没有字幕的视频：一键生成（识别 + 翻译），不用去面板里找
-                val noSubtitles = state.cues.isEmpty() && !state.transcribing && !state.extractingEmbedded && state.playbackError == null
+                // 没有字幕的视频：一键生成（识别 + 翻译），不用去面板里找；正在显示自带字幕轨时不提示
+                val noSubtitles = state.cues.isEmpty() && !embeddedTextShown && !state.transcribing && !state.extractingEmbedded && state.playbackError == null
                 if (noSubtitles && state.current?.isVideo == true && !isLive && !aiChipDismissed) {
                     Row(Modifier.padding(start = 52.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Row(
