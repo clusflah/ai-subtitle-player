@@ -47,7 +47,7 @@ fun OnboardingScreen(onStart: () -> Unit, onLater: () -> Unit) {
         Spacer(Modifier.height(28.dp))
         Step(
             AppIcons.AutoAwesome, "一键生成字幕",
-            "播放没有字幕的视频时，点画面上方的「生成中文字幕」。第一次会下载约 160 MB 的识别模型，之后在手机上识别、免费、不用联网；也可以在设置里换成云端识别。",
+            "播放没有字幕的视频时，点画面上方的「生成简体中文字幕」（有外语字幕时是「翻译成简体中文字幕」）。第一次会下载约 160 MB 的识别模型，之后在手机上识别、免费、不用联网；也可以在设置里换成云端识别。",
         )
         Step(
             AppIcons.Translate, "自动翻译成双语",

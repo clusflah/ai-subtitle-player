@@ -132,9 +132,14 @@ import com.aisub.player.Task
 import com.aisub.player.UiState
 import com.aisub.player.media.formatDuration
 import com.aisub.player.subtitle.Cue
+import com.aisub.player.subtitle.EmbeddedTrackInfo
+import com.aisub.player.subtitle.QuickSubtitle
+import com.aisub.player.subtitle.QuickSubtitles
 import com.aisub.player.subtitle.Pinyin
 import com.aisub.player.subtitle.SrtMode
 import com.aisub.player.subtitle.cueAt
+import com.aisub.player.translate.ChineseScript
+import com.aisub.player.translate.LanguageCheck
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -301,23 +306,30 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     // ---- AI 字幕：本地模型还没下载时先确认（约 160MB 起） ----
     var confirmDownload by remember { mutableStateOf<com.aisub.player.asr.LocalModel?>(null) }
+    var confirmTranslate by remember { mutableStateOf(false) }
     // 第一次生成字幕时顺便请求通知权限，进度显示在通知栏（不给也照常识别）
     val notifyPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
-    val startGenerate: () -> Unit = {
+    val startGenerate: (Boolean) -> Unit = { alsoTranslate ->
         if (Build.VERSION.SDK_INT >= 33 &&
             androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
         ) notifyPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         val model = vm.modelToDownload()
-        if (model != null) confirmDownload = model else vm.generateSubtitles()
+        confirmTranslate = alsoTranslate
+        if (model != null) confirmDownload = model else vm.generateSubtitles(alsoTranslate)
     }
     /** 本视频不再显示「生成字幕」提示 */
     var aiChipDismissed by remember(state.current?.uri) { mutableStateOf(false) }
-    /** 正在显示视频自带的字幕轨（不在 state.cues 里，由播放器直接渲染） */
-    var embeddedTextShown by remember(player) { mutableStateOf(false) }
+    /** 视频自带的字幕轨（不在 state.cues 里，由播放器直接渲染） */
+    var embeddedTracks by remember(player) { mutableStateOf(emptyList<EmbeddedTrackInfo>()) }
     DisposableEffect(player) {
         val p = player
         fun update(tracks: androidx.media3.common.Tracks) {
-            embeddedTextShown = tracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.isSelected }
+            embeddedTracks = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }.flatMap { g ->
+                (0 until g.length).map { i ->
+                    val f = g.getTrackFormat(i)
+                    EmbeddedTrackInfo(f.language, f.label, (f.codecs ?: f.sampleMimeType) in IMAGE_SUBTITLE_TYPES)
+                }
+            }
         }
         update(p.currentTracks)
         val listener = object : Player.Listener {
@@ -488,18 +500,31 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                 }
                 TaskChip(state, onClick = { showTracks = true }, modifier = Modifier.padding(start = 52.dp, bottom = 4.dp))
-                // 没有字幕的视频：一键生成（识别 + 翻译），不用去面板里找；正在显示自带字幕轨时不提示
-                val noSubtitles = state.cues.isEmpty() && !embeddedTextShown && !state.transcribing && !state.extractingEmbedded && state.playbackError == null
-                if (noSubtitles && state.current?.isVideo == true && !isLive && !aiChipDismissed) {
+                // 没有目标语言字幕的视频：一键翻译外语字幕，或识别 + 翻译，不用去面板里找
+                val quick = remember(state.cues, embeddedTracks, state.settings.targetLanguage, state.asrSettings.asrLanguage) {
+                    val target = state.settings.ttsLocale
+                    QuickSubtitles.decide(state.cues, embeddedTracks, target) {
+                        LanguageCheck.alreadyTarget(it, target, state.asrSettings.asrLanguage, ChineseScript::variant)
+                    }
+                }
+                val idle = !state.transcribing && !state.translating && !state.extractingEmbedded && state.playbackError == null
+                if (quick != null && idle && state.current?.isVideo == true && !isLive && !aiChipDismissed) {
                     Row(Modifier.padding(start = 52.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Row(
-                            Modifier.clip(RoundedCornerShape(50)).background(Orange).clickable { startGenerate() }
+                            Modifier.clip(RoundedCornerShape(50)).background(Orange).clickable {
+                                when (quick) {
+                                    QuickSubtitle.GENERATE -> startGenerate(true)
+                                    QuickSubtitle.TRANSLATE_LOADED -> vm.startTranslation()
+                                    QuickSubtitle.TRANSLATE_EMBEDDED -> vm.extractEmbeddedSubtitles(translate = true)
+                                }
+                            }
                                 .padding(start = 10.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Icon(AppIcons.AutoAwesome, null, tint = Color.White, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("生成${state.settings.targetLanguage}字幕", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            val verb = if (quick == QuickSubtitle.GENERATE) "生成" else "翻译成"
+                            Text("$verb${state.settings.targetLanguage}字幕", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                         }
                         IconButton(onClick = { aiChipDismissed = true }, modifier = Modifier.size(28.dp)) {
                             Icon(AppIcons.Close, "不用了", tint = Color(0xCCFFFFFF), modifier = Modifier.size(16.dp))
@@ -737,7 +762,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 vm = vm, state = state,
                 onSubtitleAction = { action ->
                     when (action) {
-                        SubtitleAction.GENERATE -> if (state.transcribing) vm.cancelAll() else startGenerate()
+                        SubtitleAction.GENERATE -> if (state.transcribing) vm.cancelAll() else { showTracks = false; dialog = PlayerDialog.ASR_LANGUAGE }
                         SubtitleAction.TRANSLATE -> if (state.translating) vm.cancelAll() else vm.startTranslation()
                         SubtitleAction.LIST -> { showTracks = false; showCues = true }
                         SubtitleAction.DELAY -> dialog = PlayerDialog.DELAY
@@ -748,7 +773,6 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         SubtitleAction.ROLES -> { showTracks = false; showRoles = true }
                         SubtitleAction.EMBEDDED -> if (state.extractingEmbedded) vm.cancelAll() else vm.extractEmbeddedSubtitles()
                         SubtitleAction.STYLE -> { showTracks = false; showStyle = true }
-                        SubtitleAction.ASR_LANGUAGE -> dialog = PlayerDialog.ASR_LANGUAGE
                     }
                 },
             )
@@ -933,7 +957,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         "也可以在「设置 → 语音识别」换成云端识别，不用下载，但要填对应服务的 Key。",
                 )
             },
-            confirmButton = { TextButton(onClick = { confirmDownload = null; vm.generateSubtitles() }) { Text("下载并开始") } },
+            confirmButton = { TextButton(onClick = { confirmDownload = null; vm.generateSubtitles(confirmTranslate) }) { Text("下载并开始") } },
             dismissButton = { TextButton(onClick = { confirmDownload = null }) { Text("取消") } },
         )
     }
@@ -991,11 +1015,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             "保存播放列表", "名称（当前队列 ${vm.queueSize} 项）", confirm = "保存",
             onDismiss = { dialog = null },
         ) { name -> vm.saveQueueAsPlaylist(name); indicator = AppIcons.PlaylistAdd to "已保存"; dialog = null }
+        // 语音识别前选语言：只对这个视频生效，选完直接开始识别
         PlayerDialog.ASR_LANGUAGE -> AsrLanguageDialog(
             state.asrSettings.asrLanguage, onDismiss = { dialog = null },
+            warningFor = { code -> state.asrSettings.copy(asrLanguage = code).asrLanguageWarning() },
         ) { code ->
             vm.setVideoAsrLanguage(code)
             dialog = null
+            startGenerate(false)
         }
         PlayerDialog.ERROR -> AlertDialog(
             onDismissRequest = { dialog = null },
@@ -1343,7 +1370,7 @@ private fun enterPip(activity: Activity?) {
 
 // ---------------- 字幕与音轨面板 ----------------
 
-private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ONLINE, EXPORT, ERROR, ROLES, EMBEDDED, STYLE, ASR_LANGUAGE }
+private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ONLINE, EXPORT, ERROR, ROLES, EMBEDDED, STYLE }
 
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
@@ -1370,15 +1397,12 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                 state.cues.isEmpty() -> "语音识别生成字幕"
                 else -> "重新语音识别"
             }
-            ActionRow(AppIcons.AutoAwesome, gen, subtitle = "用语音识别为当前视频生成带时间轴的字幕") { onSubtitleAction(SubtitleAction.GENERATE) }
-            // 识别前先选视频里说的语言，选错会降低准确率
-            val langWarning = state.asrSettings.asrLanguageWarning()
+            // 点了先选视频里说的语言（选错会降低准确率），再开始识别
             ActionRow(
-                AppIcons.Volume, "语音语言：" + AsrLanguages.label(state.asrSettings.asrLanguage),
-                subtitle = langWarning ?: "只对这个视频生效，其他视频用设置里的默认语言；不确定选「自动」",
-                tint = if (langWarning != null) Color(0xFFFF9E80) else MaterialTheme.colorScheme.onSurface,
-                enabled = !state.transcribing,
-            ) { onSubtitleAction(SubtitleAction.ASR_LANGUAGE) }
+                AppIcons.AutoAwesome, gen,
+                subtitle = if (state.transcribing) "语音语言：" + AsrLanguages.label(state.asrSettings.asrLanguage)
+                else "选择视频里说的语言，生成带时间轴的字幕",
+            ) { onSubtitleAction(SubtitleAction.GENERATE) }
             ActionRow(AppIcons.File, "选择字幕文件", subtitle = "SRT / VTT / ASS") { onSubtitleAction(SubtitleAction.IMPORT) }
             ActionRow(AppIcons.Search, "在线下载字幕", subtitle = "射手网 / OpenSubtitles") { onSubtitleAction(SubtitleAction.ONLINE) }
             if (state.failedTask != null) {
@@ -1504,6 +1528,9 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
         }
     }
 }
+
+/** 图形字幕（没有文字，读不出来翻译）的格式 */
+private val IMAGE_SUBTITLE_TYPES = setOf("application/pgs", "application/vobsub", "application/dvbsubs")
 
 /** 自带字幕轨的名字：语言 + 强制 / SDH / 格式，方便区分同语言的几条 */
 private fun subtitleTrackName(f: androidx.media3.common.Format, groupIndex: Int): String {
@@ -1756,21 +1783,26 @@ private fun parseCueTime(s: String): Long? {
 
 /** 选择语音识别的语言：常用语言直接点选，其他语言填代码。和「设置 → 语音识别 → 视频语言」是同一项。 */
 @Composable
-private fun AsrLanguageDialog(current: String, onDismiss: () -> Unit, onPick: (String) -> Unit) {
+private fun AsrLanguageDialog(current: String, onDismiss: () -> Unit, warningFor: (String) -> String?, onPick: (String) -> Unit) {
     var custom by remember { mutableStateOf(if (AsrLanguages.isCommon(current)) "" else current) }
     val parsed = AsrLanguages.normalize(custom)
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("这个视频的语音语言") },
+        title = { Text("视频里说的是哪种语言？") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("只对这个视频生效，不确定选「自动」。选好后开始识别。", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 AsrLanguages.COMMON.forEach { (code, label) ->
                     Row(
                         Modifier.fillMaxWidth().clickable { onPick(code) }.padding(vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Box(Modifier.width(36.dp)) { if (code == current) Icon(AppIcons.Check, null, tint = Orange) }
-                        Text(label, fontSize = 16.sp)
+                        Column {
+                            Text(label, fontSize = 16.sp)
+                            // 当前识别引擎不支持这种语言时提前说明
+                            warningFor(code)?.let { Text(it, fontSize = 12.sp, color = Color(0xFFE65100)) }
+                        }
                     }
                 }
                 OutlinedTextField(
@@ -1791,7 +1823,7 @@ private fun AsrLanguageDialog(current: String, onDismiss: () -> Unit, onPick: (S
                 )
             }
         },
-        confirmButton = { TextButton(onClick = { parsed?.let(onPick) }, enabled = parsed != null) { Text("使用这个代码") } },
+        confirmButton = { TextButton(onClick = { parsed?.let(onPick) }, enabled = parsed != null) { Text("用这个代码识别") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
