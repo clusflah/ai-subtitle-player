@@ -180,6 +180,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 媒体会话：通知栏、锁屏、耳机按键控制播放；切换内核时跟着换播放器 */
     private val session: MediaSession = MediaSession.Builder(app, exoPlayer)
+        // 同一进程里会话 ID 不能重复：旧界面还没销毁时新界面就建好了（刚退出又马上打开），用默认 ID 会闪退
+        .setId(java.util.UUID.randomUUID().toString())
         .setSessionActivity(
             PendingIntent.getActivity(
                 // 点通知栏、锁屏的播放控件回到播放页
@@ -1344,9 +1346,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         ttsEngines.values.forEach { it.close() }
         savePosition()
         extras.release()
-        PlaybackService.session = null
+        // 新界面已经接管了会话（见 session 的注释）时，不动它的会话和后台服务
+        val current = PlaybackService.session === session
+        if (current) PlaybackService.session = null
         session.release()
-        getApplication<Application>().let { it.stopService(Intent(it, PlaybackService::class.java)) }
+        if (current) getApplication<Application>().let { it.stopService(Intent(it, PlaybackService::class.java)) }
         exoPlayer.release()
         assHandler.release()
         vlcPlayer?.release()

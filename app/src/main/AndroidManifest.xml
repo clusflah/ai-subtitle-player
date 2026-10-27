@@ -29,8 +29,11 @@
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
+        <!-- singleTask：从别的 App 分享链接、用其他应用打开视频时，回到已经开着的译幕（onNewIntent），
+             不在对方的任务里再开一个界面——两个界面会各建一个播放器和媒体会话，媒体会话重复就闪退 -->
         <activity
             android:name=".MainActivity"
+            android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:supportsPictureInPicture="true"
             android:exported="true">

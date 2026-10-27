@@ -15,6 +15,12 @@ class PlaybackService : MediaSessionService() {
         session?.let(::addSession)
     }
 
+    /** 服务还在、会话换成了新界面建的（旧界面刚退出又马上打开）：把新会话也交给系统 */
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        session?.takeIf { !isSessionAdded(it) }?.let(::addSession)
+        return super.onStartCommand(intent, flags, startId)
+    }
+
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
 
     /** 从最近任务里划掉应用：播放器跟着界面一起释放，服务也结束。 */
