@@ -179,7 +179,7 @@ object PipState {
 
 /**
  * 全屏黑底播放页（仿 VLC）：顶部标题，底部进度条与五个按钮
- * （字幕/音轨、旋转、播放、画面比例、更多）。AI 字幕功能收在"字幕/音轨"面板里。
+ * （字幕/音轨、旋转、播放、锁定、更多），画面比例在“更多”第一排。AI 字幕功能收在"字幕/音轨"面板里。
  */
 @androidx.annotation.OptIn(UnstableApi::class)
 @OptIn(ExperimentalMaterial3Api::class)
@@ -620,9 +620,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         }
                     }
                     Spacer(Modifier.weight(1f))
-                    BarButton(AppIcons.AspectRatio, "画面比例") {
-                        resizeIndex = (resizeIndex + 1) % RESIZE_MODES.size
-                        indicator = AppIcons.AspectRatio to RESIZE_MODES[resizeIndex].second
+                    BarButton(AppIcons.Lock, "锁定") {
+                        locked = true; controls = true; indicator = AppIcons.Lock to "已锁定屏幕"
                         interactions++
                     }
                     Spacer(Modifier.weight(1f))
@@ -725,7 +724,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 onAction = { action ->
                     showMore = false
                     when (action) {
-                        MoreAction.LOCK -> { locked = true; controls = true; indicator = AppIcons.Lock to "已锁定屏幕" }
+                        MoreAction.ASPECT -> {
+                            resizeIndex = (resizeIndex + 1) % RESIZE_MODES.size
+                            indicator = AppIcons.AspectRatio to RESIZE_MODES[resizeIndex].second
+                        }
                         MoreAction.SLEEP -> dialog = PlayerDialog.SLEEP
                         MoreAction.SPEED -> dialog = PlayerDialog.SPEED
                         MoreAction.GOTO -> dialog = PlayerDialog.GOTO
@@ -1289,14 +1291,14 @@ private fun GestureLayer(
 
 // ---------------- 更多菜单 ----------------
 
-private enum class MoreAction { LOCK, SLEEP, SPEED, GOTO, NAVIGATE, BOOKMARKS, SKIP, EQUALIZER, AUDIO_ONLY, PIP, REPEAT, INFO, AB_LOOP, SAVE_PLAYLIST, SETTINGS }
+private enum class MoreAction { ASPECT, SLEEP, SPEED, GOTO, NAVIGATE, BOOKMARKS, SKIP, EQUALIZER, AUDIO_ONLY, PIP, REPEAT, INFO, AB_LOOP, SAVE_PLAYLIST, SETTINGS }
 
 @Composable
 private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAction: (MoreAction) -> Unit) {
     // 最常用的四个放在最上面一排，其余按用途分组
     val quick = listOf(
         Triple(MoreAction.SPEED, AppIcons.Speed, "倍速"),
-        Triple(MoreAction.LOCK, AppIcons.Lock, "锁定"),
+        Triple(MoreAction.ASPECT, AppIcons.AspectRatio, "画面比例"),
         Triple(MoreAction.PIP, AppIcons.Pip, "悬浮窗"),
         Triple(MoreAction.SLEEP, AppIcons.Timer, if (state.sleepAt != null) "定时中" else "定时关闭"),
     )
