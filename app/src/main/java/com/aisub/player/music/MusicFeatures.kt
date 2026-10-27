@@ -40,6 +40,9 @@ data class MusicState(
     val lyricsStatus: String? = null,
     /** 歌名、歌手、专辑是用户改过的（存在译幕里） */
     val edited: Boolean = false,
+    /** 歌词的翻译，和 lyrics.lines 一一对应；没翻译过为 null */
+    val translations: List<String?>? = null,
+    val translating: Boolean = false,
 )
 
 /**
@@ -159,7 +162,8 @@ class MusicFeatures(
             ?: tags.lyrics?.let { Lyrics.parse(it, "内嵌") }
             ?: withContext(Dispatchers.IO) { sidecarLrc(e) }?.let { Lyrics.parse(it, "LRC 文件") }
         if (local != null) {
-            _state.update { it.copy(lyrics = local, lyricsStatus = null) }
+            val tr = withContext(Dispatchers.IO) { savedTranslations(e, local) }
+            _state.update { it.copy(lyrics = local, lyricsStatus = null, translations = tr) }
             return
         }
         if (!settings().musicOnlineLookup) {
@@ -224,8 +228,59 @@ class MusicFeatures(
     }
 
     private fun saveLyrics(e: MediaEntry, lyrics: Lyrics) {
-        _state.update { it.copy(lyrics = lyrics, lyricsStatus = null) }
-        scope.launch(Dispatchers.IO) { lyricsFile(e).writeText(lyrics.toLrc()) }
+        // 只是整体调了时间时，每行的字没变，翻译照用
+        val sameText = _state.value.lyrics?.lines?.map { it.text } == lyrics.lines.map { it.text }
+        _state.update { it.copy(lyrics = lyrics, lyricsStatus = null, translations = it.translations.takeIf { sameText }) }
+        scope.launch(Dispatchers.IO) {
+            lyricsFile(e).writeText(lyrics.toLrc())
+            if (!sameText) translationFile(e).delete()
+        }
+    }
+
+    // ---------------- 歌词翻译 ----------------
+
+    private fun translationFile(e: MediaEntry) = File(lyricsDir, key(e) + ".tr.json")
+
+    /** 存下的翻译；歌词换过（行数对不上）就不用 */
+    private fun savedTranslations(e: MediaEntry, lyrics: Lyrics): List<String?>? = runCatching {
+        val arr = org.json.JSONArray(translationFile(e).readText())
+        if (arr.length() != lyrics.lines.size) null
+        else List(arr.length()) { i -> arr.optString(i).takeIf { it.isNotEmpty() } }
+    }.getOrNull()
+
+    /** 用设置里的翻译服务把歌词翻成目标语言。返回出错时给用户看的提示，成功返回 null。 */
+    suspend fun translateLyrics(): String? {
+        val e = entry ?: return "没有正在播放的歌曲"
+        val lyrics = _state.value.lyrics ?: return "这首歌还没有歌词"
+        val s = settings()
+        val translator = s.createTranslator() ?: return s.translatorProblem() ?: "翻译服务没有设置好"
+        _state.update { it.copy(translating = true) }
+        try {
+            val texts = lyrics.lines.map { it.text }
+            val out = arrayOfNulls<String>(texts.size)
+            // 空行、纯符号的行不用翻；一次送 40 行，前面几行作上下文
+            val todo = texts.indices.filter { texts[it].any(Char::isLetter) }
+            for (chunk in todo.chunked(40)) {
+                val context = texts.subList(maxOf(0, chunk.first() - 3), chunk.first())
+                val result = withContext(Dispatchers.IO) { translator.translate(chunk.map { texts[it] }, context, s.targetLanguage) }
+                chunk.forEachIndexed { k, i -> out[i] = result.getOrNull(k)?.trim()?.takeIf { it.isNotEmpty() && it != texts[i].trim() } }
+                if (entry != e) return null
+                _state.update { it.copy(translations = out.toList()) }
+            }
+            withContext(Dispatchers.IO) { translationFile(e).writeText(org.json.JSONArray(out.map { it ?: "" }).toString()) }
+            return null
+        } catch (ex: Exception) {
+            return "翻译失败：${ex.message}"
+        } finally {
+            _state.update { it.copy(translating = false) }
+        }
+    }
+
+    /** 不显示翻译（存下的也删掉） */
+    fun clearTranslations() {
+        val e = entry ?: return
+        _state.update { it.copy(translations = null) }
+        scope.launch(Dispatchers.IO) { translationFile(e).delete() }
     }
 
     // ---------------- 封面 ----------------

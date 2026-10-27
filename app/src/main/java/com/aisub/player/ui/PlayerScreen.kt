@@ -308,6 +308,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     // ---- 音乐：封面和歌词 ----
     val music by vm.music.state.collectAsStateWithLifecycle()
     val isMusic = music.tags != null && !isLive
+    /** 整页换成音乐播放界面（推荐 / 歌曲 / 歌词） */
+    val musicMode = isMusic && !audioOnly && state.playbackError == null
+    var addingToPlaylist by remember { mutableStateOf(false) }
     /** 正在搜索：true 为封面，false 为歌词 */
     var musicSearch by remember { mutableStateOf<Boolean?>(null) }
     var editingSong by remember { mutableStateOf(false) }
@@ -385,7 +388,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         }
 
         // ---- 字幕（音乐有歌词时不显示，避免和歌词重复） ----
-        if (!(isMusic && music.lyrics != null)) SubtitleOverlay(
+        if (!musicMode) SubtitleOverlay(
             cue = current, settings = state.settings,
             // 暂停时底栏多一行逐帧、截图按钮，字幕再往上让一些
             bottomPadding = when {
@@ -462,33 +465,33 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             }
         }
 
-        // ---- 音乐：封面、歌词（盖在手势层上，歌词才能滑动、点击） ----
-        if (isMusic && !audioOnly && state.playbackError == null) {
+        // ---- 音乐：整页的音乐播放界面（盖在手势层上） ----
+        if (musicMode) {
             MusicView(
-                music, positionMs,
-                topPadding = 56.dp, bottomPadding = 140.dp,
-                onTap = { controls = !controls; interactions++ },
-                onSeek = { player.seekTo(it); interactions++ },
-                // 在封面上左右滑切歌（队列里不止一首时）
-                onSwipe = if (vm.queueSize > 1 && !vm.usingVlc) { next ->
-                    vm.skipInQueue(next)
-                    indicator = (if (next) AppIcons.SkipNext else AppIcons.SkipPrevious) to (if (next) "下一首" else "上一首")
-                } else null,
+                vm, player, music, state.current, state.cues, positionMs, wantsPlay,
+                onBack = onBack,
+                onSeek = { player.seekTo(it) },
+                onMessage = { indicator = null to it },
                 onAction = { action ->
                     when (action) {
                         MusicAction.EDIT_INFO -> editingSong = true
                         MusicAction.SEARCH_LYRICS -> musicSearch = false
                         MusicAction.SEARCH_COVER -> musicSearch = true
                         MusicAction.IMPORT_LYRICS -> lyricsImportLauncher.launch(arrayOf("*/*"))
-                        MusicAction.LYRICS_EARLIER -> { vm.music.shiftLyrics(-500); indicator = null to "歌词提前 0.5 秒" }
-                        MusicAction.LYRICS_LATER -> { vm.music.shiftLyrics(500); indicator = null to "歌词延后 0.5 秒" }
+                        MusicAction.SLEEP -> dialog = PlayerDialog.SLEEP
+                        MusicAction.SPEED -> dialog = PlayerDialog.SPEED
+                        MusicAction.EQUALIZER -> openEqualizer(context, (player as? androidx.media3.exoplayer.ExoPlayer)?.audioSessionId ?: 0)
+                        MusicAction.INFO -> dialog = PlayerDialog.INFO
+                        MusicAction.TRACKS -> showTracks = true
+                        MusicAction.ADD_TO_PLAYLIST -> addingToPlaylist = true
+                        MusicAction.SETTINGS -> onOpenSettings()
                     }
                 },
             )
         }
 
         // ---- 顶部：返回 + 标题 + 任务状态 ----
-        AnimatedVisibility(controls && !locked, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.TopCenter)) {
+        AnimatedVisibility(controls && !locked && !musicMode, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.TopCenter)) {
             Column(
                 Modifier.fillMaxWidth().background(Color(0x66000000)).statusBarsPadding().padding(horizontal = 4.dp, vertical = 4.dp),
             ) {
@@ -550,7 +553,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         }
 
         // ---- 底部：时间 + 进度条 + 五个按钮 ----
-        AnimatedVisibility(controls && !locked, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter)) {
+        AnimatedVisibility(controls && !locked && !musicMode, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter)) {
             Column(Modifier.fillMaxWidth().background(Color(0x66000000)).navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
                 val duration = player.duration.takeIf { it > 0 } ?: 0L
                 var dragging by remember { mutableStateOf<Float?>(null) }
@@ -640,9 +643,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         var tipsShown by remember(tipsKey) { mutableStateOf(tipsKey == null || tipsPrefs.getBoolean(tipsKey, false)) }
         if (!tipsShown && tipsKey != null && state.playbackError == null) {
             val tips = if (isMusic) listOf(
-                "在封面上左右滑" to "上一首 / 下一首",
+                "左右滑" to "推荐 / 歌曲 / 歌词",
                 "点一句歌词" to "跳到那里",
-                "「⋮」菜单" to "搜索歌词、换封面、改歌名",
+                "♡" to "加入「我喜欢的音乐」",
+                "「⋮」菜单" to "定时停止、换封面、改歌名",
             ) else listOf(
                 "双击左边 / 右边" to "后退 / 前进 10 秒",
                 "左右滑动" to "拖动进度",
@@ -822,6 +826,16 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         ) {
             Column(Modifier.verticalScroll(rememberScrollState())) { RolesPanel(vm, state) }
         }
+    }
+
+    // ---- 音乐：把正在放的歌加进播放列表 ----
+    if (addingToPlaylist) {
+        AddToPlaylistDialog(
+            playlists = remember { vm.playlists() },
+            onDismiss = { addingToPlaylist = false },
+            onPick = { p -> vm.addCurrentToPlaylist(p.id); addingToPlaylist = false; indicator = null to "已加入「${p.name}」" },
+            onCreate = { name -> vm.addCurrentToPlaylist(null, name); addingToPlaylist = false; indicator = null to "已加入「$name」" },
+        )
     }
 
     // ---- 播放队列 / 直播频道列表 ----
@@ -1924,7 +1938,7 @@ private fun parseClock(s: String): Long? {
 
 private fun formatSpeed(s: Float) = if (s == s.toInt().toFloat()) "${s.toInt()}.0" else s.toString()
 
-private fun formatClock(ms: Long): String {
+internal fun formatClock(ms: Long): String {
     val t = ms / 1000
     return if (t >= 3600) "%d:%02d:%02d".format(t / 3600, t / 60 % 60, t % 60) else "%d:%02d".format(t / 60, t % 60)
 }
