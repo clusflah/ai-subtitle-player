@@ -772,6 +772,11 @@ private fun MeTab(
             }
             ListRow("设置", "语音识别、字幕翻译、播放、朗读", AppIcons.Settings, onClick = onSettings)
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
+            ListRow("检查更新", "当前版本 ${com.aisub.player.BuildConfig.VERSION_NAME}", AppIcons.SystemUpdate,
+                onClick = { activity?.let { com.aisub.player.update.appUpdater.checkNow(it) } })
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             ListRow("关于", null, AppIcons.Info, onClick = onAbout)
         }
     }
