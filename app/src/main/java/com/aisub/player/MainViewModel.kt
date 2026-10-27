@@ -1279,6 +1279,59 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         exoPlayer.play()
     }
 
+    /** 从播放队列里去掉第 index 个；去掉的是正在放的就接着放下一个。 */
+    fun removeQueueIndex(index: Int) {
+        if (usingVlc || index !in queue.indices || queue.size <= 1) return
+        queue = queue.toMutableList().also { it.removeAt(index) }
+        exoPlayer.removeMediaItem(index)
+    }
+
+    /**
+     * 播放页「推荐」里点的歌：插到正在放的这首后面并马上播放（已在队列里就直接切过去）。
+     * playNow 为 false 时只排到下一首。
+     */
+    fun playFromRecommend(entry: MediaEntry, playNow: Boolean = true) {
+        if (usingVlc) return
+        val existing = queue.indexOfFirst { it.uri == entry.uri }
+        if (existing >= 0 && playNow) {
+            playQueueIndex(existing)
+            return
+        }
+        if (existing >= 0) removeQueueIndex(existing)
+        val at = (exoPlayer.currentMediaItemIndex + 1).coerceIn(0, queue.size)
+        queue = queue.toMutableList().also { it.add(at, entry) }
+        exoPlayer.addMediaItem(at, itemOf(entry))
+        if (playNow) playQueueIndex(at)
+    }
+
+    // ---- 「我喜欢」：存成一个普通的播放列表，在首页的播放列表里也能看到 ----
+
+    fun isLiked(uri: String): Boolean = library.playlists().firstOrNull { it.name == LIKED_PLAYLIST }?.items?.any { it.uri == uri } == true
+
+    /** 喜欢 / 取消喜欢正在播放的歌，返回现在是否喜欢 */
+    fun toggleLiked(): Boolean {
+        val e = _state.value.current ?: return false
+        val lists = library.playlists()
+        val liked = lists.firstOrNull { it.name == LIKED_PLAYLIST } ?: library.createPlaylist(LIKED_PLAYLIST)
+        val now = liked.items.none { it.uri == e.uri }
+        val items = if (now) listOf(e) + liked.items else liked.items.filter { it.uri != e.uri }
+        val updated = liked.copy(items = items, updatedAt = System.currentTimeMillis())
+        library.savePlaylists(library.playlists().map { if (it.id == liked.id) updated else it })
+        return now
+    }
+
+    fun playlists() = library.playlists()
+
+    /** 把正在播放的加进播放列表；id 为 null 时新建一个叫 newName 的列表 */
+    fun addCurrentToPlaylist(id: String?, newName: String = "") {
+        val e = _state.value.current ?: return
+        val target = id ?: library.createPlaylist(newName.ifBlank { "新建播放列表" }).id
+        library.savePlaylists(library.playlists().map { p ->
+            if (p.id != target || p.items.any { it.uri == e.uri }) p
+            else p.copy(items = p.items + e, updatedAt = System.currentTimeMillis())
+        })
+    }
+
     /**
      * 上一个 / 下一个，按队列顺序（跟随循环、随机播放设置）。
      * restartFirst 时「上一个」在播放超过 3 秒时先回到开头，和常见音乐播放器的按钮一样。
@@ -1359,6 +1412,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         private const val BATCH_SIZE = 20
         private const val CONTEXT_SIZE = 6
+        /** 播放页点「♡」的歌放在这个播放列表里 */
+        const val LIKED_PLAYLIST = "我喜欢的音乐"
     }
 }
 
