@@ -10,6 +10,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.imePadding
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.CompositionLocalProvider
@@ -119,7 +120,8 @@ class MainActivity : ComponentActivity() {
             val openDetail: (MediaEntry) -> Unit = { e -> nav.push(Screen.FileDetail(null, e.toRemoteItem(), listOf(e), 0)) }
             AppTheme {
                 CompositionLocalProvider(LocalOpenDetail provides openDetail) {
-                  Column(Modifier.fillMaxSize().background(androidx.compose.material3.MaterialTheme.colorScheme.background)) {
+                  // 全面屏下 adjustResize 不会自动给键盘让位：最外层统一留出键盘高度，输入框（搜索、链接、设置里的 Key 等）不会被键盘盖住
+                  Column(Modifier.fillMaxSize().background(androidx.compose.material3.MaterialTheme.colorScheme.background).imePadding()) {
                    Box(Modifier.weight(1f)) {
                     when (val screen = nav.current) {
                         Screen.Home -> HomeScreen(lib, main, nav) { permissionLauncher.launch(mediaPermissions) }
