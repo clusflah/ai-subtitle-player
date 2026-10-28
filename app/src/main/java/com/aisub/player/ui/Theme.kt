@@ -96,6 +96,5 @@ fun AppTheme(content: @Composable () -> Unit) {
         colorScheme = if (isSystemInDarkTheme()) Dark else Light,
         shapes = AppShapes,
         typography = AppTypography,
-        content = content,
-    )
+    ) { TvRipple(content) }
 }

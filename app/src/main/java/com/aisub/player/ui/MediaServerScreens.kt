@@ -156,7 +156,7 @@ private fun HubRow(hub: ServerHub, openItem: (ServerItem) -> Unit) {
 /** 竖版海报：右上角未看集数或已看勾，底部进度条，下面片名和年份 */
 @Composable
 private fun PosterCard(item: ServerItem, modifier: Modifier, onClick: () -> Unit) {
-    Column(modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onClick)) {
+    Column(modifier.tvFocusRing(RoundedCornerShape(6.dp), scale = true).clip(RoundedCornerShape(6.dp)).clickable(onClick = onClick)) {
         Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(6.dp))) {
             NetImage(
                 if (item.type == "episode") item.showThumb else item.thumb, Modifier.fillMaxSize(), maxSize = 400,
@@ -179,7 +179,7 @@ private fun PosterCard(item: ServerItem, modifier: Modifier, onClick: () -> Unit
 /** 横版卡片：继续观看、单集 */
 @Composable
 internal fun WideCard(item: ServerItem, modifier: Modifier, onClick: () -> Unit) {
-    Column(modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onClick)) {
+    Column(modifier.tvFocusRing(RoundedCornerShape(6.dp), scale = true).clip(RoundedCornerShape(6.dp)).clickable(onClick = onClick)) {
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(6.dp))) {
             NetImage(if (item.type == "episode") item.thumb else item.art ?: item.thumb, Modifier.fillMaxSize(), maxSize = 600)
             WatchBadge(item)
@@ -263,7 +263,7 @@ fun ServerLibraryScreen(
                 if (list.isEmpty()) {
                     Text("没有内容", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(24.dp))
                 } else {
-                    LazyVerticalGrid(GridCells.Adaptive(108.dp), contentPadding = PaddingValues(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    LazyVerticalGrid(GridCells.Adaptive(if (LocalTv.current) 140.dp else 108.dp), contentPadding = PaddingValues(10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(list, key = { it.ratingKey }) { item -> PosterCard(item, Modifier) { openItem(item) } }
                     }
                 }

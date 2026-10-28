@@ -133,6 +133,9 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
+    // 电视上登录网盘：把授权地址、手机输入页显示成二维码
+    implementation("com.google.zxing:core:3.5.3")
+
     // 翻译：Claude 官方 Java SDK；OpenAI 兼容接口用 OkHttp 直连
     implementation("com.anthropic:anthropic-java:2.34.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

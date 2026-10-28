@@ -209,7 +209,7 @@ fun ListRow(
 ) {
     Row(
         Modifier.fillMaxWidth()
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(if (onClick != null) Modifier.tvFocusRing(MaterialTheme.shapes.small).clickable(onClick = onClick) else Modifier)
             .heightIn(min = 56.dp)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -235,7 +235,7 @@ fun SourceCard(icon: ImageVector, title: String, subtitle: String, modifier: Mod
         onClick = onClick,
         color = MaterialTheme.colorScheme.surfaceContainerLowest,
         shape = MaterialTheme.shapes.large,
-        modifier = modifier,
+        modifier = modifier.tvFocusRing(MaterialTheme.shapes.large),
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             IconBadge(icon, size = 36.dp)
@@ -277,7 +277,7 @@ fun VideoCard(
     onClick: () -> Unit,
 ) {
     Column(
-        Modifier.clip(MaterialTheme.shapes.medium)
+        Modifier.tvFocusRing(MaterialTheme.shapes.medium, scale = true).clip(MaterialTheme.shapes.medium)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .background(if (selected == true) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
             .padding(6.dp),
@@ -319,7 +319,7 @@ fun MediaRow(
     onClick: () -> Unit,
 ) {
     Row(
-        Modifier.fillMaxWidth()
+        Modifier.fillMaxWidth().tvFocusRing(MaterialTheme.shapes.small)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .background(if (selected == true) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
             .padding(start = 16.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),

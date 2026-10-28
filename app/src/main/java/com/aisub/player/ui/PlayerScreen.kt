@@ -106,6 +106,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.focusable
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -186,7 +197,7 @@ object PipState {
 @Composable
 fun PlayerScreen(vm: MainViewModel, onBack: () -> Unit, onOpenSettings: () -> Unit) {
     MaterialTheme(colorScheme = PlayerColors, typography = MaterialTheme.typography, shapes = MaterialTheme.shapes) {
-        PlayerContent(vm, onBack, onOpenSettings)
+        TvRipple { PlayerContent(vm, onBack, onOpenSettings) }
     }
 }
 
@@ -353,7 +364,106 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         if (uri != null) scope.launch { indicator = null to (if (vm.music.importLyrics(uri)) "已导入歌词" else "无法读取这个歌词文件") }
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    // ---- 第一次播放视频 / 音乐时说明操作（各显示一次；电视上说明遥控器按键） ----
+    val tv = LocalTv.current
+    val tipsKey = when {
+        isMusic -> "tips.music"
+        state.current?.isVideo == true && !isLive -> if (tv) "tips.tv" else "tips.video"
+        else -> null
+    }
+    val tipsPrefs = remember { context.getSharedPreferences("app", Context.MODE_PRIVATE) }
+    var tipsShown by remember(tipsKey) { mutableStateOf(tipsKey == null || tipsPrefs.getBoolean(tipsKey, false)) }
+    val dismissTips = { tipsShown = true; tipsKey?.let { tipsPrefs.edit().putBoolean(it, true).apply() } }
+
+    // ---- 电视遥控器：控制栏隐藏时画面本身拿着焦点，左右快退快进、确认键暂停 / 播放、上下呼出控制栏、菜单键打开字幕设置；
+    //      控制栏出来时焦点在播放键上，方向键在按钮之间移动 ----
+    val rootFocus = remember { FocusRequester() }
+    val playFocus = remember { FocusRequester() }
+    val moreFocus = remember { FocusRequester() }
+    val errorFocus = remember { FocusRequester() }
+    val problemShown = state.playbackError != null || state.videoProblem != null
+    var rootFocused by remember { mutableStateOf(false) }
+    var backConsumed by remember { mutableStateOf(false) }
+    // 控制栏、更多菜单开合时把焦点放到看得见的地方，不留在隐藏的按钮上；音乐界面用默认的焦点移动
+    LaunchedEffect(tv, controls, locked, showMore, musicMode, problemShown) {
+        if (!tv || musicMode) return@LaunchedEffect
+        withFrameNanos { }
+        runCatching {
+            when {
+                showMore -> moreFocus.requestFocus()
+                problemShown -> errorFocus.requestFocus()
+                controls && !locked -> playFocus.requestFocus()
+                else -> rootFocus.requestFocus()
+            }
+        }
+    }
+    // 返回键先收起控制栏，再按一次才退出播放页
+    BackHandler(enabled = tv && controls && !locked && !showMore && !musicMode) { controls = false }
+    val seekBy: (Long) -> Unit = { delta ->
+        val duration = player.duration.takeIf { it > 0 }
+        if (!isLive || (!player.isCurrentMediaItemLive && duration != null)) {
+            val target = (player.currentPosition + delta).coerceIn(0L, duration ?: Long.MAX_VALUE)
+            player.seekTo(target)
+            positionMs = target
+            indicator = (if (delta > 0) AppIcons.FastForward else AppIcons.FastRewind) to
+                "${formatClock(target)} / ${formatClock(duration ?: 0L)}"
+        }
+    }
+    /** 长按方向键时越跳越远：10 秒起，最多一次 60 秒 */
+    fun seekStep(e: KeyEvent) = (10_000L * (1 + e.nativeKeyEvent.repeatCount / 5)).coerceAtMost(60_000L)
+    val onTvKey: (KeyEvent) -> Boolean = handler@{ e ->
+        if (!tv || musicMode) return@handler false
+        val down = e.type == KeyEventType.KeyDown
+        val code = e.nativeKeyEvent.keyCode
+        // 返回键：先关更多菜单、再收起控制栏（Compose 默认会把返回键当成「焦点移出」，要按两下才有反应），都没有时才退出
+        if (code == android.view.KeyEvent.KEYCODE_BACK) {
+            if (down) {
+                backConsumed = showMore || (controls && !locked)
+                if (showMore) showMore = false else if (backConsumed) controls = false
+                return@handler backConsumed
+            }
+            // 抬起时跟按下保持一致：按下时已经处理过，抬起也吞掉，免得系统再当成退出
+            return@handler backConsumed.also { backConsumed = false }
+        }
+        if (!tipsShown && state.playbackError == null) {
+            if (down) dismissTips()
+            return@handler true
+        }
+        interactions++
+        if (code == android.view.KeyEvent.KEYCODE_MENU) {
+            if (down) showTracks = true
+            return@handler true
+        }
+        // 焦点在按钮上（控制栏显示中）：方向键照常在按钮之间移动
+        if (!rootFocused) return@handler false
+        when (code) {
+            android.view.KeyEvent.KEYCODE_DPAD_LEFT, android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                if (down && !locked) seekBy(if (code == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) seekStep(e) else -seekStep(e))
+                true
+            }
+            android.view.KeyEvent.KEYCODE_DPAD_CENTER, android.view.KeyEvent.KEYCODE_ENTER, android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                if (down && e.nativeKeyEvent.repeatCount == 0 && !locked) {
+                    vm.togglePlay()
+                    indicator = (if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow) to (if (wantsPlay) "已暂停" else "播放")
+                }
+                true
+            }
+            android.view.KeyEvent.KEYCODE_DPAD_UP, android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (down) controls = true
+                true
+            }
+            else -> false
+        }
+    }
+
+    Box(
+        Modifier.fillMaxSize().background(Color.Black)
+            .then(
+                if (tv) Modifier.onPreviewKeyEvent(onTvKey).onFocusChanged { rootFocused = it.isFocused }
+                    .focusRequester(rootFocus).focusProperties { canFocus = !musicMode }.focusable()
+                else Modifier,
+            ),
+    ) {
         // ---- 画面 ----
         AndroidView(
             factory = { ctx ->
@@ -437,7 +547,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         Text(if (showDetail) "收起详细信息" else "详细信息", color = Color(0xFF999999), fontSize = 12.sp)
                     }
                 }
-                Row {
+                Row(Modifier.focusRequester(errorFocus)) {
                     TextButton(onClick = { vm.togglePlay() }) { Text("重试", color = Orange) }
                     if (!vm.usingVlc) TextButton(onClick = { vm.switchToVlc() }) { Text("兼容模式播放", color = Orange) }
                 }
@@ -457,7 +567,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     color = Color(0xFFCCCCCC), fontSize = 13.sp,
                 )
                 Spacer(Modifier.height(10.dp))
-                Row {
+                Row(Modifier.focusRequester(errorFocus)) {
                     if (vm.canTranscode) TextButton(onClick = vm::playTranscoded) { Text("服务器转码播放", color = Orange) }
                     if (!vm.usingVlc) TextButton(onClick = vm::switchToVlc) { Text("兼容模式播放", color = Orange) }
                     TextButton(onClick = vm::dismissVideoProblem) { Text("只听声音", color = Color(0xFFCCCCCC)) }
@@ -594,26 +704,43 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         extras.chapters.lastOrNull { it.startMs <= ms }?.title,
                     )
                 }
-                if (seekable) SeekBar(
-                    fraction = fraction,
-                    durationMs = duration,
-                    chapters = extras.chapters.map { it.startMs },
-                    skips = extras.skipRanges.map { it.startMs to it.endMs },
-                    bookmarks = extras.bookmarks.map { it.positionMs },
-                    onDrag = { f -> dragging = f * duration; vm.extras.requestThumbnail((f * duration).toLong()); interactions++ },
-                    onDragEnd = { dragging?.let { player.seekTo(it.toLong()) }; dragging = null; vm.extras.clearThumbnail() },
-                ) else Spacer(Modifier.height(12.dp))
+                // 电视：进度条可以拿到焦点，左右键快退快进
+                if (seekable) Box(
+                    if (tv) Modifier.tvFocusRing(RoundedCornerShape(16.dp), color = Color.White)
+                        .onKeyEvent { e ->
+                            val code = e.nativeKeyEvent.keyCode
+                            val left = code == android.view.KeyEvent.KEYCODE_DPAD_LEFT
+                            if (!left && code != android.view.KeyEvent.KEYCODE_DPAD_RIGHT) return@onKeyEvent false
+                            if (e.type == KeyEventType.KeyDown) seekBy(if (left) -seekStep(e) else seekStep(e))
+                            true
+                        }
+                        .focusable().padding(horizontal = 6.dp)
+                    else Modifier,
+                ) {
+                    SeekBar(
+                        fraction = fraction,
+                        durationMs = duration,
+                        chapters = extras.chapters.map { it.startMs },
+                        skips = extras.skipRanges.map { it.startMs to it.endMs },
+                        bookmarks = extras.bookmarks.map { it.positionMs },
+                        onDrag = { f -> dragging = f * duration; vm.extras.requestThumbnail((f * duration).toLong()); interactions++ },
+                        onDragEnd = { dragging?.let { player.seekTo(it.toLong()) }; dragging = null; vm.extras.clearThumbnail() },
+                    )
+                } else Spacer(Modifier.height(12.dp))
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     BarButton(AppIcons.Subtitles, "字幕与音轨") { showTracks = true }
                     Spacer(Modifier.weight(1f))
-                    BarButton(AppIcons.ScreenRotation, "旋转屏幕") {
-                        activity?.requestedOrientation =
-                            if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    // 电视不能转屏、不用锁屏，这两个按钮不显示
+                    if (!tv) {
+                        BarButton(AppIcons.ScreenRotation, "旋转屏幕") {
+                            activity?.requestedOrientation =
+                                if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        }
+                        Spacer(Modifier.weight(1f))
                     }
-                    Spacer(Modifier.weight(1f))
                     IconButton(
                         onClick = { vm.togglePlay(); interactions++ },
-                        modifier = Modifier.size(64.dp).clip(CircleShape).background(Color.Transparent),
+                        modifier = Modifier.focusRequester(playFocus).tvFocusRing(CircleShape, color = Color.White).size(64.dp).clip(CircleShape).background(Color.Transparent),
                     ) {
                         Box(
                             Modifier.size(60.dp).clip(CircleShape).background(Color(0x22FFFFFF)),
@@ -623,26 +750,27 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         }
                     }
                     Spacer(Modifier.weight(1f))
-                    BarButton(AppIcons.Lock, "锁定") {
-                        locked = true; controls = true; indicator = AppIcons.Lock to "已锁定屏幕"
-                        interactions++
+                    if (!tv) {
+                        BarButton(AppIcons.Lock, "锁定") {
+                            locked = true; controls = true; indicator = AppIcons.Lock to "已锁定屏幕"
+                            interactions++
+                        }
+                        Spacer(Modifier.weight(1f))
                     }
-                    Spacer(Modifier.weight(1f))
                     BarButton(AppIcons.MoreHoriz, "更多") { showMore = true }
                 }
             }
         }
 
-        // ---- 第一次播放视频 / 音乐时说明手势（各显示一次） ----
-        val tipsKey = when {
-            isMusic -> "tips.music"
-            state.current?.isVideo == true && !isLive -> "tips.video"
-            else -> null
-        }
-        val tipsPrefs = remember { context.getSharedPreferences("app", Context.MODE_PRIVATE) }
-        var tipsShown by remember(tipsKey) { mutableStateOf(tipsKey == null || tipsPrefs.getBoolean(tipsKey, false)) }
+        // ---- 第一次播放视频 / 音乐时说明操作 ----
         if (!tipsShown && tipsKey != null && state.playbackError == null) {
-            val tips = if (isMusic) listOf(
+            val tips = if (tv && !isMusic) listOf(
+                "← / →" to "后退 / 前进 10 秒（按住越跳越远）",
+                "确认键" to "暂停 / 播放",
+                "↑ / ↓" to "显示控制栏",
+                "菜单键" to "字幕与音轨、字幕样式",
+                "返回键" to "收起控制栏 / 退出播放",
+            ) else if (isMusic) listOf(
                 "左右滑" to "推荐 / 歌曲 / 歌词",
                 "点一句歌词" to "跳到那里",
                 "♡" to "加入「我喜欢的音乐」",
@@ -656,11 +784,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             )
             Box(
                 Modifier.fillMaxSize().background(Color(0xCC000000))
-                    .clickable { tipsShown = true; tipsPrefs.edit().putBoolean(tipsKey, true).apply() },
+                    .clickable { dismissTips() },
                 contentAlignment = Alignment.Center,
             ) {
                 Column(Modifier.padding(32.dp)) {
-                    Text("手势操作", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+                    Text(if (tv && !isMusic) "遥控器操作" else "手势操作", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Medium)
                     Spacer(Modifier.height(16.dp))
                     tips.forEach { (gesture, effect) ->
                         Row(Modifier.padding(vertical = 6.dp)) {
@@ -669,7 +797,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         }
                     }
                     Spacer(Modifier.height(20.dp))
-                    Text("点任意处关闭", color = Color(0xFFAAAAAA), fontSize = 13.sp)
+                    Text(if (tv) "按任意键关闭" else "点任意处关闭", color = Color(0xFFAAAAAA), fontSize = 13.sp)
                 }
             }
         }
@@ -718,10 +846,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         }
 
         // ---- 更多菜单（右侧滑出） ----
-        if (showMore) Box(Modifier.fillMaxSize().clickable(onClick = { showMore = false }))
+        // 点空白处关闭；遥控器的焦点不落到这层上
+        if (showMore) Box(Modifier.fillMaxSize().focusProperties { canFocus = false }.clickable(onClick = { showMore = false }))
         AnimatedVisibility(
             showMore, enter = slideInHorizontally { it }, exit = slideOutHorizontally { it },
-            modifier = Modifier.align(Alignment.CenterEnd),
+            modifier = Modifier.align(Alignment.CenterEnd).focusRequester(moreFocus),
         ) {
             MorePanel(
                 state = state, audioOnly = audioOnly, repeatMode = player.repeatMode,
@@ -1085,7 +1214,7 @@ private fun SeekPreview(fraction: Float, image: android.graphics.Bitmap?, time: 
 @Composable
 private fun FrameButton(icon: ImageVector, label: String, onClick: () -> Unit) {
     Column(
-        Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 4.dp),
+        Modifier.tvFocusRing(RoundedCornerShape(8.dp), color = Color.White).clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Icon(icon, label, tint = Color.White, modifier = Modifier.size(24.dp))
@@ -1152,7 +1281,7 @@ private fun SeekBar(
 
 @Composable
 private fun BarButton(icon: ImageVector, label: String, onClick: () -> Unit) {
-    IconButton(onClick = onClick, modifier = Modifier.size(52.dp)) {
+    IconButton(onClick = onClick, modifier = Modifier.tvFocusRing(CircleShape, color = Color.White).size(52.dp)) {
         Icon(icon, label, tint = Color.White, modifier = Modifier.size(30.dp))
     }
 }

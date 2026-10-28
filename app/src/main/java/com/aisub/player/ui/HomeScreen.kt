@@ -34,6 +34,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.aspectRatio
@@ -161,6 +164,14 @@ fun HomeScreen(
     BackHandler(enabled = selected.isNotEmpty()) { selected = emptySet() }
     val toggle: (MediaEntry) -> Unit = { e -> selected = if (e.uri in selected) selected - e.uri else selected + e.uri }
     val openSettings = { nav.push(Screen.Settings) }
+    val wide = LocalWideLayout.current
+    val selectTab: (Tab) -> Unit = { t ->
+        lib.homeTab = t.ordinal
+        selected = emptySet()
+        searching = false
+        query = ""
+        barVisible = true
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -245,18 +256,13 @@ fun HomeScreen(
           Column {
             // 音乐在后台放着时的「正在播放」小条，放在标签栏上面，占自己的位置
             NowPlayingBar(main, bottomPadding = 4.dp, onOpen = { nav.push(Screen.Player) }, navigationBarInset = false)
-            AnimatedVisibility(barVisible, enter = slideInVertically { it }, exit = slideOutVertically { it }) {
+            // 电视、横屏平板：标签放在左侧竖栏（见下面），底部不放
+            if (!wide) AnimatedVisibility(barVisible, enter = slideInVertically { it }, exit = slideOutVertically { it }) {
                 NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest, tonalElevation = 0.dp) {
                     Tab.entries.forEach { t ->
                         NavigationBarItem(
                             selected = tab == t,
-                            onClick = {
-                                lib.homeTab = t.ordinal
-                                selected = emptySet()
-                                searching = false
-                                query = ""
-                                barVisible = true
-                            },
+                            onClick = { selectTab(t) },
                             icon = { Icon(t.icon, null) },
                             label = { Text(t.label) },
                             colors = NavigationBarItemDefaults.colors(
@@ -271,7 +277,27 @@ fun HomeScreen(
           }
         },
     ) { padding ->
-        Box(Modifier.padding(padding).fillMaxSize().nestedScroll(scrollWatcher)) {
+      Row(Modifier.padding(padding).fillMaxSize()) {
+        if (wide) {
+            NavigationRail(containerColor = MaterialTheme.colorScheme.background, modifier = Modifier.padding(end = 8.dp)) {
+                Spacer(Modifier.weight(1f))
+                Tab.entries.forEach { t ->
+                    NavigationRailItem(
+                        selected = tab == t,
+                        onClick = { selectTab(t) },
+                        icon = { Icon(t.icon, null) },
+                        label = { Text(t.label) },
+                        colors = NavigationRailItemDefaults.colors(
+                            selectedIconColor = MaterialTheme.colorScheme.primary,
+                            selectedTextColor = MaterialTheme.colorScheme.primary,
+                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                        ),
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+            }
+        }
+        Box(Modifier.weight(1f).fillMaxSize().nestedScroll(scrollWatcher)) {
             val openServer: (Server) -> Unit = { s ->
                 // Plex、Emby / Jellyfin 用官方客户端那样的首页；首页菜单里还能切回按文件夹浏览
                 if (s.type == ServerType.PLEX || s.type == ServerType.EMBY) nav.push(Screen.ServerHome(s.id, s.name))
@@ -338,6 +364,7 @@ fun HomeScreen(
                 )
             }
         }
+      }
     }
 
     when (val d = dialog) {
@@ -452,7 +479,7 @@ private fun MediaTab(
     }?.takeIf { q.isEmpty() }
 
     if (isVideo && state.videoGrid) {
-        LazyVerticalGrid(GridCells.Adaptive(160.dp), state = gridState, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+        LazyVerticalGrid(GridCells.Adaptive(if (LocalTv.current) 200.dp else 160.dp), state = gridState, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
             if (resume != null) item(span = { GridItemSpan(maxLineSpan) }) { ResumeCard(resume) { play(listOf(resume.entry), 0) } }
             itemsIndexed(list, key = { _, e -> e.uri }) { i, e ->
                 VideoCard(e, menu(e), selected = if (selecting) e.uri in selected else null, onLongClick = { onToggle(e) }) {
@@ -479,7 +506,7 @@ private fun ResumeCard(item: HistoryItem, onClick: () -> Unit) {
         onClick = onClick,
         color = MaterialTheme.colorScheme.primaryContainer,
         shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp).tvFocusRing(MaterialTheme.shapes.large),
     ) {
         Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
             MediaThumbnail(item.entry, Modifier.size(width = 96.dp, height = 54.dp).clip(MaterialTheme.shapes.small))
@@ -524,11 +551,12 @@ private fun BrowseTab(
                 }
             } + Card(AppIcons.File, "选择文件…", "系统文件选择器", pickFile)
         }
-        // 两列网格
-        cards.chunked(2).forEach { row ->
+        // 两列网格（大屏四列）
+        val columns = if (LocalWideLayout.current) 4 else 2
+        cards.chunked(columns).forEach { row ->
             Row(Modifier.padding(horizontal = 16.dp, vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 row.forEach { c -> SourceCard(c.icon, c.title, c.subtitle, Modifier.weight(1f), c.onClick) }
-                if (row.size == 1) Spacer(Modifier.weight(1f))
+                repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
             }
         }
 
@@ -662,7 +690,7 @@ private fun HomeTab(
 /** 「继续观看」卡片：横版画面 + 进度条 + 名字 */
 @Composable
 private fun ResumeTile(item: HistoryItem, onClick: () -> Unit) {
-    Column(Modifier.width(180.dp).clip(MaterialTheme.shapes.medium).clickable(onClick = onClick)) {
+    Column(Modifier.width(180.dp).tvFocusRing(MaterialTheme.shapes.medium, scale = true).clip(MaterialTheme.shapes.medium).clickable(onClick = onClick)) {
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(MaterialTheme.shapes.medium)) {
             MediaThumbnail(item.entry, Modifier.fillMaxSize())
             val d = item.entry.durationMs
