@@ -15,11 +15,13 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -109,8 +111,6 @@ import com.aisub.player.media.MediaEntry
 import com.aisub.player.music.LyricLine
 import com.aisub.player.music.Lyrics
 import com.aisub.player.music.MusicState
-import com.aisub.player.music.RelatedSong
-import com.aisub.player.music.RelatedSongs
 import com.aisub.player.music.SongCandidate
 import com.aisub.player.subtitle.Cue
 import kotlinx.coroutines.Dispatchers
@@ -128,6 +128,9 @@ enum class MusicAction {
 private val Dim = Color(0x99FFFFFF)
 private val Faint = Color(0x66FFFFFF)
 private val SheetColor = Color(0xFF2B2E2D)
+
+/** 上方两页：0 歌曲（唱片），1 歌词 */
+private const val LYRICS_PAGE = 1
 
 /**
  * 播放音乐时的整页：上面「推荐 / 歌曲 / 歌词」三页左右滑，
@@ -152,7 +155,8 @@ fun MusicView(
     val tags = music.tags ?: return
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     val scope = rememberCoroutineScope()
-    val pager = rememberPagerState(initialPage = 1) { 3 }
+    val pager = rememberPagerState(initialPage = 0) { 2 }
+    val onLyricsPage = pager.currentPage == LYRICS_PAGE
     var showQueue by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var liked by remember(current?.uri) { mutableStateOf(current?.let { vm.isLiked(it.uri) } == true) }
@@ -172,7 +176,7 @@ fun MusicView(
     var controlsShown by remember { mutableStateOf(true) }
     LaunchedEffect(pager.currentPage, touches, landscape, showMenu, showQueue) {
         controlsShown = true
-        if (pager.currentPage == 2 && !landscape && !showMenu && !showQueue) {
+        if (onLyricsPage && !landscape && !showMenu && !showQueue) {
             delay(4_000)
             controlsShown = false
         }
@@ -181,10 +185,18 @@ fun MusicView(
     Box(
         Modifier.fillMaxSize().background(Color(0xFF1E201F))
             .pointerInput(Unit) {
-                // 只观察按下，不消费，歌词的点击、滑动照常
+                // 只观察、不消费，歌词的点击、滑动照常。轻点才算操作（重新显示控件）；
+                // 拖着歌词滑动不算，免得一滑控件就冒出来
                 awaitEachGesture {
-                    awaitPointerEvent(PointerEventPass.Initial)
-                    touches++
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    var dragged = false
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if ((change.position - down.position).getDistance() > viewConfiguration.touchSlop) dragged = true
+                        if (!change.pressed) break
+                    }
+                    if (!dragged) touches++
                 }
             }
             .pointerInput(Unit) { detectTapGestures { } },
@@ -194,12 +206,12 @@ fun MusicView(
             Column(mod) {
                 TopTabs(pager.currentPage, onBack) { scope.launch { pager.animateScrollToPage(it) } }
                 HorizontalPager(pager, Modifier.weight(1f).fillMaxWidth(), beyondViewportPageCount = 1) { page ->
-                    when (page) {
-                        0 -> RecommendPage(vm, music, current, onMessage)
-                        1 -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    if (page == LYRICS_PAGE) {
+                        LyricsPage(vm, music, lyrics, translations, positionMs, onSeek, onAction, onMessage, toolsShown = controlsShown)
+                    } else {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Vinyl(music, wantsPlay, Modifier.fillMaxWidth(if (landscape) 0.62f else 0.84f).widthIn(max = 420.dp))
                         }
-                        else -> LyricsPage(vm, music, lyrics, translations, positionMs, onSeek, onAction, onMessage)
                     }
                 }
             }
@@ -208,7 +220,7 @@ fun MusicView(
             Column(mod) {
                 SongTitleRow(tags.title, listOfNotNull(tags.artist, tags.album).joinToString(" - "), liked, toggleLike) { showMenu = true }
                 // 歌词页以外，在歌名下面显示正在唱的一句
-                val line = lyrics?.takeIf { it.synced && pager.currentPage != 2 }?.let { l -> l.lines.getOrNull(l.indexAt(positionMs))?.text }
+                val line = lyrics?.takeIf { it.synced && !onLyricsPage }?.let { l -> l.lines.getOrNull(l.indexAt(positionMs))?.text }
                 if (line != null && !landscape) Text(
                     line.ifEmpty { "♪" }, color = Color(0xCCFFFFFF), fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 14.dp),
@@ -266,7 +278,7 @@ private fun TopTabs(page: Int, onBack: () -> Unit, onSelect: (Int) -> Unit) {
             Icon(AppIcons.ExpandMore, "返回", tint = Color.White, modifier = Modifier.size(30.dp))
         }
         Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(28.dp)) {
-            listOf("推荐", "歌曲", "歌词").forEachIndexed { i, label ->
+            listOf("歌曲", "歌词").forEachIndexed { i, label ->
                 Text(
                     label, color = if (i == page) Color.White else Dim, fontSize = 18.sp,
                     fontWeight = if (i == page) FontWeight.Medium else FontWeight.Normal,
@@ -323,8 +335,15 @@ private fun Vinyl(music: MusicState, playing: Boolean, modifier: Modifier) {
 private fun SongTitleRow(title: String, subtitle: String, liked: Boolean, onLike: () -> Unit, onMenu: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(start = 32.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text(title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (subtitle.isNotEmpty()) Text(subtitle, color = Dim, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp))
+            // 放不下时来回滚动显示全名（只在放不下时才动）
+            Text(
+                title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1,
+                modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE, initialDelayMillis = 1_500, repeatDelayMillis = 2_000),
+            )
+            if (subtitle.isNotEmpty()) Text(
+                subtitle, color = Dim, fontSize = 15.sp, maxLines = 1,
+                modifier = Modifier.padding(top = 4.dp).basicMarquee(iterations = Int.MAX_VALUE, initialDelayMillis = 1_500, repeatDelayMillis = 2_000),
+            )
         }
         IconButton(onClick = onLike) {
             Icon(if (liked) AppIcons.Favorite else AppIcons.FavoriteBorder, if (liked) "取消喜欢" else "喜欢", tint = if (liked) Color(0xFFFF5A6E) else Color.White, modifier = Modifier.size(26.dp))
@@ -438,57 +457,6 @@ private fun PlayControls(vm: MainViewModel, player: Player, wantsPlay: Boolean, 
     }
 }
 
-// ---------------- 推荐：同一专辑、同一歌手 ----------------
-
-@Composable
-private fun RecommendPage(vm: MainViewModel, music: MusicState, current: MediaEntry?, onMessage: (String) -> Unit) {
-    val context = LocalContext.current
-    val tags = music.tags
-    val uri = current?.uri.orEmpty()
-    val related by produceState<Pair<List<RelatedSong>, List<RelatedSong>>?>(null, uri, tags?.artist, tags?.album) {
-        value = withContext(Dispatchers.IO) {
-            RelatedSongs.sameAlbum(context, tags?.album, tags?.artist, uri) to
-                RelatedSongs.sameArtist(context, tags?.artist, uri, excludeAlbum = tags?.album)
-        }
-    }
-    val (album, artist) = related ?: (emptyList<RelatedSong>() to emptyList())
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
-        item { SectionTitle(tags?.album?.let { "同一专辑《$it》" } ?: "同一专辑") }
-        if (album.isEmpty()) item { EmptyHint(if (related == null) "正在查找…" else "暂无数据") }
-        items(album, key = { "al" + it.entry.uri }) { s -> SongRow(s, vm, onMessage) }
-        item { SectionTitle(tags?.artist?.let { "$it 的其他歌" } ?: "同一歌手") }
-        if (artist.isEmpty()) item { EmptyHint(if (related == null) "正在查找…" else "暂无数据") }
-        items(artist, key = { "ar" + it.entry.uri }) { s -> SongRow(s, vm, onMessage) }
-    }
-}
-
-@Composable
-private fun SectionTitle(text: String) =
-    Text(text, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
-        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 10.dp))
-
-@Composable
-private fun EmptyHint(text: String) =
-    Text(text, color = Dim, fontSize = 15.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(vertical = 22.dp))
-
-@Composable
-private fun SongRow(s: RelatedSong, vm: MainViewModel, onMessage: (String) -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clickable { vm.playFromRecommend(s.entry) }.padding(start = 28.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        MediaThumbnail(s.entry, Modifier.size(52.dp).clip(RoundedCornerShape(6.dp)))
-        Spacer(Modifier.width(16.dp))
-        Column(Modifier.weight(1f)) {
-            Text(s.title, color = Color.White, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(listOf(s.artist, s.album).filter { it.isNotBlank() }.joinToString(" - "), color = Dim, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        IconButton(onClick = { vm.playFromRecommend(s.entry, playNow = false); onMessage("下一首播放") }) {
-            Icon(AppIcons.PlaylistAdd, "下一首播放", tint = Dim)
-        }
-    }
-}
-
 // ---------------- 歌词 ----------------
 
 @Composable
@@ -501,6 +469,8 @@ private fun LyricsPage(
     onSeek: (Long) -> Unit,
     onAction: (MusicAction) -> Unit,
     onMessage: (String) -> Unit,
+    /** 下方控件淡出时，LRC、音量这一行也一起收起 */
+    toolsShown: Boolean,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -533,36 +503,43 @@ private fun LyricsPage(
                 TextButton(onClick = { adjusting = false }) { Text("完成", color = Color.White) }
             }
         }
-        Row(Modifier.padding(start = 28.dp, top = 4.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-            var menu by remember { mutableStateOf(false) }
-            Box {
-                Text(
-                    "LRC", color = Color(0xCCFFFFFF), fontSize = 13.sp,
-                    modifier = Modifier.clip(RoundedCornerShape(4.dp)).border(1.dp, Dim, RoundedCornerShape(4.dp))
-                        .clickable { menu = true }.padding(horizontal = 6.dp, vertical = 4.dp),
-                )
-                DropdownMenu(menu, onDismissRequest = { menu = false }, containerColor = Color(0xFF2E2E2E)) {
-                    val own = music.lyrics
-                    MenuRow("调整歌词", AppIcons.SwapVert, enabled = own?.synced == true) { menu = false; adjusting = true }
-                    when {
-                        music.translating -> MenuRow("正在翻译…", AppIcons.Translate, enabled = false) {}
-                        music.translations != null -> MenuRow("隐藏翻译", AppIcons.Translate) { menu = false; vm.music.clearTranslations() }
-                        else -> MenuRow("生成翻译", AppIcons.Translate, enabled = own != null) {
-                            menu = false
-                            onMessage("正在翻译歌词…")
-                            scope.launch { vm.music.translateLyrics()?.let(onMessage) }
+        var menu by remember { mutableStateOf(false) }
+        // 菜单开着、正在调整歌词时不收起
+        AnimatedVisibility(
+            toolsShown || menu || adjusting,
+            enter = fadeIn(tween(250)) + expandVertically(tween(250)),
+            exit = fadeOut(tween(800)) + shrinkVertically(tween(800)),
+        ) {
+            Row(Modifier.padding(start = 28.dp, top = 4.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box {
+                    Text(
+                        "LRC", color = Color(0xCCFFFFFF), fontSize = 13.sp,
+                        modifier = Modifier.clip(RoundedCornerShape(4.dp)).border(1.dp, Dim, RoundedCornerShape(4.dp))
+                            .clickable { menu = true }.padding(horizontal = 6.dp, vertical = 4.dp),
+                    )
+                    DropdownMenu(menu, onDismissRequest = { menu = false }, containerColor = Color(0xFF2E2E2E)) {
+                        val own = music.lyrics
+                        MenuRow("调整歌词", AppIcons.SwapVert, enabled = own?.synced == true) { menu = false; adjusting = true }
+                        when {
+                            music.translating -> MenuRow("正在翻译…", AppIcons.Translate, enabled = false) {}
+                            music.translations != null -> MenuRow("隐藏翻译", AppIcons.Translate) { menu = false; vm.music.clearTranslations() }
+                            else -> MenuRow("生成翻译", AppIcons.Translate, enabled = own != null) {
+                                menu = false
+                                onMessage("正在翻译歌词…")
+                                scope.launch { vm.music.translateLyrics()?.let(onMessage) }
+                            }
                         }
+                        MenuRow("切换歌词", AppIcons.Search) { menu = false; onAction(MusicAction.SEARCH_LYRICS) }
+                        MenuRow("导入歌词文件", AppIcons.File) { menu = false; onAction(MusicAction.IMPORT_LYRICS) }
                     }
-                    MenuRow("切换歌词", AppIcons.Search) { menu = false; onAction(MusicAction.SEARCH_LYRICS) }
-                    MenuRow("导入歌词文件", AppIcons.File) { menu = false; onAction(MusicAction.IMPORT_LYRICS) }
                 }
+                Spacer(Modifier.width(16.dp))
+                IconButton(onClick = {
+                    // 系统音量条
+                    (context.getSystemService(Context.AUDIO_SERVICE) as AudioManager)
+                        .adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_SAME, AudioManager.FLAG_SHOW_UI)
+                }) { Icon(AppIcons.Volume, "音量", tint = Color(0xCCFFFFFF)) }
             }
-            Spacer(Modifier.width(16.dp))
-            IconButton(onClick = {
-                // 系统音量条
-                (context.getSystemService(Context.AUDIO_SERVICE) as AudioManager)
-                    .adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_SAME, AudioManager.FLAG_SHOW_UI)
-            }) { Icon(AppIcons.Volume, "音量", tint = Color(0xCCFFFFFF)) }
         }
     }
 }

@@ -21,6 +21,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.extractor.DefaultExtractorsFactory
+import com.aisub.player.media.withAiff
 import io.github.peerless2012.ass.media.AssHandler
 import io.github.peerless2012.ass.media.kt.withAssMkvSupport
 import io.github.peerless2012.ass.media.kt.withAssSupport
@@ -152,7 +153,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 默认播放内核 */
     val exoPlayer: ExoPlayer = run {
         val assParsers = AssSubtitleParserFactory(assHandler)
-        val sources = DefaultMediaSourceFactory(authDataSourceFactory(app), DefaultExtractorsFactory().withAssMkvSupport(assParsers, assHandler))
+        val sources = DefaultMediaSourceFactory(authDataSourceFactory(app), DefaultExtractorsFactory().withAssMkvSupport(assParsers, assHandler).withAiff())
         sources.setSubtitleParserFactory(assParsers)
         ExoPlayer.Builder(app)
             .setRenderersFactory(renderersFactory(app).withAssSupport(assHandler))
@@ -553,7 +554,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         ServerProgress.find(e.uri)?.let { p ->
             return p.viewOffsetMs.takeIf { it > 0 && (p.durationMs <= 0 || it < p.durationMs - 10_000) } ?: 0L
         }
-        return library.positionOf(e.uri).takeIf { e.durationMs <= 0 || it < e.durationMs - 10_000 } ?: 0L
+        // 媒体库没给时长（例如 AIFF）时用上次播放时记下的，不然听完的歌会从结尾续播、马上结束
+        val saved = library.history().firstOrNull { it.entry.uri == e.uri } ?: return 0L
+        val duration = e.durationMs.takeIf { it > 0 } ?: saved.entry.durationMs
+        return saved.positionMs.takeIf { duration <= 0 || it < duration - 10_000 } ?: 0L
     }
 
     // ---- 媒体服务器（Plex、Emby / Jellyfin）：把播放进度报给服务器，官方客户端里的「继续观看」「已看」跟着更新 ----
@@ -1284,24 +1288,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (usingVlc || index !in queue.indices || queue.size <= 1) return
         queue = queue.toMutableList().also { it.removeAt(index) }
         exoPlayer.removeMediaItem(index)
-    }
-
-    /**
-     * 播放页「推荐」里点的歌：插到正在放的这首后面并马上播放（已在队列里就直接切过去）。
-     * playNow 为 false 时只排到下一首。
-     */
-    fun playFromRecommend(entry: MediaEntry, playNow: Boolean = true) {
-        if (usingVlc) return
-        val existing = queue.indexOfFirst { it.uri == entry.uri }
-        if (existing >= 0 && playNow) {
-            playQueueIndex(existing)
-            return
-        }
-        if (existing >= 0) removeQueueIndex(existing)
-        val at = (exoPlayer.currentMediaItemIndex + 1).coerceIn(0, queue.size)
-        queue = queue.toMutableList().also { it.add(at, entry) }
-        exoPlayer.addMediaItem(at, itemOf(entry))
-        if (playNow) playQueueIndex(at)
     }
 
     // ---- 「我喜欢」：存成一个普通的播放列表，在首页的播放列表里也能看到 ----

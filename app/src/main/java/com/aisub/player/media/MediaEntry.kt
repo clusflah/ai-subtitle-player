@@ -48,7 +48,7 @@ data class MediaEntry(
             "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts", "m2ts", "mts",
             "rmvb", "rm", "3gp", "mpg", "mpeg", "vob", "iso",
         )
-        private val AUDIO_EXT = setOf("mp3", "flac", "aac", "m4a", "wav", "ogg", "opus", "wma", "ape", "alac", "dsf")
+        private val AUDIO_EXT = setOf("mp3", "flac", "aac", "m4a", "wav", "aif", "aiff", "aifc", "ogg", "opus", "wma", "ape", "alac", "dsf")
 
         fun isVideoName(name: String) = name.substringAfterLast('.', "").lowercase() in VIDEO_EXT
         fun isAudioName(name: String) = name.substringAfterLast('.', "").lowercase() in AUDIO_EXT
