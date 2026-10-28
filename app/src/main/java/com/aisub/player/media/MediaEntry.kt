@@ -19,6 +19,9 @@ data class MediaEntry(
     /** 显示用的名字：去掉 .mkv、.mp3 这类扩展名 */
     val displayTitle: String get() = if (isMediaName(title)) title.substringBeforeLast('.') else title
 
+    /** 音乐（音频文件）；直播即使只有声音也归到视频那边 */
+    val isMusic: Boolean get() = !isVideo && !isLive
+
     fun toJson(): JSONObject = JSONObject()
         .put("uri", uri)
         .put("title", title)

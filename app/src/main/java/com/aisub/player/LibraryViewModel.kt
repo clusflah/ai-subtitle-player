@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aisub.player.media.AppStore
+import com.aisub.player.media.FavoriteFolder
 import com.aisub.player.media.HistoryItem
 import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.MediaLibrary
@@ -34,6 +35,7 @@ data class LibraryState(
     val audios: List<MediaEntry> = emptyList(),
     val history: List<HistoryItem> = emptyList(),
     val playlists: List<Playlist> = emptyList(),
+    val favoriteFolders: List<FavoriteFolder> = emptyList(),
     val servers: List<Server> = emptyList(),
     val videoSort: SortOrder = SortOrder.RECENT,
     val audioSort: SortOrder = SortOrder.RECENT,
@@ -122,12 +124,30 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 历史、播放列表、服务器存在本地，回到首页时重新读一次。 */
     fun reloadStored() {
-        _state.update { it.copy(history = store.history(), playlists = store.playlists(), servers = store.servers()) }
+        _state.update {
+            it.copy(history = store.history(), playlists = store.playlists(), favoriteFolders = store.favoriteFolders(), servers = store.servers())
+        }
     }
 
-    fun clearHistory() {
-        store.clearHistory()
+    fun clearHistory(music: Boolean) {
+        store.clearHistory(music)
         reloadStored()
+    }
+
+    // ---- 收藏的文件夹 ----
+
+    fun isFavoriteFolder(serverId: String?, path: String) = _state.value.favoriteFolders.any { it.serverId == serverId && it.path == path }
+
+    /** 收藏或取消收藏；返回之后是否处于收藏状态 */
+    fun toggleFavoriteFolder(serverId: String?, path: String, title: String): Boolean {
+        val list = store.favoriteFolders()
+        val exists = list.any { it.serverId == serverId && it.path == path }
+        store.saveFavoriteFolders(
+            if (exists) list.filter { !(it.serverId == serverId && it.path == path) }
+            else listOf(FavoriteFolder(serverId, path, title, System.currentTimeMillis())) + list,
+        )
+        reloadStored()
+        return !exists
     }
 
     // ---- 播放列表 ----

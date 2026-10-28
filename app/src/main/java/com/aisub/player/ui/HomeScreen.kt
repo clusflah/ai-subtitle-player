@@ -82,6 +82,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aisub.player.LibraryState
 import com.aisub.player.LibraryViewModel
 import com.aisub.player.MainViewModel
+import com.aisub.player.media.FavoriteFolder
 import com.aisub.player.media.HistoryItem
 import com.aisub.player.media.LocalBrowser
 import com.aisub.player.media.MediaEntry
@@ -308,6 +309,10 @@ fun HomeScreen(
                     lib, state, play,
                     openServer = openServer,
                     openServerItem = { s, item -> nav.push(Screen.ServerDetail(s.id, item.ratingKey)) },
+                    openFavorite = { f ->
+                        if (f.serverId == null) nav.push(Screen.LocalFolder(f.path, f.title))
+                        else nav.push(Screen.Remote(f.serverId, f.path, f.title))
+                    },
                     goLocal = { lib.homeTab = Tab.LOCAL.ordinal },
                     goBrowse = { lib.homeTab = Tab.BROWSE.ordinal },
                     addSource = { dialog = HomeDialog.AddSource },
@@ -354,8 +359,9 @@ fun HomeScreen(
                     onSettings = openSettings,
                     onAbout = { dialog = HomeDialog.About },
                     onLink = if (main.linkDownloader != null) ({ dialog = HomeDialog.Link }) else null,
-                    onHistory = { nav.push(Screen.History) },
+                    onHistory = { music -> nav.push(Screen.History(music)) },
                     onPlayHistory = { item -> play(listOf(item.entry), 0) },
+                    onPlayMusic = play,
                     onOpenPlaylist = { nav.push(Screen.PlaylistDetail(it.id)) },
                     onPlayPlaylist = { p -> if (p.items.isNotEmpty()) play(p.items, 0) },
                     onNewPlaylist = { dialog = HomeDialog.NewPlaylist },
@@ -633,6 +639,7 @@ private fun HomeTab(
     play: (List<MediaEntry>, Int) -> Unit,
     openServer: (Server) -> Unit,
     openServerItem: (Server, com.aisub.player.remote.cloud.ServerItem) -> Unit,
+    openFavorite: (FavoriteFolder) -> Unit,
     goLocal: () -> Unit,
     goBrowse: () -> Unit,
     addSource: () -> Unit,
@@ -643,16 +650,46 @@ private fun HomeTab(
         val serverIds = mediaServers.map { it.id }.toSet()
         state.history.filter { h ->
             val fromServer = h.entry.uri.startsWith("cloud://") && android.net.Uri.parse(h.entry.uri).host in serverIds
-            !fromServer && !h.entry.isLive && h.positionMs > 10_000 && (h.entry.durationMs <= 0 || h.positionMs < h.entry.durationMs - 30_000)
+            !fromServer && !h.entry.isLive && !h.entry.isMusic && h.positionMs > 10_000 &&
+                (h.entry.durationMs <= 0 || h.positionMs < h.entry.durationMs - 30_000)
         }.take(12)
     }
+    // 继续收听：最近听的歌，点一首从它开始连着放；没听完的从上次的位置接着放
+    val recentSongs = remember(state.history) { state.history.filter { it.entry.isMusic }.take(12) }
     val recentVideos = remember(state.videos) { state.videos.sortedBy(SortOrder.RECENT).take(12) }
+    // 服务器删掉后它的收藏也不显示
+    val favorites = remember(state.favoriteFolders, state.servers) {
+        state.favoriteFolders.filter { f -> f.serverId == null || state.servers.any { it.id == f.serverId } }
+    }
     LazyColumn(state = lib.listState("home"), contentPadding = PaddingValues(bottom = 24.dp)) {
         if (resume.isNotEmpty()) {
             item { SectionHeader("继续观看") }
             item {
                 LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     items(resume, key = { it.entry.uri }) { h -> ResumeTile(h) { play(listOf(h.entry), 0) } }
+                }
+            }
+        }
+        if (recentSongs.isNotEmpty()) {
+            item { SectionHeader("继续收听") }
+            item {
+                val songs = recentSongs.map { it.entry }
+                LazyRow(contentPadding = PaddingValues(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    itemsIndexed(recentSongs, key = { _, h -> h.entry.uri }) { i, h -> SongTile(h.entry, h.positionMs) { play(songs, i) } }
+                }
+            }
+        }
+        if (favorites.isNotEmpty()) {
+            item { SectionHeader("收藏的文件夹") }
+            item {
+                LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(favorites, key = { it.key }) { f ->
+                        val source = f.serverId?.let { id -> state.servers.firstOrNull { it.id == id }?.name } ?: "本机"
+                        FavoriteFolderTile(
+                            f, source,
+                            onRemove = { lib.toggleFavoriteFolder(f.serverId, f.path, f.title) },
+                        ) { openFavorite(f) }
+                    }
                 }
             }
         }
@@ -667,7 +704,7 @@ private fun HomeTab(
                 }
             }
         }
-        if (resume.isEmpty() && mediaServers.isEmpty() && recentVideos.isEmpty()) item {
+        if (resume.isEmpty() && recentSongs.isEmpty() && favorites.isEmpty() && mediaServers.isEmpty() && recentVideos.isEmpty()) item {
             Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 IconBadge(AppIcons.Movie, size = 72.dp)
                 Spacer(Modifier.height(16.dp))
@@ -684,6 +721,45 @@ private fun HomeTab(
                 }
             }
         }
+    }
+}
+
+/** 首页「收藏的文件夹」卡片：文件夹名 + 来源（本机或服务器名），「⋮」里取消收藏 */
+@Composable
+private fun FavoriteFolderTile(folder: FavoriteFolder, source: String, onRemove: () -> Unit, onClick: () -> Unit) {
+    Row(
+        Modifier.width(200.dp).tvFocusRing(MaterialTheme.shapes.medium, scale = true).clip(MaterialTheme.shapes.medium)
+            .background(MaterialTheme.colorScheme.surfaceContainer).clickable(onClick = onClick)
+            .padding(start = 12.dp, top = 10.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(AppIcons.Folder, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
+        Column(Modifier.weight(1f).padding(start = 10.dp)) {
+            Text(folder.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+            Text(source, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        OverflowMenu(listOf(MenuAction("取消收藏", onClick = onRemove)), compact = true)
+    }
+}
+
+/** 歌曲卡片（首页继续收听、我的 → 最近听过的音乐）：方形封面 + 歌名；positionMs 为没听完时的进度 */
+@Composable
+private fun SongTile(entry: MediaEntry, positionMs: Long = 0, onClick: () -> Unit) {
+    Column(Modifier.width(110.dp).tvFocusRing(MaterialTheme.shapes.medium, scale = true).clip(MaterialTheme.shapes.medium).clickable(onClick = onClick)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(MaterialTheme.shapes.medium)) {
+            MediaThumbnail(entry, Modifier.fillMaxSize())
+            val d = entry.durationMs
+            if (d > 0 && positionMs > 5_000 && positionMs < d - 10_000) {
+                Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color(0x66000000))) {
+                    Box(Modifier.fillMaxWidth(positionMs.toFloat() / d).height(3.dp).background(Orange))
+                }
+            }
+        }
+        // 留出左右边距，不被卡片的圆角裁掉
+        Text(
+            entry.displayTitle, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        )
     }
 }
 
@@ -743,8 +819,10 @@ private fun MeTab(
     onSettings: () -> Unit,
     onAbout: () -> Unit,
     onLink: (() -> Unit)?,
-    onHistory: () -> Unit,
+    /** 参数：true 打开音乐的最近播放，false 打开视频的 */
+    onHistory: (Boolean) -> Unit,
     onPlayHistory: (HistoryItem) -> Unit,
+    onPlayMusic: (List<MediaEntry>, Int) -> Unit,
     onOpenPlaylist: (Playlist) -> Unit,
     onPlayPlaylist: (Playlist) -> Unit,
     onNewPlaylist: () -> Unit,
@@ -778,17 +856,33 @@ private fun MeTab(
             }
         }
 
-        SectionHeader("最近播放", actionLabel = if (state.history.isNotEmpty()) "全部" else null, onAction = onHistory)
-        if (state.history.isEmpty()) {
+        // 视频和音乐的最近播放分开放
+        val videoHistory = remember(state.history) { state.history.filter { !it.entry.isMusic } }
+        val musicHistory = remember(state.history) { state.history.filter { it.entry.isMusic } }
+        SectionHeader("最近看过的视频", actionLabel = if (videoHistory.isNotEmpty()) "全部" else null, onAction = { onHistory(false) })
+        if (videoHistory.isEmpty()) {
             Text(
-                "还没有播放记录", color = MaterialTheme.colorScheme.onSurfaceVariant,
+                "还没有看过的视频", color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 20.dp),
             )
         } else {
             LazyRow(contentPadding = PaddingValues(horizontal = 10.dp)) {
-                items(state.history.take(10), key = { it.entry.uri }) { h ->
+                items(videoHistory.take(10), key = { it.entry.uri }) { h ->
                     Box(Modifier.width(170.dp)) { VideoCard(h.entry, emptyList()) { onPlayHistory(h) } }
                 }
+            }
+        }
+
+        SectionHeader("最近听过的音乐", actionLabel = if (musicHistory.isNotEmpty()) "全部" else null, onAction = { onHistory(true) })
+        if (musicHistory.isEmpty()) {
+            Text(
+                "还没有听过的音乐", color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 20.dp),
+            )
+        } else {
+            val songs = musicHistory.take(20).map { it.entry }
+            LazyRow(contentPadding = PaddingValues(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                itemsIndexed(songs, key = { _, e -> e.uri }) { i, e -> SongTile(e) { onPlayMusic(songs, i) } }
             }
         }
 
