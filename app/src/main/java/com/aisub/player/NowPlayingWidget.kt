@@ -149,8 +149,8 @@ class NowPlayingWidget : AppWidgetProvider() {
             handler.postDelayed(nextLine, ((next - pos) / speed).toLong().coerceAtLeast(100))
         }
 
-        private fun artistOf(p: Player): String =
-            listOfNotNull(p.mediaMetadata.artist, p.mediaMetadata.albumTitle).filter { it.isNotBlank() }.joinToString(" · ")
+        /** 小组件那行窄，只放歌手，不带专辑 */
+        private fun artistOf(p: Player): String = p.mediaMetadata.artist?.toString()?.trim().orEmpty()
 
         private fun views(context: Context): RemoteViews {
             val v = RemoteViews(context.packageName, R.layout.widget_now_playing)
