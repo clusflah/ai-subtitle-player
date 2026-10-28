@@ -305,6 +305,7 @@ class MusicFeatures(
         }
         if (bitmap != null) {
             _state.update { it.copy(cover = bitmap, coverSource = source) }
+            withContext(Dispatchers.IO) { saveThumb(app, e.uri, bitmap) }
             return
         }
         if (!settings().musicOnlineLookup) return
@@ -343,9 +344,24 @@ class MusicFeatures(
     private fun coverFile(e: MediaEntry) = File(coverDir, key(e) + ".img")
 
     companion object {
-        /** 列表、最近播放里的歌曲封面：在线找到或手动选过的，没有就用系统媒体库的（内嵌或文件夹封面） */
+        private fun thumbFile(context: android.content.Context, key: String) = File(File(context.cacheDir, "song-thumbs"), "$key.jpg")
+
+        private fun keyOf(uri: String) = MessageDigest.getInstance("SHA-1").digest(uri.toByteArray()).joinToString("") { "%02x".format(it) }
+
+        /** 播放时找到的封面（内嵌、文件夹）存一张小图，最近播放等列表里直接用 */
+        private fun saveThumb(context: android.content.Context, uri: String, bitmap: Bitmap) = runCatching {
+            val f = thumbFile(context, keyOf(uri)).apply { parentFile?.mkdirs() }
+            val scale = 300f / maxOf(bitmap.width, bitmap.height)
+            val small = if (scale < 1f) Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true) else bitmap
+            f.outputStream().use { small.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+        }
+
+        /**
+         * 列表、最近播放里的歌曲封面：在线找到或手动选过的 → 播放时存下的小图 → 系统媒体库的（内嵌或文件夹封面）
+         * → 直接读文件里内嵌的封面（不在媒体库里的文件，例如从文件管理器打开的）。都没有返回 null，界面显示音乐图标。
+         */
         fun thumbnail(context: android.content.Context, uri: String, maxPx: Int = 300): Bitmap? {
-            val key = MessageDigest.getInstance("SHA-1").digest(uri.toByteArray()).joinToString("") { "%02x".format(it) }
+            val key = keyOf(uri)
             val file = File(File(context.filesDir, "covers"), "$key.img")
             if (file.exists()) {
                 val bytes = runCatching { file.readBytes() }.getOrNull()
@@ -357,8 +373,28 @@ class MusicFeatures(
                     BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })?.let { return it }
                 }
             }
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || !uri.startsWith("content://media/")) return null
-            return runCatching { context.contentResolver.loadThumbnail(Uri.parse(uri), Size(maxPx, maxPx), null) }.getOrNull()
+            thumbFile(context, key).takeIf { it.exists() }?.let { f -> BitmapFactory.decodeFile(f.path)?.let { return it } }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && uri.startsWith("content://media/")) {
+                runCatching { context.contentResolver.loadThumbnail(Uri.parse(uri), Size(maxPx, maxPx), null) }.getOrNull()?.let { return it }
+            }
+            if (!uri.startsWith("content://") && !uri.startsWith("file://")) return null
+            val art = runCatching {
+                android.media.MediaMetadataRetriever().run {
+                    try {
+                        setDataSource(context, Uri.parse(uri))
+                        embeddedPicture
+                    } finally {
+                        release()
+                    }
+                }
+            }.getOrNull() ?: return null
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(art, 0, art.size, opts)
+            var sample = 1
+            while (maxOf(opts.outWidth, opts.outHeight) / (sample * 2) >= maxPx) sample *= 2
+            val bitmap = BitmapFactory.decodeByteArray(art, 0, art.size, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return null
+            saveThumb(context, uri, bitmap)
+            return bitmap
         }
     }
 
