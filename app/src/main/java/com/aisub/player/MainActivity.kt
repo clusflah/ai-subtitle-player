@@ -81,6 +81,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         // 有新版本时提示（一天最多查一次）
         com.aisub.player.update.appUpdater.autoCheck(this)
+        // 小组件在后台放着歌：界面接着放（先于 handleIntent，点通知栏进来时能直接打开播放页）
+        main.resumeWidgetPlayback()
         if (savedInstanceState == null) handleIntent(intent)
 
         setContent { ProvideScreenClass {

@@ -14,8 +14,10 @@ import androidx.media3.common.Player
 
 /**
  * 桌面小组件「正在播放」：封面、歌名、歌手，上一首 / 播放暂停 / 下一首。
- * 播放器状态变了（播放、暂停、切歌、读到歌曲信息）就刷新；应用没在播放时显示「没有在播放」，点一下打开译幕。
+ * 播放器状态变了（播放、暂停、切歌、读到歌曲信息）就刷新；应用没在播放时显示上次听的歌，
+ * 点播放在后台接着放（[WidgetPlayback]），不打开界面；没听过歌时点一下打开译幕。
  */
+@androidx.media3.common.util.UnstableApi
 class NowPlayingWidget : AppWidgetProvider() {
 
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) = render(context)
@@ -23,10 +25,11 @@ class NowPlayingWidget : AppWidgetProvider() {
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
             ACTION_TOGGLE, ACTION_PREV, ACTION_NEXT -> {
-                // 应用已经被系统结束、小组件还停在之前的样子：换成「没有在播放」，再试着打开译幕
+                // 应用已经被系统结束、小组件还停在之前的样子：点播放就在后台接着放，其他按钮只刷新小组件
                 val p = PlaybackService.session?.player ?: run {
                     render(context)
-                    return openApp(context)
+                    if (intent.action == ACTION_TOGGLE) startBackground(context)
+                    return
                 }
                 when (intent.action) {
                     ACTION_TOGGLE -> if (p.isPlaying) p.pause() else {
@@ -41,9 +44,9 @@ class NowPlayingWidget : AppWidgetProvider() {
         }
     }
 
-    private fun openApp(context: Context) {
-        // 系统可能不允许从后台打开界面；不行也没关系，刷新后的小组件点一下就能打开
-        runCatching { context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+    private fun startBackground(context: Context) {
+        // 系统可能不允许从这里启动后台播放；不行也没关系，刷新后的小组件再点一下就能放
+        runCatching { androidx.core.content.ContextCompat.startForegroundService(context, playIntent(context)) }
     }
 
     companion object {
@@ -97,9 +100,11 @@ class NowPlayingWidget : AppWidgetProvider() {
         private fun views(context: Context): RemoteViews {
             val v = RemoteViews(context.packageName, R.layout.widget_now_playing)
             val p = player?.takeIf { it.currentMediaItem != null }
+            val recent = if (p == null) WidgetPlayback.recentSongs(context).firstOrNull() else null
             if (p == null) {
-                v.setTextViewText(R.id.widget_title, "没有在播放")
-                v.setTextViewText(R.id.widget_artist, "译幕")
+                v.setTextViewText(R.id.widget_title, recent?.entry?.displayTitle ?: "没有在播放")
+                v.setTextViewText(R.id.widget_artist, if (recent != null) "继续收听 · 译幕" else "译幕")
+                v.setViewVisibility(R.id.widget_artist, View.VISIBLE)
                 v.setImageViewResource(R.id.widget_cover, R.drawable.widget_cover_placeholder)
                 v.setImageViewResource(R.id.widget_play, R.drawable.widget_play)
                 v.setViewVisibility(R.id.widget_prev, View.GONE)
@@ -121,11 +126,20 @@ class NowPlayingWidget : AppWidgetProvider() {
             val open = Intent(context, MainActivity::class.java).setAction(MainActivity.ACTION_OPEN_PLAYER).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
             val openApp = PendingIntent.getActivity(context, 2, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             v.setOnClickPendingIntent(R.id.widget_root, openApp)
-            v.setOnClickPendingIntent(R.id.widget_play, if (p == null) openApp else broadcast(context, ACTION_TOGGLE, 10))
+            // 没在播放：有听过的歌就直接启动后台播放服务（不经过广播，系统允许小组件这样启动前台服务），没有就打开译幕
+            val play = when {
+                p != null -> broadcast(context, ACTION_TOGGLE, 10)
+                recent != null -> PendingIntent.getForegroundService(context, 13, playIntent(context), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                else -> openApp
+            }
+            v.setOnClickPendingIntent(R.id.widget_play, play)
             v.setOnClickPendingIntent(R.id.widget_prev, broadcast(context, ACTION_PREV, 11))
             v.setOnClickPendingIntent(R.id.widget_next, broadcast(context, ACTION_NEXT, 12))
             return v
         }
+
+        private fun playIntent(context: Context) =
+            Intent(context, PlaybackService::class.java).setAction(PlaybackService.ACTION_WIDGET_PLAY)
 
         private fun broadcast(context: Context, action: String, code: Int): PendingIntent =
             PendingIntent.getBroadcast(

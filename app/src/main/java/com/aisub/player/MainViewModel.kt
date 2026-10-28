@@ -179,6 +179,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val player: Player get() = _player.value
     val usingVlc: Boolean get() = player !== exoPlayer
 
+    /** 应用没开着时从桌面小组件开始的后台播放：先停掉它，界面打开后接着放（见 [resumeWidgetPlayback]） */
+    private var widgetHandover = WidgetPlayback.takeOver()
+
     /** 媒体会话：通知栏、锁屏、耳机按键控制播放；切换内核时跟着换播放器 */
     private val session: MediaSession = MediaSession.Builder(app, exoPlayer)
         // 同一进程里会话 ID 不能重复：旧界面还没销毁时新界面就建好了（刚退出又马上打开），用默认 ID 会闪退
@@ -205,6 +208,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             .setAlbumTitle(tags.album)
             .apply { artwork?.let { setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER) } }
             .build()
+    }
+
+    /** 界面打开前小组件在后台放着歌：从同一首、同一位置接着放（进度已记进历史） */
+    fun resumeWidgetPlayback() {
+        val h = widgetHandover ?: return
+        widgetHandover = null
+        play(h.queue, h.index)
+        if (!h.playing) player.pause()
     }
 
     /** 开始播放时启动后台播放服务（应用在前台时才能启动），之后由 Media3 管理前台通知 */
