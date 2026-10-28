@@ -190,6 +190,9 @@ private fun BaiduLogin(onSuccess: (String) -> Unit) {
                 "在 pan.baidu.com/union 创建应用后获得 AppKey 和 SecretKey。授权完全走百度官方接口。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
             )
+            PhoneInputButton(listOf(PhoneField("app_key", "AppKey", appKey), PhoneField("secret_key", "SecretKey", secretKey, secret = true)), title = "登录百度网盘") { v ->
+                appKey = v["app_key"].orEmpty(); secretKey = v["secret_key"].orEmpty()
+            }
             OutlinedTextField(appKey, { appKey = it }, label = { Text("AppKey") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(
                 secretKey, { secretKey = it }, label = { Text("SecretKey") }, singleLine = true,
@@ -208,6 +211,9 @@ private fun BaiduLogin(onSuccess: (String) -> Unit) {
             "粘贴已有的 refresh_token。token 由下面的续期接口刷新——默认是 OpenList 提供的公共服务 api.oplist.org（可在其网页上扫码获取 token）。",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
         )
+        PhoneInputButton(listOf(PhoneField("token", "refresh_token", refreshToken), PhoneField("api", "续期接口", renewApi)), title = "登录百度网盘") { v ->
+            refreshToken = v["token"].orEmpty(); renewApi = v["api"].orEmpty().ifBlank { renewApi }
+        }
         OutlinedTextField(refreshToken, { refreshToken = it }, label = { Text("refresh_token") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(renewApi, { renewApi = it }, label = { Text("续期接口") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         OutlinedButton(
@@ -228,6 +234,9 @@ private fun PikPakLogin(onSuccess: (String) -> Unit) {
     var verifyUrl by remember { mutableStateOf<String?>(null) }
     var captcha by remember { mutableStateOf("") }
 
+    PhoneInputButton(listOf(PhoneField("user", "邮箱 / 手机号", username), PhoneField("pass", "密码", secret = true)), title = "登录 PikPak") { v ->
+        username = v["user"].orEmpty(); password = v["pass"].orEmpty()
+    }
     OutlinedTextField(username, { username = it }, label = { Text("邮箱 / 手机号") }, singleLine = true, modifier = Modifier.fillMaxWidth())
     OutlinedTextField(
         password, { password = it }, label = { Text("密码") }, singleLine = true,
@@ -235,7 +244,12 @@ private fun PikPakLogin(onSuccess: (String) -> Unit) {
     )
     message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
     verifyUrl?.let { url ->
-        OutlinedButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }) { Text("打开验证页面") }
+        // 电视上没有浏览器时用手机扫码验证；验证后的跳转地址可以用手机输入填回来
+        if (LocalTv.current) {
+            ScanWithPhone(url, "用手机扫码打开验证页面完成人机验证，然后再点登录。")
+            PhoneInputButton(listOf(PhoneField("captcha", "验证后的跳转地址或 captcha_token", captcha)), title = "PikPak 验证") { v -> captcha = v["captcha"].orEmpty() }
+        }
+        if (!LocalTv.current || canOpenBrowser(context)) OutlinedButton(onClick = { runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } }) { Text("打开验证页面") }
         OutlinedTextField(
             captcha, { captcha = it },
             label = { Text("验证后的跳转地址或 captcha_token（可选）") },

@@ -47,7 +47,7 @@ import com.aisub.player.remote.RemoteItem
 fun PosterWall(items: List<RemoteItem>, settings: AppSettings, menu: (RemoteItem) -> List<MenuAction>, onClick: (RemoteItem) -> Unit) {
     val wide = items.count { (it.meta?.posterRatio ?: (2f / 3f)) > 1f } > items.size / 2
     LazyVerticalGrid(
-        GridCells.Adaptive(if (wide) 168.dp else 112.dp),
+        GridCells.Adaptive(if (LocalTv.current) (if (wide) 220.dp else 150.dp) else if (wide) 168.dp else 112.dp),
         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
     ) {
         items(items, key = { (if (it.isDir) "d:" else "f:") + it.path }) { item ->
@@ -65,7 +65,7 @@ private fun PosterCard(item: RemoteItem, wide: Boolean, settings: AppSettings, m
     // 服务器没有海报或加载失败时，到网上（TMDB / 豆瓣）找一张；只找一次
     var poster by remember(item.path) { mutableStateOf(meta?.posterUrl) }
     var searchedOnline by remember(item.path) { mutableStateOf(false) }
-    Column(Modifier.clip(MaterialTheme.shapes.medium).combinedClickable(onClick = onClick).padding(6.dp)) {
+    Column(Modifier.tvFocusRing(MaterialTheme.shapes.medium, scale = true).clip(MaterialTheme.shapes.medium).combinedClickable(onClick = onClick).padding(6.dp)) {
         Box(Modifier.fillMaxWidth().aspectRatio(if (wide) 16f / 9f else 2f / 3f).clip(MaterialTheme.shapes.medium)) {
             NetImage(
                 poster, Modifier.fillMaxSize(), maxSize = if (wide) 480 else 360,

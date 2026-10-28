@@ -14,8 +14,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 47
-        versionName = "2.2.0"
+        versionCode = 48
+        versionName = "2.3.0"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用
@@ -132,6 +132,9 @@ dependencies {
     implementation("io.github.peerless2012:ass-media:0.5.1")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+
+    // 电视上登录网盘：把授权地址、手机输入页显示成二维码
+    implementation("com.google.zxing:core:3.5.3")
 
     // 翻译：Claude 官方 Java SDK；OpenAI 兼容接口用 OkHttp 直连
     implementation("com.anthropic:anthropic-java:2.34.0")

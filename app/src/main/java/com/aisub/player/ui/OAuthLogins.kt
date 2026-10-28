@@ -55,8 +55,10 @@ private fun ErrorText(text: String?) {
     if (text != null) Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
 }
 
-private fun openBrowser(context: Context, url: String) =
+/** 打开浏览器；没有浏览器（很多电视）时不闪退，返回 false。 */
+private fun openBrowser(context: Context, url: String): Boolean = runCatching {
     context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+}.isSuccess
 
 /** 在后台执行一个登录步骤，记录进行中状态和错误。 */
 private class Runner {
@@ -91,6 +93,12 @@ internal fun EmbyLogin(initialUrl: String, initialLan: String, onSuccess: (creds
     var password by remember { mutableStateOf("") }
     val (state, run) = rememberRun()
     Hint("Emby 和 Jellyfin 都可以，填服务器地址（例如 http://192.168.1.2:8096）和账号。")
+    PhoneInputButton(
+        listOf(PhoneField("url", "服务器地址", url), PhoneField("lan", "内网地址（可不填）", lan), PhoneField("user", "用户名", username), PhoneField("pass", "密码", secret = true)),
+        title = "登录 Emby / Jellyfin",
+    ) { v ->
+        url = v["url"].orEmpty(); lan = v["lan"].orEmpty(); username = v["user"].orEmpty(); password = v["pass"].orEmpty()
+    }
     OutlinedTextField(url, { url = it }, label = { Text("服务器地址") }, singleLine = true, modifier = Modifier.fillMaxWidth())
     OutlinedTextField(
         lan, { lan = it }, label = { Text("内网地址（可不填）") }, placeholder = { Text("http://192.168.1.2:8096") },
@@ -162,11 +170,21 @@ private fun BrowserPollLogin(
         }
     }
     val s = session
+    val tv = LocalTv.current
     if (s == null && !failed) CircularProgressIndicator()
     if (showCode) s?.state?.get("user_code")?.let { Text(it, style = MaterialTheme.typography.headlineMedium) }
-    Text(status, style = MaterialTheme.typography.bodyMedium)
+    // 电视：授权页显示成二维码，用手机扫码完成（电视上一般没有浏览器，遥控器打字也慢）
+    if (tv && s != null && !failed && !s.content.isNullOrEmpty()) {
+        ScanWithPhone(
+            s.content,
+            if (showCode) "用手机扫码打开验证页面，输入上面的代码并登录；完成后这里会自动继续。"
+            else "用手机扫码打开授权页面，登录并允许访问；完成后这里会自动继续。",
+        )
+    }
+    if (!tv || showCode) Text(status, style = MaterialTheme.typography.bodyMedium)
+    else if (failed) Text(status, style = MaterialTheme.typography.bodyMedium)
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (s != null && !failed) {
+        if (s != null && !failed && (!tv || canOpenBrowser(context))) {
             OutlinedButton(onClick = {
                 s.state["user_code"]?.let { code ->
                     context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("code", code))
@@ -191,6 +209,9 @@ internal fun PlexLogin(onSuccess: (String) -> Unit) {
         var url by remember { mutableStateOf("") }
         var token by remember { mutableStateOf("") }
         Hint("局域网直连：填服务器地址（例如 http://192.168.1.2:32400）和 X-Plex-Token。")
+        PhoneInputButton(listOf(PhoneField("url", "服务器地址", url), PhoneField("token", "X-Plex-Token", token)), title = "连接 Plex 服务器") { v ->
+            url = v["url"].orEmpty(); token = v["token"].orEmpty()
+        }
         OutlinedTextField(url, { url = it }, label = { Text("服务器地址") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(token, { token = it }, label = { Text("X-Plex-Token") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         OutlinedButton(onClick = { onSuccess(PlexClient.manual(url, token)) }, enabled = url.isNotBlank() && token.isNotBlank()) { Text("保存") }
@@ -206,6 +227,10 @@ internal fun OneDriveLogin(onSuccess: (String) -> Unit) {
             "需要先免费注册一个应用：在 portal.azure.com 打开「应用注册」→ 新注册，账户类型选「任何组织目录中的帐户和个人 Microsoft 帐户」；" +
                 "在「身份验证」里打开「允许公共客户端流」。然后复制「应用程序(客户端) ID」填到下面。",
         )
+        PhoneInputButton(listOf(PhoneField("client_id", "应用程序(客户端) ID", clientId)), title = "登录 OneDrive") { v ->
+            clientId = v["client_id"].orEmpty()
+            if (clientId.isNotBlank()) started = true
+        }
         OutlinedTextField(clientId, { clientId = it }, label = { Text("应用程序(客户端) ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         OutlinedButton(onClick = { started = true }, enabled = clientId.isNotBlank()) { Text("下一步") }
     } else {
@@ -229,6 +254,27 @@ internal fun DropboxLogin(onSuccess: (String) -> Unit) {
         "需要先免费建一个应用：在 dropbox.com/developers/apps 选 Create app → Scoped access → Full Dropbox；" +
             "在 Permissions 里勾选 files.metadata.read、files.content.read、files.content.write 并提交，然后复制 App key。",
     )
+    // 电视：整个授权在手机上做，授权码也在手机上粘贴，不用遥控器打字
+    var onPhone by remember { mutableStateOf(false) }
+    if (LocalTv.current) {
+        if (!onPhone) OutlinedButton(onClick = { onPhone = true }) { Text("用手机完成授权") }
+        else PhoneOAuthPanel(
+            title = "登录 Dropbox",
+            caption = "用手机扫码打开（手机和电视要在同一个局域网），按网页上的步骤授权，提交后这里自动完成登录。",
+            idField = PhoneField("app_key", "① App key", appKey),
+            secretField = null,
+            authorizeUrl = DropboxClient.authorizeUrl("__CID__", pkce),
+            stepsHtml = "② 填好 App key 后点下面的按钮，在 Dropbox 页面点「允许」，复制显示的授权码",
+            codeField = PhoneField("code", "③ 粘贴授权码"),
+            onCancel = { onPhone = false },
+            onSubmit = { v ->
+                val key = v["app_key"].orEmpty().ifBlank { throw java.io.IOException("没有填 App key") }
+                val creds = withContext(Dispatchers.IO) { DropboxClient.exchangeCode(key, extractAuthCode(v["code"].orEmpty()), pkce) }
+                onSuccess(creds)
+            },
+        )
+        if (!canOpenBrowser(context)) return
+    }
     OutlinedTextField(appKey, { appKey = it }, label = { Text("App key") }, singleLine = true, modifier = Modifier.fillMaxWidth())
     OutlinedButton(
         enabled = appKey.isNotBlank(),
@@ -269,6 +315,36 @@ internal fun GoogleLogin(onSuccess: (String) -> Unit) {
             "「OAuth 同意屏幕」选外部，并把自己的 Google 账号加为测试用户 → 「凭据」新建 OAuth 客户端 ID，类型选「桌面应用」。" +
             "测试状态下授权 7 天后需要重新登录；在同意屏幕点「发布应用」可以去掉这个限制。",
     )
+    // 电视：Google 授权后只会跳回「发起授权那台设备」的 127.0.0.1。在手机上授权时跳回的是手机自己，电视收不到，
+    // 所以改成在手机上打开电视的临时网页：去授权 → 手机显示打不开的 127.0.0.1 页面 → 复制它的地址粘回网页提交。
+    // （Google 给电视用的设备码登录只允许 drive.file 权限，看不到网盘里已有的文件，不能用。）
+    var onPhone by remember { mutableStateOf(false) }
+    val phonePkce = remember { Pkce() }
+    val phoneRedirect = remember { "http://127.0.0.1:${(20000..60000).random()}" }
+    if (LocalTv.current) {
+        if (!onPhone) OutlinedButton(onClick = { onPhone = true }) { Text("用手机完成授权") }
+        else PhoneOAuthPanel(
+            title = "登录 Google Drive",
+            caption = "用手机扫码打开（手机和电视要在同一个局域网），按网页上的步骤授权，提交后这里自动完成登录。",
+            idField = PhoneField("client_id", "① 客户端 ID", clientId),
+            secretField = PhoneField("client_secret", "客户端密钥", secret, secret = true),
+            authorizeUrl = GoogleDriveClient.authorizeUrl("__CID__", phoneRedirect, phonePkce),
+            stepsHtml = "② 点下面的按钮，选择账号并允许访问。最后手机会打开一个<b>无法访问</b>的 127.0.0.1 页面，这是正常的：" +
+                "复制那个页面地址栏里的<b>完整地址</b>，回到这个网页粘贴",
+            codeField = PhoneField("redirect", "③ 粘贴授权后的地址"),
+            onCancel = { onPhone = false },
+            onSubmit = { v ->
+                val id = v["client_id"].orEmpty().ifBlank { throw java.io.IOException("没有填客户端 ID") }
+                val code = extractAuthCode(v["redirect"].orEmpty())
+                val creds = withContext(Dispatchers.IO) {
+                    GoogleDriveClient.exchangeCode(id, v["client_secret"].orEmpty(), code, phoneRedirect, phonePkce)
+                }
+                onSuccess(creds)
+            },
+        )
+        // 有浏览器的电视也可以直接在电视上授权（回环地址就是电视自己）
+        if (!canOpenBrowser(context)) return
+    }
     OutlinedTextField(clientId, { clientId = it }, label = { Text("客户端 ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
     OutlinedTextField(
         secret, { secret = it }, label = { Text("客户端密钥") }, singleLine = true,

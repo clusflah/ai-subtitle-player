@@ -24,6 +24,9 @@ import com.aisub.player.ui.FileDetailScreen
 import com.aisub.player.ui.ImageViewerScreen
 import com.aisub.player.ui.LiveScreen
 import com.aisub.player.ui.LocalOpenDetail
+import com.aisub.player.ui.LocalTv
+import com.aisub.player.ui.ProvideScreenClass
+import androidx.compose.foundation.layout.padding
 import com.aisub.player.ui.toRemoteItem
 import androidx.core.content.ContextCompat
 import com.aisub.player.media.MediaEntry
@@ -80,7 +83,7 @@ class MainActivity : ComponentActivity() {
         com.aisub.player.update.appUpdater.autoCheck(this)
         if (savedInstanceState == null) handleIntent(intent)
 
-        setContent {
+        setContent { ProvideScreenClass {
             val ui by main.state.collectAsState()
             val permissionLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestMultiplePermissions()
@@ -106,7 +109,7 @@ class MainActivity : ComponentActivity() {
                         },
                     )
                 }
-                return@setContent
+                return@ProvideScreenClass
             }
 
             val play: (List<MediaEntry>, Int) -> Unit = { list, i ->
@@ -124,7 +127,9 @@ class MainActivity : ComponentActivity() {
                 CompositionLocalProvider(LocalOpenDetail provides openDetail) {
                   // 全面屏下 adjustResize 不会自动给键盘让位：最外层统一留出键盘高度，输入框（搜索、链接、设置里的 Key 等）不会被键盘盖住
                   Column(Modifier.fillMaxSize().background(androidx.compose.material3.MaterialTheme.colorScheme.background).imePadding()) {
-                   Box(Modifier.weight(1f)) {
+                   // 电视：播放页以外留出安全边距（部分电视有过扫描，贴边的内容会被切掉）
+                   val tvSafe = if (LocalTv.current && nav.current != Screen.Player) Modifier.padding(horizontal = 40.dp, vertical = 20.dp) else Modifier
+                   Box(Modifier.weight(1f).then(tvSafe)) {
                     when (val screen = nav.current) {
                         Screen.Home -> HomeScreen(lib, main, nav) { permissionLauncher.launch(mediaPermissions) }
                         Screen.Player -> PlayerScreen(main, onBack = back, onOpenSettings = { nav.push(Screen.Settings) })
@@ -201,7 +206,7 @@ class MainActivity : ComponentActivity() {
                   }
                 }
             }
-        }
+        } }
     }
 
     /** 离开播放页：视频暂停；音乐（开了后台播放时）继续放，底部显示「正在播放」小条。 */
