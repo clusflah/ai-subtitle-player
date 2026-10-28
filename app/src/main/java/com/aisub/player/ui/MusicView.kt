@@ -3,6 +3,11 @@ package com.aisub.player.ui
 import android.content.Context
 import android.content.res.Configuration
 import android.media.AudioManager
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
@@ -14,6 +19,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -84,6 +90,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -160,8 +167,28 @@ fun MusicView(
     val translations = if (music.lyrics != null) music.translations else remember(cues) {
         cues.sortedBy { it.startMs }.map { it.translation }.takeIf { t -> t.any { it != null } }
     }
+    // 竖屏停在歌词页时，一会儿不操作就淡出下方控件，让歌词占满；点一下屏幕再显示
+    var touches by remember { mutableIntStateOf(0) }
+    var controlsShown by remember { mutableStateOf(true) }
+    LaunchedEffect(pager.currentPage, touches, landscape, showMenu, showQueue) {
+        controlsShown = true
+        if (pager.currentPage == 2 && !landscape && !showMenu && !showQueue) {
+            delay(4_000)
+            controlsShown = false
+        }
+    }
 
-    Box(Modifier.fillMaxSize().background(Color(0xFF1E201F)).pointerInput(Unit) { detectTapGestures { } }) {
+    Box(
+        Modifier.fillMaxSize().background(Color(0xFF1E201F))
+            .pointerInput(Unit) {
+                // 只观察按下，不消费，歌词的点击、滑动照常
+                awaitEachGesture {
+                    awaitPointerEvent(PointerEventPass.Initial)
+                    touches++
+                }
+            }
+            .pointerInput(Unit) { detectTapGestures { } },
+    ) {
         Backdrop(music)
         val pages: @Composable (Modifier) -> Unit = { mod ->
             Column(mod) {
@@ -198,7 +225,11 @@ fun MusicView(
         } else {
             Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
                 pages(Modifier.weight(1f).fillMaxWidth())
-                controls(Modifier.fillMaxWidth().padding(bottom = 20.dp))
+                AnimatedVisibility(
+                    controlsShown,
+                    enter = fadeIn(tween(250)) + expandVertically(tween(250)),
+                    exit = fadeOut(tween(800)) + shrinkVertically(tween(800)),
+                ) { controls(Modifier.fillMaxWidth().padding(bottom = 20.dp)) }
             }
         }
     }

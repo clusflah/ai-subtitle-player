@@ -85,20 +85,44 @@ class ChatCompletionsTranslator(
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
-        val body = try {
-            http.newCall(request).execute().use { resp ->
-                val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) throw TranslationException("翻译请求失败 HTTP ${resp.code}：${text.take(300)}")
-                text
+        // 网关超时、限流、服务暂时不可用时等一会儿重试（免费的 Index-Translate 忙时常回 504）
+        var attempt = 0
+        var body: String
+        while (true) {
+            val (code, text) = try {
+                http.newCall(request).execute().use { resp -> resp.code to resp.body?.string().orEmpty() }
+            } catch (e: IOException) {
+                throw TranslationException("网络错误：${e.message}", e)
             }
-        } catch (e: IOException) {
-            throw TranslationException("网络错误：${e.message}", e)
+            body = text
+            if (code in 200..299) break
+            if (code !in RETRY_CODES || attempt >= RETRY_DELAYS_MS.size) {
+                throw TranslationException("翻译请求失败 HTTP $code：${errorSummary(code, text)}")
+            }
+            Thread.sleep(RETRY_DELAYS_MS[attempt++])
         }
 
         return try {
             JSONObject(body).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
         } catch (e: Exception) {
             throw TranslationException("无法解析返回内容：${body.take(300)}", e)
+        }
+    }
+
+    private companion object {
+        val RETRY_CODES = setOf(429, 502, 503, 504)
+        val RETRY_DELAYS_MS = longArrayOf(2_000, 5_000)
+
+        /** 网关返回的是整页 HTML，只取标题；JSON 等文字原样截一段 */
+        fun errorSummary(code: Int, text: String): String {
+            if ('<' !in text.take(20)) return text.take(300)
+            val title = Regex("<title>(.*?)</title>", RegexOption.IGNORE_CASE).find(text)?.groupValues?.get(1)?.trim()
+            val hint = when (code) {
+                504 -> "，翻译服务响应超时，可以稍后重试或换一个翻译服务"
+                502, 503 -> "，翻译服务暂时不可用，可以稍后重试或换一个翻译服务"
+                else -> ""
+            }
+            return (title ?: "服务器返回了网页") + hint
         }
     }
 }
