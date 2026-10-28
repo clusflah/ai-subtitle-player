@@ -8,7 +8,7 @@
     android:gravity="center_vertical"
     android:orientation="vertical"
     android:paddingHorizontal="12dp"
-    android:paddingVertical="8dp">
+    android:paddingVertical="6dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -18,8 +18,8 @@
 
         <ImageView
             android:id="@+id/widget_cover"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
             android:background="@drawable/widget_cover_background"
             android:clipToOutline="true"
             android:contentDescription="封面"
@@ -37,12 +37,19 @@
                 android:id="@+id/widget_title"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:ellipsize="end"
-                android:maxLines="1"
+                android:ellipsize="marquee"
+                android:focusable="true"
+                android:focusableInTouchMode="true"
+                android:marqueeRepeatLimit="marquee_forever"
+                android:singleLine="true"
                 android:text="没有在播放"
                 android:textColor="#FFFFFFFF"
                 android:textSize="15sp"
-                android:textStyle="bold" />
+                android:textStyle="bold">
+
+                <!-- 放不下时滚动：小组件里只有拿到焦点的那一行能跑马灯 -->
+                <requestFocus />
+            </TextView>
 
             <TextView
                 android:id="@+id/widget_artist"
@@ -58,8 +65,8 @@
 
         <ImageView
             android:id="@+id/widget_prev"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
             android:background="@drawable/widget_button_background"
             android:contentDescription="上一首"
             android:padding="8dp"
@@ -68,8 +75,8 @@
 
         <ImageView
             android:id="@+id/widget_play"
-            android:layout_width="44dp"
-            android:layout_height="44dp"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
             android:layout_marginHorizontal="2dp"
             android:background="@drawable/widget_play_background"
             android:contentDescription="播放 / 暂停"
@@ -78,8 +85,8 @@
 
         <ImageView
             android:id="@+id/widget_next"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
             android:background="@drawable/widget_button_background"
             android:contentDescription="下一首"
             android:padding="8dp"
@@ -87,12 +94,13 @@
             android:visibility="gone" />
     </LinearLayout>
 
-    <!-- 正在唱的那句歌词：占满一整行，放不下才缩小字号 -->
+    <!-- 正在唱的那句歌词：占满一整行，放不下才缩小字号；小组件不够高时由这一行让出空间，上面一行不被截断 -->
     <TextView
         android:id="@+id/widget_lyric"
         android:layout_width="match_parent"
-        android:layout_height="22dp"
-        android:layout_marginTop="8dp"
+        android:layout_height="0dp"
+        android:layout_marginTop="4dp"
+        android:layout_weight="1"
         android:autoSizeMaxTextSize="15sp"
         android:autoSizeMinTextSize="11sp"
         android:autoSizeStepGranularity="1sp"
