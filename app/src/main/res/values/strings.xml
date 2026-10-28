@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_now_playing_description">显示正在播放的歌曲，可以暂停、切歌</string>
+</resources>

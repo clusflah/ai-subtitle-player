@@ -81,6 +81,18 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
+        <!-- 桌面小组件：正在播放的歌曲和播放控制 -->
+        <receiver
+            android:name=".NowPlayingWidget"
+            android:exported="false"
+            android:label="译幕 · 正在播放">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_now_playing_info" />
+        </receiver>
         <!-- 应用内更新下载的安装包交给系统安装器 -->
         <provider
             android:name=".update.UpdateFileProvider"

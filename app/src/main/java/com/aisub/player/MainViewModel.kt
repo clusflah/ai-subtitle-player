@@ -425,11 +425,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (player.isPlaying) reportPlexNow("playing")
             }
         }
-        // 换了播放内核（ExoPlayer ↔ VLC）或读到歌曲信息时，更新媒体会话：通知栏、锁屏显示歌名、歌手和封面
+        // 换了播放内核（ExoPlayer ↔ VLC）或读到歌曲信息时，更新媒体会话：通知栏、锁屏显示歌名、歌手和封面；桌面小组件也跟着刷新
         viewModelScope.launch {
             kotlinx.coroutines.flow.combine(_player, music.state) { p, m -> p to m }
                 .distinctUntilChanged { a, b -> a.first === b.first && a.second.tags == b.second.tags && a.second.cover === b.second.cover }
-                .collect { (p, m) -> session.player = SessionPlayer(p, musicMetadata(m)) }
+                .collect { (p, m) ->
+                    session.player = SessionPlayer(p, musicMetadata(m))
+                    if (PlaybackService.session === session) NowPlayingWidget.attach(getApplication(), session.player)
+                }
         }
     }
 
@@ -1388,6 +1391,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // 新界面已经接管了会话（见 session 的注释）时，不动它的会话和后台服务
         val current = PlaybackService.session === session
         if (current) PlaybackService.session = null
+        if (current) NowPlayingWidget.detach(getApplication())
         session.release()
         if (current) getApplication<Application>().let { it.stopService(Intent(it, PlaybackService::class.java)) }
         exoPlayer.release()
