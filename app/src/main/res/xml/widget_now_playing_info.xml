@@ -1,15 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 桌面小组件「正在播放」：4×1，可以横向拉宽；状态由应用推送，不需要定时刷新 -->
+<!-- 桌面小组件「正在播放」：4×2（下面一行放歌词），可以拉宽、拉高；状态由应用推送，不需要定时刷新 -->
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/widget_now_playing_description"
     android:initialLayout="@layout/widget_now_playing"
     android:minWidth="250dp"
-    android:minHeight="40dp"
+    android:minHeight="90dp"
     android:minResizeWidth="180dp"
-    android:minResizeHeight="40dp"
+    android:minResizeHeight="60dp"
     android:previewLayout="@layout/widget_now_playing"
-    android:resizeMode="horizontal"
+    android:resizeMode="horizontal|vertical"
     android:targetCellWidth="4"
-    android:targetCellHeight="1"
+    android:targetCellHeight="2"
     android:updatePeriodMillis="0"
     android:widgetCategory="home_screen|keyguard" />
