@@ -15,6 +15,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -96,10 +97,16 @@ fun LocalFolderScreen(
     val toggle: (MediaEntry) -> Unit = { e -> selected = if (e.uri in selected) selected - e.uri else selected + e.uri }
     val inFolder: (String) -> List<MediaEntry> = { p -> all.filter { it.folder == p || it.folder.startsWith("$p/") } }
 
+    val favoriteMenu: (String, String) -> MenuAction = { p, name ->
+        if (state.favoriteFolders.any { it.serverId == null && it.path == p }) MenuAction("取消收藏") { lib.toggleFavoriteFolder(null, p, name) }
+        else MenuAction("收藏到首页") { lib.toggleFavoriteFolder(null, p, name) }
+    }
+
     Box(Modifier.fillMaxSize()) {
         DetailScaffold(
             title, onBack,
             actions = {
+                if (path.isNotEmpty()) FavoriteFolderButton(lib, null, path, title)
                 if (files.isNotEmpty()) {
                     OverflowMenu(
                         listOf(
@@ -120,7 +127,7 @@ fun LocalFolderScreen(
                     val entries = inFolder(f.path)
                     FolderRow(
                         f.name, subtitle = countText(f.folderCount, f.fileCount),
-                        menu = if (selecting) emptyList() else fm.folderMenu(f.path, entries) { play(entries, 0) },
+                        menu = if (selecting) emptyList() else listOf(favoriteMenu(f.path, f.name)) + fm.folderMenu(f.path, entries) { play(entries, 0) },
                     ) { openFolder(f.path, f.name) }
                 }
                 itemsIndexed(files, key = { _, e -> e.uri }) { i, e ->
@@ -256,6 +263,10 @@ fun RemoteFolderScreen(
     }
 
     fun itemMenu(item: RemoteItem): List<MenuAction> = listOfNotNull(
+        item.takeIf { it.isDir }?.let { dir ->
+            val fav = state.favoriteFolders.any { it.serverId == serverId && it.path == dir.path }
+            MenuAction(if (fav) "取消收藏" else "收藏到首页") { lib.toggleFavoriteFolder(serverId, dir.path, dir.name) }
+        },
         MenuAction("详情") { showDetail(item) }.takeIf { !item.isDir || item.meta != null },
         item.takeIf { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }?.toMediaEntry()
             ?.let { MenuAction("加入播放列表") { addTo = listOf(it) } },
@@ -274,6 +285,7 @@ fun RemoteFolderScreen(
                     Icon(if (posterWall) AppIcons.ListIcon else AppIcons.GridView, if (posterWall) "列表" else "海报墙")
                 }
             }
+            if (server != null) FavoriteFolderButton(lib, serverId, path, title)
             IconButton(onClick = { reload++ }) { Icon(AppIcons.Refresh, "刷新") }
             OverflowMenu(
                 listOf(
@@ -421,19 +433,50 @@ fun PlaylistDetailScreen(
     }
 }
 
+/** 文件夹页标题栏上的收藏星标：收藏后显示在首页 */
 @Composable
-fun HistoryScreen(lib: LibraryViewModel, onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
+internal fun FavoriteFolderButton(lib: LibraryViewModel, serverId: String?, path: String, title: String) {
     val state by lib.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val fav = state.favoriteFolders.any { it.serverId == serverId && it.path == path }
+    IconButton(onClick = {
+        val now = lib.toggleFavoriteFolder(serverId, path, title)
+        Toast.makeText(context, if (now) "已收藏，在首页可以直接打开" else "已取消收藏", Toast.LENGTH_SHORT).show()
+    }) {
+        Icon(
+            if (fav) AppIcons.Star else AppIcons.StarBorder, if (fav) "取消收藏" else "收藏到首页",
+            tint = if (fav) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+        )
+    }
+}
+
+/** 最近播放：music 为 true 时只列音乐，否则只列视频（含直播） */
+@Composable
+fun HistoryScreen(lib: LibraryViewModel, music: Boolean, onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
+    val state by lib.state.collectAsStateWithLifecycle()
+    val history = remember(state.history, music) { state.history.filter { it.entry.isMusic == music } }
     DetailScaffold(
-        "历史", onBack,
-        actions = { TextButton(onClick = lib::clearHistory, enabled = state.history.isNotEmpty()) { Text("清空") } },
+        if (music) "最近听过的音乐" else "最近看过的视频", onBack,
+        actions = { TextButton(onClick = { lib.clearHistory(music) }, enabled = history.isNotEmpty()) { Text("清空") } },
     ) {
-        if (state.history.isEmpty()) {
-            EmptyState("还没有播放记录", icon = AppIcons.History)
+        if (history.isEmpty()) {
+            EmptyState(if (music) "还没有听过的音乐" else "还没有看过的视频", icon = AppIcons.History)
+            return@DetailScaffold
+        }
+        if (music) {
+            // 音乐：点一首从这首开始连着放整个列表
+            val entries = history.map { it.entry }
+            LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+                itemsIndexed(history, key = { _, h -> h.entry.uri }) { i, h ->
+                    MediaRow(h.entry, emptyList(), subtitle = "${android.text.format.DateUtils.getRelativeTimeSpanString(h.playedAt)}") {
+                        play(entries, i)
+                    }
+                }
+            }
             return@DetailScaffold
         }
         LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
-            items(state.history, key = { it.entry.uri }) { h ->
+            items(history, key = { it.entry.uri }) { h ->
                 val progress = formatDuration(h.positionMs)
                 val ago = android.text.format.DateUtils.getRelativeTimeSpanString(h.playedAt)
                 MediaRow(

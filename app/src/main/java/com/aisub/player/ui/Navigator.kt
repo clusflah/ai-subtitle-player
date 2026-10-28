@@ -5,7 +5,8 @@ import androidx.compose.runtime.mutableStateListOf
 sealed interface Screen {
     data object Home : Screen
     data object Player : Screen
-    data object History : Screen
+    /** 最近播放：音乐和视频分开 */
+    data class History(val music: Boolean = false) : Screen
     data object Settings : Screen
     /** 直播：M3U / TXT 直播源的频道列表 */
     data object Live : Screen

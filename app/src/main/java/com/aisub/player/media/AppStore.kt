@@ -13,6 +13,11 @@ data class HistoryItem(val entry: MediaEntry, val positionMs: Long, val playedAt
 
 data class Playlist(val id: String, val name: String, val items: List<MediaEntry>, val updatedAt: Long = 0)
 
+/** 收藏的文件夹：serverId 为 null 是本机文件夹（path 是相对存储根目录的路径），否则是网络服务器上的目录 */
+data class FavoriteFolder(val serverId: String?, val path: String, val title: String, val addedAt: Long) {
+    val key: String get() = "${serverId ?: "local"}|$path"
+}
+
 /** 播放历史、播放列表、网络服务器的持久化（SharedPreferences + JSON）。 */
 class AppStore(context: Context) {
     private val prefs = context.getSharedPreferences("library", Context.MODE_PRIVATE)
@@ -37,7 +42,13 @@ class AppStore(context: Context) {
 
     fun positionOf(uri: String): Long = history().firstOrNull { it.entry.uri == uri }?.positionMs ?: 0L
 
-    fun clearHistory() = prefs.edit().remove("history").apply()
+    /** 只清空音乐（music = true）或视频的播放记录 */
+    fun clearHistory(music: Boolean) = writeArray(
+        "history",
+        history().filter { it.entry.isMusic != music }.map {
+            JSONObject().put("entry", it.entry.toJson()).put("position", it.positionMs).put("playedAt", it.playedAt)
+        },
+    )
 
     // ---- 播放列表 ----
 
@@ -55,6 +66,16 @@ class AppStore(context: Context) {
         savePlaylists(playlists() + p)
         return p
     }
+
+    // ---- 收藏的文件夹 ----
+
+    fun favoriteFolders(): List<FavoriteFolder> = readArray("favoriteFolders").map { o ->
+        FavoriteFolder(o.optString("server").ifEmpty { null }, o.getString("path"), o.optString("title"), o.optLong("addedAt"))
+    }
+
+    fun saveFavoriteFolders(list: List<FavoriteFolder>) = writeArray("favoriteFolders", list.map { f ->
+        JSONObject().put("server", f.serverId.orEmpty()).put("path", f.path).put("title", f.title).put("addedAt", f.addedAt)
+    })
 
     // ---- 网络服务器 ----
 
@@ -82,6 +103,7 @@ class AppStore(context: Context) {
         servers().firstOrNull { it.id == id }?.let { AuthRegistry.unregister(it); Endpoints.unregister(it) }
         CloudRegistry.forget(id)
         writeArray("servers", servers().filter { it.id != id }.map { it.toJson() })
+        saveFavoriteFolders(favoriteFolders().filter { it.serverId != id })
     }
 
     private fun readArray(key: String): List<JSONObject> = try {

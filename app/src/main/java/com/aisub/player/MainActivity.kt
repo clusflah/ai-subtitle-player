@@ -141,7 +141,7 @@ class MainActivity : ComponentActivity() {
                                 nav.push(Screen.Player)
                             },
                         )
-                        Screen.History -> HistoryScreen(lib, back, play)
+                        is Screen.History -> HistoryScreen(lib, screen.music, back, play)
                         Screen.Live -> LiveScreen(back, play)
                         is Screen.LocalFolder -> LocalFolderScreen(
                             lib, screen.path, screen.title, back,
