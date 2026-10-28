@@ -16,7 +16,7 @@ import androidx.media3.common.Player
 import com.aisub.player.music.Lyrics
 
 /**
- * 桌面小组件「正在播放」：封面、歌名、歌手，上一首 / 播放暂停 / 下一首；有带时间的歌词时，歌手那行换成正在唱的那句。
+ * 桌面小组件「正在播放」：封面、歌名、歌手，上一首 / 播放暂停 / 下一首；有带时间的歌词时，下面一整行显示正在唱的那句。
  * 播放器状态变了（播放、暂停、切歌、读到歌曲信息）就刷新；应用没在播放时显示上次听的歌，
  * 点播放在后台接着放（[WidgetPlayback]），不打开界面；没听过歌时点一下打开译幕。
  */
@@ -142,7 +142,7 @@ class NowPlayingWidget : AppWidgetProvider() {
             val text = l?.lines?.getOrNull(index)?.text?.takeIf { it.isNotBlank() }
             v.setTextViewText(R.id.widget_lyric, text ?: "")
             v.setViewVisibility(R.id.widget_lyric, if (text != null) View.VISIBLE else View.GONE)
-            v.setViewVisibility(R.id.widget_artist, if (text != null || artistOf(p).isEmpty()) View.GONE else View.VISIBLE)
+            v.setViewVisibility(R.id.widget_artist, if (artistOf(p).isEmpty()) View.GONE else View.VISIBLE)
             val next = l?.lines?.getOrNull(index + 1)?.timeMs ?: return
             if (!p.isPlaying) return
             val speed = p.playbackParameters.speed.takeIf { it > 0 } ?: 1f
