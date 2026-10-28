@@ -8,12 +8,15 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.widget.RemoteViews
 import androidx.media3.common.Player
+import com.aisub.player.music.Lyrics
 
 /**
- * 桌面小组件「正在播放」：封面、歌名、歌手，上一首 / 播放暂停 / 下一首。
+ * 桌面小组件「正在播放」：封面、歌名、歌手，上一首 / 播放暂停 / 下一首；有带时间的歌词时，歌手那行换成正在唱的那句。
  * 播放器状态变了（播放、暂停、切歌、读到歌曲信息）就刷新；应用没在播放时显示上次听的歌，
  * 点播放在后台接着放（[WidgetPlayback]），不打开界面；没听过歌时点一下打开译幕。
  */
@@ -61,12 +64,19 @@ class NowPlayingWidget : AppWidgetProvider() {
         private var coverData: ByteArray? = null
         private var cover: Bitmap? = null
 
+        /** 当前歌的歌词（界面或后台播放器读到后交过来）；到下一句的时间刷新一次 */
+        private var lyrics: Lyrics? = null
+        private val handler = Handler(Looper.getMainLooper())
+        private val nextLine = Runnable { appContext?.let(::renderLyric) }
+
         private val listener = object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) {
                 if (events.containsAny(
                         Player.EVENT_IS_PLAYING_CHANGED, Player.EVENT_PLAYBACK_STATE_CHANGED,
                         Player.EVENT_MEDIA_ITEM_TRANSITION, Player.EVENT_MEDIA_METADATA_CHANGED,
                         Player.EVENT_AVAILABLE_COMMANDS_CHANGED,
+                        // 拖动进度、改倍速：歌词要重新对时间
+                        Player.EVENT_POSITION_DISCONTINUITY, Player.EVENT_PLAYBACK_PARAMETERS_CHANGED,
                     )
                 ) appContext?.let(::render)
             }
@@ -87,7 +97,16 @@ class NowPlayingWidget : AppWidgetProvider() {
             player = null
             coverData = null
             cover = null
+            lyrics = null
             render(context)
+        }
+
+        /** 换歌、读到歌词、调整歌词时间时调用；null 为没有歌词 */
+        fun setLyrics(context: Context, l: Lyrics?) {
+            if (l == lyrics) return
+            lyrics = l
+            appContext = context.applicationContext
+            renderLyric(context)
         }
 
         private fun render(context: Context) {
@@ -97,11 +116,49 @@ class NowPlayingWidget : AppWidgetProvider() {
             manager.updateAppWidget(ids, views(context))
         }
 
+        /** 只换歌词那一行：不重新传封面 */
+        private fun renderLyric(context: Context) {
+            val manager = AppWidgetManager.getInstance(context)
+            val ids = manager.getAppWidgetIds(ComponentName(context, NowPlayingWidget::class.java))
+            val p = player?.takeIf { it.currentMediaItem != null }
+            if (ids.isEmpty() || p == null) {
+                handler.removeCallbacks(nextLine)
+                return
+            }
+            val v = RemoteViews(context.packageName, R.layout.widget_now_playing)
+            lyricLine(v, p)
+            manager.partiallyUpdateAppWidget(ids, v)
+        }
+
+        /**
+         * 填正在唱的那句：没有带时间的歌词、还没唱到第一句时显示歌手。
+         * 播放中顺便约好下一句开始的时间再刷新。
+         */
+        private fun lyricLine(v: RemoteViews, p: Player) {
+            handler.removeCallbacks(nextLine)
+            val l = lyrics?.takeIf { it.synced }
+            val pos = p.currentPosition
+            val index = l?.indexAt(pos) ?: -1
+            val text = l?.lines?.getOrNull(index)?.text?.takeIf { it.isNotBlank() }
+            v.setTextViewText(R.id.widget_lyric, text ?: "")
+            v.setViewVisibility(R.id.widget_lyric, if (text != null) View.VISIBLE else View.GONE)
+            v.setViewVisibility(R.id.widget_artist, if (text != null || artistOf(p).isEmpty()) View.GONE else View.VISIBLE)
+            val next = l?.lines?.getOrNull(index + 1)?.timeMs ?: return
+            if (!p.isPlaying) return
+            val speed = p.playbackParameters.speed.takeIf { it > 0 } ?: 1f
+            handler.postDelayed(nextLine, ((next - pos) / speed).toLong().coerceAtLeast(100))
+        }
+
+        private fun artistOf(p: Player): String =
+            listOfNotNull(p.mediaMetadata.artist, p.mediaMetadata.albumTitle).filter { it.isNotBlank() }.joinToString(" · ")
+
         private fun views(context: Context): RemoteViews {
             val v = RemoteViews(context.packageName, R.layout.widget_now_playing)
             val p = player?.takeIf { it.currentMediaItem != null }
             val recent = if (p == null) WidgetPlayback.recentSongs(context).firstOrNull() else null
             if (p == null) {
+                handler.removeCallbacks(nextLine)
+                v.setViewVisibility(R.id.widget_lyric, View.GONE)
                 v.setTextViewText(R.id.widget_title, recent?.entry?.displayTitle ?: "没有在播放")
                 v.setTextViewText(R.id.widget_artist, if (recent != null) "继续收听 · 译幕" else "译幕")
                 v.setViewVisibility(R.id.widget_artist, View.VISIBLE)
@@ -112,9 +169,8 @@ class NowPlayingWidget : AppWidgetProvider() {
             } else {
                 val meta = p.mediaMetadata
                 v.setTextViewText(R.id.widget_title, meta.title ?: meta.displayTitle ?: "")
-                val artist = listOfNotNull(meta.artist, meta.albumTitle).filter { it.isNotBlank() }.joinToString(" · ")
-                v.setTextViewText(R.id.widget_artist, artist)
-                v.setViewVisibility(R.id.widget_artist, if (artist.isEmpty()) View.GONE else View.VISIBLE)
+                v.setTextViewText(R.id.widget_artist, artistOf(p))
+                lyricLine(v, p)
                 val bmp = coverOf(meta.artworkData)
                 if (bmp != null) v.setImageViewBitmap(R.id.widget_cover, bmp)
                 else v.setImageViewResource(R.id.widget_cover, R.drawable.widget_cover_placeholder)

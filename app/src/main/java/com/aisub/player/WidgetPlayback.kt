@@ -19,10 +19,17 @@ import com.aisub.player.media.AppStore
 import com.aisub.player.media.HistoryItem
 import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.withAiff
+import com.aisub.player.music.MusicFeatures
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 /**
  * 应用没开着时，在桌面小组件上点播放：不打开界面，直接在后台播放服务里接着放最近听的歌（同首页「继续收听」）。
- * 只是个精简的播放器：歌名、歌手、封面用文件里的标签，没有歌词等功能。
+ * 只是个精简的播放器：歌名、歌手、封面、歌词和界面里一样读取（[MusicFeatures]），给通知栏和小组件用，其他功能要打开译幕。
  * 打开译幕时界面接管（[takeOver]），从同一首歌、同一位置继续。
  */
 @UnstableApi
@@ -36,6 +43,8 @@ internal object WidgetPlayback {
     private var queue: List<MediaEntry> = emptyList()
     private var store: AppStore? = null
     private var app: Application? = null
+    private var scope: CoroutineScope? = null
+    private var music: MusicFeatures? = null
 
     /** 最近听过的歌，最新的在前 */
     fun recentSongs(context: Context): List<HistoryItem> =
@@ -66,15 +75,32 @@ internal object WidgetPlayback {
             .setId(java.util.UUID.randomUUID().toString())
             .setSessionActivity(openApp(app))
             .build()
+        val sc = MainScope()
+        val settings = SettingsRepository(app).load()
+        val m = MusicFeatures(app, sc, player = { p }, settings = { settings })
         player = p
         session = s
         store = st
         this.app = app
+        scope = sc
+        music = m
         PlaybackService.session = s
         service.addSession(s)
         p.prepare()
         p.play()
         NowPlayingWidget.attach(app, p)
+        m.onEntryChanged(queue.first())
+        // 读到歌名、歌手、封面：通知栏、锁屏和小组件换成这些；读到歌词：小组件显示正在唱的那句
+        sc.launch {
+            m.state.distinctUntilChanged { a, b -> a.tags == b.tags && a.cover === b.cover }.collect { ms ->
+                if (session !== s) return@collect
+                s.player = SessionPlayer(p, musicMetadata(ms))
+                NowPlayingWidget.attach(app, s.player)
+            }
+        }
+        sc.launch {
+            m.state.map { it.lyrics }.distinctUntilChanged().collect { l -> if (session === s) NowPlayingWidget.setLyrics(app, l) }
+        }
         return true
     }
 
@@ -94,6 +120,9 @@ internal object WidgetPlayback {
         session?.let { if (PlaybackService.session === it) PlaybackService.session = null }
         session?.release()
         p.release()
+        scope?.cancel()
+        scope = null
+        music = null
         app?.let(NowPlayingWidget::detach)
         player = null
         session = null
@@ -108,7 +137,13 @@ internal object WidgetPlayback {
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            player?.let(::save)
+            val p = player ?: return
+            save(p)
+            queue.getOrNull(p.currentMediaItemIndex)?.let { music?.onEntryChanged(it) }
+        }
+
+        override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+            music?.onTracksChanged(tracks)
         }
     }
 

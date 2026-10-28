@@ -83,6 +83,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -195,20 +196,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         )
         .build()
         .also { PlaybackService.session = it }
-
-    /** 音乐的歌名、歌手、专辑、封面，给通知栏和锁屏用；不是音乐时返回 null */
-    private fun musicMetadata(m: com.aisub.player.music.MusicState): MediaMetadata? {
-        val tags = m.tags ?: return null
-        val artwork = m.cover?.let { bmp ->
-            java.io.ByteArrayOutputStream().also { bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, it) }.toByteArray()
-        }
-        return MediaMetadata.Builder()
-            .setTitle(tags.title)
-            .setArtist(tags.artist)
-            .setAlbumTitle(tags.album)
-            .apply { artwork?.let { setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER) } }
-            .build()
-    }
 
     /** 界面打开前小组件在后台放着歌：从同一首、同一位置接着放（进度已记进历史） */
     fun resumeWidgetPlayback() {
@@ -444,6 +431,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     session.player = SessionPlayer(p, musicMetadata(m))
                     if (PlaybackService.session === session) NowPlayingWidget.attach(getApplication(), session.player)
                 }
+        }
+        // 桌面小组件显示正在唱的那句歌词
+        viewModelScope.launch {
+            music.state.map { it.lyrics }.distinctUntilChanged().collect { l ->
+                if (PlaybackService.session === session) NowPlayingWidget.setLyrics(getApplication(), l)
+            }
         }
     }
 
