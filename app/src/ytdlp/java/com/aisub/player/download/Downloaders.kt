@@ -95,7 +95,9 @@ private class YtDlpDownloader(private val context: Context) : LinkDownloader {
                 percent >= 0 -> onProgress(
                     LinkProgress(
                         LinkStage.DOWNLOAD, percent / 100f,
-                        line.substringAfter("[download]").trim().takeIf { it.contains('%') } ?: (if (eta > 0) "剩余约 ${eta} 秒" else title),
+                        // 进度行本身带 ETA；其他行（分片清单、合并前的提示）沿用上次的百分比和 ETA，
+                        // 不能拿来当说明，否则会被当成标题、一直停在「剩余约 1 秒」
+                        line.substringAfter("[download]").trim().takeIf { it.contains('%') } ?: title,
                     ),
                 )
             }

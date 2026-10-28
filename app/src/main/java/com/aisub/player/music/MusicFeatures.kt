@@ -19,6 +19,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -257,20 +258,29 @@ class MusicFeatures(
         _state.update { it.copy(translating = true) }
         try {
             val texts = lyrics.lines.map { it.text }
-            val out = arrayOfNulls<String>(texts.size)
-            // 空行、纯符号的行不用翻；一次送 40 行，前面几行作上下文
-            val todo = texts.indices.filter { texts[it].any(Char::isLetter) }
-            for (chunk in todo.chunked(40)) {
-                val context = texts.subList(maxOf(0, chunk.first() - 3), chunk.first())
-                val result = withContext(Dispatchers.IO) { translator.translate(chunk.map { texts[it] }, context, s.targetLanguage) }
-                chunk.forEachIndexed { k, i -> out[i] = result.getOrNull(k)?.trim()?.takeIf { it.isNotEmpty() && it != texts[i].trim() } }
-                if (entry != e) return null
-                _state.update { it.copy(translations = out.toList()) }
+            // 上次翻到一半失败时接着翻，已经翻好的行不再请求
+            val out = _state.value.translations?.takeIf { it.size == texts.size }?.toTypedArray() ?: arrayOfNulls(texts.size)
+            // 空行、纯符号的行不用翻；一次送 20 行（和字幕一样，太多免费服务容易超时），前面几行作上下文
+            val todo = texts.indices.filter { out[it] == null && texts[it].any(Char::isLetter) }
+            try {
+                for (chunk in todo.chunked(20)) {
+                    val context = texts.subList(maxOf(0, chunk.first() - 3), chunk.first())
+                    val result = withContext(Dispatchers.IO) { translator.translate(chunk.map { texts[it] }, context, s.targetLanguage) }
+                    chunk.forEachIndexed { k, i -> out[i] = result.getOrNull(k)?.trim()?.takeIf { it.isNotEmpty() && it != texts[i].trim() } }
+                    if (entry != e) return null
+                    _state.update { it.copy(translations = out.toList()) }
+                }
+            } finally {
+                // 失败时也把翻好的部分存下
+                if (entry == e && out.any { it != null }) {
+                    withContext(NonCancellable + Dispatchers.IO) { translationFile(e).writeText(org.json.JSONArray(out.map { it ?: "" }).toString()) }
+                }
             }
-            withContext(Dispatchers.IO) { translationFile(e).writeText(org.json.JSONArray(out.map { it ?: "" }).toString()) }
             return null
         } catch (ex: Exception) {
-            return "翻译失败：${ex.message}"
+            if (ex is kotlinx.coroutines.CancellationException) throw ex
+            val done = _state.value.translations?.count { it != null } ?: 0
+            return "翻译失败：${ex.message}" + if (done > 0) "\n已翻译的部分已保存，再点「生成翻译」会接着翻剩下的" else ""
         } finally {
             _state.update { it.copy(translating = false) }
         }
