@@ -977,7 +977,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun runLive(settings: AppSettings, translator: Translator?) {
         val entry = _state.value.current ?: return
         val base = android.os.SystemClock.elapsedRealtime()
-        _state.update { it.copy(cues = emptyList(), liveBaseMs = base, status = "实时字幕已开启，几秒后出现…", progress = null) }
+        // 字幕比说话晚一段（一段音频 + 识别 + 翻译）：把画面往回拖十秒左右，字幕出现时画面刚好播到那句话
+        val delayed = delayLivePlayback(entry)
+        _state.update {
+            it.copy(
+                cues = emptyList(), liveBaseMs = base, progress = null,
+                status = if (delayed) "实时字幕已开启，画面延迟了约 ${LIVE_DELAY_MS / 1000} 秒来对齐字幕" else "实时字幕已开启，几秒后出现…",
+            )
+        }
         val incoming = java.util.concurrent.ConcurrentLinkedQueue<Cue>()
         val dispatcher = if (settings.asrEngine == AsrEngine.LOCAL) Dispatchers.Default else Dispatchers.IO
 
@@ -1010,10 +1017,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val now = android.os.SystemClock.elapsedRealtime() - base
                 // 积压太多（翻译或识别变慢）时不再排队，直接显示最新的
                 var cursor = if (lastEnd - now > LIVE_MAX_BACKLOG_MS) now else maxOf(now, lastEnd)
+                val first = batch.first().startMs
                 val shown = batch.mapIndexed { i, c ->
                     val same = LanguageCheck.alreadyTarget(c.text, target, s.asrSettings.asrLanguage, ChineseScript::variant)
-                    val duration = (c.endMs - c.startMs).coerceIn(1500, 6000)
-                    Cue(nextCueId++, cursor, cursor + duration, c.text, if (same) c.text else results[i]).also { cursor += duration }
+                    val duration = (c.endMs - c.startMs).coerceIn(1200, 6000)
+                    // 保持这一批里各句原来的间隔，画面也是这样一句一句播出来的
+                    val start = maxOf(cursor, now + (c.startMs - first))
+                    cursor = start + duration
+                    Cue(nextCueId++, start, cursor, c.text, if (same) c.text else results[i])
                 }
                 lastEnd = cursor
                 batch.forEach { recent.addLast(it.text) }
@@ -1050,7 +1061,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         } finally {
             shower.cancel()
             _state.update { it.copy(liveBaseMs = 0) }
+            if (delayed) restoreLivePlayback(entry)
         }
+    }
+
+    /**
+     * 把直播画面往回拖 [LIVE_DELAY_MS]，并固定 1 倍速（不然播放器会加速追回直播位置）。
+     * 只对能往回拖的直播流（HLS / DASH）有效；返回是否真的延迟了。
+     */
+    private fun delayLivePlayback(entry: MediaEntry): Boolean {
+        if (usingVlc) return false
+        val p = exoPlayer
+        val item = p.currentMediaItem ?: return false
+        if (item.mediaId != entry.uri || !p.isCurrentMediaItemLive) return false
+        val offset = p.currentLiveOffset.takeIf { it != C.TIME_UNSET } ?: return false
+        val config = item.liveConfiguration.buildUpon()
+            .setTargetOffsetMs(offset + LIVE_DELAY_MS)
+            .setMinPlaybackSpeed(1f)
+            .setMaxPlaybackSpeed(1f)
+            .build()
+        p.replaceMediaItem(p.currentMediaItemIndex, item.buildUpon().setLiveConfiguration(config).build())
+        p.seekTo((p.currentPosition - LIVE_DELAY_MS).coerceAtLeast(0))
+        return true
+    }
+
+    /** 实时字幕停了：恢复正常的直播延迟，回到直播最新位置。 */
+    private fun restoreLivePlayback(entry: MediaEntry) {
+        if (usingVlc) return
+        val p = exoPlayer
+        if (p.currentMediaItem?.mediaId != entry.uri) return
+        p.replaceMediaItem(p.currentMediaItemIndex, itemOf(entry))
+        p.seekToDefaultPosition()
     }
 
     /** 新识别出的字幕按开始时间排进列表；编号用不重复的新号，翻译、朗读靠编号找字幕。 */
@@ -1670,6 +1711,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private const val LIVE_CHUNK_SEC = 8
         private const val LIVE_KEEP_CUES = 200
         private const val LIVE_MAX_BACKLOG_MS = 8_000L
+
+        /** 实时字幕开启时画面往回拖多久：一段音频 8 秒 + 识别和翻译约 2 秒 */
+        private const val LIVE_DELAY_MS = 10_000L
         /** 播放页点「♡」的歌放在这个播放列表里 */
         const val LIKED_PLAYLIST = "我喜欢的音乐"
     }
