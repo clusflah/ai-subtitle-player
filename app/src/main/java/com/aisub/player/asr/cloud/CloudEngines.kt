@@ -77,7 +77,7 @@ class AliyunFunAsrTranscriber(
     endpoint: String,
     private val model: String,
     private val language: String,
-) : ChunkedCloudEngine(firstChunkSec = 60, chunkSec = 240) {
+) : ChunkedCloudEngine() {
     private val url = endpoint.trimEnd('/') + "/api/v1/services/aigc/multimodal-generation/generation"
 
     override fun recognize(wav: ByteArray, chunkStartMs: Long, chunkEndMs: Long): List<Recognized> {
@@ -166,8 +166,9 @@ class XfyunTranscriber(private val appId: String, private val secretKey: String,
         val orderId = upload.getJSONObject("content").getString("orderId")
 
         var result: JSONObject
+        var polls = 0
         while (true) {
-            pause(3000)
+            pause(if (polls++ == 0) 800L else 1500L)
             result = execute({
                 Request.Builder().url(
                     signed("https://raasr.xfyun.cn/v2/api/getResult")

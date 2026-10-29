@@ -6,6 +6,7 @@ import com.aisub.player.subtitle.LineStyle
 import com.aisub.player.subtitle.Pinyin
 import com.aisub.player.tts.TtsEngineType
 import com.aisub.player.tts.ttsLocaleFor
+import com.aisub.player.translate.AzureTranslator
 import com.aisub.player.translate.ChatCompletionsTranslator
 import com.aisub.player.translate.ClaudeTranslator
 import com.aisub.player.translate.PromptStyle
@@ -33,6 +34,19 @@ enum class Provider(
     DEEPSEEK("DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", needsApiKey = true, editableBaseUrl = false),
     GEMINI(
         "Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash",
+        needsApiKey = true, editableBaseUrl = false,
+    ),
+    // 国内直连、速度快的几家：阿里云百炼（通义千问）、火山方舟（豆包）、Azure 机器翻译
+    ALIYUN(
+        "阿里云百炼", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-flash",
+        needsApiKey = true, editableBaseUrl = false,
+    ),
+    VOLC(
+        "火山方舟（豆包）", "https://ark.cn-beijing.volces.com/api/v3", "doubao-seed-1-6-flash-250828",
+        needsApiKey = true, editableBaseUrl = false,
+    ),
+    AZURE_TRANSLATOR(
+        "Azure 翻译", "https://api.cognitive.microsofttranslator.com", "global",
         needsApiKey = true, editableBaseUrl = false,
     ),
     OPENAI_COMPAT("自定义", "https://api.openai.com/v1", "", needsApiKey = false, editableBaseUrl = true),
@@ -206,6 +220,17 @@ data class AppSettings(
                     "chat_template_kwargs" to JSONObject().put("enable_thinking", false),
                 ),
             )
+            // 国内这两家的接口都兼容 OpenAI；通义千问 3 默认开启思考会很慢，翻译不需要
+            Provider.ALIYUN -> ChatCompletionsTranslator(
+                c.baseUrl, c.apiKey, c.model,
+                extraBody = mapOf("enable_thinking" to false),
+            )
+            Provider.VOLC -> ChatCompletionsTranslator(
+                c.baseUrl, c.apiKey, c.model,
+                extraBody = mapOf("thinking" to JSONObject().put("type", "disabled")),
+            )
+            // 模型一栏填的是资源区域
+            Provider.AZURE_TRANSLATOR -> AzureTranslator(c.baseUrl, c.apiKey, c.model)
             Provider.OPENAI_COMPAT -> ChatCompletionsTranslator(c.baseUrl, c.apiKey, c.model)
         }
     }

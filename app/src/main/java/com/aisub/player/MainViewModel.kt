@@ -40,6 +40,7 @@ import com.aisub.player.asr.AudioDecoder
 import com.aisub.player.asr.LocalModel
 import com.aisub.player.asr.ModelCatalog
 import com.aisub.player.asr.ModelManager
+import com.aisub.player.asr.RangeSet
 import com.aisub.player.asr.SpeechEngine
 import com.aisub.player.asr.Transcriber
 import com.aisub.player.subtitle.Cue
@@ -71,12 +72,15 @@ import com.aisub.player.tts.TtsEngineType
 import com.aisub.player.tts.TtsReader
 import com.aisub.player.tts.TtsSnapshot
 import com.aisub.player.tts.TtsVoice
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -129,6 +133,8 @@ data class UiState(
     val videoProblem: String? = null,
     /** 正在播放服务器转码后的流 */
     val transcoding: Boolean = false,
+    /** 直播实时字幕的时间起点（SystemClock.elapsedRealtime）；0 表示没开。直播字幕的时间都是相对它的 */
+    val liveBaseMs: Long = 0,
 ) {
     /** 当前视频识别时用的设置：语音语言换成这个视频单独选的 */
     val asrSettings: AppSettings get() = videoAsrLanguage?.let { settings.copy(asrLanguage = it) } ?: settings
@@ -316,6 +322,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private var transcribeJob: Job? = null
     private var translateJob: Job? = null
+
+    /** 按播放位置边看边识别：已经识别过的时间段，以及这个视频是否还只识别了一部分 */
+    private val coverage = RangeSet()
+    private var coverageActive = false
+    private var coverageLimit = UNKNOWN_END
+    private var nextCueId = 1
+
+    /** 这次识别同时要翻译：Gemini 识别时顺带翻译，省掉单独翻译的一轮 */
+    private var inlineTranslate = false
     private var roleJob: Job? = null
     private var embeddedJob: Job? = null
     /** 读出的自带字幕轨载入后一定翻译（播放页的「翻译成…字幕」按钮），不看自动翻译设置 */
@@ -592,8 +607,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         cancelAll()
         sawFirstFrame = false
         frameWatch?.cancel()
-        _state.update { it.copy(videoProblem = null, transcoding = false) }
+        _state.update { it.copy(videoProblem = null, transcoding = false, liveBaseMs = 0) }
         val uri = Uri.parse(entry.uri)
+        coverage.clear()
+        coverageLimit = UNKNOWN_END
+        coverageActive = false
+        store.loadCoverage(uri)?.let { coverage.load(it); coverageActive = true }
         val videoLanguage = store.loadAsrLanguage(uri)
         // 旧版把俄语等非拉丁文字误判成「不用翻译」、原文直接当了译文，这里清掉让它重新翻译
         val cached = store.load(uri).let { cues ->
@@ -623,6 +642,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         extras.onEntryChanged(entry)
+        // 上次只识别了一部分：打开后接着识别
+        if (coverageActive && entry.isVideo && !entry.isLive) viewModelScope.launch { transcribeJob?.join(); resumePartialSubtitles() }
         music.onEntryChanged(entry)
         library.recordHistory(entry, 0)
     }
@@ -753,7 +774,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         status = "识别出 ${withVoices.size} 个角色",
                     )
                 }
-                store.save(uri, _state.value.cues)
+                persistCues(uri)
                 store.saveRoles(uri, withVoices)
                 ttsReader.reset()
             } catch (e: CancellationException) {
@@ -792,13 +813,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun dismissError() = _state.update { it.copy(error = null, failedTask = null) }
 
-    /** 识别整段音轨。边识别边出字幕，开启自动翻译时同时翻译。 */
-    /** @param alsoTranslate 不看自动翻译设置，识别的同时一定翻译（播放页的一键字幕按钮） */
-    fun generateSubtitles(alsoTranslate: Boolean = false) {
+    /**
+     * 生成字幕：从当前播放位置开始识别，识别一段、翻译一段，播放到哪里字幕就出现在哪里；
+     * 拖动进度条到还没识别的地方，马上改从那里开始；识别到结尾后再回头补前面的。
+     * 直播流只识别正在播出的内容（见 [runLive]）。
+     * @param alsoTranslate 不看自动翻译设置，识别的同时一定翻译（播放页的一键字幕按钮）
+     * @param resume 接着上次没识别完的继续，不清空已有字幕
+     */
+    fun generateSubtitles(alsoTranslate: Boolean = false, resume: Boolean = false) {
+        // 上次识别中途失败（网络断了等）：再点一次是接着识别，不是从头来
+        val keep = resume || (_state.value.current?.isLive != true && coverageActive && _state.value.failedTask == Task.TRANSCRIBE)
         val uri = _state.value.videoUri ?: return
         if (transcribeJob?.isActive == true) return
         translateJob?.cancel()
-        _state.update { it.copy(cues = emptyList(), transcribing = true, error = null, failedTask = null) }
+        val live = _state.value.current?.isLive == true
+        if (!keep || live) {
+            coverage.clear()
+            coverageActive = !live
+            store.clearCoverage(uri)
+            _state.update { it.copy(cues = emptyList(), liveBaseMs = 0) }
+        }
+        _state.update { it.copy(transcribing = true, error = null, failedTask = null) }
+        nextCueId = (_state.value.cues.maxOfOrNull { it.id } ?: 0) + 1
         updateAutoAdvance()
 
         transcribeJob = viewModelScope.launch {
@@ -816,43 +852,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val engineName = if (settings.asrEngine == AsrEngine.LOCAL) localModel.label else settings.asrEngine.label
                 _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f) }
-                if ((settings.autoTranslate || alsoTranslate) && settings.createTranslator() != null) startTranslation()
-
-                // 云端引擎大部分时间在等网络，放到 IO 线程池
-                val dispatcher = if (settings.asrEngine == AsrEngine.LOCAL) Dispatchers.Default else Dispatchers.IO
-                withContext(dispatcher) {
-                    createEngine(settings).use { engine ->
-                        // 协程取消时中断引擎里正在进行的网络请求
-                        val cancelHandle = coroutineContext.job.invokeOnCompletion { engine.cancel() }
-                        try {
-                            val onCue: (Cue) -> Unit = { cue -> _state.update { it.copy(cues = it.cues + cue) } }
-                            AudioDecoder(getApplication(), uri, authDataSourceFactory(getApplication())).decode(
-                                isActive = { isActive },
-                                onProgress = { p -> _state.update { it.copy(progress = p) } },
-                                onChunk = { chunk -> engine.accept(chunk, onCue) },
-                            )
-                            if (isActive) engine.finish(onCue)
-                        } finally {
-                            cancelHandle.dispose()
-                        }
-                    }
+                val translate = (settings.autoTranslate || alsoTranslate) && settings.createTranslator() != null
+                inlineTranslate = translate
+                if (live) {
+                    runLive(settings, if (translate) settings.createTranslator() else null)
+                } else {
+                    if (translate) startTranslation()
+                    runOnDemand(settings, uri)
                 }
                 ensureActive()
-                val count = _state.value.cues.size
-                _state.update { it.copy(status = "识别完成，共 $count 条字幕", progress = null) }
-                store.save(uri, _state.value.cues)
-                saveSidecar()
+                if (!live) {
+                    val count = _state.value.cues.size
+                    _state.update { it.copy(status = "识别完成，共 $count 条字幕", progress = null) }
+                    persistCues(uri)
+                    saveSidecar()
+                }
             } catch (e: CancellationException) {
                 _state.update { it.copy(status = "已取消", progress = null) }
+                _state.value.videoUri?.let { if (!live) persistCues(it) }
                 throw e
             } catch (e: Exception) {
                 // 取消时被中断的网络请求会抛 IOException，不算失败
                 if (!isActive) {
                     _state.update { it.copy(status = "已取消", progress = null) }
+                    _state.value.videoUri?.let { if (!live) persistCues(it) }
                     throw CancellationException("cancelled")
                 }
                 android.util.Log.e("Voxtitle", "识别失败", e)
                 _state.update { it.copy(status = "识别失败", progress = null, error = e.message ?: e.toString(), failedTask = Task.TRANSCRIBE) }
+                _state.value.videoUri?.let { if (!live) persistCues(it) }
             } finally {
                 _state.update { it.copy(transcribing = false) }
                 updateAutoAdvance()
@@ -860,12 +888,213 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 按已识别的范围往前推进：从播放位置开始，到结尾后回头补前面没识别的。 */
+    private suspend fun runOnDemand(settings: AppSettings, uri: Uri) {
+        val dispatcher = if (settings.asrEngine == AsrEngine.LOCAL) Dispatchers.Default else Dispatchers.IO
+        var duration = player.duration
+        var tries = 0
+        while (duration <= 0 && tries++ < 20) { delay(200); duration = player.duration }
+        if (duration <= 0) duration = UNKNOWN_END
+        coverageLimit = duration
+        var cursor = player.currentPosition - LEAD_IN_MS
+        while (true) {
+            coroutineContext.ensureActive()
+            val gap = coverage.nextGap(cursor.coerceAtLeast(0), duration) ?: coverage.nextGap(0, duration) ?: break
+            val restartAt = withContext(dispatcher) { recognizeRange(settings, uri, gap.first, gap.second, duration) }
+            persistCues(uri)
+            cursor = restartAt ?: gap.second
+        }
+    }
+
+    /**
+     * 识别 [from, to) 这一段。播放位置跳到了这一段够不到、也没识别过的地方时提前结束，返回新的位置；
+     * 正常识别完（或到视频结尾）返回 null。识别过的范围记入 [coverage]。
+     */
+    private suspend fun recognizeRange(settings: AppSettings, uri: Uri, from: Long, to: Long, duration: Long): Long? {
+        val ctx = coroutineContext
+        val consumed = java.util.concurrent.atomic.AtomicLong(0)
+        val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+        val seekTo = java.util.concurrent.atomic.AtomicLong(-1)
+        val sampleRate = Transcriber.SAMPLE_RATE
+        val frontier = { from + consumed.get() * 1000 / sampleRate }
+
+        val watcher = viewModelScope.launch(Dispatchers.Main) {
+            var ticks = 0
+            while (true) {
+                delay(400)
+                val p = player.currentPosition
+                val away = p in 0 until duration && !coverage.contains(p) && (p < from - 1500 || p > frontier() + AHEAD_MS)
+                if (away) {
+                    seekTo.set(p)
+                    stop.set(true)
+                    break
+                }
+                // 识别很长时每隔一会儿存一次，中途退出也不会白识别
+                if (++ticks % 50 == 0) persistCues(uri)
+            }
+        }
+        try {
+            createEngine(settings).use { engine ->
+                val cancelHandle = ctx.job.invokeOnCompletion { engine.cancel() }
+                try {
+                    val onCue: (Cue) -> Unit = { c ->
+                        val start = c.startMs + from
+                        if (start < to) addCues(listOf(c.copy(startMs = start, endMs = c.endMs + from)))
+                    }
+                    var lastProgress = 0L
+                    AudioDecoder(getApplication(), uri, authDataSourceFactory(getApplication())).decode(
+                        startMs = from,
+                        isActive = { ctx.isActive && !stop.get() },
+                        onProgress = {},
+                        onChunk = { chunk ->
+                            engine.accept(chunk, onCue)
+                            val n = consumed.addAndGet(chunk.size.toLong())
+                            if (from + n * 1000 / sampleRate >= to) stop.set(true)
+                            val now = System.currentTimeMillis()
+                            if (duration < UNKNOWN_END && now - lastProgress > 500) {
+                                lastProgress = now
+                                val done = coverage.coveredMs(duration) + n * 1000 / sampleRate
+                                _state.update { it.copy(progress = (done.toFloat() / duration).coerceIn(0f, 1f)) }
+                            }
+                        },
+                    )
+                    if (ctx.isActive) engine.finish(onCue)
+                } finally {
+                    cancelHandle.dispose()
+                }
+            }
+            if (!ctx.isActive) return null
+            // 没被打断就是一直解码到了音轨结尾；被打断或到了这一段的终点，就只算解码到的部分
+            val reachedEnd = !stop.get()
+            coverage.add(from, if (reachedEnd) maxOf(duration, frontier()) else minOf(frontier(), to))
+            return seekTo.get().takeIf { it >= 0 }
+        } finally {
+            watcher.cancel()
+        }
+    }
+
+    /** 直播：从现在开始识别，每几秒出一批字幕（译成中文后显示），只保留最近的一部分。 */
+    private suspend fun runLive(settings: AppSettings, translator: Translator?) {
+        val entry = _state.value.current ?: return
+        val base = android.os.SystemClock.elapsedRealtime()
+        _state.update { it.copy(cues = emptyList(), liveBaseMs = base, status = "实时字幕已开启，几秒后出现…", progress = null) }
+        val incoming = java.util.concurrent.ConcurrentLinkedQueue<Cue>()
+        val dispatcher = if (settings.asrEngine == AsrEngine.LOCAL) Dispatchers.Default else Dispatchers.IO
+
+        // 识别出来的字幕比说话晚几秒，到了才排上显示时间：按到达的先后一句接一句显示
+        val shower = viewModelScope.launch {
+            var lastEnd = 0L
+            val recent = ArrayDeque<String>()
+            while (true) {
+                delay(250)
+                val batch = ArrayList<Cue>()
+                while (batch.size < BATCH_SIZE) batch.add(incoming.poll() ?: break)
+                if (batch.isEmpty()) continue
+                val s = _state.value
+                val target = s.settings.ttsLocale
+                // 识别时已经顺带翻译好的（Gemini）不用再翻
+                val need = batch.indices.filter { batch[it].translation == null }
+                val translatedNeed = if (translator != null && need.isNotEmpty()) {
+                    try {
+                        translator.translate(need.map { batch[it].text }, recent.toList(), s.settings.targetLanguage)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        android.util.Log.w("Voxtitle", "直播字幕翻译失败：${e.message}")
+                        null
+                    }
+                } else null
+                val results = List(batch.size) { i ->
+                    batch[i].translation ?: need.indexOf(i).takeIf { it >= 0 }?.let { translatedNeed?.getOrNull(it) }
+                }
+                val now = android.os.SystemClock.elapsedRealtime() - base
+                // 积压太多（翻译或识别变慢）时不再排队，直接显示最新的
+                var cursor = if (lastEnd - now > LIVE_MAX_BACKLOG_MS) now else maxOf(now, lastEnd)
+                val shown = batch.mapIndexed { i, c ->
+                    val same = LanguageCheck.alreadyTarget(c.text, target, s.asrSettings.asrLanguage, ChineseScript::variant)
+                    val duration = (c.endMs - c.startMs).coerceIn(1500, 6000)
+                    Cue(nextCueId++, cursor, cursor + duration, c.text, if (same) c.text else results[i]).also { cursor += duration }
+                }
+                lastEnd = cursor
+                batch.forEach { recent.addLast(it.text) }
+                while (recent.size > CONTEXT_SIZE) recent.removeFirst()
+                _state.update { st -> st.copy(cues = (st.cues + shown).takeLast(LIVE_KEEP_CUES), status = "实时字幕") }
+            }
+        }
+        try {
+            withContext(dispatcher) {
+                createEngine(settings).use { engine ->
+                    (engine as? com.aisub.player.asr.cloud.ChunkedCloudEngine)?.useChunks(LIVE_FIRST_CHUNK_SEC, LIVE_CHUNK_SEC)
+                    val cancelHandle = coroutineContext.job.invokeOnCompletion { engine.cancel() }
+                    try {
+                        // 直播流断了或系统解码器一读就结束时，重连几次
+                        var quickEnds = 0
+                        while (coroutineContext.isActive && quickEnds < 3) {
+                            val startedAt = System.currentTimeMillis()
+                            AudioDecoder(getApplication(), Uri.parse(entry.uri), authDataSourceFactory(getApplication())).decode(
+                                isActive = { coroutineContext.isActive },
+                                onProgress = {},
+                                onChunk = { chunk -> engine.accept(chunk) { incoming.add(it) } },
+                            )
+                            if (System.currentTimeMillis() - startedAt < 10_000) quickEnds++ else quickEnds = 0
+                            delay(500)
+                        }
+                        if (coroutineContext.isActive) engine.finish { incoming.add(it) }
+                    } finally {
+                        cancelHandle.dispose()
+                    }
+                }
+            }
+            delay(2000)
+            _state.update { it.copy(status = "直播字幕已停止") }
+        } finally {
+            shower.cancel()
+            _state.update { it.copy(liveBaseMs = 0) }
+        }
+    }
+
+    /** 新识别出的字幕按开始时间排进列表；编号用不重复的新号，翻译、朗读靠编号找字幕。 */
+    private fun addCues(new: List<Cue>) {
+        val numbered = new.map { it.copy(id = nextCueId++) }
+        _state.update { s -> s.copy(cues = (s.cues + numbered).sortedBy { it.startMs }) }
+    }
+
+    /** 存字幕；只识别了一部分时连同已识别的范围一起存，下次打开接着识别。 */
+    private fun persistCues(uri: Uri) {
+        if (_state.value.videoUri != uri) return
+        store.save(uri, _state.value.cues)
+        if (!coverageActive) return
+        if (coverage.isFull(coverageLimit)) {
+            store.clearCoverage(uri)
+            coverageActive = false
+        } else {
+            store.saveCoverage(uri, coverage.snapshot())
+        }
+    }
+
+    /** 字幕换成了导入的、视频自带的等别的来源：不再按识别范围续识别。 */
+    private fun dropCoverage(uri: Uri) {
+        coverageActive = false
+        coverage.clear()
+        store.clearCoverage(uri)
+    }
+
+    /** 打开上次没识别完的视频：接着识别（识别设置不完整或要下载模型时不自动做）。 */
+    private fun resumePartialSubtitles() {
+        val s = _state.value.asrSettings
+        if (s.asrProblem() != null) return
+        if (s.asrEngine == AsrEngine.LOCAL && !models.isReady(ModelCatalog.byId(s.localModel))) return
+        generateSubtitles(alsoTranslate = false, resume = true)
+    }
+
     private fun createEngine(settings: AppSettings): SpeechEngine = when (settings.asrEngine) {
         AsrEngine.LOCAL -> {
             val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
             Transcriber(ModelCatalog.byId(settings.localModel), models, com.aisub.player.asr.AsrLanguages.primary(settings.asrLanguage), threads)
         }
-        else -> settings.createCloudEngine()
+        else -> settings.createCloudEngine().also { e ->
+            if (e is com.aisub.player.asr.cloud.GeminiTranscriber && inlineTranslate) e.translateTo = settings.targetLanguage
+        }
     }
 
     // ---- 本地模型管理（设置页用） ----
@@ -895,13 +1124,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 _state.update { it.copy(translating = false) }
                 updateAutoAdvance()
-                _state.value.videoUri?.let { store.save(it, _state.value.cues) }
+                _state.value.videoUri?.let { persistCues(it) }
                 saveSidecar()
             }
         }
     }
 
-    private suspend fun translateLoop(translator: Translator) {
+    /**
+     * 同时翻译几批：先翻播放位置之后的，再回头翻前面的。识别还在进行时，没有在途的请求就马上翻手上有的，
+     * 有在途的请求就攒够一批再发。
+     */
+    private suspend fun translateLoop(translator: Translator) = coroutineScope {
+        val slots = Semaphore(TRANSLATE_PARALLEL)
+        val inFlight = HashSet<Int>()
+        var running = 0
         var skipped = 0
         while (true) {
             // 原文已经是目标语言（或没有文字）的句子不发给大模型，原文直接当译文
@@ -916,35 +1152,47 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
 
             val snapshot = _state.value
-            val firstPending = snapshot.cues.indexOfFirst { it.translation == null }
-            if (firstPending < 0) {
-                if (snapshot.transcribing) {
-                    delay(1000)
+            val pending = snapshot.cues.filter { it.translation == null && it.id !in inFlight }
+            if (pending.isEmpty()) {
+                if (running > 0 || snapshot.transcribing) {
+                    delay(250)
                     continue
                 }
-                if (skipped > 0 && !snapshot.transcribing) {
+                if (skipped > 0) {
                     _state.update { it.copy(status = "翻译完成，其中 $skipped 句原文已是${it.settings.targetLanguage}，没有翻译") }
                 }
-                return
+                return@coroutineScope
             }
-            // 跳过中间不用翻译的句子，凑够一批再发
-            val batch = snapshot.cues.drop(firstPending).filter { it.translation == null }.take(BATCH_SIZE)
-            // 识别还在进行时攒够一批再翻，翻译质量更好、请求也更少
-            if (snapshot.transcribing && batch.size < BATCH_SIZE) {
-                delay(1000)
+            val position = if (snapshot.current?.isLive == true) 0L else player.currentPosition
+            val ahead = pending.filter { it.endMs >= position - 5_000 }
+            val batch = (ahead.ifEmpty { pending }).take(BATCH_SIZE)
+            if (snapshot.transcribing && batch.size < BATCH_SIZE && running > 0) {
+                delay(250)
                 continue
             }
-            val context = snapshot.cues.subList(maxOf(0, firstPending - CONTEXT_SIZE), firstPending).map { it.text }
-            val results = translator.translate(batch.map { it.text }, context, snapshot.settings.targetLanguage)
-
-            // 模型漏掉的条目用原文占位，避免死循环反复请求
-            val translated = batch.indices.associate { i -> batch[i].id to (results[i] ?: batch[i].text) }
-            _state.update { s ->
-                s.copy(cues = s.cues.map { c -> translated[c.id]?.let { c.copy(translation = it) } ?: c })
-            }
-            val done = _state.value.cues.count { it.translation != null }
-            if (!_state.value.transcribing) {
-                _state.update { it.copy(status = "翻译中 $done/${it.cues.size}") }
+            slots.acquire()
+            val ids = batch.map { it.id }
+            inFlight += ids
+            running++
+            val first = snapshot.cues.indexOfFirst { it.id == batch.first().id }
+            val context = snapshot.cues.subList(maxOf(0, first - CONTEXT_SIZE), first).map { it.text }
+            launch {
+                try {
+                    val results = translator.translate(batch.map { it.text }, context, snapshot.settings.targetLanguage)
+                    // 模型漏掉的条目用原文占位，避免死循环反复请求
+                    val translated = batch.indices.associate { i -> batch[i].id to (results[i] ?: batch[i].text) }
+                    _state.update { s ->
+                        s.copy(cues = s.cues.map { c -> translated[c.id]?.let { c.copy(translation = it) } ?: c })
+                    }
+                    if (!_state.value.transcribing) {
+                        val done = _state.value.cues.count { it.translation != null }
+                        _state.update { it.copy(status = "翻译中 $done/${it.cues.size}") }
+                    }
+                } finally {
+                    inFlight -= ids.toSet()
+                    running--
+                    slots.release()
+                }
             }
         }
     }
@@ -970,7 +1218,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val result = translator.translate(listOf(cues[i].text), context, settings.targetLanguage).firstOrNull()
                 if (result != null) {
                     _state.update { s -> s.copy(cues = s.cues.map { if (it.id == cueId) it.copy(translation = result) else it }) }
-                    _state.value.videoUri?.let { store.save(it, _state.value.cues) }
+                    _state.value.videoUri?.let { persistCues(it) }
                 }
             } catch (e: Exception) {
                 _state.update { it.copy(error = "翻译失败：${e.message}", failedTask = Task.TRANSLATE) }
@@ -989,14 +1237,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     .sortedBy { it.startMs },
             )
         }
-        _state.value.videoUri?.let { store.save(it, _state.value.cues) }
+        _state.value.videoUri?.let { persistCues(it) }
         saveSidecar()
         ttsReader.reset()
     }
 
     fun deleteCue(cueId: Int) {
         _state.update { s -> s.copy(cues = s.cues.filter { it.id != cueId }) }
-        _state.value.videoUri?.let { store.save(it, _state.value.cues) }
+        _state.value.videoUri?.let { persistCues(it) }
         saveSidecar()
         ttsReader.reset()
     }
@@ -1215,6 +1463,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 error = null, failedTask = null, choosingEmbedded = false,
             )
         }
+        dropCoverage(video)
         store.save(video, track.cues)
         val settings = _state.value.settings
         val translate = translateEmbedded
@@ -1234,6 +1483,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (cues.isEmpty()) throw IllegalArgumentException("文件里没有识别到字幕")
         cancelAll()
         _state.update { it.copy(cues = cues, status = "已载入 ${cues.size} 句字幕", error = null, failedTask = null) }
+        dropCoverage(video)
         store.save(video, cues)
         return cues.size
     }
@@ -1371,7 +1621,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun clearTranslations() {
         translateJob?.cancel()
         _state.update { s -> s.copy(cues = s.cues.map { it.copy(translation = null) }) }
-        _state.value.videoUri?.let { store.save(it, _state.value.cues) }
+        _state.value.videoUri?.let { persistCues(it) }
     }
 
     fun exportSrt(target: Uri, mode: SrtMode) {
@@ -1406,6 +1656,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         private const val BATCH_SIZE = 20
         private const val CONTEXT_SIZE = 6
+        private const val TRANSLATE_PARALLEL = 3
+
+        /** 时长未知时的"结尾" */
+        private const val UNKNOWN_END = Long.MAX_VALUE / 4
+
+        /** 从播放位置往前多识别一点，字幕不会晚于画面 */
+        private const val LEAD_IN_MS = 3_000L
+
+        /** 播放位置超出已解码位置这么多，就当作拖动了进度条，改从新位置开始 */
+        private const val AHEAD_MS = 45_000L
+        private const val LIVE_FIRST_CHUNK_SEC = 6
+        private const val LIVE_CHUNK_SEC = 8
+        private const val LIVE_KEEP_CUES = 200
+        private const val LIVE_MAX_BACKLOG_MS = 8_000L
         /** 播放页点「♡」的歌放在这个播放列表里 */
         const val LIKED_PLAYLIST = "我喜欢的音乐"
     }

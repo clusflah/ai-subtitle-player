@@ -6,6 +6,7 @@ import com.aisub.player.asr.cloud.AliyunFunAsrTranscriber
 import com.aisub.player.asr.cloud.AzureTranscriber
 import com.aisub.player.asr.cloud.DeepgramTranscriber
 import com.aisub.player.asr.cloud.ElevenLabsTranscriber
+import com.aisub.player.asr.cloud.GeminiTranscriber
 import com.aisub.player.asr.cloud.OpenAiTranscriber
 import com.aisub.player.asr.cloud.VolcEngineTranscriber
 import com.aisub.player.asr.cloud.XfyunTranscriber
@@ -50,6 +51,14 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
         listOf(
             AsrField("appId", "APPID"),
             AsrField("secretKey", "SecretKey", secret = true),
+        ),
+    ),
+    GEMINI(
+        "Gemini", "Google Gemini：一次请求同时识别和翻译成中文，出字幕最快，多语种强（需要能访问 Google）",
+        listOf(
+            AsrField("apiKey", "Gemini API Key", secret = true),
+            AsrField("model", "模型", default = GeminiTranscriber.DEFAULT_MODEL),
+            AsrField("endpoint", "接口地址", default = GeminiTranscriber.DEFAULT_ENDPOINT, required = false),
         ),
     ),
     ELEVENLABS(
@@ -106,6 +115,10 @@ fun AppSettings.createCloudEngine(): SpeechEngine {
         AsrEngine.VOLC -> VolcEngineTranscriber(v("appKey"), v("accessKey"))
         AsrEngine.ALIYUN -> AliyunFunAsrTranscriber(v("apiKey"), v("endpoint"), v("model"), lang)
         AsrEngine.XFYUN -> XfyunTranscriber(v("appId"), v("secretKey"), asrLanguage)
+        AsrEngine.GEMINI -> GeminiTranscriber(
+            v("apiKey"), v("model"), v("endpoint"),
+            if (lang == "auto") "" else AsrLanguages.label(asrLanguage),
+        )
         AsrEngine.ELEVENLABS -> ElevenLabsTranscriber(v("apiKey"), v("model"), lang)
         AsrEngine.DEEPGRAM -> DeepgramTranscriber(v("apiKey"), v("model"), asrLanguage)
         AsrEngine.OPENAI -> OpenAiTranscriber(v("apiKey"), v("baseUrl"), v("model"), lang)
