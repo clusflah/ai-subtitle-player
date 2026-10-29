@@ -64,6 +64,33 @@ class SubtitleStore(context: Context) {
         fileFor(video).delete()
         rolesFile(video).delete()
         languageFile(video).delete()
+        clearCoverage(video)
+    }
+
+    private fun coverageFile(video: Uri) = File(fileFor(video).path.removeSuffix(".json") + ".cov")
+
+    /**
+     * 语音识别已经覆盖的时间段（毫秒）。按播放位置边看边识别时，字幕可能只覆盖视频的一部分；
+     * null 表示没有记录，即整段都有字幕（整段识别、导入、视频自带字幕等），不需要再识别。
+     */
+    fun loadCoverage(video: Uri): List<Pair<Long, Long>>? {
+        val file = coverageFile(video)
+        if (!file.exists()) return null
+        return try {
+            file.readLines().mapNotNull { line ->
+                val p = line.trim().split(' ')
+                if (p.size == 2) p[0].toLong() to p[1].toLong() else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun saveCoverage(video: Uri, ranges: List<Pair<Long, Long>>) =
+        coverageFile(video).writeText(ranges.joinToString("\n") { "${it.first} ${it.second}" })
+
+    fun clearCoverage(video: Uri) {
+        coverageFile(video).delete()
     }
 
     private fun languageFile(video: Uri) = File(fileFor(video).path.removeSuffix(".json") + ".lang")

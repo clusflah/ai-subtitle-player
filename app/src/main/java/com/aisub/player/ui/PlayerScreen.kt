@@ -229,7 +229,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             delay(100)
         }
     }
-    val current = state.cues.cueAt(positionMs - state.subtitleDelayMs)
+    // 直播字幕的时间是相对开启时刻的（直播流自己的播放位置不可靠），按这个时钟显示
+    val current = if (state.liveBaseMs > 0) {
+        state.cues.cueAt(android.os.SystemClock.elapsedRealtime() - state.liveBaseMs - state.subtitleDelayMs)
+    } else state.cues.cueAt(positionMs - state.subtitleDelayMs)
 
     // ---- 播放视频时不自动锁屏；暂停、播完、听音乐时按系统设置熄屏 ----
     val view = androidx.compose.ui.platform.LocalView.current
@@ -629,7 +632,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                 }
                 val idle = !state.transcribing && !state.translating && !state.extractingEmbedded && state.playbackError == null
-                if (quick != null && idle && state.current?.isVideo == true && !isLive && !aiChipDismissed) {
+                if (quick != null && idle && (state.current?.isVideo == true || isLive) && !aiChipDismissed) {
                     Row(Modifier.padding(start = 52.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Row(
                             Modifier.clip(RoundedCornerShape(50)).background(Orange).clickable {
@@ -644,7 +647,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         ) {
                             Icon(AppIcons.AutoAwesome, null, tint = Color.White, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            val verb = if (quick == QuickSubtitle.GENERATE) "生成" else "翻译成"
+                            val verb = if (quick == QuickSubtitle.GENERATE) (if (isLive) "实时生成" else "生成") else "翻译成"
                             Text("$verb${state.settings.targetLanguage}字幕", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                         }
                         IconButton(onClick = { aiChipDismissed = true }, modifier = Modifier.size(28.dp)) {

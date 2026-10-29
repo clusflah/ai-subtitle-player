@@ -80,7 +80,10 @@ private val PROVIDER_HINTS = mapOf(
     Provider.DEEPSEEK to "性价比高，国内可直连",
     Provider.GEMINI to "Google AI Studio 的 API Key",
     Provider.INDEX_TRANSLATE to "B 站开源翻译模型，公共接口免费、无需 Key（预览版）",
-    Provider.OPENAI_COMPAT to "兼容接口：通义千问、Kimi、Ollama 等",
+    Provider.ALIYUN to "通义千问，国内直连、速度快；API Key 在百炼控制台获取",
+    Provider.VOLC to "豆包，国内直连、速度快；模型一栏可填模型名或接入点 ID（ep-…）",
+    Provider.AZURE_TRANSLATOR to "机器翻译：最快、最便宜，译文偏直译；「模型」一栏填资源区域，如 eastasia，全局资源填 global",
+    Provider.OPENAI_COMPAT to "兼容接口：Kimi、Ollama 等",
 )
 
 private val TARGET_LANGUAGES = listOf("简体中文", "繁體中文", "English", "日本語", "한국어")
