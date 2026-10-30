@@ -39,4 +39,15 @@ class ChunkedCloudEngineTest {
         assertEquals(starts.sorted(), starts)
         assertTrue("并发数 ${engine.peak.get()}", engine.peak.get() in 2..3)
     }
+
+    @Test
+    fun useParallelOneRunsChunksOneAtATime() {
+        val engine = FakeEngine().apply { useParallel(1) }
+        val texts = ArrayList<String>()
+        repeat(4) { engine.accept(FloatArray(16_000) { 0.1f }) { texts.add(it.text) } }
+        engine.finish { texts.add(it.text) }
+        engine.close()
+        assertTrue("段数 ${texts.size}", texts.size >= 3)
+        assertEquals(1, engine.peak.get())
+    }
 }

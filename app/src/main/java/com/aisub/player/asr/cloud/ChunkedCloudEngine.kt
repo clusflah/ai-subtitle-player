@@ -43,8 +43,8 @@ sealed interface Recognized {
 abstract class ChunkedCloudEngine(
     private var firstChunkSec: Int = 15,
     private var chunkSec: Int = 40,
-    /** 同时在途的请求数；各家接口都有并发限制，超了会 429，由 [execute] 退避重试 */
-    private val parallel: Int = 3,
+    /** 同时在途的请求数；各家接口都有并发限制，超了会 429，由 [execute] 退避重试。可在设置里按引擎改（[useParallel]） */
+    private var parallel: Int = 3,
 ) : SpeechEngine {
 
     protected val http: OkHttpClient = OkHttpClient.Builder()
@@ -59,7 +59,9 @@ abstract class ChunkedCloudEngine(
     private var chunksSent = 0
     private var nextId = 1
 
-    private val pool = Executors.newFixedThreadPool(parallel) { r -> Thread(r, "asr-chunk").apply { isDaemon = true } }
+    /** 第一段要发时才建，这样开始识别前 [useParallel] 还能改并发数 */
+    private val pool by lazy { Executors.newFixedThreadPool(parallel) { r -> Thread(r, "asr-chunk").apply { isDaemon = true } } }
+    private var poolStarted = false
 
     /** 已经交给线程池、还没取走结果的段，按发送顺序排队 */
     private val inFlight = ArrayDeque<Future<List<Recognized>>>()
@@ -69,6 +71,11 @@ abstract class ChunkedCloudEngine(
     protected var cancelled = false
 
     /** 直播用更短的段：延迟 = 段长 + 识别时间 */
+    /** 同时识别几段（1～3）；账号不支持并发时设成 1。要在开始识别前调用 */
+    fun useParallel(n: Int) {
+        if (!poolStarted) parallel = n.coerceIn(1, 3)
+    }
+
     fun useChunks(firstSec: Int, eachSec: Int) {
         firstChunkSec = firstSec
         chunkSec = eachSec
@@ -95,7 +102,7 @@ abstract class ChunkedCloudEngine(
         cancelled = true
         calls.forEach { it.cancel() }
         inFlight.forEach { it.cancel(true) }
-        pool.shutdownNow()
+        if (poolStarted) pool.shutdownNow()
     }
 
     override fun close() = cancel()
@@ -104,6 +111,7 @@ abstract class ChunkedCloudEngine(
         val start = bufferStartMs
         val end = start + count * 1000L / SAMPLE_RATE
         val wav = encodeWav(buffer, count)
+        poolStarted = true
         inFlight.addLast(pool.submit<List<Recognized>> { recognize(wav, start, end) })
         System.arraycopy(buffer, count, buffer, 0, size - count)
         size -= count
