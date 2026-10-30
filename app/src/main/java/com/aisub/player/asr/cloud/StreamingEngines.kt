@@ -77,6 +77,7 @@ abstract class StreamingCloudEngine : SpeechEngine {
 
         /** [fatal]：Key 错、服务没开通这类重连也没用的错误 */
         fun failed(message: String, fatal: Boolean = false) {
+            log("流式识别出错（${if (fatal) "不再重连" else "会重连"}）：$message")
             lastError = message
             if (fatal) fatalError = message
             end()
@@ -160,6 +161,7 @@ abstract class StreamingCloudEngine : SpeechEngine {
             if (e != null) Thread.sleep(minOf(500L * failures, 3_000L))
             e = Events(sent * 1000 / SAMPLE_RATE)
             events = e
+            log("流式识别：开新连接（已发 ${sent * 1000 / SAMPLE_RATE / 1000} 秒音频，连续失败 $failures 次）")
             session = openSession(e)
             pacingStart = System.currentTimeMillis()
             pacingFrom = sent
@@ -192,6 +194,14 @@ abstract class StreamingCloudEngine : SpeechEngine {
         }
     }
 
+    /** 写日志（用 adb logcat 看后台原因）；单元测试里没有 Android 的 Log，跳过 */
+    protected fun log(message: String) {
+        try {
+            android.util.Log.i("Voxtitle", message)
+        } catch (_: RuntimeException) {
+        }
+    }
+
     private fun Recognized.shifted(ms: Long): Recognized = when (this) {
         is Recognized.Words -> Recognized.Words(tokens.map { it.copy(startMs = it.startMs + ms) }, endMs + ms)
         is Recognized.Sentence -> copy(startMs = startMs + ms, endMs = endMs + ms)
@@ -211,7 +221,10 @@ abstract class StreamingCloudEngine : SpeechEngine {
             }
         }
 
-        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = events.end()
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            log("$name 流式识别连接关闭：$code $reason")
+            events.end()
+        }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             if (code != 1000 && reason.isNotBlank()) events.failed("$name 流式识别连接被关闭：$reason")

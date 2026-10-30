@@ -115,7 +115,8 @@ class ExoAudioDecoder(
         private var channels = 1
         private var encoding = C.ENCODING_PCM_16BIT
         private var resampler: LinearResampler? = null
-        private var startUs = C.TIME_UNSET
+        /** 最后一块音频结束处的时间戳（播放器的时间轴）；播放进度就报这个 */
+        private var endUs = C.TIME_UNSET
         private var framesWritten = 0L
         private var ended = false
         private var params = PlaybackParameters.DEFAULT
@@ -140,8 +141,13 @@ class ExoAudioDecoder(
                 (format.pcmEncoding == C.ENCODING_PCM_16BIT || format.pcmEncoding == C.ENCODING_PCM_FLOAT)
             ) AudioSink.SINK_FORMAT_SUPPORTED_DIRECTLY else AudioSink.SINK_FORMAT_UNSUPPORTED
 
+        /**
+         * 播放进度按音频自带的时间戳报，不按收到了多少音频自己数：直播流里缺几帧、时间戳跳一下，
+         * 自己数的进度就会落后于真实时间，播放器以为缓冲了很多、不再下载新分片，
+         * 手上的音频交完后进度不再前进，就一直卡着（不报错，也不会结束）。
+         */
         override fun getCurrentPositionUs(sourceEnded: Boolean): Long =
-            if (startUs == C.TIME_UNSET) AudioSink.CURRENT_POSITION_NOT_SET else startUs + framesToUs(framesWritten)
+            if (endUs == C.TIME_UNSET) AudioSink.CURRENT_POSITION_NOT_SET else endUs
 
         override fun configure(inputFormat: Format, specifiedBufferSize: Int, outputChannels: IntArray?) {
             sampleRate = inputFormat.sampleRate
@@ -151,7 +157,6 @@ class ExoAudioDecoder(
         }
 
         override fun handleBuffer(buffer: ByteBuffer, presentationTimeUs: Long, encodedAccessUnitCount: Int): Boolean {
-            if (startUs == C.TIME_UNSET) startUs = presentationTimeUs
             val buf = buffer.duplicate().order(ByteOrder.nativeOrder())
             val mono = if (encoding == C.ENCODING_PCM_FLOAT) {
                 val fb = buf.asFloatBuffer()
@@ -163,6 +168,7 @@ class ExoAudioDecoder(
             buffer.position(buffer.limit()) // 告诉播放器这块已经全部消费
             framesWritten += mono.size
             writtenUs = framesToUs(framesWritten) // 只算音频长度，不含播放器内部的时间偏移
+            endUs = presentationTimeUs + framesToUs(mono.size.toLong())
             val out = resampler?.process(mono) ?: mono
             if (out.isNotEmpty()) {
                 onChunk(out)
@@ -184,7 +190,7 @@ class ExoAudioDecoder(
         override fun handleDiscontinuity() {}
 
         override fun flush() {
-            startUs = C.TIME_UNSET
+            endUs = C.TIME_UNSET
             framesWritten = 0
             ended = false
         }
