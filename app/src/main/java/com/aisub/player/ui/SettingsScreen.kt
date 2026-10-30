@@ -75,6 +75,13 @@ import com.aisub.player.asrProblem
 import com.aisub.player.withAsrValue
 import kotlinx.coroutines.launch
 
+/** 本地模型常见的服务地址（在手机上运行时） */
+private val LOCAL_LLM_SERVERS = listOf(
+    "Ollama" to "http://127.0.0.1:11434/v1",
+    "LM Studio" to "http://127.0.0.1:1234/v1",
+    "llama.cpp" to "http://127.0.0.1:8080/v1",
+)
+
 private val PROVIDER_HINTS = mapOf(
     Provider.CLAUDE to "Anthropic 官方 API，翻译质量高",
     Provider.DEEPSEEK to "性价比高，国内可直连",
@@ -83,7 +90,9 @@ private val PROVIDER_HINTS = mapOf(
     Provider.ALIYUN to "通义千问，国内直连、速度快；API Key 在百炼控制台获取",
     Provider.VOLC to "豆包，国内直连、速度快；模型一栏可填模型名或接入点 ID（ep-…）",
     Provider.AZURE_TRANSLATOR to "机器翻译：最快、最便宜，译文偏直译；「模型」一栏填资源区域，如 eastasia，全局资源填 global",
-    Provider.OPENAI_COMPAT to "兼容接口：Kimi、Ollama 等",
+    Provider.LOCAL to "Ollama、LM Studio、llama.cpp 等在本机或局域网电脑上运行的模型，免费、不用 Key，字幕不出本地。" +
+        "电脑上运行时把地址改成 http://电脑IP:11434/v1（LM Studio 是 1234 端口），Ollama 要设置 OLLAMA_HOST=0.0.0.0",
+    Provider.OPENAI_COMPAT to "兼容 OpenAI 接口的服务：Kimi、OpenRouter 等",
 )
 
 private val TARGET_LANGUAGES = listOf("简体中文", "繁體中文", "English", "日本語", "한국어")
@@ -270,6 +279,17 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                             val raw = s.providerConfigs[p] ?: ProviderConfig()
                             if (p.editableBaseUrl) {
                                 ConfigField(raw.baseUrl, { s = s.withConfig(p, raw.copy(baseUrl = it)) }, "Base URL", p.defaultBaseUrl)
+                                if (p == Provider.LOCAL) {
+                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        LOCAL_LLM_SERVERS.forEach { (label, url) ->
+                                            FilterChip(
+                                                selected = s.configOf(p).baseUrl == url,
+                                                onClick = { s = s.withConfig(p, raw.copy(baseUrl = url)) },
+                                                label = { Text(label) },
+                                            )
+                                        }
+                                    }
+                                }
                             }
                             ConfigField(
                                 raw.apiKey, { s = s.withConfig(p, raw.copy(apiKey = it)) },
@@ -278,7 +298,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                             val cfg = s.configOf(p)
                             ModelField(
                                 raw.model, { s = s.withConfig(p, raw.copy(model = it)) },
-                                p.defaultModel.ifEmpty { "例如 qwen-plus、moonshot-v1-8k" },
+                                p.defaultModel.ifEmpty { if (p == Provider.LOCAL) "例如 qwen3:4b、gemma3:4b" else "例如 qwen-plus、moonshot-v1-8k" },
                                 // Key 或地址变了，之前拉到的列表作废
                                 listKey = "${p.name}|${cfg.baseUrl}|${cfg.apiKey}",
                                 fetch = { ModelList.fetch(p, cfg) },

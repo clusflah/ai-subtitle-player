@@ -229,10 +229,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             delay(100)
         }
     }
-    // 直播字幕的时间是相对开启时刻的（直播流自己的播放位置不可靠），按这个时钟显示
-    val current = if (state.liveBaseMs > 0) {
-        state.cues.cueAt(android.os.SystemClock.elapsedRealtime() - state.liveBaseMs - state.subtitleDelayMs)
-    } else state.cues.cueAt(positionMs - state.subtitleDelayMs)
+    // 字幕时间轴上的"现在"：普通视频就是播放位置；直播实时字幕换算到直播流自己的时间线上（见 LiveTimeline）
+    val subtitleNow = vm.subtitleTime(positionMs)
+    val current = state.cues.cueAt(subtitleNow - state.subtitleDelayMs)
 
     // ---- 播放视频时不自动锁屏；暂停、播完、听音乐时按系统设置熄屏 ----
     val view = androidx.compose.ui.platform.LocalView.current
@@ -1082,7 +1081,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 }
                 CueList(
                     cues = state.cues, current = current, settings = state.settings, roles = state.roles,
-                    onSeek = { player.seekTo(it.startMs + state.subtitleDelayMs); player.play() },
+                    onSeek = { vm.seekToSubtitleTime(it.startMs + state.subtitleDelayMs); player.play() },
                     onRetranslate = { vm.retranslate(it.id) },
                     onEdit = { editing = it },
                     onDelete = { vm.deleteCue(it.id); indicator = null to "已删除这句" },
@@ -1093,7 +1092,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     }
     editing?.let { cue ->
         CueEditDialog(
-            cue, positionMs - state.subtitleDelayMs,
+            cue, subtitleNow - state.subtitleDelayMs,
             onDismiss = { editing = null },
             onDelete = { vm.deleteCue(cue.id); editing = null },
         ) { text, translation, start, end ->

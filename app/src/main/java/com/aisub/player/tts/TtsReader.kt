@@ -42,6 +42,8 @@ class TtsReader(
     private val snapshot: () -> TtsSnapshot,
     private val engineFor: (TtsEngineType) -> TtsEngine,
     private val onError: (String) -> Unit,
+    /** 字幕时间轴上的当前时间；直播实时字幕和播放位置不是一回事 */
+    private val clock: () -> Long = { player().currentPosition },
 ) {
     private val cacheDir = File(context.cacheDir, "tts").apply { mkdirs() }
     private val ready = ConcurrentHashMap<String, File>()
@@ -92,7 +94,7 @@ class TtsReader(
     private fun tick() {
         val p = player()
         val s = snapshot()
-        val pos = p.currentPosition - s.delayMs
+        val pos = clock() - s.delayMs
         val playing = p.isPlaying
 
         // 拖动进度：位置突变时停掉正在读的句子

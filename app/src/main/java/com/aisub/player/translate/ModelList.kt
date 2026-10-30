@@ -39,7 +39,11 @@ object ModelList {
                 }
                 .build()
         }
-        val text = http.newCall(request).execute().use { resp ->
+        val text = try {
+            http.newCall(request).execute()
+        } catch (e: java.net.ConnectException) {
+            throw IOException("连不上 ${c.baseUrl}，确认模型服务已经运行、地址和端口正确", e)
+        }.use { resp ->
             val body = resp.body?.string().orEmpty()
             when {
                 resp.code == 401 || resp.code == 403 -> throw IOException("API Key 无效（HTTP ${resp.code}）")

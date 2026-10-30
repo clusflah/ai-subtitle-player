@@ -91,6 +91,8 @@ class ChatCompletionsTranslator(
         while (true) {
             val (code, text) = try {
                 http.newCall(request).execute().use { resp -> resp.code to resp.body?.string().orEmpty() }
+            } catch (e: java.net.ConnectException) {
+                throw TranslationException("连不上 $endpoint：${e.message}。本地模型要先在手机或电脑上运行起来，并检查地址和端口", e)
             } catch (e: IOException) {
                 throw TranslationException("网络错误：${e.message}", e)
             }
@@ -104,6 +106,8 @@ class ChatCompletionsTranslator(
 
         return try {
             JSONObject(body).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
+                // 推理模型（本地的 Qwen3、DeepSeek-R1 等）会把思考过程写在 <think> 里，去掉再解析
+                .replace(THINK_BLOCK, "").trim()
         } catch (e: Exception) {
             throw TranslationException("无法解析返回内容：${body.take(300)}", e)
         }
@@ -111,6 +115,7 @@ class ChatCompletionsTranslator(
 
     private companion object {
         val RETRY_CODES = setOf(429, 502, 503, 504)
+        val THINK_BLOCK = Regex("(?s)<think>.*?</think>")
         val RETRY_DELAYS_MS = longArrayOf(2_000, 5_000)
 
         /** 网关返回的是整页 HTML，只取标题；JSON 等文字原样截一段 */

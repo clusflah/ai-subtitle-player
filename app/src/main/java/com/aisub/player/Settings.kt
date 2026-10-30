@@ -49,6 +49,8 @@ enum class Provider(
         "Azure 翻译", "https://api.cognitive.microsofttranslator.com", "global",
         needsApiKey = true, editableBaseUrl = false,
     ),
+    // 手机或局域网电脑上跑的模型（Ollama、LM Studio、llama.cpp 等）：不用 Key、不花钱，字幕内容不出本地
+    LOCAL("本地模型", "http://127.0.0.1:11434/v1", "", needsApiKey = false, editableBaseUrl = true),
     OPENAI_COMPAT("自定义", "https://api.openai.com/v1", "", needsApiKey = false, editableBaseUrl = true),
 }
 
@@ -188,6 +190,7 @@ data class AppSettings(
         val c = configOf(provider)
         return when {
             provider.needsApiKey && c.apiKey.isEmpty() -> "请先在设置里填写 ${provider.label} 的 API Key"
+            c.model.isEmpty() && provider == Provider.LOCAL -> "请先在设置里选择本地模型（点模型一栏右边的箭头列出已装的模型）"
             c.model.isEmpty() -> "请先在设置里填写 ${provider.label} 的模型名"
             c.baseUrl.isEmpty() && provider != Provider.CLAUDE -> "请先在设置里填写 Base URL"
             else -> null
@@ -231,6 +234,12 @@ data class AppSettings(
             )
             // 模型一栏填的是资源区域
             Provider.AZURE_TRANSLATOR -> AzureTranslator(c.baseUrl, c.apiKey, c.model)
+            // 本地小模型：温度调低更稳；Qwen3 等混合推理模型关掉思考（llama.cpp、vLLM 认这个参数，其他服务会忽略）
+            Provider.LOCAL -> ChatCompletionsTranslator(
+                c.baseUrl, c.apiKey, c.model,
+                temperature = 0.1,
+                extraBody = mapOf("chat_template_kwargs" to JSONObject().put("enable_thinking", false)),
+            )
             Provider.OPENAI_COMPAT -> ChatCompletionsTranslator(c.baseUrl, c.apiKey, c.model)
         }
     }

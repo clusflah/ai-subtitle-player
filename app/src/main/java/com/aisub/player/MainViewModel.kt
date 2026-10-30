@@ -8,6 +8,9 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
+import com.aisub.player.live.LiveAnchors
+import com.aisub.player.live.LiveClock
+import com.aisub.player.live.LiveTimeline
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
@@ -133,8 +136,8 @@ data class UiState(
     val videoProblem: String? = null,
     /** 正在播放服务器转码后的流 */
     val transcoding: Boolean = false,
-    /** 直播实时字幕的时间起点（SystemClock.elapsedRealtime）；0 表示没开。直播字幕的时间都是相对它的 */
-    val liveBaseMs: Long = 0,
+    /** 直播实时字幕用的时钟（见 [LiveClock]）；null 表示没开，字幕按播放位置显示 */
+    val liveClock: LiveClock? = null,
 ) {
     /** 当前视频识别时用的设置：语音语言换成这个视频单独选的 */
     val asrSettings: AppSettings get() = videoAsrLanguage?.let { settings.copy(asrLanguage = it) } ?: settings
@@ -359,6 +362,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         },
         engineFor = ::ttsEngine,
         onError = { msg -> _state.update { it.copy(status = "朗读失败：$msg") } },
+        clock = { subtitleTime() },
     )
     private var queue: List<MediaEntry> = emptyList()
 
@@ -607,7 +611,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         cancelAll()
         sawFirstFrame = false
         frameWatch?.cancel()
-        _state.update { it.copy(videoProblem = null, transcoding = false, liveBaseMs = 0) }
+        _state.update { it.copy(videoProblem = null, transcoding = false, liveClock = null) }
         val uri = Uri.parse(entry.uri)
         coverage.clear()
         coverageLimit = UNKNOWN_END
@@ -831,7 +835,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             coverage.clear()
             coverageActive = !live
             store.clearCoverage(uri)
-            _state.update { it.copy(cues = emptyList(), liveBaseMs = 0) }
+            _state.update { it.copy(cues = emptyList(), liveClock = null) }
         }
         _state.update { it.copy(transcribing = true, error = null, failedTask = null) }
         nextCueId = (_state.value.cues.maxOfOrNull { it.id } ?: 0) + 1
@@ -854,12 +858,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f) }
                 val translate = (settings.autoTranslate || alsoTranslate) && settings.createTranslator() != null
                 inlineTranslate = translate
-                if (live) {
-                    runLive(settings, if (translate) settings.createTranslator() else null)
-                } else {
-                    if (translate) startTranslation()
-                    runOnDemand(settings, uri)
-                }
+                if (translate) startTranslation()
+                if (live) runLive(settings) else runOnDemand(settings, uri)
                 ensureActive()
                 if (!live) {
                     val count = _state.value.cues.size
@@ -973,63 +973,44 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 直播：从现在开始识别，每几秒出一批字幕（译成中文后显示），只保留最近的一部分。 */
-    private suspend fun runLive(settings: AppSettings, translator: Translator?) {
+    /**
+     * 直播实时字幕，所有时间都放在同一条时间轴上（屏幕播放器的位置，见 [LiveTimeline]）：
+     * 1. 另开一个不出声的播放器，用和屏幕播放器完全一样的条目（类型、请求头）在直播最新处解码声音，
+     *    它天然比屏幕上的画面早十几秒；
+     * 2. 解码时定期记下"音频第几毫秒 ↔ 直播内容位置"（[LiveAnchors]），识别出的每句都换算成屏幕播放器上的开始、结束时间；
+     * 3. 字幕按屏幕播放器的位置显示，和画面用同一个时钟。字幕赶不上画面时把画面再往回拖一点（只拖一两次）；
+     * 4. 原文先显示，译文由实时翻译（[translateLoop]）按播放位置就近补上。
+     * 换算不了时间的直播流（普通 HTTP 流、VLC 内核）退回按到达先后显示。
+     */
+    private suspend fun runLive(settings: AppSettings) {
         val entry = _state.value.current ?: return
-        val base = android.os.SystemClock.elapsedRealtime()
-        // 字幕比说话晚一段（一段音频 + 识别 + 翻译）：把画面往回拖十秒左右，字幕出现时画面刚好播到那句话
-        val delayed = delayLivePlayback(entry)
+        val item = itemOf(entry)
+        val anchors = LiveAnchors()
+        liveDelayAdded = 0
+        liveDelayChangedAt = 0
         _state.update {
             it.copy(
-                cues = emptyList(), liveBaseMs = base, progress = null,
-                status = if (delayed) "实时字幕已开启，画面延迟了约 ${LIVE_DELAY_MS / 1000} 秒来对齐字幕" else "实时字幕已开启，几秒后出现…",
+                cues = emptyList(), progress = null, status = "正在连接直播的声音…",
+                liveClock = if (usingVlc) LiveClock.Arrival(android.os.SystemClock.elapsedRealtime()) else LiveClock.Stream,
             )
         }
-        val incoming = java.util.concurrent.ConcurrentLinkedQueue<Cue>()
+        val incoming = java.util.concurrent.ConcurrentLinkedQueue<Pair<Cue, Long>>()
         val dispatcher = if (settings.asrEngine == AsrEngine.LOCAL) Dispatchers.Default else Dispatchers.IO
+        // 识别引擎收到的音频总长（样本数）；重连后接着往后数，字幕的时间都相对它
+        val samples = java.util.concurrent.atomic.AtomicLong(0)
+        val heard = java.util.concurrent.atomic.AtomicBoolean(false)
+        var lastError: String? = null
 
-        // 识别出来的字幕比说话晚几秒，到了才排上显示时间：按到达的先后一句接一句显示
         val shower = viewModelScope.launch {
-            var lastEnd = 0L
-            val recent = ArrayDeque<String>()
+            val waiting = ArrayList<Pair<Cue, Long>>()
+            val state = LivePublishState()
             while (true) {
-                delay(250)
-                val batch = ArrayList<Cue>()
-                while (batch.size < BATCH_SIZE) batch.add(incoming.poll() ?: break)
-                if (batch.isEmpty()) continue
-                val s = _state.value
-                val target = s.settings.ttsLocale
-                // 识别时已经顺带翻译好的（Gemini）不用再翻
-                val need = batch.indices.filter { batch[it].translation == null }
-                val translatedNeed = if (translator != null && need.isNotEmpty()) {
-                    try {
-                        translator.translate(need.map { batch[it].text }, recent.toList(), s.settings.targetLanguage)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        android.util.Log.w("Voxtitle", "直播字幕翻译失败：${e.message}")
-                        null
-                    }
-                } else null
-                val results = List(batch.size) { i ->
-                    batch[i].translation ?: need.indexOf(i).takeIf { it >= 0 }?.let { translatedNeed?.getOrNull(it) }
+                delay(200)
+                if (heard.getAndSet(false) && _state.value.cues.isEmpty()) {
+                    _state.update { it.copy(status = "已连上直播，正在识别…（第一句要等几秒）") }
                 }
-                val now = android.os.SystemClock.elapsedRealtime() - base
-                // 积压太多（翻译或识别变慢）时不再排队，直接显示最新的
-                var cursor = if (lastEnd - now > LIVE_MAX_BACKLOG_MS) now else maxOf(now, lastEnd)
-                val first = batch.first().startMs
-                val shown = batch.mapIndexed { i, c ->
-                    val same = LanguageCheck.alreadyTarget(c.text, target, s.asrSettings.asrLanguage, ChineseScript::variant)
-                    val duration = (c.endMs - c.startMs).coerceIn(1200, 6000)
-                    // 保持这一批里各句原来的间隔，画面也是这样一句一句播出来的
-                    val start = maxOf(cursor, now + (c.startMs - first))
-                    cursor = start + duration
-                    Cue(nextCueId++, start, cursor, c.text, if (same) c.text else results[i])
-                }
-                lastEnd = cursor
-                batch.forEach { recent.addLast(it.text) }
-                while (recent.size > CONTEXT_SIZE) recent.removeFirst()
-                _state.update { st -> st.copy(cues = (st.cues + shown).takeLast(LIVE_KEEP_CUES), status = "实时字幕") }
+                while (true) waiting.add(incoming.poll() ?: break)
+                if (waiting.isNotEmpty()) publishLive(waiting, anchors, state)
             }
         }
         try {
@@ -1037,61 +1018,195 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 createEngine(settings).use { engine ->
                     (engine as? com.aisub.player.asr.cloud.ChunkedCloudEngine)?.useChunks(LIVE_FIRST_CHUNK_SEC, LIVE_CHUNK_SEC)
                     val cancelHandle = coroutineContext.job.invokeOnCompletion { engine.cancel() }
+                    val onCue: (Cue) -> Unit = { incoming.add(it to android.os.SystemClock.elapsedRealtime()) }
                     try {
-                        // 直播流断了或系统解码器一读就结束时，重连几次
+                        // 直播流断了或一连上就结束时，重连几次
                         var quickEnds = 0
                         while (coroutineContext.isActive && quickEnds < 3) {
                             val startedAt = System.currentTimeMillis()
-                            AudioDecoder(getApplication(), Uri.parse(entry.uri), authDataSourceFactory(getApplication())).decode(
-                                isActive = { coroutineContext.isActive },
-                                onProgress = {},
-                                onChunk = { chunk -> engine.accept(chunk) { incoming.add(it) } },
-                            )
+                            val baseMs = samples.get() * 1000 / Transcriber.SAMPLE_RATE
+                            anchors.newSegment(baseMs)
+                            var lastWall = -1L
+                            var lastMs = -1L
+                            try {
+                                com.aisub.player.asr.ExoAudioDecoder(
+                                    getApplication(), Uri.parse(entry.uri), authDataSourceFactory(getApplication()),
+                                    mediaItem = item, lowestBitrate = true,
+                                    onTick = { p, ms ->
+                                        // 解码器在追缓冲时一下子解出很多，这时读到的位置不准；
+                                        // 只在它停下来等新数据、或按正常速度解码时记锚点
+                                        val wall = android.os.SystemClock.elapsedRealtime()
+                                        val steady = lastWall >= 0 && (ms == lastMs || kotlin.math.abs((ms - lastMs) - (wall - lastWall)) <= 200)
+                                        lastWall = wall
+                                        lastMs = ms
+                                        if (steady && ms > 0) LiveTimeline.keyOf(p)?.let { anchors.add(baseMs + ms, it) }
+                                    },
+                                ).decode(
+                                    isActive = { coroutineContext.isActive },
+                                    onProgress = {},
+                                    onChunk = { chunk ->
+                                        samples.addAndGet(chunk.size.toLong())
+                                        heard.set(true)
+                                        engine.accept(chunk, onCue)
+                                    },
+                                )
+                            } catch (e: java.io.IOException) {
+                                // 直播流断开、解不了：记下原因，重连
+                                if (!coroutineContext.isActive) throw e
+                                android.util.Log.w("Voxtitle", "直播声音解码中断：${e.message}")
+                                lastError = e.message
+                            }
                             if (System.currentTimeMillis() - startedAt < 10_000) quickEnds++ else quickEnds = 0
                             delay(500)
                         }
-                        if (coroutineContext.isActive) engine.finish { incoming.add(it) }
+                        if (coroutineContext.isActive) engine.finish(onCue)
                     } finally {
                         cancelHandle.dispose()
                     }
                 }
             }
             delay(2000)
-            _state.update { it.copy(status = "直播字幕已停止") }
+            if (_state.value.cues.isEmpty() && lastError != null) throw java.io.IOException("直播的声音连不上：$lastError")
+            _state.update { it.copy(status = "直播字幕已停止：直播的声音断了" + (lastError?.let { "（$it）" } ?: "")) }
         } finally {
             shower.cancel()
-            _state.update { it.copy(liveBaseMs = 0) }
-            if (delayed) restoreLivePlayback(entry)
+            _state.update { it.copy(liveClock = null) }
+            if (liveDelayAdded > 0) restoreLivePlayback(entry)
         }
     }
 
+    /** 直播字幕上屏过程中要记住的东西（只在主线程用） */
+    private class LivePublishState {
+        /** 按到达先后显示时，上一句的结束时间 */
+        var lastEnd = 0L
+
+        /** 换算出的时间明显不对的次数，多了就不再换算 */
+        var badMappings = 0
+    }
+
+    /** 已经识别出的直播字幕：换算到屏幕播放器的时间上，加进字幕列表。换算不了的先留在 [waiting] 里等锚点。 */
+    private fun publishLive(waiting: MutableList<Pair<Cue, Long>>, anchors: LiveAnchors, ps: LivePublishState) {
+        val clock = _state.value.liveClock ?: return
+        val wall = android.os.SystemClock.elapsedRealtime()
+        val shown = ArrayList<Cue>()
+        if (clock == LiveClock.Stream) {
+            val now = LiveTimeline.periodPosition(exoPlayer)
+            var latest = Long.MIN_VALUE
+            val mapped = ArrayList<Pair<Cue, Long>>()
+            val it = waiting.iterator()
+            while (it.hasNext()) {
+                val (c, arrivedAt) = it.next()
+                val start = anchors.keyAt(c.startMs)?.let { k -> LiveTimeline.positionOf(k, exoPlayer) }
+                if (start == null) {
+                    // 等了十几秒还换算不了：这个直播流对不上时间，改成按到达先后显示
+                    if (wall - arrivedAt > LIVE_MAP_TIMEOUT_MS) return switchToArrival(waiting, ps, "这个直播流对不上时间")
+                    continue
+                }
+                it.remove()
+                if (start !in now - 60_000..now + 180_000) {
+                    if (++ps.badMappings >= 3) return switchToArrival(waiting, ps, "换算出的时间不对")
+                    continue
+                }
+                ps.badMappings = 0
+                mapped += c to start
+                latest = maxOf(latest, now + LIVE_SAFETY_MS - start)
+            }
+            // 字幕赶不上画面：画面再往回拖一点，这几句和之后的字幕就都能赶在画面之前准备好
+            val after = if (latest > 0 && delayLive(latest)) LiveTimeline.periodPosition(exoPlayer) else now
+            for ((c, start) in mapped) {
+                val length = (c.endMs - c.startMs).coerceIn(LIVE_MIN_CUE_MS, 8_000)
+                // 还是晚了（画面已经播过这句）也显示出来，从现在开始
+                val from = maxOf(start, after)
+                shown += Cue(nextCueId++, from, from + length, c.text, c.translation)
+            }
+        } else {
+            val now = wall - (clock as LiveClock.Arrival).baseMs
+            // 积压太多（翻译或识别变慢）时不再排队，直接显示最新的
+            var cursor = if (ps.lastEnd - now > LIVE_MAX_BACKLOG_MS) now else maxOf(now, ps.lastEnd)
+            val first = waiting.first().first.startMs
+            for ((c, _) in waiting) {
+                val length = (c.endMs - c.startMs).coerceIn(LIVE_MIN_CUE_MS, 6_000)
+                // 保持这一批里各句原来的间隔
+                val start = maxOf(cursor, now + (c.startMs - first))
+                cursor = start + length
+                shown += Cue(nextCueId++, start, cursor, c.text, c.translation)
+            }
+            ps.lastEnd = cursor
+            waiting.clear()
+        }
+        if (shown.isEmpty()) return
+        _state.update { st ->
+            st.copy(
+                cues = (st.cues + shown).sortedBy { it.startMs }.takeLast(LIVE_KEEP_CUES),
+                status = if (liveDelayAdded > 0) "实时字幕 · 画面延后了 ${liveDelayAdded / 1000} 秒，和说话对齐" else "实时字幕",
+            )
+        }
+    }
+
+    private fun switchToArrival(waiting: MutableList<Pair<Cue, Long>>, ps: LivePublishState, why: String) {
+        android.util.Log.w("Voxtitle", "直播字幕改为按到达顺序显示：$why")
+        ps.lastEnd = 0
+        _state.update { it.copy(cues = emptyList(), liveClock = LiveClock.Arrival(android.os.SystemClock.elapsedRealtime())) }
+        if (waiting.isNotEmpty()) publishLive(waiting, LiveAnchors(), ps)
+    }
+
+    /** 实时字幕让画面额外延后了多久（毫秒） */
+    private var liveDelayAdded = 0L
+    private var liveDelayChangedAt = 0L
+
     /**
-     * 把直播画面往回拖 [LIVE_DELAY_MS]，并固定 1 倍速（不然播放器会加速追回直播位置）。
-     * 只对能往回拖的直播流（HLS / DASH）有效；返回是否真的延迟了。
+     * 字幕比画面晚了 [lateMs]：把画面往回拖这么多（再多留一秒余量）。隔一会儿才调一次，总共最多 [LIVE_MAX_DELAY_MS]。
+     * 带绝对时间的直播流播放器会自动加速追回直播位置，所以同时把目标延迟加上、固定 1 倍速。
      */
-    private fun delayLivePlayback(entry: MediaEntry): Boolean {
-        if (usingVlc) return false
+    private fun delayLive(lateMs: Long): Boolean {
+        val wall = android.os.SystemClock.elapsedRealtime()
+        if (usingVlc || liveDelayAdded >= LIVE_MAX_DELAY_MS) return false
+        if (liveDelayChangedAt > 0 && wall - liveDelayChangedAt < 15_000) return false
         val p = exoPlayer
-        val item = p.currentMediaItem ?: return false
-        if (item.mediaId != entry.uri || !p.isCurrentMediaItemLive) return false
-        val offset = p.currentLiveOffset.takeIf { it != C.TIME_UNSET } ?: return false
-        val config = item.liveConfiguration.buildUpon()
-            .setTargetOffsetMs(offset + LIVE_DELAY_MS)
-            .setMinPlaybackSpeed(1f)
-            .setMaxPlaybackSpeed(1f)
-            .build()
-        p.replaceMediaItem(p.currentMediaItemIndex, item.buildUpon().setLiveConfiguration(config).build())
-        p.seekTo((p.currentPosition - LIVE_DELAY_MS).coerceAtLeast(0))
+        if (!p.isCurrentMediaItemLive) return false
+        val step = minOf(lateMs + 1_000, LIVE_MAX_DELAY_MS - liveDelayAdded, p.currentPosition - 1_000)
+        if (step < 500) return false
+        val offset = p.currentLiveOffset
+        if (offset != C.TIME_UNSET) {
+            val item = p.currentMediaItem ?: return false
+            val config = item.liveConfiguration.buildUpon()
+                .setTargetOffsetMs(offset + step)
+                .setMinPlaybackSpeed(1f)
+                .setMaxPlaybackSpeed(1f)
+                .build()
+            p.replaceMediaItem(p.currentMediaItemIndex, item.buildUpon().setLiveConfiguration(config).build())
+        }
+        p.seekTo(p.currentPosition - step)
+        liveDelayAdded += step
+        liveDelayChangedAt = wall
+        android.util.Log.i("Voxtitle", "直播画面延后 $step ms，共 $liveDelayAdded ms")
         return true
     }
 
     /** 实时字幕停了：恢复正常的直播延迟，回到直播最新位置。 */
     private fun restoreLivePlayback(entry: MediaEntry) {
+        liveDelayAdded = 0
         if (usingVlc) return
         val p = exoPlayer
         if (p.currentMediaItem?.mediaId != entry.uri) return
         p.replaceMediaItem(p.currentMediaItemIndex, itemOf(entry))
         p.seekToDefaultPosition()
+    }
+
+    /** 跳到字幕时间轴上的某个时间（点字幕列表里的一句）；直播按到达先后显示时跳不了。 */
+    fun seekToSubtitleTime(ms: Long) {
+        when (_state.value.liveClock) {
+            null -> player.seekTo(ms)
+            LiveClock.Stream -> if (!usingVlc) exoPlayer.seekTo(ms - LiveTimeline.periodPosition(exoPlayer, 0))
+            is LiveClock.Arrival -> {}
+        }
+    }
+
+    /** 字幕时间轴上的"现在"：普通视频就是播放位置；直播实时字幕见 [LiveClock]。 */
+    fun subtitleTime(positionMs: Long = player.currentPosition): Long = when (val c = _state.value.liveClock) {
+        null -> positionMs
+        LiveClock.Stream -> if (usingVlc) positionMs else LiveTimeline.periodPosition(exoPlayer, positionMs)
+        is LiveClock.Arrival -> android.os.SystemClock.elapsedRealtime() - c.baseMs
     }
 
     /** 新识别出的字幕按开始时间排进列表；编号用不重复的新号，翻译、朗读靠编号找字幕。 */
@@ -1172,10 +1287,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 同时翻译几批：先翻播放位置之后的，再回头翻前面的。识别还在进行时，没有在途的请求就马上翻手上有的，
-     * 有在途的请求就攒够一批再发。
+     * 同时翻译几批：先翻播放位置之后的，再回头翻前面的。
+     *
+     * 两种方案：
+     * - 本地视频（普通翻译）：识别还在进行时，没有在途的请求就马上翻手上有的，有在途的请求就攒够 [BATCH_SIZE] 句再发，
+     *   上下文多、请求少，译文更连贯；
+     * - 直播和网盘、NAS 等远程文件（实时翻译）：识别出来就翻，一次最多 [REALTIME_BATCH] 句、不攒批，
+     *   只按播放位置就近翻，译文赶在画面播到之前出来；直播已经播过去的句子不再翻。
      */
     private suspend fun translateLoop(translator: Translator) = coroutineScope {
+        val current = _state.value.current
+        val live = current?.isLive == true
+        val realtime = live || current?.let { isRemote(it) } == true
+        val batchSize = if (realtime) REALTIME_BATCH else BATCH_SIZE
         val slots = Semaphore(TRANSLATE_PARALLEL)
         val inFlight = HashSet<Int>()
         var running = 0
@@ -1193,7 +1317,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
 
             val snapshot = _state.value
-            val pending = snapshot.cues.filter { it.translation == null && it.id !in inFlight }
+            val position = subtitleTime()
+            // 直播：画面已经播过去的不翻了
+            val pending = snapshot.cues.filter { it.translation == null && it.id !in inFlight && (!live || it.endMs >= position - 2_000) }
             if (pending.isEmpty()) {
                 if (running > 0 || snapshot.transcribing) {
                     delay(250)
@@ -1204,10 +1330,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 return@coroutineScope
             }
-            val position = if (snapshot.current?.isLive == true) 0L else player.currentPosition
             val ahead = pending.filter { it.endMs >= position - 5_000 }
-            val batch = (ahead.ifEmpty { pending }).take(BATCH_SIZE)
-            if (snapshot.transcribing && batch.size < BATCH_SIZE && running > 0) {
+            val batch = (ahead.ifEmpty { pending }).take(batchSize)
+            if (!realtime && snapshot.transcribing && batch.size < batchSize && running > 0) {
                 delay(250)
                 continue
             }
@@ -1225,10 +1350,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.update { s ->
                         s.copy(cues = s.cues.map { c -> translated[c.id]?.let { c.copy(translation = it) } ?: c })
                     }
-                    if (!_state.value.transcribing) {
+                    if (!_state.value.transcribing && !live) {
                         val done = _state.value.cues.count { it.translation != null }
                         _state.update { it.copy(status = "翻译中 $done/${it.cues.size}") }
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // 直播翻译失败一次不停下来：原文照常显示，过一会儿再翻
+                    if (!live) throw e
+                    android.util.Log.w("Voxtitle", "直播字幕翻译失败：${e.message}")
+                    _state.update { it.copy(status = "实时字幕 · 翻译暂时失败，稍后重试：${e.message?.take(60)}") }
+                    delay(3_000)
                 } finally {
                     inFlight -= ids.toSet()
                     running--
@@ -1237,6 +1370,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    /** 网盘、NAS、网络地址等不在手机上的文件：边下边识别，翻译走实时方案。 */
+    private fun isRemote(e: MediaEntry) = Uri.parse(e.uri).scheme?.lowercase().let { it != null && it !in LOCAL_SCHEMES }
 
     fun cancelAll() {
         transcribeJob?.cancel()
@@ -1696,6 +1832,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val BATCH_SIZE = 20
+        private val LOCAL_SCHEMES = setOf("content", "file", "android.resource")
+
+        /** 实时翻译（直播、远程文件）一次最多翻几句 */
+        private const val REALTIME_BATCH = 6
         private const val CONTEXT_SIZE = 6
         private const val TRANSLATE_PARALLEL = 3
 
@@ -1707,13 +1847,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         /** 播放位置超出已解码位置这么多，就当作拖动了进度条，改从新位置开始 */
         private const val AHEAD_MS = 45_000L
-        private const val LIVE_FIRST_CHUNK_SEC = 6
-        private const val LIVE_CHUNK_SEC = 8
+        /** 直播云端识别的分段（秒）：段越短字幕越早出来，太短识别不准 */
+        private const val LIVE_FIRST_CHUNK_SEC = 4
+        private const val LIVE_CHUNK_SEC = 6
         private const val LIVE_KEEP_CUES = 200
         private const val LIVE_MAX_BACKLOG_MS = 8_000L
+        private const val LIVE_MIN_CUE_MS = 1_200L
 
-        /** 实时字幕开启时画面往回拖多久：一段音频 8 秒 + 识别和翻译约 2 秒 */
-        private const val LIVE_DELAY_MS = 10_000L
+        /** 字幕至少要比画面早这么久换算好，留给翻译 */
+        private const val LIVE_SAFETY_MS = 2_500L
+
+        /** 为了对齐字幕，画面最多额外往回拖多久 */
+        private const val LIVE_MAX_DELAY_MS = 30_000L
+
+        /** 字幕识别出来这么久还换算不了时间，就改成按到达先后显示 */
+        private const val LIVE_MAP_TIMEOUT_MS = 15_000L
         /** 播放页点「♡」的歌放在这个播放列表里 */
         const val LIKED_PLAYLIST = "我喜欢的音乐"
     }
