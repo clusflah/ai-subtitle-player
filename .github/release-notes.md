@@ -20,7 +20,11 @@
 3. 网盘直连：在「浏览 → 网盘」里登录——115 和阿里云盘用手机 App 扫码；百度网盘用自己申请的 AppKey 扫码，或粘贴 refresh_token；PikPak 用账号密码（可能需要人机验证）。也可以添加 WebDAV、OpenList。
 4. 翻译默认用**本地模型**（Ollama、LM Studio、llama.cpp 等，在设置里选好模型），也可以装 Offline Translator App 完全离线翻译；不想自己跑模型，选免费、无需 Key 的 **Index-Translate**，或 Claude、DeepSeek、Gemini、阿里云百炼、火山方舟、Azure 翻译和自定义 OpenAI 兼容接口。
 
-## 本版更新（2.9.12）
+## 本版更新（2.9.13）
+
+- **修复：Gemini 语音识别选 gemini-*-transcribe 这类转写专用模型时报「JSON mode is not enabled for this model」**。现在会自动改用普通输出再解析；转写模型只给纯文字时，整段当一句显示（时间按比例分）。想要准确的时间轴和同时翻译，建议还是用 flash 模型
+
+## 2.9.12 更新
 
 - **播放页的「生成字幕」先选视频语言**再开始识别（和字幕面板里的「语音识别生成字幕」一样），选错语言会降低准确率
 - **设置里选中的服务再点一下可以收起**它的配置项，行尾箭头显示展开还是收起；选中的服务说明文字完整显示，不再被截断

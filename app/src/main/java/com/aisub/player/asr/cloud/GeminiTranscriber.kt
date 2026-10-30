@@ -28,6 +28,10 @@ class GeminiTranscriber(
 
     private val base = endpoint.trimEnd('/')
 
+    /** 这个模型支持 JSON 模式；试出来不支持后，后面的段直接不用 */
+    @Volatile
+    private var jsonMode = true
+
     override fun recognize(wav: ByteArray, chunkStartMs: Long, chunkEndMs: Long): List<Recognized> {
         val target = translateTo
         val prompt = buildString {
@@ -39,8 +43,9 @@ class GeminiTranscriber(
             append("}]。没有人说话（只有音乐、音效或静音）时输出 []；听不清的不要编造；不要把背景音乐的歌词当成对白。")
         }
         val audio = JSONObject().put("inline_data", JSONObject().put("mime_type", "audio/wav").put("data", Base64.getEncoder().encodeToString(wav)))
-        fun body(thinking: Boolean): String {
-            val config = JSONObject().put("responseMimeType", "application/json").put("temperature", 0)
+        fun body(thinking: Boolean, json: Boolean): String {
+            val config = JSONObject().put("temperature", 0)
+            if (json) config.put("responseMimeType", "application/json")
             // Gemini 3 无法完全关闭推理，调到最低档以降低延迟
             if (thinking) config.put("thinkingConfig", JSONObject().put("thinkingLevel", "low"))
             return JSONObject()
@@ -50,12 +55,14 @@ class GeminiTranscriber(
         }
 
         var thinking = true
+        // 转写专用模型（如 gemini-*-transcribe）不支持 JSON 模式：去掉重来，按提示词要求的 JSON 解析
+        var json = jsonMode
         val text = run {
             while (true) {
                 val result = execute({
                     Request.Builder().url("$base/v1beta/models/$model:generateContent")
                         .header("x-goog-api-key", apiKey)
-                        .post(body(thinking).toRequestBody("application/json".toMediaType()))
+                        .post(body(thinking, json).toRequestBody("application/json".toMediaType()))
                         .build()
                 }) { resp ->
                     val raw = resp.body?.string().orEmpty()
@@ -63,12 +70,17 @@ class GeminiTranscriber(
                         resp.isSuccessful -> raw to 0
                         // 老模型不认 thinkingConfig：去掉重来一次
                         resp.code == 400 && thinking && raw.contains("thinking", ignoreCase = true) -> "" to 1
+                        resp.code == 400 && json && raw.contains("JSON mode", ignoreCase = true) -> "" to 2
                         resp.code == 400 && raw.contains("API key", ignoreCase = true) -> throw IOException("Gemini Key 无效：请检查 API Key")
                         resp.code == 403 || resp.code == 401 -> throw IOException("Gemini 鉴权失败 HTTP ${resp.code}：${raw.take(200)}")
                         else -> throw IOException("Gemini 识别失败 HTTP ${resp.code}：${raw.take(300)}")
                     }
                 }
-                if (result.second == 1) thinking = false else return@run result.first
+                when (result.second) {
+                    1 -> thinking = false
+                    2 -> { json = false; jsonMode = false }
+                    else -> return@run result.first
+                }
             }
             @Suppress("UNREACHABLE_CODE")
             ""
@@ -82,10 +94,16 @@ class GeminiTranscriber(
         val content = buildString { for (i in 0 until parts.length()) append(parts.optJSONObject(i)?.optString("text").orEmpty()) }
         val start = content.indexOf('[')
         val end = content.lastIndexOf(']')
-        if (start < 0 || end <= start) return emptyList()
+        if (start < 0 || end <= start) {
+            // 没按要求给 JSON（转写专用模型可能只给纯文本）：整段当一句，时间按比例分
+            val plain = content.trim()
+            return if (plain.isEmpty()) emptyList() else listOf(Recognized.Sentence(plain, chunkStartMs, chunkEndMs))
+        }
         val arr = try {
             JSONArray(content.substring(start, end + 1))
         } catch (e: Exception) {
+            // 纯文本里带着 [音乐] 这类方括号
+            if (!jsonMode) return listOf(Recognized.Sentence(content.trim(), chunkStartMs, chunkEndMs))
             throw IOException("无法解析 Gemini 返回的结果：${content.take(200)}", e)
         }
         val out = ArrayList<Recognized>()
