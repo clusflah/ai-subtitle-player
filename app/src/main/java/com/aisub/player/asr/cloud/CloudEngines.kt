@@ -57,6 +57,11 @@ class VolcEngineTranscriber(private val appKey: String, private val accessKey: S
                         "旧版控制台要第一栏填 APP ID、第二栏填 Access Token。火山方舟（大模型）的 Key 不能用"
                     else "火山引擎不认这组 APP ID 和 Access Token（45000010）：检查两栏是否来自旧版控制台的同一个应用，或者改用新版控制台的 API Key（第二栏留空）",
                 )
+                // Key 是对的，但账号没开通（或这个 Key 没授权）录音文件识别的极速版
+                "45000030" -> throw IOException(
+                    "火山引擎账号还没开通「录音文件识别大模型 · 极速版」（45000030）。到豆包语音控制台（console.volcengine.com/speech/new）" +
+                        "开通这项服务（有免费试用额度），只开通流式识别或录音文件标准版不行；开通后如果还报错，检查这个 API Key 是否勾选了该服务",
+                )
                 else -> throw IOException("火山引擎识别失败（$status ${resp.header("X-Api-Message").orEmpty()}）${text.take(200)}")
             }
         } ?: return emptyList()
