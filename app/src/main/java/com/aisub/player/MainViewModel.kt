@@ -138,6 +138,10 @@ data class UiState(
     val transcoding: Boolean = false,
     /** 直播实时字幕用的时钟（见 [LiveClock]）；null 表示没开，字幕按播放位置显示 */
     val liveClock: LiveClock? = null,
+    /** 这次识别用的是流式识别（直播、远程视频，见设置里的开关） */
+    val streamingAsr: Boolean = false,
+    /** 直播实时字幕一直出不来时的说明（显示在字幕的位置）；正常时为 null */
+    val liveHint: String? = null,
 ) {
     /** 当前视频识别时用的设置：语音语言换成这个视频单独选的 */
     val asrSettings: AppSettings get() = videoAsrLanguage?.let { settings.copy(asrLanguage = it) } ?: settings
@@ -611,7 +615,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         cancelAll()
         sawFirstFrame = false
         frameWatch?.cancel()
-        _state.update { it.copy(videoProblem = null, transcoding = false, liveClock = null) }
+        _state.update { it.copy(videoProblem = null, transcoding = false, liveClock = null, liveHint = null) }
         val uri = Uri.parse(entry.uri)
         coverage.clear()
         coverageLimit = UNKNOWN_END
@@ -854,9 +858,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         _state.update { it.copy(status = msg, progress = p) }
                     }
                 }
+                val streaming = useStreaming(settings)
                 val engineName = (if (settings.asrEngine == AsrEngine.LOCAL) localModel.label else settings.asrEngine.label) +
-                    if (useStreaming(settings)) " 流式" else ""
-                _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f) }
+                    if (streaming) " 流式" else ""
+                _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f, streamingAsr = streaming) }
                 val translate = (settings.autoTranslate || alsoTranslate) && settings.createTranslator() != null
                 if ((settings.autoTranslate || alsoTranslate) && !translate) {
                     // 要翻译但翻译服务没设置好：说出来，不要只出原文让人以为翻译坏了
@@ -887,7 +892,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(status = "识别失败", progress = null, error = e.message ?: e.toString(), failedTask = Task.TRANSCRIBE) }
                 _state.value.videoUri?.let { if (!live) persistCues(it) }
             } finally {
-                _state.update { it.copy(transcribing = false) }
+                _state.update { it.copy(transcribing = false, streamingAsr = false) }
                 updateAutoAdvance()
             }
         }
@@ -1006,16 +1011,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val heard = java.util.concurrent.atomic.AtomicBoolean(false)
         var lastError: String? = null
 
+        val watchdog = com.aisub.player.live.LiveWatchdog(
+            android.os.SystemClock.elapsedRealtime(),
+            language = settings.asrLanguage.takeIf { it != "auto" }?.let { com.aisub.player.asr.AsrLanguages.label(it) },
+            streaming = _state.value.streamingAsr,
+            onDevice = settings.asrEngine == AsrEngine.LOCAL,
+        )
         val shower = viewModelScope.launch {
             val waiting = ArrayList<Pair<Cue, Long>>()
             val state = LivePublishState()
+            var tick = 0
             while (true) {
                 delay(200)
-                if (heard.getAndSet(false) && _state.value.cues.isEmpty()) {
-                    _state.update { it.copy(status = "已连上直播，正在识别…（第一句要等几秒）") }
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (heard.getAndSet(false)) {
+                    if (_state.value.cues.isEmpty() && _state.value.liveHint == null) {
+                        _state.update { it.copy(status = "已连上直播，正在识别…（第一句要等几秒）") }
+                    }
+                    watchdog.audio(now)
                 }
+                val before = waiting.size
                 while (true) waiting.add(incoming.poll() ?: break)
+                if (waiting.size > before) watchdog.cue(now)
                 if (waiting.isNotEmpty()) publishLive(waiting, anchors, state)
+                // 每秒看一次：一直没有字的时候在画面上说明原因
+                if (++tick % 5 == 0) {
+                    val hint = watchdog.hint(now)
+                    if (hint != _state.value.liveHint) {
+                        _state.update { it.copy(liveHint = hint, status = hint ?: if (it.cues.isEmpty()) "正在识别…" else "实时字幕") }
+                    }
+                }
             }
         }
         try {
@@ -1075,7 +1100,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(status = "直播字幕已停止：直播的声音断了" + (lastError?.let { "（$it）" } ?: "")) }
         } finally {
             shower.cancel()
-            _state.update { it.copy(liveClock = null) }
+            _state.update { it.copy(liveClock = null, liveHint = null) }
             if (liveDelayAdded > 0) restoreLivePlayback(entry)
         }
     }

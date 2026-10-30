@@ -510,6 +510,24 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             }.dp + state.settings.subtitleOffset.dp,
             topPadding = (if (controls && !PipState.inPip) 72 else 0).dp,
         )
+        // 直播实时字幕一直出不来：在字幕的位置说明原因（控制栏收起时也看得到）
+        if (!musicMode && current == null && state.liveHint != null) {
+            Text(
+                state.liveHint!!,
+                color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center,
+                modifier = Modifier.align(Alignment.BottomCenter)
+                    .padding(start = 24.dp, end = 24.dp, bottom = (if (controls && !PipState.inPip) 150 else 24).dp + state.settings.subtitleOffset.dp)
+                    .clip(RoundedCornerShape(8.dp)).background(Color(0xAA000000)).padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+        // 流式识别进行中：控制栏收起时在角上留一个小标记
+        if (state.transcribing && state.streamingAsr && !controls && !musicMode && !PipState.inPip) {
+            Text(
+                "● 流式识别", color = Color(0xCCFFFFFF), fontSize = 11.sp,
+                modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(12.dp)
+                    .clip(RoundedCornerShape(50)).background(Color(0x55F28C00)).padding(horizontal = 8.dp, vertical = 2.dp),
+            )
+        }
         if (PipState.inPip) return@Box
 
         // ---- 缓冲提示（出错提示在手势层上面，按钮才点得到） ----
@@ -1294,7 +1312,8 @@ private fun TaskChip(state: UiState, onClick: () -> Unit, modifier: Modifier = M
     val text = when {
         state.extractingEmbedded -> "读取视频自带字幕 ${((state.progress ?: 0f) * 100).toInt()}%"
         state.transcribing -> state.progress?.takeIf { it >= 0 && state.status.startsWith("正在识别") }
-            ?.let { "AI 识别字幕中 ${(it * 100).toInt()}%" } ?: state.status
+            ?.let { (if (state.streamingAsr) "AI 流式识别字幕中 " else "AI 识别字幕中 ") + "${(it * 100).toInt()}%" }
+            ?: state.status.let { if (state.streamingAsr && "流式" !in it) "$it · 流式识别" else it }
         state.translating -> "AI 翻译中 ${state.cues.count { it.translation != null }}/${state.cues.size}"
         state.failedTask != null -> if (state.failedTask == Task.TRANSCRIBE) "字幕识别失败，点此查看" else "翻译失败，点此查看"
         else -> return
