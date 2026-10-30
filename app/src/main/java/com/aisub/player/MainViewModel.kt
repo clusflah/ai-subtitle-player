@@ -692,8 +692,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         coverageActive = false
         store.loadCoverage(uri)?.let { coverage.load(it); coverageActive = true }
         val videoLanguage = store.loadAsrLanguage(uri)
+        // 直播字幕的时间是那一次直播的时间轴，下次打开对不上（会一遍遍冒出旧字幕）：不读缓存，旧版存下的也清掉
+        if (entry.isLive) store.deleteCues(uri)
         // 旧版把俄语等非拉丁文字误判成「不用翻译」、原文直接当了译文，这里清掉让它重新翻译
-        val cached = store.load(uri).let { cues ->
+        val cached = if (entry.isLive) emptyList() else store.load(uri).let { cues ->
             val s = _state.value.settings
             val asrLanguage = videoLanguage ?: s.asrLanguage
             cues.map {
@@ -1427,6 +1429,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 存字幕；只识别了一部分时连同已识别的范围一起存，下次打开接着识别。 */
     private fun persistCues(uri: Uri) {
         if (_state.value.videoUri != uri) return
+        // 直播字幕只在这次观看时有用，不存
+        if (_state.value.current?.isLive == true) return
         store.save(uri, _state.value.cues)
         if (!coverageActive) return
         if (coverage.isFull(coverageLimit)) {
@@ -1705,7 +1709,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun saveSidecar() {
         val s = _state.value
         val entry = s.current ?: return
-        if (!s.settings.autoSaveSrt || s.cues.isEmpty()) return
+        if (!s.settings.autoSaveSrt || s.cues.isEmpty() || entry.isLive) return
         val cues = s.cues
         viewModelScope.launch(Dispatchers.IO) {
             sidecarLock.withLock {

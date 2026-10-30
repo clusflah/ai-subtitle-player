@@ -60,6 +60,12 @@ class SubtitleStore(context: Context) {
         tmp.renameTo(file)
     }
 
+    /** 只删字幕，留着单独选的语音语言和角色表（直播用：字幕不留，语言要记住） */
+    fun deleteCues(video: Uri) {
+        fileFor(video).delete()
+        clearCoverage(video)
+    }
+
     fun delete(video: Uri) {
         fileFor(video).delete()
         rolesFile(video).delete()
