@@ -63,6 +63,11 @@ object CloudRegistry {
 
     fun isCloud(uri: String) = uri.startsWith("${CloudClient.SCHEME}://")
 
+    /** 直链用不了（过期、被拒）：下次重新获取 */
+    fun invalidate(uri: String) {
+        linkCache.remove(uri)
+    }
+
     /** cloud://<serverId>/<fileRef> → 直链。阻塞调用。 */
     fun resolve(uri: String): ResolvedLink {
         // 媒体服务器的直链里带着服务器地址，网络切换后换成当前能连上的内网 / 外网地址

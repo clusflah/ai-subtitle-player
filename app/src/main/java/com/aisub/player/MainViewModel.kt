@@ -1009,6 +1009,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         coverageLimit = duration
         var cursor = player.currentPosition - LEAD_IN_MS
         var waiting = false
+        var readFailures = 0
         while (true) {
             coroutineContext.ensureActive()
             if (coverage.isFull(duration)) break
@@ -1037,7 +1038,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 waiting = false
                 _state.update { it.copy(status = "正在识别语音…") }
             }
-            val restartAt = withContext(dispatcher) { recognizeRange(settings, uri, gap.first, gap.second, duration, remote) }
+            val coveredBefore = coverage.coveredMs(duration)
+            val restartAt = try {
+                withContext(dispatcher) { recognizeRange(settings, uri, gap.first, gap.second, duration, remote) }
+            } catch (e: com.aisub.player.asr.SourceReadException) {
+                // 网盘、NAS 读到一半断了（网络抖动、直链过期）：换个新直链，从断开的地方接着识别
+                persistCues(uri)
+                // 断开前识别了不少：不算连续失败
+                if (coverage.coveredMs(duration) > coveredBefore + 30_000) readFailures = 0
+                if (++readFailures > REMOTE_READ_RETRIES) throw e
+                android.util.Log.w("Voxtitle", "识别时读取视频中断（第 $readFailures 次），重连：${e.message}")
+                if (CloudRegistry.isCloud(uri.toString())) CloudRegistry.invalidate(uri.toString())
+                _state.update { it.copy(status = "读取视频中断，正在重连…") }
+                delay(2_000L * readFailures)
+                continue
+            }
+            readFailures = 0
             persistCues(uri)
             cursor = restartAt ?: gap.second
         }
@@ -1056,6 +1072,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val seekTo = java.util.concurrent.atomic.AtomicLong(-1)
         val sampleRate = Transcriber.SAMPLE_RATE
         val frontier = { from + consumed.get() * 1000 / sampleRate }
+        var readError: com.aisub.player.asr.SourceReadException? = null
 
         val watcher = viewModelScope.launch(Dispatchers.Main) {
             var ticks = 0
@@ -1086,28 +1103,38 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         if (start < to) addCues(listOf(c.copy(startMs = start, endMs = c.endMs + from)))
                     }
                     var lastProgress = 0L
-                    AudioDecoder(getApplication(), uri, authDataSourceFactory(getApplication())).decode(
-                        startMs = from,
-                        isActive = { ctx.isActive && !stop.get() },
-                        onProgress = {},
-                        onChunk = { chunk ->
-                            engine.accept(chunk, onCue)
-                            val n = consumed.addAndGet(chunk.size.toLong())
-                            if (from + n * 1000 / sampleRate >= to) stop.set(true)
-                            val now = System.currentTimeMillis()
-                            if (duration < UNKNOWN_END && now - lastProgress > 500) {
-                                lastProgress = now
-                                val done = coverage.coveredMs(duration) + n * 1000 / sampleRate
-                                _state.update { it.copy(progress = (done.toFloat() / duration).coerceIn(0f, 1f)) }
-                            }
-                        },
-                    )
+                    try {
+                        AudioDecoder(getApplication(), uri, authDataSourceFactory(getApplication())).decode(
+                            startMs = from,
+                            isActive = { ctx.isActive && !stop.get() },
+                            onProgress = {},
+                            onChunk = { chunk ->
+                                engine.accept(chunk, onCue)
+                                val n = consumed.addAndGet(chunk.size.toLong())
+                                if (from + n * 1000 / sampleRate >= to) stop.set(true)
+                                val now = System.currentTimeMillis()
+                                if (duration < UNKNOWN_END && now - lastProgress > 500) {
+                                    lastProgress = now
+                                    val done = coverage.coveredMs(duration) + n * 1000 / sampleRate
+                                    _state.update { it.copy(progress = (done.toFloat() / duration).coerceIn(0f, 1f)) }
+                                }
+                            },
+                        )
+                    } catch (e: com.aisub.player.asr.SourceReadException) {
+                        // 远程视频读到一半断了：已经解码的部分照样识别完、记下来，由 [runOnDemand] 从断开处重连
+                        if (!remote) throw e
+                        readError = e
+                    }
                     if (ctx.isActive) engine.finish(onCue)
                 } finally {
                     cancelHandle.dispose()
                 }
             }
             if (!ctx.isActive) return null
+            readError?.let {
+                if (frontier() > from) coverage.add(from, minOf(frontier(), to))
+                throw it
+            }
             // 没被打断就是一直解码到了音轨结尾；被打断或到了这一段的终点，就只算解码到的部分
             val reachedEnd = !stop.get()
             coverage.add(from, if (reachedEnd) maxOf(duration, frontier()) else minOf(frontier(), to))
@@ -2133,6 +2160,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         /** 远程视频的识别最多领先播放这么久；领先够了就停，播放追到只剩 [REMOTE_RESUME_MS] 时再继续 */
         private const val REMOTE_AHEAD_MS = 5 * 60_000L
         private const val REMOTE_RESUME_MS = 3 * 60_000L
+
+        /** 远程视频识别时读取中断，连续重连几次 */
+        private const val REMOTE_READ_RETRIES = 3
         /** 直播云端识别的分段（秒）：段越短字幕越早出来，太短识别不准 */
         private const val LIVE_FIRST_CHUNK_SEC = 4
         private const val LIVE_CHUNK_SEC = 6

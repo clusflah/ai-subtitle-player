@@ -26,6 +26,9 @@ import java.nio.ByteOrder
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
+/** 读取视频数据失败（不是格式解不了）：网络、直链过期这类，重连可能就好了 */
+class SourceReadException(message: String, cause: Throwable) : IOException(message, cause)
+
 /**
  * 备用音频解码：用一个不出声的 ExoPlayer（带 FFmpeg 扩展）把音轨解码成 PCM。
  * 用于手机系统 MediaCodec 解不了的格式（AC3、E-AC3、DTS、TrueHD 等）和 MediaExtractor 打不开的容器。
@@ -191,7 +194,13 @@ class ExoAudioDecoder(
             released.await(5, TimeUnit.SECONDS)
             thread.quitSafely()
         }
-        error?.let { throw IOException("无法解码音轨：${it.message}", it) }
+        error?.let { e ->
+            // 读不到数据（网络断了、直链过期、服务器拒绝）：说清原因，远程视频由调用方接着断开的位置重连
+            if (e is PlaybackException && e.errorCode in 2000 until 3000) {
+                throw SourceReadException("读取视频失败：" + com.aisub.player.describePlaybackError(e).replace(com.aisub.player.PLAYBACK_ERROR_DETAIL, "\n"), e)
+            }
+            throw IOException("无法解码音轨：${e.message}", e)
+        }
         if (isActive()) onProgress(1f)
     }
 
