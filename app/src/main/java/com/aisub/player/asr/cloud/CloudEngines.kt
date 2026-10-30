@@ -27,9 +27,31 @@ private fun errorText(code: Int, body: String) = "HTTP $code：${body.take(300)}
  * 火山引擎 · 豆包语音「录音文件极速版识别」：一次请求直接返回结果，音频 base64 上传。
  * 文档：docs.volcengine.com（DoubaoVoice / LargemodelrecordingfileLiterecognitionAPI）。
  * 新版控制台只需 API Key；旧版控制台需要 APP ID + Access Token。
+ *
+ * 极速版是 1.0 的服务，已经不给新账号开通（返回 45000030）；录音文件识别 2.0 只收音频网址、不能直接传音频，
+ * 所以这时改用流式语音识别 2.0 的「流式输入」模式，一段音频发完再一次拿回结果。
  */
 class VolcEngineTranscriber(private val appKey: String, private val accessKey: String) : ChunkedCloudEngine() {
     override fun recognize(wav: ByteArray, chunkStartMs: Long, chunkEndMs: Long): List<Recognized> {
+        if (appKey !in noTurbo) {
+            try {
+                return recognizeTurbo(wav, chunkStartMs)
+            } catch (_: NotGranted) {
+                noTurbo.add(appKey)
+            }
+        }
+        val pcm = wav.copyOfRange(minOf(44, wav.size), wav.size)
+        val engine = VolcStreamingTranscriber(appKey, accessKey, VolcStreamingTranscriber.FILE_URL, notGrantedHint = NOT_GRANTED)
+        return try {
+            engine.recognizeAll(pcm) { cancelled }.map { it.shifted(chunkStartMs) }
+        } finally {
+            engine.close()
+        }
+    }
+
+    private class NotGranted : RuntimeException()
+
+    private fun recognizeTurbo(wav: ByteArray, chunkStartMs: Long): List<Recognized> {
         val body = JSONObject()
             .put("user", JSONObject().put("uid", appKey.take(32)))
             .put("audio", JSONObject().put("data", Base64.getEncoder().encodeToString(wav)).put("format", "wav"))
@@ -57,11 +79,8 @@ class VolcEngineTranscriber(private val appKey: String, private val accessKey: S
                         "旧版控制台要第一栏填 APP ID、第二栏填 Access Token。火山方舟（大模型）的 Key 不能用"
                     else "火山引擎不认这组 APP ID 和 Access Token（45000010）：检查两栏是否来自旧版控制台的同一个应用，或者改用新版控制台的 API Key（第二栏留空）",
                 )
-                // Key 是对的，但账号没开通（或这个 Key 没授权）录音文件识别的极速版
-                "45000030" -> throw IOException(
-                    "火山引擎账号还没开通「录音文件识别大模型 · 极速版」（45000030）。到豆包语音控制台（console.volcengine.com/speech/new）" +
-                        "开通这项服务（有免费试用额度），只开通流式识别或录音文件标准版不行；开通后如果还报错，检查这个 API Key 是否勾选了该服务",
-                )
+                // Key 是对的，但账号没开通极速版：改用流式语音识别 2.0
+                "45000030" -> throw NotGranted()
                 else -> throw IOException("火山引擎识别失败（$status ${resp.header("X-Api-Message").orEmpty()}）${text.take(200)}")
             }
         } ?: return emptyList()
@@ -76,6 +95,15 @@ class VolcEngineTranscriber(private val appKey: String, private val accessKey: S
                 Recognized.Words(spacedTokens(list).first, end)
             } else Recognized.Sentence(u.optString("text"), start, end)
         }
+    }
+
+    private companion object {
+        /** 没开通极速版的 Key，这次运行里直接走流式 */
+        val noTurbo: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+        const val NOT_GRANTED = "火山引擎账号没开通可用的语音识别服务（45000030）。到豆包语音控制台（console.volcengine.com/speech/new）" +
+            "开通「流式语音识别 2.0」（有免费试用额度）；老账号开通了「录音文件识别 · 极速版」也可以。" +
+            "「录音文件识别 2.0」只能识别网上的音频文件，这里用不上。开通后如果还报错，检查这个 API Key 是否勾选了该服务"
     }
 }
 
