@@ -16,8 +16,11 @@ import androidx.media3.common.Player
 import com.aisub.player.music.Lyrics
 
 /**
- * 桌面小组件「正在播放」：封面、歌名、歌手，上一首 / 播放暂停 / 下一首；有带时间的歌词时，下面一整行显示正在唱的那句。
- * 播放器状态变了（播放、暂停、切歌、读到歌曲信息）就刷新；应用没在播放时显示上次听的歌，
+ * 桌面小组件「正在播放」，按大小换布局（见 [Size]）：
+ * - 4×1、2×2：封面、歌名、正在唱的那句，播放键；
+ * - 4×2：左边封面，右边歌名、歌手和 ♡ / 上一首 / 播放 / 下一首；下面两行歌词，正在唱的那句突出；
+ * - 4×3：同 4×2，封面更大，三行歌词（上一句、这一句、下一句）。
+ * 播放器状态变了（播放、暂停、切歌、读到歌曲信息）就刷新，歌词到下一句的时间刷新；应用没在播放时显示上次听的歌，
  * 点播放在后台接着放（[WidgetPlayback]），不打开界面；没听过歌时点一下打开译幕。
  */
 @androidx.media3.common.util.UnstableApi
@@ -25,8 +28,15 @@ class NowPlayingWidget : AppWidgetProvider() {
 
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) = render(context)
 
+    /** 拉大、缩小小组件：换布局 */
+    override fun onAppWidgetOptionsChanged(context: Context, manager: AppWidgetManager, id: Int, options: android.os.Bundle) = render(context)
+
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
+            ACTION_LIKE -> {
+                currentEntry(context)?.let { com.aisub.player.media.AppStore(context).toggleLiked(it) }
+                render(context)
+            }
             ACTION_TOGGLE, ACTION_PREV, ACTION_NEXT -> {
                 // 应用已经被系统结束、小组件还停在之前的样子：点播放就在后台接着放，其他按钮只刷新小组件
                 val p = PlaybackService.session?.player ?: run {
@@ -52,10 +62,25 @@ class NowPlayingWidget : AppWidgetProvider() {
         runCatching { androidx.core.content.ContextCompat.startForegroundService(context, playIntent(context)) }
     }
 
+    /**
+     * 小组件的几种大小。桌面报的尺寸（dp）因桌面而异，按竖屏时的宽、高大致分：
+     * 一行高的是 4×1，窄的是 2×2，两行是 4×2，再高是 4×3。
+     */
+    private enum class Size(val layout: Int, val card: Boolean, val lyricLines: Int) {
+        SMALL(R.layout.widget_np_small, card = false, lyricLines = 1),
+        SQUARE(R.layout.widget_np_square, card = false, lyricLines = 1),
+        CARD2(R.layout.widget_np_card2, card = true, lyricLines = 2),
+        CARD3(R.layout.widget_np_card3, card = true, lyricLines = 3),
+    }
+
     companion object {
         private const val ACTION_TOGGLE = "com.aisub.player.widget.TOGGLE"
         private const val ACTION_PREV = "com.aisub.player.widget.PREV"
         private const val ACTION_NEXT = "com.aisub.player.widget.NEXT"
+        private const val ACTION_LIKE = "com.aisub.player.widget.LIKE"
+
+        private const val LYRIC_COLOR = 0xFFFFB347.toInt()
+        private const val DIM_COLOR = 0x99FFFFFF.toInt()
 
         private var player: Player? = null
         private var appContext: Context? = null
@@ -109,42 +134,76 @@ class NowPlayingWidget : AppWidgetProvider() {
             renderLyric(context)
         }
 
+        /** 播放页点了 ♡ 等：重画一次 */
+        fun refresh(context: Context) = render(context)
+
+        private fun ids(context: Context, manager: AppWidgetManager) =
+            manager.getAppWidgetIds(ComponentName(context, NowPlayingWidget::class.java))
+
+        private fun sizeOf(manager: AppWidgetManager, id: Int): Size {
+            val o = manager.getAppWidgetOptions(id)
+            val width = o.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH)
+            val height = o.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT)
+            return when {
+                width == 0 || height == 0 -> Size.CARD2
+                height < 110 -> Size.SMALL
+                width < 220 -> Size.SQUARE
+                height < 230 -> Size.CARD2
+                else -> Size.CARD3
+            }
+        }
+
         private fun render(context: Context) {
             val manager = AppWidgetManager.getInstance(context)
-            val ids = manager.getAppWidgetIds(ComponentName(context, NowPlayingWidget::class.java))
-            if (ids.isEmpty()) return
-            manager.updateAppWidget(ids, views(context))
+            val ids = ids(context, manager)
+            if (ids.isEmpty()) return handler.removeCallbacks(nextLine)
+            for (id in ids) manager.updateAppWidget(id, views(context, sizeOf(manager, id)))
         }
 
-        /** 只换歌词那一行：不重新传封面 */
+        /** 只换歌词那几行：不重新传封面 */
         private fun renderLyric(context: Context) {
             val manager = AppWidgetManager.getInstance(context)
-            val ids = manager.getAppWidgetIds(ComponentName(context, NowPlayingWidget::class.java))
+            val ids = ids(context, manager)
             val p = player?.takeIf { it.currentMediaItem != null }
-            if (ids.isEmpty() || p == null) {
-                handler.removeCallbacks(nextLine)
-                return
+            handler.removeCallbacks(nextLine)
+            if (ids.isEmpty() || p == null) return
+            for (id in ids) {
+                val size = sizeOf(manager, id)
+                val v = RemoteViews(context.packageName, size.layout)
+                fillLyrics(v, size, p)
+                manager.partiallyUpdateAppWidget(id, v)
             }
-            val v = RemoteViews(context.packageName, R.layout.widget_now_playing)
-            lyricLine(v, p)
-            manager.partiallyUpdateAppWidget(ids, v)
+            scheduleNextLine(p)
         }
 
+        private fun line(l: Lyrics?, index: Int): String? = l?.lines?.getOrNull(index)?.text?.trim()?.takeIf { it.isNotEmpty() }
+
         /**
-         * 填正在唱的那句：没有带时间的歌词、还没唱到第一句时显示歌手。
-         * 播放中顺便约好下一句开始的时间再刷新。
+         * 填歌词：正在唱的那句突出（橙色），4×2 加下一句，4×3 再加上一句（都淡一些）。
+         * 小的两种没有歌手那一行：没有带时间的歌词、还没唱到第一句时，那一行显示歌手。
          */
-        private fun lyricLine(v: RemoteViews, p: Player) {
+        private fun fillLyrics(v: RemoteViews, size: Size, p: Player) {
+            val l = lyrics?.takeIf { it.synced && it.lines.isNotEmpty() }
+            val index = l?.indexAt(p.currentPosition) ?: -1
+            val current = line(l, index)
+            if (!size.card) {
+                v.setTextViewText(R.id.widget_lyric, current ?: artistOf(p))
+                v.setTextColor(R.id.widget_lyric, if (current != null) LYRIC_COLOR else DIM_COLOR)
+                return
+            }
+            v.setTextViewText(R.id.widget_lyric, current ?: if (l == null) "暂无歌词" else "♪")
+            v.setTextColor(R.id.widget_lyric, if (current != null) LYRIC_COLOR else DIM_COLOR)
+            v.setTextViewText(R.id.widget_lyric_next, line(l, index + 1) ?: "")
+            if (size.lyricLines >= 3) v.setTextViewText(R.id.widget_lyric_prev, line(l, index - 1) ?: "")
+        }
+
+        /** 播放中，约好下一句开始的时间再刷新歌词 */
+        private fun scheduleNextLine(p: Player) {
             handler.removeCallbacks(nextLine)
-            val l = lyrics?.takeIf { it.synced }
-            val pos = p.currentPosition
-            val index = l?.indexAt(pos) ?: -1
-            val text = l?.lines?.getOrNull(index)?.text?.takeIf { it.isNotBlank() }
-            v.setTextViewText(R.id.widget_lyric, text ?: "")
-            v.setViewVisibility(R.id.widget_lyric, if (text != null) View.VISIBLE else View.GONE)
-            v.setViewVisibility(R.id.widget_artist, if (artistOf(p).isEmpty()) View.GONE else View.VISIBLE)
-            val next = l?.lines?.getOrNull(index + 1)?.timeMs ?: return
+            val l = lyrics?.takeIf { it.synced } ?: return
             if (!p.isPlaying) return
+            val pos = p.currentPosition
+            val next = l.lines.getOrNull(l.indexAt(pos) + 1)?.timeMs ?: return
             val speed = p.playbackParameters.speed.takeIf { it > 0 } ?: 1f
             handler.postDelayed(nextLine, ((next - pos) / speed).toLong().coerceAtLeast(100))
         }
@@ -152,31 +211,61 @@ class NowPlayingWidget : AppWidgetProvider() {
         /** 小组件那行窄，只放歌手，不带专辑 */
         private fun artistOf(p: Player): String = p.mediaMetadata.artist?.toString()?.trim().orEmpty()
 
-        private fun views(context: Context): RemoteViews {
-            val v = RemoteViews(context.packageName, R.layout.widget_now_playing)
+        /** 正在放的（或上次听的）歌，点 ♡ 时用 */
+        private fun currentEntry(context: Context): com.aisub.player.media.MediaEntry? {
+            val p = PlaybackService.session?.player ?: player
+            val item = p?.currentMediaItem
+            if (item != null && item.mediaId.isNotEmpty()) {
+                val title = p.mediaMetadata.title?.toString() ?: item.mediaMetadata.title?.toString() ?: item.mediaId.substringAfterLast('/')
+                return com.aisub.player.media.MediaEntry(item.mediaId, title, isVideo = false)
+            }
+            return WidgetPlayback.recentSongs(context).firstOrNull()?.entry
+        }
+
+        private fun views(context: Context, size: Size): RemoteViews {
+            val v = RemoteViews(context.packageName, size.layout)
             val p = player?.takeIf { it.currentMediaItem != null }
             val recent = if (p == null) WidgetPlayback.recentSongs(context).firstOrNull() else null
+            val subtitle = if (recent != null) "继续收听 · 译幕" else "译幕"
             if (p == null) {
                 handler.removeCallbacks(nextLine)
-                v.setViewVisibility(R.id.widget_lyric, View.GONE)
                 v.setTextViewText(R.id.widget_title, recent?.entry?.displayTitle ?: "没有在播放")
-                v.setTextViewText(R.id.widget_artist, if (recent != null) "继续收听 · 译幕" else "译幕")
-                v.setViewVisibility(R.id.widget_artist, View.VISIBLE)
                 v.setImageViewResource(R.id.widget_cover, R.drawable.widget_cover_placeholder)
                 v.setImageViewResource(R.id.widget_play, R.drawable.widget_play)
-                v.setViewVisibility(R.id.widget_prev, View.GONE)
-                v.setViewVisibility(R.id.widget_next, View.GONE)
+                if (size.card) {
+                    v.setTextViewText(R.id.widget_artist, subtitle)
+                    v.setTextViewText(R.id.widget_lyric, "")
+                    v.setTextViewText(R.id.widget_lyric_next, "")
+                    if (size.lyricLines >= 3) v.setTextViewText(R.id.widget_lyric_prev, "")
+                    v.setViewVisibility(R.id.widget_prev, View.INVISIBLE)
+                    v.setViewVisibility(R.id.widget_next, View.INVISIBLE)
+                    v.setViewVisibility(R.id.widget_like, if (recent != null) View.VISIBLE else View.INVISIBLE)
+                } else {
+                    v.setTextViewText(R.id.widget_lyric, subtitle)
+                    v.setTextColor(R.id.widget_lyric, DIM_COLOR)
+                }
             } else {
                 val meta = p.mediaMetadata
                 v.setTextViewText(R.id.widget_title, meta.title ?: meta.displayTitle ?: "")
-                v.setTextViewText(R.id.widget_artist, artistOf(p))
-                lyricLine(v, p)
+                fillLyrics(v, size, p)
+                scheduleNextLine(p)
                 val bmp = coverOf(meta.artworkData)
                 if (bmp != null) v.setImageViewBitmap(R.id.widget_cover, bmp)
                 else v.setImageViewResource(R.id.widget_cover, R.drawable.widget_cover_placeholder)
                 v.setImageViewResource(R.id.widget_play, if (p.isPlaying) R.drawable.widget_pause else R.drawable.widget_play)
-                v.setViewVisibility(R.id.widget_prev, if (p.isCommandAvailable(Player.COMMAND_SEEK_TO_PREVIOUS)) View.VISIBLE else View.INVISIBLE)
-                v.setViewVisibility(R.id.widget_next, if (p.isCommandAvailable(Player.COMMAND_SEEK_TO_NEXT)) View.VISIBLE else View.INVISIBLE)
+                if (size.card) {
+                    v.setTextViewText(R.id.widget_artist, artistOf(p))
+                    v.setViewVisibility(R.id.widget_prev, if (p.isCommandAvailable(Player.COMMAND_SEEK_TO_PREVIOUS)) View.VISIBLE else View.INVISIBLE)
+                    v.setViewVisibility(R.id.widget_next, if (p.isCommandAvailable(Player.COMMAND_SEEK_TO_NEXT)) View.VISIBLE else View.INVISIBLE)
+                    v.setViewVisibility(R.id.widget_like, View.VISIBLE)
+                }
+            }
+            if (size.card) {
+                val liked = currentEntry(context)?.let { com.aisub.player.media.AppStore(context).isLiked(it.uri) } == true
+                v.setImageViewResource(R.id.widget_like, if (liked) R.drawable.widget_heart_filled else R.drawable.widget_heart)
+                v.setOnClickPendingIntent(R.id.widget_like, broadcast(context, ACTION_LIKE, 14))
+                v.setOnClickPendingIntent(R.id.widget_prev, broadcast(context, ACTION_PREV, 11))
+                v.setOnClickPendingIntent(R.id.widget_next, broadcast(context, ACTION_NEXT, 12))
             }
             // 点封面、文字：回到播放页（没在播放时就是打开译幕）
             val open = Intent(context, MainActivity::class.java).setAction(MainActivity.ACTION_OPEN_PLAYER).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -189,8 +278,6 @@ class NowPlayingWidget : AppWidgetProvider() {
                 else -> openApp
             }
             v.setOnClickPendingIntent(R.id.widget_play, play)
-            v.setOnClickPendingIntent(R.id.widget_prev, broadcast(context, ACTION_PREV, 11))
-            v.setOnClickPendingIntent(R.id.widget_next, broadcast(context, ACTION_NEXT, 12))
             return v
         }
 
