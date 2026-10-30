@@ -28,6 +28,9 @@ data class AsrField(
 /** 每个云端引擎都有：同时识别几段。账号不支持并发（比如只买了不支持并发的资源包）时填 1 */
 private val PARALLEL = AsrField("parallel", "同时识别几段（1～3）", required = false, default = "3", placeholder = "3；账号不支持并发时填 1")
 
+/** 火山默认 1：新账号用的流式语音识别 2.0 时长资源包不支持并发 */
+private val VOLC_PARALLEL = PARALLEL.copy(default = "1", placeholder = "1；账号支持并发时可填 2、3")
+
 enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrField> = emptyList()) {
     LOCAL("手机上识别（免费）", "在手机上离线识别，不花钱、不联网；第一次要下载模型，可选多种"),
     AZURE(
@@ -44,7 +47,7 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
         listOf(
             AsrField("appKey", "API Key（旧版控制台填 APP ID）", secret = true),
             AsrField("accessKey", "Access Token（仅旧版控制台需要）", secret = true, required = false),
-            PARALLEL,
+            VOLC_PARALLEL,
         ),
     ),
     ALIYUN(
