@@ -91,6 +91,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
@@ -349,6 +350,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 网盘视频识别到结尾后，盯着播放位置：拖回没识别过的地方就接着识别 */
     private var gapWatch: Job? = null
+
+    /** 这次翻译用的服务和模型；翻出第一批后才显示到播放页 */
+    private var pendingTranslateInfo: String? = null
 
     /** 这次识别同时要翻译：Gemini 识别时顺带翻译，省掉单独翻译的一轮 */
     private var inlineTranslate = false
@@ -916,13 +920,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             coverage.clear()
             coverageActive = !live
             store.clearCoverage(uri)
-            _state.update { it.copy(cues = emptyList(), liveClock = null) }
+            _state.update { it.copy(cues = emptyList(), liveClock = null, asrInfo = null, translateInfo = null) }
         }
         _state.update { it.copy(transcribing = true, error = null, failedTask = null) }
         nextCueId = (_state.value.cues.maxOfOrNull { it.id } ?: 0) + 1
         updateAutoAdvance()
 
         transcribeJob = viewModelScope.launch {
+            // 识别出第一句之后才在播放页顶部显示用的识别服务（没识别出东西就不显示）
+            var asrInfoWatch: Job? = null
             try {
                 _state.value.current?.takeIf { VlcPlayer.needsVlc(it.title) }?.let {
                     throw IllegalStateException("光盘镜像（ISO）暂不支持 AI 识别字幕，可以用「在线下载字幕」或选择字幕文件")
@@ -941,7 +947,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // 播放页顶部显示用的是哪家、哪个模型（流式识别的模型由引擎自己定，不写）
                 val asrModel = settings.asrValue(settings.asrEngine, "model").takeIf { !streaming && settings.asrEngine != AsrEngine.LOCAL && it.isNotEmpty() }
                 val asrInfo = "识别：$engineName" + (asrModel?.let { " · $it" } ?: "")
-                _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f, streamingAsr = streaming, asrInfo = asrInfo) }
+                _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f, streamingAsr = streaming) }
+                val cuesBefore = _state.value.cues.size
+                asrInfoWatch = launch {
+                    _state.map { it.cues.size }.first { it > cuesBefore }
+                    _state.update { it.copy(asrInfo = asrInfo) }
+                }
                 val translate = (settings.autoTranslate || alsoTranslate) && settings.createTranslator() != null
                 if ((settings.autoTranslate || alsoTranslate) && !translate) {
                     // 要翻译但翻译服务没设置好：说出来，不要只出原文让人以为翻译坏了
@@ -972,6 +983,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(status = "识别失败", progress = null, error = e.message ?: e.toString(), failedTask = Task.TRANSCRIBE) }
                 _state.value.videoUri?.let { if (!live) persistCues(it) }
             } finally {
+                asrInfoWatch?.cancel()
                 _state.update { it.copy(transcribing = false, streamingAsr = false) }
                 updateAutoAdvance()
             }
@@ -1186,8 +1198,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     try {
                         // 直播流断了或一连上就结束时，重连几次
                         var quickEnds = 0
+                        var connects = 0
                         while (coroutineContext.isActive && quickEnds < 3) {
                             val startedAt = System.currentTimeMillis()
+                            // 收不到新声音太久就断开重连：解码器可能卡住了（不报错也不结束）
+                            val lastAudioAt = java.util.concurrent.atomic.AtomicLong(startedAt)
+                            val gotAudio = java.util.concurrent.atomic.AtomicBoolean(false)
+                            val stalled = java.util.concurrent.atomic.AtomicBoolean(false)
+                            android.util.Log.i("Voxtitle", "直播声音：第 ${++connects} 次连接 ${entry.uri}")
                             val baseMs = samples.get() * 1000 / Transcriber.SAMPLE_RATE
                             anchors.newSegment(baseMs)
                             var lastWall = -1L
@@ -1206,14 +1224,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                         if (steady && ms > 0) LiveTimeline.keyOf(p)?.let { anchors.add(baseMs + ms, it) }
                                     },
                                 ).decode(
-                                    isActive = { coroutineContext.isActive },
+                                    isActive = {
+                                        val limit = if (gotAudio.get()) LIVE_AUDIO_STALL_MS else LIVE_AUDIO_FIRST_MS
+                                        val quiet = System.currentTimeMillis() - lastAudioAt.get()
+                                        if (quiet > limit && stalled.compareAndSet(false, true)) {
+                                            android.util.Log.w("Voxtitle", "直播声音：${quiet / 1000} 秒没收到新声音，断开重连")
+                                        }
+                                        coroutineContext.isActive && !stalled.get()
+                                    },
                                     onProgress = {},
                                     onChunk = { chunk ->
+                                        if (!gotAudio.getAndSet(true)) {
+                                            android.util.Log.i("Voxtitle", "直播声音：连上了，${System.currentTimeMillis() - startedAt} ms 收到第一段")
+                                        }
+                                        lastAudioAt.set(System.currentTimeMillis())
                                         samples.addAndGet(chunk.size.toLong())
                                         heard.set(true)
                                         pending.add(chunk)
                                     },
                                 )
+                                if (stalled.get()) lastError = "直播声音卡住了"
+                                else if (coroutineContext.isActive) android.util.Log.w("Voxtitle", "直播声音：直播流结束了，重连")
                             } catch (e: java.io.IOException) {
                                 // 直播流断开、解不了：记下原因，重连
                                 if (!coroutineContext.isActive) throw e
@@ -1440,6 +1471,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteModel(model: LocalModel) = models.delete(model)
 
     /** 翻译所有还没有译文的字幕。识别进行中时会持续等待新字幕。 */
+    /** 播放页顶部显示的翻译服务和模型；Azure 翻译的「模型」一栏填的是区域，不显示 */
+    private fun translateInfoOf(settings: AppSettings): String {
+        val provider = settings.provider
+        val model = settings.configOf(provider).model.takeIf { provider != Provider.AZURE_TRANSLATOR && it.isNotEmpty() }
+        return "翻译：${provider.label}" + (model?.let { " · $it" } ?: "")
+    }
+
     fun startTranslation() {
         if (translateJob?.isActive == true) return
         val settings = _state.value.settings
@@ -1448,11 +1486,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(error = settings.translatorProblem() ?: "翻译服务配置不完整", failedTask = Task.TRANSLATE) }
             return
         }
-        // Azure 翻译的「模型」一栏填的是区域，不显示
-        val provider = settings.provider
-        val translateModel = settings.configOf(provider).model.takeIf { provider != Provider.AZURE_TRANSLATOR && it.isNotEmpty() }
-        val translateInfo = "翻译：${provider.label}" + (translateModel?.let { " · $it" } ?: "")
-        _state.update { it.copy(translating = true, error = null, failedTask = null, translateInfo = translateInfo) }
+        // 真的有句子翻出来了才在播放页顶部显示（例如中文直播一句都不用翻，就不显示翻译服务）
+        pendingTranslateInfo = translateInfoOf(settings)
+        _state.update { it.copy(translating = true, error = null, failedTask = null) }
         updateAutoAdvance()
         translateJob = viewModelScope.launch {
             try {
@@ -1549,6 +1585,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             launch {
                 try {
                     val results = translator.translate(batch.map { it.text }, context, snapshot.settings.targetLanguage)
+                    if (results.any { it != null }) _state.update { it.copy(translateInfo = pendingTranslateInfo) }
                     // 模型漏掉的条目用原文占位，避免死循环反复请求
                     val translated = batch.indices.associate { i -> batch[i].id to (results[i] ?: batch[i].text) }
                     _state.update { s ->
@@ -1619,7 +1656,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val context = cues.subList(maxOf(0, i - CONTEXT_SIZE), i).map { it.text }
                 val result = translator.translate(listOf(cues[i].text), context, settings.targetLanguage).firstOrNull()
                 if (result != null) {
-                    _state.update { s -> s.copy(cues = s.cues.map { if (it.id == cueId) it.copy(translation = result) else it }) }
+                    _state.update { s ->
+                        s.copy(cues = s.cues.map { if (it.id == cueId) it.copy(translation = result) else it }, translateInfo = translateInfoOf(settings))
+                    }
                     _state.value.videoUri?.let { persistCues(it) }
                 }
             } catch (e: Exception) {
@@ -2086,6 +2125,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private const val LIVE_CHUNK_SEC = 6
         private const val LIVE_KEEP_CUES = 200
         private const val LIVE_MAX_BACKLOG_MS = 8_000L
+
+        /** 直播声音这么久没有新的就断开重连；刚连上时等第一段声音放宽一些 */
+        private const val LIVE_AUDIO_STALL_MS = 12_000L
+        private const val LIVE_AUDIO_FIRST_MS = 25_000L
 
         /** 兼容模式下直播不能出字幕时给的提示（播放页也用） */
         const val VLC_NO_SUBTITLES = "兼容模式（VLC 内核）下字幕无法工作"
