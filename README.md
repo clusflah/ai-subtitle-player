@@ -87,7 +87,7 @@
 1. **安装**：到 [Releases](https://github.com/clusflah/ai-subtitle-player/releases/latest) 下载 APK。大多数手机选 `Voxtitle-*-arm64-v8a.apk`，不确定就选 `universal`。需要 Android 8.0 及以上。以后升级不用再来这里：打开 App 时会自动检查新版本（一天最多一次），也可以在首页「工具 → 检查更新」手动检查；会按手机的 CPU 架构和你装的版本（普通版 / 下载版）选安装包，下载后调起系统安装。
 2. **打开视频**：第一次打开会有简短说明。在「本机」标签选手机里的视频或音乐，在「浏览」里添加 NAS、网盘、Plex / Emby；「首页」汇总各处的继续观看。也可以在文件管理器里「用其他应用打开」。
 3. **生成字幕**：播放没有中文字幕的视频时，画面上方会出现一键按钮：没有字幕时是「生成简体中文字幕」（语音识别后翻译）；只有外语字幕（视频自带的文字字幕、载入的字幕文件）时是「翻译成简体中文字幕」；已经有中文字幕时不显示。按钮里的语言跟着「翻译目标语言」设置变。也可以在「字幕与音轨」→「AI 字幕」→「语音识别生成字幕」里操作，点了会先选视频里说的语言。默认在手机上识别，第一次会提示下载约 160 MB 的模型，之后完全离线。识别和翻译的进度会显示在通知栏。
-4. **翻译**：默认用免费的 **Index-Translate**，不用填 Key，识别时自动翻译。想要更好的翻译，到「设置 → 字幕翻译」换成 Claude、DeepSeek、Gemini 等（设置改了即时保存）。
+4. **翻译**：默认用**本地模型**（手机或局域网电脑上的 Ollama、LM Studio、llama.cpp 等），字幕不出本地、不花钱，到「设置 → 字幕翻译」选好模型就行；也可以装 Offline Translator App 完全离线翻译。不想自己跑模型，就换成免费、不用 Key 的 **Index-Translate**，或 Claude、DeepSeek、Gemini 等（设置改了即时保存）。
 5. **看双语字幕**：字幕面板里选「双语 / 原文 / 译文」，设置里还能调字号和位置。
 
 > 识别是从头往后进行的。拖到还没识别到的位置时暂时没有字幕，等识别跟上即可。识别结果按视频缓存，下次打开直接加载。
@@ -133,14 +133,14 @@
 
 | 服务 | 说明 |
 |---|---|
+| 本地模型（默认） | 手机或局域网电脑上运行的 Ollama、LM Studio、llama.cpp 等，免费、不用 Key，字幕不出本地 |
+| 离线翻译（Offline Translator App） | 另外安装的开源 App [Offline Translator](https://github.com/DavidVentura/offline-translator)（GPL-3.0），在手机上运行 Firefox 翻译用的 Bergamot 模型：完全离线、免费、最快，字幕不会离开手机；译文偏直译，不能识别角色 |
 | Claude | Anthropic 官方 API，翻译质量高 |
 | DeepSeek | 性价比高，国内可直连 |
 | Gemini | Google AI Studio 的 API Key |
 | Index-Translate | B 站开源翻译模型，公共接口免费、无需 Key |
 | 阿里云百炼 / 火山方舟 | 通义千问、豆包，国内直连、速度快 |
 | Azure 翻译 | 机器翻译，最快最便宜，译文偏直译 |
-| 本地模型 | 手机或局域网电脑上运行的 Ollama、LM Studio、llama.cpp 等，免费、不用 Key，字幕不出本地 |
-| 离线翻译（Offline Translator App） | 另外安装的开源 App [Offline Translator](https://github.com/DavidVentura/offline-translator)（GPL-3.0），在手机上运行 Firefox 翻译用的 Bergamot 模型：完全离线、免费、最快，字幕不会离开手机；译文偏直译，不能识别角色 |
 | 自定义 | 任意 OpenAI 兼容接口：Kimi、OpenRouter 等 |
 
 - 目标语言可选简体中文、繁體中文、English、日本語、한국어，也可以手动输入任意语言
@@ -310,7 +310,7 @@ cookies 只保存在应用私有目录，只在下载时交给 yt-dlp；「清�
 ## 常见问题
 
 **完全免费能用吗？**
-能。语音识别用本地模型（离线、免费），翻译选 Index-Translate（公共接口免费），朗读用系统 TTS。
+能。语音识别用本地模型（离线、免费，默认就是），翻译用本地模型或 Offline Translator（默认是本地模型），也可以选 Index-Translate（公共接口免费），朗读用系统 TTS。
 
 **API Key 安全吗？**
 所有 Key 只保存在手机本地（应用私有存储），只发给对应的服务商。项目开源，可以自行审查代码。

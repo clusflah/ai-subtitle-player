@@ -51,7 +51,8 @@ fun OnboardingScreen(onStart: () -> Unit, onLater: () -> Unit) {
         )
         Step(
             AppIcons.Translate, "自动翻译成双语",
-            "默认用免费的 Index-Translate，不用填任何 Key。想要更好的翻译，可以在「设置 → 字幕翻译」换成 Claude、DeepSeek、Gemini 等。",
+            "默认用本地模型翻译：在手机或局域网电脑上运行 Ollama、LM Studio 等，字幕不出本地、不花钱，到「设置 → 字幕翻译」选好模型就能用；" +
+                "也可以装 Offline Translator App 完全离线翻译，或者换成免费的 Index-Translate、Claude、DeepSeek 等云端服务。",
         )
         Step(
             AppIcons.Folder, "哪里的视频都能看",
