@@ -649,7 +649,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                 }
                 val idle = !state.transcribing && !state.translating && !state.extractingEmbedded && state.playbackError == null
-                if (quick != null && idle && (state.current?.isVideo == true || isLive) && !aiChipDismissed) {
+                if (isLive && vm.usingVlc && state.playbackError == null) {
+                    // 兼容模式下直播不能出字幕：直接说明，不显示「实时生成字幕」
+                    Text(
+                        MainViewModel.VLC_NO_SUBTITLES, color = Color.White, fontSize = 12.sp,
+                        modifier = Modifier.padding(start = 52.dp, bottom = 4.dp).clip(RoundedCornerShape(50)).background(Color(0x66000000))
+                            .padding(horizontal = 10.dp, vertical = 3.dp),
+                    )
+                } else if (quick != null && idle && (state.current?.isVideo == true || isLive) && !aiChipDismissed) {
                     Row(Modifier.padding(start = 52.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Row(
                             Modifier.clip(RoundedCornerShape(50)).background(Orange).clickable {
