@@ -1105,6 +1105,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     (engine as? com.aisub.player.asr.cloud.ChunkedCloudEngine)?.useChunks(LIVE_FIRST_CHUNK_SEC, LIVE_CHUNK_SEC)
                     val cancelHandle = coroutineContext.job.invokeOnCompletion { engine.cancel() }
                     val onCue: (Cue) -> Unit = { incoming.add(it to android.os.SystemClock.elapsedRealtime()) }
+                    // 解码和识别分开两条线程：识别引擎会等（流式识别控制发送速度、断线重连，
+                    // 分段识别在途太多时等结果），不能卡住解码线程，不然收不到新的声音，
+                    // 画面上会误报「声音断了」，卡久了解码器还会掉出直播窗口、真的断开重连
+                    val pending = java.util.concurrent.LinkedBlockingQueue<FloatArray>()
+                    val decodingDone = java.util.concurrent.atomic.AtomicBoolean(false)
+                    val feeder = launch(Dispatchers.IO) {
+                        while (true) {
+                            val chunk = pending.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS)
+                            if (chunk == null) {
+                                if (decodingDone.get()) break else continue
+                            }
+                            engine.accept(chunk, onCue)
+                        }
+                    }
                     try {
                         // 直播流断了或一连上就结束时，重连几次
                         var quickEnds = 0
@@ -1133,7 +1147,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                     onChunk = { chunk ->
                                         samples.addAndGet(chunk.size.toLong())
                                         heard.set(true)
-                                        engine.accept(chunk, onCue)
+                                        pending.add(chunk)
                                     },
                                 )
                             } catch (e: java.io.IOException) {
@@ -1145,8 +1159,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             if (System.currentTimeMillis() - startedAt < 10_000) quickEnds++ else quickEnds = 0
                             delay(500)
                         }
+                        // 等识别把已经收到的声音处理完
+                        decodingDone.set(true)
+                        feeder.join()
                         if (coroutineContext.isActive) engine.finish(onCue)
                     } finally {
+                        decodingDone.set(true)
+                        feeder.cancel()
                         cancelHandle.dispose()
                     }
                 }
