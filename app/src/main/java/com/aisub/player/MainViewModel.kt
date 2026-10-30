@@ -1790,18 +1790,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- 「我喜欢」：存成一个普通的播放列表，在首页的播放列表里也能看到 ----
 
-    fun isLiked(uri: String): Boolean = library.playlists().firstOrNull { it.name == LIKED_PLAYLIST }?.items?.any { it.uri == uri } == true
+    fun isLiked(uri: String): Boolean = library.isLiked(uri)
 
     /** 喜欢 / 取消喜欢正在播放的歌，返回现在是否喜欢 */
     fun toggleLiked(): Boolean {
         val e = _state.value.current ?: return false
-        val lists = library.playlists()
-        val liked = lists.firstOrNull { it.name == LIKED_PLAYLIST } ?: library.createPlaylist(LIKED_PLAYLIST)
-        val now = liked.items.none { it.uri == e.uri }
-        val items = if (now) listOf(e) + liked.items else liked.items.filter { it.uri != e.uri }
-        val updated = liked.copy(items = items, updatedAt = System.currentTimeMillis())
-        library.savePlaylists(library.playlists().map { if (it.id == liked.id) updated else it })
-        return now
+        return library.toggleLiked(e).also { NowPlayingWidget.refresh(getApplication()) }
     }
 
     fun playlists() = library.playlists()
@@ -1933,7 +1927,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         /** 字幕识别出来这么久还换算不了时间，就改成按到达先后显示 */
         private const val LIVE_MAP_TIMEOUT_MS = 15_000L
         /** 播放页点「♡」的歌放在这个播放列表里 */
-        const val LIKED_PLAYLIST = "我喜欢的音乐"
+        const val LIKED_PLAYLIST = com.aisub.player.media.LIKED_PLAYLIST
     }
 }
 

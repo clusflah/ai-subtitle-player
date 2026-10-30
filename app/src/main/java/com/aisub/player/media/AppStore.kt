@@ -18,6 +18,9 @@ data class FavoriteFolder(val serverId: String?, val path: String, val title: St
     val key: String get() = "${serverId ?: "local"}|$path"
 }
 
+/** 播放页点「♡」、小组件点「♡」的歌放在这个播放列表里 */
+const val LIKED_PLAYLIST = "我喜欢的音乐"
+
 /** 播放历史、播放列表、网络服务器的持久化（SharedPreferences + JSON）。 */
 class AppStore(context: Context) {
     private val prefs = context.getSharedPreferences("library", Context.MODE_PRIVATE)
@@ -65,6 +68,19 @@ class AppStore(context: Context) {
         val p = Playlist(UUID.randomUUID().toString(), name, emptyList(), System.currentTimeMillis())
         savePlaylists(playlists() + p)
         return p
+    }
+
+    /** 「我喜欢的音乐」里有没有这首（播放页的 ♡、桌面小组件的 ♡ 共用） */
+    fun isLiked(uri: String): Boolean = playlists().firstOrNull { it.name == LIKED_PLAYLIST }?.items?.any { it.uri == uri } == true
+
+    /** 喜欢 / 取消喜欢，返回现在是否喜欢 */
+    fun toggleLiked(entry: MediaEntry): Boolean {
+        val liked = playlists().firstOrNull { it.name == LIKED_PLAYLIST } ?: createPlaylist(LIKED_PLAYLIST)
+        val now = liked.items.none { it.uri == entry.uri }
+        val items = if (now) listOf(entry) + liked.items else liked.items.filter { it.uri != entry.uri }
+        val updated = liked.copy(items = items, updatedAt = System.currentTimeMillis())
+        savePlaylists(playlists().map { if (it.id == liked.id) updated else it })
+        return now
     }
 
     // ---- 收藏的文件夹 ----
