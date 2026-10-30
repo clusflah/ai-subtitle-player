@@ -857,6 +857,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val engineName = if (settings.asrEngine == AsrEngine.LOCAL) localModel.label else settings.asrEngine.label
                 _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f) }
                 val translate = (settings.autoTranslate || alsoTranslate) && settings.createTranslator() != null
+                if ((settings.autoTranslate || alsoTranslate) && !translate) {
+                    // 要翻译但翻译服务没设置好：说出来，不要只出原文让人以为翻译坏了
+                    _state.update { it.copy(error = "字幕不会翻译：${settings.translatorProblem() ?: "翻译服务没有设置好"}。到「设置 → 字幕翻译」改好后，点「翻译」补上", failedTask = Task.TRANSLATE) }
+                }
                 inlineTranslate = translate
                 if (translate) startTranslation()
                 if (live) runLive(settings) else runOnDemand(settings, uri)
@@ -1292,8 +1296,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * 两种方案：
      * - 本地视频（普通翻译）：识别还在进行时，没有在途的请求就马上翻手上有的，有在途的请求就攒够 [BATCH_SIZE] 句再发，
      *   上下文多、请求少，译文更连贯；
-     * - 直播和网盘、NAS 等远程文件（实时翻译）：识别出来就翻，一次最多 [REALTIME_BATCH] 句、不攒批，
-     *   只按播放位置就近翻，译文赶在画面播到之前出来；直播已经播过去的句子不再翻。
+     * - 直播和网盘、NAS 等远程文件（实时翻译）：播放位置之后 [REALTIME_HORIZON_MS] 内的句子识别出来就翻，
+     *   一次最多 [REALTIME_BATCH] 句、不攒批，译文赶在画面播到之前出来；更远的照普通方案攒批翻，
+     *   不然识别跑在播放前面很远时会一下子发出一大串小请求、被限流。直播已经播过去的句子不再翻。
+     *   实时翻译失败了不停下来：原文照常显示，等一会儿再试。
      */
     private suspend fun translateLoop(translator: Translator) = coroutineScope {
         val current = _state.value.current
@@ -1304,7 +1310,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val inFlight = HashSet<Int>()
         var running = 0
         var skipped = 0
+        var failures = 0
+        var retryAt = 0L
         while (true) {
+            // 实时翻译刚失败过：先等一会儿再发
+            val wait = retryAt - android.os.SystemClock.elapsedRealtime()
+            if (wait > 0) {
+                delay(minOf(wait, 250))
+                continue
+            }
             // 原文已经是目标语言（或没有文字）的句子不发给大模型，原文直接当译文
             val target = _state.value.settings.ttsLocale
             val asrLanguage = _state.value.asrSettings.asrLanguage
@@ -1331,8 +1345,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 return@coroutineScope
             }
             val ahead = pending.filter { it.endMs >= position - 5_000 }
-            val batch = (ahead.ifEmpty { pending }).take(batchSize)
-            if (!realtime && snapshot.transcribing && batch.size < batchSize && running > 0) {
+            // 实时翻译只对快播到的句子不攒批
+            val urgent = realtime && ahead.firstOrNull()?.let { it.startMs < position + REALTIME_HORIZON_MS } == true
+            val size = if (urgent || live) batchSize else BATCH_SIZE
+            val batch = (if (urgent) ahead.filter { it.startMs < position + REALTIME_HORIZON_MS } else ahead.ifEmpty { pending }).take(size)
+            if (!urgent && !live && snapshot.transcribing && batch.size < size && running > 0) {
                 delay(250)
                 continue
             }
@@ -1350,6 +1367,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.update { s ->
                         s.copy(cues = s.cues.map { c -> translated[c.id]?.let { c.copy(translation = it) } ?: c })
                     }
+                    failures = 0
                     if (!_state.value.transcribing && !live) {
                         val done = _state.value.cues.count { it.translation != null }
                         _state.update { it.copy(status = "翻译中 $done/${it.cues.size}") }
@@ -1357,11 +1375,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    // 直播翻译失败一次不停下来：原文照常显示，过一会儿再翻
-                    if (!live) throw e
-                    android.util.Log.w("Voxtitle", "直播字幕翻译失败：${e.message}")
-                    _state.update { it.copy(status = "实时字幕 · 翻译暂时失败，稍后重试：${e.message?.take(60)}") }
-                    delay(3_000)
+                    // 实时翻译失败不停下来（限流、网络抖动常见）：原文照常显示，越失败等得越久；
+                    // 远程文件连续失败多次多半是配置问题，停下来报错
+                    failures++
+                    if (!realtime || (!live && failures >= REALTIME_MAX_FAILURES)) throw e
+                    android.util.Log.w("Voxtitle", "实时翻译失败（第 $failures 次）：${e.message}")
+                    retryAt = android.os.SystemClock.elapsedRealtime() + minOf(3_000L shl minOf(failures - 1, 4), 30_000L)
+                    _state.update { it.copy(status = "翻译暂时失败，稍后重试：${e.message?.take(60)}") }
                 } finally {
                     inFlight -= ids.toSet()
                     running--
@@ -1836,6 +1856,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         /** 实时翻译（直播、远程文件）一次最多翻几句 */
         private const val REALTIME_BATCH = 6
+
+        /** 实时翻译：播放位置之后这么久以内的句子马上翻，更远的攒批 */
+        private const val REALTIME_HORIZON_MS = 90_000L
+
+        /** 远程文件实时翻译连续失败这么多次就停下报错 */
+        private const val REALTIME_MAX_FAILURES = 5
         private const val CONTEXT_SIZE = 6
         private const val TRANSLATE_PARALLEL = 3
 
