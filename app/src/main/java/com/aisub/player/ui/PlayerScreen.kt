@@ -35,6 +35,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.Dp
 import com.aisub.player.asr.AsrLanguages
 import com.aisub.player.asrLanguageWarning
+import com.aisub.player.asrProblem
+import com.aisub.player.AsrEngine
 import com.aisub.player.PLAYBACK_ERROR_DETAIL
 import com.aisub.player.media.Bookmark
 import io.github.peerless2012.ass.media.kt.withAssSupport
@@ -79,6 +81,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -1226,9 +1229,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         ) { name -> vm.saveQueueAsPlaylist(name); indicator = AppIcons.PlaylistAdd to "已保存"; dialog = null }
         // 语音识别前选语言：只对这个视频生效，选完直接开始识别
         PlayerDialog.ASR_LANGUAGE -> AsrLanguageDialog(
-            state.asrSettings.asrLanguage, onDismiss = { dialog = null },
-            warningFor = { code -> state.asrSettings.copy(asrLanguage = code).asrLanguageWarning() },
-        ) { code ->
+            state.asrSettings.asrLanguage, state.settings, onDismiss = { dialog = null },
+        ) { code, engine ->
+            if (engine != state.settings.asrEngine) vm.updateSettings(state.settings.copy(asrEngine = engine))
             vm.setVideoAsrLanguage(code)
             dialog = null
             startGenerate(generateTranslate)
@@ -1992,27 +1995,46 @@ private fun parseCueTime(s: String): Long? {
     return total * 60_000 + (seconds * 1000).roundToInt()
 }
 
-/** 选择语音识别的语言：常用语言直接点选，其他语言填代码。和「设置 → 语音识别 → 视频语言」是同一项。 */
+/** 开始识别前选识别服务和视频语言：服务只列能用的，语言常用的直接点选，其他填代码。语言只对这个视频生效。 */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun AsrLanguageDialog(current: String, onDismiss: () -> Unit, warningFor: (String) -> String?, onPick: (String) -> Unit) {
+private fun AsrLanguageDialog(
+    current: String,
+    settings: AppSettings,
+    onDismiss: () -> Unit,
+    onPick: (code: String, engine: AsrEngine) -> Unit,
+) {
     var custom by remember { mutableStateOf(if (AsrLanguages.isCommon(current)) "" else current) }
     val parsed = AsrLanguages.normalize(custom)
+    // 能用的识别服务：手机上识别，加上设置里填好了的云端服务
+    val engines = remember(settings) { AsrEngine.entries.filter { it == AsrEngine.LOCAL || settings.copy(asrEngine = it).asrProblem() == null } }
+    var engine by remember { mutableStateOf(settings.asrEngine) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("视频里说的是哪种语言？") },
+        title = { Text("用哪家识别、视频里说什么语言？") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text("只对这个视频生效，不确定选「自动」。选好后开始识别。", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("识别服务", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    engines.forEach { e ->
+                        FilterChip(selected = engine == e, onClick = { engine = e }, label = { Text(if (e == AsrEngine.LOCAL) "手机上识别" else e.label) })
+                    }
+                }
+                Text(
+                    "没出现的服务要先到 设置 → 语音识别 填好 Key。选的服务会记下来，下次默认用它。",
+                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp),
+                )
+                Text("视频语言（只对这个视频生效，不确定选「自动」；点一下就开始识别）", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 AsrLanguages.COMMON.forEach { (code, label) ->
                     Row(
-                        Modifier.fillMaxWidth().clickable { onPick(code) }.padding(vertical = 10.dp),
+                        Modifier.fillMaxWidth().clickable { onPick(code, engine) }.padding(vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Box(Modifier.width(36.dp)) { if (code == current) Icon(AppIcons.Check, null, tint = Orange) }
                         Column {
                             Text(label, fontSize = 16.sp)
                             // 当前识别引擎不支持这种语言时提前说明
-                            warningFor(code)?.let { Text(it, fontSize = 12.sp, color = Color(0xFFE65100)) }
+                            settings.copy(asrEngine = engine, asrLanguage = code).asrLanguageWarning()?.let { Text(it, fontSize = 12.sp, color = Color(0xFFE65100)) }
                         }
                     }
                 }
@@ -2034,7 +2056,7 @@ private fun AsrLanguageDialog(current: String, onDismiss: () -> Unit, warningFor
                 )
             }
         },
-        confirmButton = { TextButton(onClick = { parsed?.let(onPick) }, enabled = parsed != null) { Text("用这个代码识别") } },
+        confirmButton = { TextButton(onClick = { parsed?.let { onPick(it, engine) } }, enabled = parsed != null) { Text("用这个代码识别") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
