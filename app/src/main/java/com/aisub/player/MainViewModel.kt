@@ -1210,10 +1210,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             anchors.newSegment(baseMs)
                             var lastWall = -1L
                             var lastMs = -1L
+                            var anchorCount = 0
                             try {
                                 com.aisub.player.asr.ExoAudioDecoder(
                                     getApplication(), Uri.parse(entry.uri), authDataSourceFactory(getApplication()),
-                                    mediaItem = item, lowestBitrate = true,
+                                    mediaItem = item, lowestBitrate = true, diagnostics = true,
                                     onTick = { p, ms ->
                                         // 解码器在追缓冲时一下子解出很多，这时读到的位置不准；
                                         // 只在它停下来等新数据、或按正常速度解码时记锚点
@@ -1221,7 +1222,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                         val steady = lastWall >= 0 && (ms == lastMs || kotlin.math.abs((ms - lastMs) - (wall - lastWall)) <= 200)
                                         lastWall = wall
                                         lastMs = ms
-                                        if (steady && ms > 0) LiveTimeline.keyOf(p)?.let { anchors.add(baseMs + ms, it) }
+                                        if (steady && ms > 0) LiveTimeline.keyOf(p)?.let {
+                                            anchors.add(baseMs + ms, it)
+                                            // 诊断：对照点（识别用的音频时间 ↔ 直播内容位置）
+                                            if (anchorCount++ % 10 == 0) {
+                                                android.util.Log.i("Voxtitle-map", "对照点 音频 ${baseMs + ms} → 分片 ${it.seq} +${it.ms}ms；解码器进度 ${p.currentPosition} 离直播最新处 ${p.currentLiveOffset}ms")
+                                            }
+                                        }
                                     },
                                 ).decode(
                                     isActive = {
@@ -1308,6 +1315,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     continue
                 }
                 ps.badMappings = 0
+                // 诊断：这句字幕换算到屏幕上的时间，和它到达时屏幕播到哪了（差为负 = 程序认为字幕晚了）
+                android.util.Log.i("Voxtitle-map", "字幕 音频 ${c.startMs} → 屏幕 $start，屏幕现在 $now（差 ${start - now}ms）；屏幕离直播最新处 ${exoPlayer.currentLiveOffset}ms「${c.text.take(12)}」")
                 mapped += c to start
                 latest = maxOf(latest, now + LIVE_SAFETY_MS - start)
             }
