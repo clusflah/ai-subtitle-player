@@ -51,6 +51,12 @@ class VolcEngineTranscriber(private val appKey: String, private val accessKey: S
             when (status) {
                 "20000000" -> JSONObject(text)
                 "20000003" -> null // 静音
+                // 火山不认这个 Key：多半是旧版控制台的 APP ID 没配 Access Token，或者填了火山方舟等别处的 Key
+                "45000010" -> throw IOException(
+                    if (accessKey.isBlank()) "火山引擎不认这个 API Key（45000010）。新版豆包语音控制台（console.volcengine.com/speech/new）的 API Key 填第一栏、第二栏留空；" +
+                        "旧版控制台要第一栏填 APP ID、第二栏填 Access Token。火山方舟（大模型）的 Key 不能用"
+                    else "火山引擎不认这组 APP ID 和 Access Token（45000010）：检查两栏是否来自旧版控制台的同一个应用，或者改用新版控制台的 API Key（第二栏留空）",
+                )
                 else -> throw IOException("火山引擎识别失败（$status ${resp.header("X-Api-Message").orEmpty()}）${text.take(200)}")
             }
         } ?: return emptyList()
