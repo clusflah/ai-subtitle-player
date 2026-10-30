@@ -141,6 +141,10 @@ data class UiState(
     val liveClock: LiveClock? = null,
     /** 这次识别用的是流式识别（直播、远程视频，见设置里的开关） */
     val streamingAsr: Boolean = false,
+    /** 这个视频的字幕用的识别服务和模型（显示在播放页顶部），如「识别：阿里 Fun-ASR · fun-asr-flash」；null 表示没识别过 */
+    val asrInfo: String? = null,
+    /** 用的翻译服务和模型，如「翻译：DeepSeek · deepseek-chat」 */
+    val translateInfo: String? = null,
     /** 直播实时字幕一直出不来时的说明（显示在字幕的位置）；正常时为 null */
     val liveHint: String? = null,
 ) {
@@ -336,6 +340,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var coverageActive = false
     private var coverageLimit = UNKNOWN_END
     private var nextCueId = 1
+
+    /** 已识别范围是用哪个引擎、哪种语言识别的（"引擎/语言"）；换了就从头识别。null 表示不知道（重新打开的视频） */
+    private var coverageKey: String? = null
+
+    /** 上次点生成字幕时是否要求同时翻译；自动接着识别时沿用 */
+    private var lastAlsoTranslate = false
+
+    /** 网盘视频识别到结尾后，盯着播放位置：拖回没识别过的地方就接着识别 */
+    private var gapWatch: Job? = null
 
     /** 这次识别同时要翻译：Gemini 识别时顺带翻译，省掉单独翻译的一轮 */
     private var inlineTranslate = false
@@ -667,10 +680,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         cancelAll()
         sawFirstFrame = false
         frameWatch?.cancel()
-        _state.update { it.copy(videoProblem = null, transcoding = false, liveClock = null, liveHint = null) }
+        _state.update { it.copy(videoProblem = null, transcoding = false, liveClock = null, liveHint = null, asrInfo = null, translateInfo = null) }
         val uri = Uri.parse(entry.uri)
         coverage.clear()
         coverageLimit = UNKNOWN_END
+        coverageKey = null
         coverageActive = false
         store.loadCoverage(uri)?.let { coverage.load(it); coverageActive = true }
         val videoLanguage = store.loadAsrLanguage(uri)
@@ -881,10 +895,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * @param resume 接着上次没识别完的继续，不清空已有字幕
      */
     fun generateSubtitles(alsoTranslate: Boolean = false, resume: Boolean = false) {
-        // 上次识别中途失败（网络断了等）：再点一次是接着识别，不是从头来
-        val keep = resume || (_state.value.current?.isLive != true && coverageActive && _state.value.failedTask == Task.TRANSCRIBE)
+        // 已经识别了一部分（中途退出、失败、网盘视频只识别了播放位置之后）：再点一次是接着识别没识别的部分，
+        // 不清空重来；换了识别引擎或视频语言才从头识别
+        val key = _state.value.asrSettings.let { "${it.asrEngine}/${it.asrLanguage}" }
+        val partial = _state.value.current?.isLive != true && coverageActive && _state.value.cues.isNotEmpty() &&
+            (coverageKey == null || coverageKey == key)
+        val keep = resume || partial
         val uri = _state.value.videoUri ?: return
         if (transcribeJob?.isActive == true) return
+        gapWatch?.cancel()
+        if (!resume) lastAlsoTranslate = alsoTranslate
+        coverageKey = key
         val live = _state.value.current?.isLive == true
         if (live && usingVlc) {
             _state.update { it.copy(error = VLC_NO_SUBTITLES, failedTask = Task.TRANSCRIBE) }
@@ -917,7 +938,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val streaming = useStreaming(settings)
                 val engineName = (if (settings.asrEngine == AsrEngine.LOCAL) localModel.label else settings.asrEngine.label) +
                     if (streaming) " 流式" else ""
-                _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f, streamingAsr = streaming) }
+                // 播放页顶部显示用的是哪家、哪个模型（流式识别的模型由引擎自己定，不写）
+                val asrModel = settings.asrValue(settings.asrEngine, "model").takeIf { !streaming && settings.asrEngine != AsrEngine.LOCAL && it.isNotEmpty() }
+                val asrInfo = "识别：$engineName" + (asrModel?.let { " · $it" } ?: "")
+                _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f, streamingAsr = streaming, asrInfo = asrInfo) }
                 val translate = (settings.autoTranslate || alsoTranslate) && settings.createTranslator() != null
                 if ((settings.autoTranslate || alsoTranslate) && !translate) {
                     // 要翻译但翻译服务没设置好：说出来，不要只出原文让人以为翻译坏了
@@ -954,19 +978,52 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 按已识别的范围往前推进：从播放位置开始，到结尾后回头补前面没识别的。 */
+    /**
+     * 按已识别的范围往前推进：从播放位置开始，到结尾后回头补前面没识别的。
+     *
+     * 网盘、NAS 等远程视频：识别要另外下载一遍视频，所以只领先播放 [REMOTE_AHEAD_MS]，
+     * 领先够了就停下断开连接，播放追到只剩 [REMOTE_RESUME_MS] 时再接着识别；也不回头补播放位置之前的。
+     * 这样流量和只看视频差不多，也不和播放抢带宽。
+     */
     private suspend fun runOnDemand(settings: AppSettings, uri: Uri) {
         val dispatcher = if (settings.asrEngine == AsrEngine.LOCAL) Dispatchers.Default else Dispatchers.IO
+        val remote = _state.value.current?.let { isRemote(it) } == true
         var duration = player.duration
         var tries = 0
         while (duration <= 0 && tries++ < 20) { delay(200); duration = player.duration }
         if (duration <= 0) duration = UNKNOWN_END
         coverageLimit = duration
         var cursor = player.currentPosition - LEAD_IN_MS
+        var waiting = false
         while (true) {
             coroutineContext.ensureActive()
-            val gap = coverage.nextGap(cursor.coerceAtLeast(0), duration) ?: coverage.nextGap(0, duration) ?: break
-            val restartAt = withContext(dispatcher) { recognizeRange(settings, uri, gap.first, gap.second, duration) }
+            if (coverage.isFull(duration)) break
+            val gap = if (remote) {
+                val position = player.currentPosition
+                // 从播放位置到结尾都识别过了：结束（不然一直算"识别中"，播完不会自动放下一集）；
+                // 前面没识别的部分：拖回去时接着识别（[startGapWatch]），下次打开这个视频时也会接着识别
+                val ahead = coverage.nextGap((position - LEAD_IN_MS).coerceAtLeast(0), duration) ?: run {
+                    startGapWatch(uri)
+                    break
+                }
+                ahead.takeIf { it.first < position + REMOTE_RESUME_MS }
+            } else {
+                coverage.nextGap(cursor.coerceAtLeast(0), duration) ?: coverage.nextGap(0, duration) ?: break
+            }
+            if (gap == null) {
+                // 远程视频已经领先播放够多了：等播放追上来（或拖到没识别的地方）
+                if (!waiting) {
+                    waiting = true
+                    _state.update { it.copy(status = "已识别到播放位置之后几分钟，跟着播放继续识别（省流量）") }
+                }
+                delay(1000)
+                continue
+            }
+            if (waiting) {
+                waiting = false
+                _state.update { it.copy(status = "正在识别语音…") }
+            }
+            val restartAt = withContext(dispatcher) { recognizeRange(settings, uri, gap.first, gap.second, duration, remote) }
             persistCues(uri)
             cursor = restartAt ?: gap.second
         }
@@ -976,7 +1033,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * 识别 [from, to) 这一段。播放位置跳到了这一段够不到、也没识别过的地方时提前结束，返回新的位置；
      * 正常识别完（或到视频结尾）返回 null。识别过的范围记入 [coverage]。
      */
-    private suspend fun recognizeRange(settings: AppSettings, uri: Uri, from: Long, to: Long, duration: Long): Long? {
+    private suspend fun recognizeRange(
+        settings: AppSettings, uri: Uri, from: Long, to: Long, duration: Long, remote: Boolean = false,
+    ): Long? {
         val ctx = coroutineContext
         val consumed = java.util.concurrent.atomic.AtomicLong(0)
         val stop = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -992,6 +1051,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val away = p in 0 until duration && !coverage.contains(p) && (p < from - 1500 || p > frontier() + AHEAD_MS)
                 if (away) {
                     seekTo.set(p)
+                    stop.set(true)
+                    break
+                }
+                // 远程视频领先播放够多了：先停下，断开这一路下载
+                if (remote && p >= 0 && frontier() > p + REMOTE_AHEAD_MS) {
                     stop.set(true)
                     break
                 }
@@ -1384,7 +1448,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(error = settings.translatorProblem() ?: "翻译服务配置不完整", failedTask = Task.TRANSLATE) }
             return
         }
-        _state.update { it.copy(translating = true, error = null, failedTask = null) }
+        // Azure 翻译的「模型」一栏填的是区域，不显示
+        val provider = settings.provider
+        val translateModel = settings.configOf(provider).model.takeIf { provider != Provider.AZURE_TRANSLATOR && it.isNotEmpty() }
+        val translateInfo = "翻译：${provider.label}" + (translateModel?.let { " · $it" } ?: "")
+        _state.update { it.copy(translating = true, error = null, failedTask = null, translateInfo = translateInfo) }
         updateAutoAdvance()
         translateJob = viewModelScope.launch {
             try {
@@ -1513,7 +1581,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 网盘、NAS、网络地址等不在手机上的文件：边下边识别，翻译走实时方案。 */
     private fun isRemote(e: MediaEntry) = Uri.parse(e.uri).scheme?.lowercase().let { it != null && it !in LOCAL_SCHEMES }
 
+    /** 识别结束后盯着播放位置：拖到没识别过的地方，就接着识别那里（等这次识别真正结束后才开始） */
+    private fun startGapWatch(uri: Uri) {
+        gapWatch?.cancel()
+        gapWatch = viewModelScope.launch {
+            while (true) {
+                delay(1000)
+                if (_state.value.videoUri != uri || !coverageActive) return@launch
+                if (transcribeJob?.isActive == true) continue
+                val p = player.currentPosition
+                if (p in 0 until coverageLimit && !coverage.contains(p)) {
+                    generateSubtitles(alsoTranslate = lastAlsoTranslate, resume = true)
+                    return@launch
+                }
+            }
+        }
+    }
+
     fun cancelAll() {
+        gapWatch?.cancel()
         transcribeJob?.cancel()
         translateJob?.cancel()
         embeddedJob?.cancel()
@@ -1991,6 +2077,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         /** 播放位置超出已解码位置这么多，就当作拖动了进度条，改从新位置开始 */
         private const val AHEAD_MS = 45_000L
+
+        /** 远程视频的识别最多领先播放这么久；领先够了就停，播放追到只剩 [REMOTE_RESUME_MS] 时再继续 */
+        private const val REMOTE_AHEAD_MS = 5 * 60_000L
+        private const val REMOTE_RESUME_MS = 3 * 60_000L
         /** 直播云端识别的分段（秒）：段越短字幕越早出来，太短识别不准 */
         private const val LIVE_FIRST_CHUNK_SEC = 4
         private const val LIVE_CHUNK_SEC = 6
