@@ -271,7 +271,14 @@ class ExoAudioDecoder(
         }
 
         override fun isEnded() = ended
-        override fun hasPendingData() = false
+
+        /**
+         * 收到第一段音频后、结束前一直说"还有数据在播"。真的扬声器总有一点数据在放，播放器靠这个从"缓冲中"进入"播放"；
+         * 这里收到就算处理完，要是说没有，播放器就一直停在缓冲中、进度不动：
+         * 直播窗口往前滑时它以为缓冲越攒越多，超过上限就不再下载（约半分钟后没声音），
+         * 直播字幕的对照点也按不动的进度算，字幕被对到很早的位置（比画面早十几秒）。
+         */
+        override fun hasPendingData() = endUs != C.TIME_UNSET && !ended
         override fun play() {}
         override fun pause() {}
         override fun handleDiscontinuity() {}
