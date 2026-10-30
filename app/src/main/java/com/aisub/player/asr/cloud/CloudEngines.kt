@@ -12,8 +12,6 @@ import java.io.IOException
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.UUID
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.locks.ReentrantLock
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -43,14 +41,12 @@ class VolcEngineTranscriber(private val appKey: String, private val accessKey: S
             }
         }
         val pcm = wav.copyOfRange(minOf(44, wav.size), wav.size)
-        // 流式识别的时长资源包不支持并发：几段排队，一次只开一路连接
-        while (!streamLock.tryLock(200, TimeUnit.MILLISECONDS)) if (cancelled) throw IOException("已取消")
+        // 同时开几路连接跟着「同时识别几段」走（火山默认 1：流式识别的时长资源包不支持并发）
         val engine = VolcStreamingTranscriber(appKey, accessKey, VolcStreamingTranscriber.FILE_URL, notGrantedHint = NOT_GRANTED)
         return try {
             engine.recognizeAll(pcm) { cancelled }.map { it.shifted(chunkStartMs) }
         } finally {
             engine.close()
-            streamLock.unlock()
         }
     }
 
@@ -105,9 +101,6 @@ class VolcEngineTranscriber(private val appKey: String, private val accessKey: S
     private companion object {
         /** 没开通极速版的 Key，这次运行里直接走流式 */
         val noTurbo: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
-
-        /** 所有火山引擎实例共用（同时开着的识别也不并发） */
-        val streamLock = ReentrantLock()
 
         const val NOT_GRANTED = "火山引擎账号没开通可用的语音识别服务（45000030）。到豆包语音控制台（console.volcengine.com/speech/new）" +
             "开通「流式语音识别 2.0」（有免费试用额度）；老账号开通了「录音文件识别 · 极速版」也可以。" +

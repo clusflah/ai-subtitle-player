@@ -28,6 +28,9 @@ data class AsrField(
 /** 每个云端引擎都有：同时识别几段。账号不支持并发（比如只买了不支持并发的资源包）时填 1 */
 private val PARALLEL = AsrField("parallel", "同时识别几段（1～3）", required = false, default = "3", placeholder = "3；账号不支持并发时填 1")
 
+/** 火山默认 1：新账号用的流式语音识别 2.0 时长资源包不支持并发 */
+private val VOLC_PARALLEL = PARALLEL.copy(default = "1", placeholder = "1；账号支持并发时可填 2、3")
+
 enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrField> = emptyList()) {
     LOCAL("手机上识别（免费）", "在手机上离线识别，不花钱、不联网；第一次要下载模型，可选多种"),
     AZURE(
@@ -40,11 +43,11 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
         ),
     ),
     VOLC(
-        "火山豆包", "字节跳动豆包语音，中文影视口语效果好；新账号开通「流式语音识别 2.0」即可",
+        "火山豆包", "中文影视口语效果好；新账号开通「流式语音识别 2.0」即可",
         listOf(
             AsrField("appKey", "API Key（旧版控制台填 APP ID）", secret = true),
             AsrField("accessKey", "Access Token（仅旧版控制台需要）", secret = true, required = false),
-            PARALLEL,
+            VOLC_PARALLEL,
         ),
     ),
     ALIYUN(
@@ -65,7 +68,7 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
         ),
     ),
     GEMINI(
-        "Gemini", "Google Gemini：一次请求同时识别和翻译成中文，出字幕最快，多语种强（需要能访问 Google）",
+        "Gemini", "一次请求同时识别和翻译，出字幕最快，多语种强（需能访问 Google）",
         listOf(
             AsrField("apiKey", "Gemini API Key", secret = true),
             AsrField("model", "模型", default = GeminiTranscriber.DEFAULT_MODEL),

@@ -57,6 +57,44 @@ object ModelList {
         if (provider == Provider.CLAUDE) ids else ids.sortedBy { it.lowercase() }
     }
 
+    /**
+     * 语音识别用的模型列表。Gemini 用原生接口，只留能 generateContent、听得懂音频的 gemini 模型；
+     * OpenAI 兼容接口只留转写模型（whisper、transcribe）。
+     */
+    suspend fun fetchAsr(engine: com.aisub.player.AsrEngine, apiKey: String, endpoint: String): List<String> = withContext(Dispatchers.IO) {
+        if (apiKey.isEmpty()) throw IOException("请先填写 API Key")
+        val gemini = engine == com.aisub.player.AsrEngine.GEMINI
+        val request = if (gemini) {
+            Request.Builder().url(endpoint.trimEnd('/') + "/v1beta/models?pageSize=1000").header("x-goog-api-key", apiKey).build()
+        } else {
+            Request.Builder().url(endpoint.trimEnd('/') + "/models").header("Authorization", "Bearer $apiKey").build()
+        }
+        val text = http.newCall(request).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            when {
+                resp.code == 400 && gemini && "API_KEY" in body -> throw IOException("API Key 无效")
+                resp.code == 401 || resp.code == 403 -> throw IOException("API Key 无效（HTTP ${resp.code}）")
+                resp.code == 404 -> throw IOException("这个接口不提供模型列表，请手动填写")
+                !resp.isSuccessful -> throw IOException("HTTP ${resp.code}：${body.take(200)}")
+            }
+            body
+        }
+        if (gemini) {
+            val arr = runCatching { JSONObject(text).optJSONArray("models") }.getOrNull() ?: JSONArray()
+            (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+                .filter { o ->
+                    val methods = o.optJSONArray("supportedGenerationMethods")
+                    methods != null && (0 until methods.length()).any { methods.optString(it) == "generateContent" }
+                }
+                .map { it.optString("name").removePrefix("models/") }
+                // 只留对话模型：画图、朗读、向量、实时语音这些用不了
+                .filter { n -> n.startsWith("gemini") && listOf("image", "tts", "embedding", "live", "native-audio").none { it in n } }
+                .distinct().sortedDescending()
+        } else {
+            parse(text).filter { "whisper" in it || "transcribe" in it }.sorted()
+        }
+    }
+
     /** OpenAI 格式是 {"data":[{"id":…}]}；Ollama 原生接口是 {"models":[{"name":…}]}。 */
     private fun parse(text: String): List<String> {
         val json = try {

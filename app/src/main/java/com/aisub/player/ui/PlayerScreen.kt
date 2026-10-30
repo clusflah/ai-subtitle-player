@@ -341,6 +341,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         confirmTranslate = alsoTranslate
         if (model != null) confirmDownload = model else vm.generateSubtitles(alsoTranslate)
     }
+    /** 选完语言后是否同时翻译：播放页的「生成字幕」按钮要翻译，菜单里的语音识别不翻译 */
+    var generateTranslate by remember { mutableStateOf(false) }
     /** 本视频不再显示「生成字幕」提示 */
     var aiChipDismissed by remember(state.current?.uri) { mutableStateOf(false) }
     /** 视频自带的字幕轨（不在 state.cues 里，由播放器直接渲染） */
@@ -672,7 +674,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         Row(
                             Modifier.clip(RoundedCornerShape(50)).background(Orange).clickable {
                                 when (quick) {
-                                    QuickSubtitle.GENERATE -> startGenerate(true)
+                                    // 先选视频里说的语言（选错会降低准确率），再识别并翻译
+                                    QuickSubtitle.GENERATE -> { generateTranslate = true; dialog = PlayerDialog.ASR_LANGUAGE }
                                     QuickSubtitle.TRANSLATE_LOADED -> vm.startTranslation()
                                     QuickSubtitle.TRANSLATE_EMBEDDED -> vm.extractEmbeddedSubtitles(translate = true)
                                 }
@@ -958,7 +961,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 vm = vm, state = state,
                 onSubtitleAction = { action ->
                     when (action) {
-                        SubtitleAction.GENERATE -> if (state.transcribing) vm.cancelAll() else { showTracks = false; dialog = PlayerDialog.ASR_LANGUAGE }
+                        SubtitleAction.GENERATE -> if (state.transcribing) vm.cancelAll() else { showTracks = false; generateTranslate = false; dialog = PlayerDialog.ASR_LANGUAGE }
                         SubtitleAction.TRANSLATE -> if (state.translating) vm.cancelAll() else vm.startTranslation()
                         SubtitleAction.LIST -> { showTracks = false; showCues = true }
                         SubtitleAction.DELAY -> dialog = PlayerDialog.DELAY
@@ -1228,7 +1231,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         ) { code ->
             vm.setVideoAsrLanguage(code)
             dialog = null
-            startGenerate(false)
+            startGenerate(generateTranslate)
         }
         PlayerDialog.ERROR -> AlertDialog(
             onDismissRequest = { dialog = null },
