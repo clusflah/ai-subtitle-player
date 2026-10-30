@@ -44,7 +44,90 @@ class ExoAudioDecoder(
     private val lowestBitrate: Boolean = false,
     /** 解码线程上每 300 毫秒回调一次：解码用的播放器、已交出的音频长度（毫秒）。用来对齐直播时间轴 */
     private val onTick: ((Player, Long) -> Unit)? = null,
+    /** 直播识别：把这一路的下载、状态和缓冲写进日志（adb logcat 看 "Voxtitle-dec"），排查声音为什么停 */
+    private val diagnostics: Boolean = false,
 ) {
+    private fun log(message: String) {
+        try {
+            android.util.Log.i("Voxtitle-dec", message)
+        } catch (_: RuntimeException) {
+        }
+    }
+
+    /** 下载信息里只留路径最后一段，不把地址里的令牌写进日志 */
+    private fun shortUri(u: Uri) = u.lastPathSegment ?: u.host ?: "?"
+
+    private fun dataType(type: Int) = when (type) {
+        C.DATA_TYPE_MANIFEST -> "列表"
+        C.DATA_TYPE_MEDIA -> "分片"
+        C.DATA_TYPE_MEDIA_INITIALIZATION -> "初始化"
+        else -> "类型$type"
+    }
+
+    private fun stateName(state: Int) = when (state) {
+        Player.STATE_IDLE -> "空闲"
+        Player.STATE_BUFFERING -> "缓冲中"
+        Player.STATE_READY -> "就绪"
+        Player.STATE_ENDED -> "结束"
+        else -> "$state"
+    }
+
+    /** 加给解码用的播放器，记录每次下载和状态变化 */
+    private fun diagnosticsListener() = object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+        override fun onLoadCompleted(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+            mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+        ) = log("下载完成 ${dataType(mediaLoadData.dataType)} ${shortUri(loadEventInfo.uri)} ${loadEventInfo.bytesLoaded}B ${loadEventInfo.loadDurationMs}ms 媒体时间 ${mediaLoadData.mediaStartTimeMs}-${mediaLoadData.mediaEndTimeMs}")
+
+        override fun onLoadError(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+            mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+            error: IOException,
+            wasCanceled: Boolean,
+        ) = log("下载失败 ${dataType(mediaLoadData.dataType)} ${shortUri(loadEventInfo.uri)}：${error.javaClass.simpleName} ${error.message}")
+
+        override fun onLoadCanceled(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+            mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+        ) = log("下载取消 ${dataType(mediaLoadData.dataType)} ${shortUri(loadEventInfo.uri)}")
+
+        override fun onPlaybackStateChanged(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime, state: Int) =
+            log("状态 → ${stateName(state)}")
+
+        override fun onIsLoadingChanged(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime, isLoading: Boolean) =
+            log(if (isLoading) "开始下载" else "停止下载")
+
+        override fun onAudioInputFormatChanged(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            format: Format,
+            decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
+        ) = log("音轨 ${format.sampleMimeType} ${format.sampleRate}Hz ${format.channelCount}声道 码率 ${format.bitrate}")
+
+        override fun onPositionDiscontinuity(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int,
+        ) = log("进度跳变 ${oldPosition.positionMs} → ${newPosition.positionMs}（原因 $reason）")
+    }
+
+    /** 每 3 秒一次：播放器状态、进度、已缓冲多少、离直播最新处多远 */
+    private fun logStatus(player: ExoPlayer, sink: CapturingSink) {
+        val window = androidx.media3.common.Timeline.Window()
+        val timeline = player.currentTimeline
+        val windowInfo = if (!timeline.isEmpty) {
+            timeline.getWindow(player.currentMediaItemIndex, window)
+            "窗口 ${window.durationMs}ms 动态=${window.isDynamic}"
+        } else "没有时间线"
+        log(
+            "${stateName(player.playbackState)} 下载中=${player.isLoading} 进度 ${player.currentPosition} 缓冲到 ${player.bufferedPosition}" +
+                "（领先 ${player.totalBufferedDuration}ms）离直播最新处 ${player.currentLiveOffset}ms $windowInfo 已交出声音 ${sink.emitted / 16}ms",
+        )
+    }
+
     fun decode(
         targetRate: Int = 16_000,
         startMs: Long = 0,
@@ -83,6 +166,7 @@ class ExoAudioDecoder(
                     done.countDown()
                 }
             })
+            if (diagnostics) player.addAnalyticsListener(diagnosticsListener())
             player.volume = 0f
             if (startMs > 0) player.setMediaItem(mediaItem, startMs) else player.setMediaItem(mediaItem)
             player.prepare()
@@ -90,12 +174,15 @@ class ExoAudioDecoder(
         }
 
         try {
+            var ticks = 0
             while (!done.await(300, TimeUnit.MILLISECONDS)) {
                 if (!isActive()) break
+                val logNow = diagnostics && ++ticks % 10 == 0
                 handler.post {
                     val d = player.duration
                     if (d > 0) onProgress((sink.writtenUs / 1000f / d).coerceIn(0f, 1f))
                     onTick?.invoke(player, sink.emitted * 1000L / targetRate)
+                    if (logNow) logStatus(player, sink)
                 }
             }
         } finally {
