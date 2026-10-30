@@ -7,6 +7,7 @@ import com.aisub.player.asr.cloud.AliyunStreamingTranscriber
 import com.aisub.player.asr.cloud.AzureStreamingTranscriber
 import com.aisub.player.asr.cloud.VolcStreamingTranscriber
 import com.aisub.player.asr.cloud.AzureTranscriber
+import com.aisub.player.asr.cloud.ChunkedCloudEngine
 import com.aisub.player.asr.cloud.DeepgramTranscriber
 import com.aisub.player.asr.cloud.ElevenLabsTranscriber
 import com.aisub.player.asr.cloud.GeminiTranscriber
@@ -24,6 +25,9 @@ data class AsrField(
     val placeholder: String = "",
 )
 
+/** 每个云端引擎都有：同时识别几段。账号不支持并发（比如只买了不支持并发的资源包）时填 1 */
+private val PARALLEL = AsrField("parallel", "同时识别几段（1～3）", required = false, default = "3", placeholder = "3；账号不支持并发时填 1")
+
 enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrField> = emptyList()) {
     LOCAL("手机上识别（免费）", "在手机上离线识别，不花钱、不联网；第一次要下载模型，可选多种"),
     AZURE(
@@ -32,13 +36,15 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
             AsrField("key", "Speech 资源 Key", secret = true),
             AsrField("region", "区域（Region）", default = "eastasia", placeholder = "例如 eastasia、southeastasia"),
             AsrField("endpoint", "自定义 Endpoint（可不填）", required = false, placeholder = "中国区：https://chinanorth3.api.cognitive.azure.cn"),
+            PARALLEL,
         ),
     ),
     VOLC(
-        "火山豆包", "字节跳动豆包语音·录音文件极速版，中文影视口语效果好",
+        "火山豆包", "字节跳动豆包语音，中文影视口语效果好；新账号开通「流式语音识别 2.0」即可",
         listOf(
             AsrField("appKey", "API Key（旧版控制台填 APP ID）", secret = true),
             AsrField("accessKey", "Access Token（仅旧版控制台需要）", secret = true, required = false),
+            PARALLEL,
         ),
     ),
     ALIYUN(
@@ -47,6 +53,7 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
             AsrField("apiKey", "百炼 API Key", secret = true),
             AsrField("model", "模型", default = AliyunFunAsrTranscriber.DEFAULT_MODEL),
             AsrField("endpoint", "接口地址", default = AliyunFunAsrTranscriber.DEFAULT_ENDPOINT, placeholder = "国际站：https://dashscope-intl.aliyuncs.com"),
+            PARALLEL,
         ),
     ),
     XFYUN(
@@ -54,6 +61,7 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
         listOf(
             AsrField("appId", "APPID"),
             AsrField("secretKey", "SecretKey", secret = true),
+            PARALLEL,
         ),
     ),
     GEMINI(
@@ -62,6 +70,7 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
             AsrField("apiKey", "Gemini API Key", secret = true),
             AsrField("model", "模型", default = GeminiTranscriber.DEFAULT_MODEL),
             AsrField("endpoint", "接口地址", default = GeminiTranscriber.DEFAULT_ENDPOINT, required = false),
+            PARALLEL,
         ),
     ),
     ELEVENLABS(
@@ -69,6 +78,7 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
         listOf(
             AsrField("apiKey", "API Key", secret = true),
             AsrField("model", "模型", default = ElevenLabsTranscriber.DEFAULT_MODEL),
+            PARALLEL,
         ),
     ),
     DEEPGRAM(
@@ -76,6 +86,7 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
         listOf(
             AsrField("apiKey", "API Key", secret = true),
             AsrField("model", "模型（留空自动：中文 nova-2，其余 nova-3）", required = false),
+            PARALLEL,
         ),
     ),
     OPENAI(
@@ -84,6 +95,7 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
             AsrField("apiKey", "API Key", secret = true),
             AsrField("model", "模型", default = OpenAiTranscriber.DEFAULT_MODEL, placeholder = "whisper-1 有时间戳；gpt-4o 系列没有"),
             AsrField("baseUrl", "Base URL", default = OpenAiTranscriber.DEFAULT_BASE_URL),
+            PARALLEL,
         ),
     ),
 }
@@ -110,7 +122,7 @@ fun AppSettings.createCloudEngine(): SpeechEngine {
     val v = { key: String -> asrValue(asrEngine, key) }
     // 大多数接口只认语言代码；Azure 要 locale，Deepgram 认得带地区的写法（pt-BR、es-419）
     val lang = AsrLanguages.primary(asrLanguage)
-    return when (asrEngine) {
+    val engine = when (asrEngine) {
         AsrEngine.LOCAL -> error("本地引擎不在这里创建")
         AsrEngine.AZURE -> AzureTranscriber(
             v("endpoint").ifEmpty { AzureTranscriber.defaultEndpoint(v("region")) }, v("key"), AzureTranscriber.localesFor(asrLanguage),
@@ -126,6 +138,8 @@ fun AppSettings.createCloudEngine(): SpeechEngine {
         AsrEngine.DEEPGRAM -> DeepgramTranscriber(v("apiKey"), v("model"), asrLanguage)
         AsrEngine.OPENAI -> OpenAiTranscriber(v("apiKey"), v("baseUrl"), v("model"), lang)
     }
+    (engine as? ChunkedCloudEngine)?.useParallel(v("parallel").toIntOrNull() ?: 3)
+    return engine
 }
 
 /** 支持流式识别的引擎 */
