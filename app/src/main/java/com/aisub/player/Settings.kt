@@ -55,6 +55,10 @@ enum class Provider(
     // 另外安装的 Offline Translator App（Bergamot 机器翻译）：完全离线，不用地址、Key 和模型
     OFFLINE_TRANSLATOR("离线翻译（Offline Translator App）", "", "", needsApiKey = false, editableBaseUrl = false),
     OPENAI_COMPAT("自定义", "https://api.openai.com/v1", "", needsApiKey = false, editableBaseUrl = true),
+    ;
+
+    /** 在手机或局域网里翻译：没有限流，实时翻译时识别出来就翻 */
+    val isLocal: Boolean get() = this == LOCAL || this == OFFLINE_TRANSLATOR
 }
 
 data class ProviderConfig(val apiKey: String = "", val model: String = "", val baseUrl: String = "")

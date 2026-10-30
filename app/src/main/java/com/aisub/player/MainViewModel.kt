@@ -1296,9 +1296,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * 两种方案：
      * - 本地视频（普通翻译）：识别还在进行时，没有在途的请求就马上翻手上有的，有在途的请求就攒够 [BATCH_SIZE] 句再发，
      *   上下文多、请求少，译文更连贯；
-     * - 直播和网盘、NAS 等远程文件（实时翻译）：播放位置之后 [REALTIME_HORIZON_MS] 内的句子识别出来就翻，
-     *   一次最多 [REALTIME_BATCH] 句、不攒批，译文赶在画面播到之前出来；更远的照普通方案攒批翻，
-     *   不然识别跑在播放前面很远时会一下子发出一大串小请求、被限流。直播已经播过去的句子不再翻。
+     * - 直播和网盘、NAS 等远程文件（实时翻译）：
+     *   - 本地翻译（本地模型、Offline Translator）没有限流，识别出来就翻（快速翻译），一次最多 [REALTIME_BATCH] 句；
+     *   - 云端翻译：播放位置之后 [REALTIME_HORIZON_MS] 内的句子识别出来就翻，一次最多 [REALTIME_BATCH] 句、不攒批，
+     *     更远的照普通方案攒批翻，不然识别跑在播放前面很远时会一下子发出一大串小请求、被限流。
+     *   直播已经播过去的句子不再翻。
      *   实时翻译失败了不停下来：原文照常显示，等一会儿再试。
      */
     private suspend fun translateLoop(translator: Translator) = coroutineScope {
@@ -1306,6 +1308,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val live = current?.isLive == true
         val realtime = live || current?.let { isRemote(it) } == true
         val batchSize = if (realtime) REALTIME_BATCH else BATCH_SIZE
+        // 本地翻译不怕请求多：实时翻译时所有句子都马上翻
+        val localTranslator = _state.value.settings.provider.isLocal
+        val horizon = if (localTranslator) Long.MAX_VALUE / 4 else REALTIME_HORIZON_MS
         val slots = Semaphore(TRANSLATE_PARALLEL)
         val inFlight = HashSet<Int>()
         var running = 0
@@ -1346,9 +1351,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             val ahead = pending.filter { it.endMs >= position - 5_000 }
             // 实时翻译只对快播到的句子不攒批
-            val urgent = realtime && ahead.firstOrNull()?.let { it.startMs < position + REALTIME_HORIZON_MS } == true
+            // 云端翻译时，播放位置之前的句子（拖动进度条跳过的）不着急，照普通方案攒批
+            val quick = if (localTranslator) ahead.ifEmpty { pending } else ahead
+            val urgent = realtime && quick.firstOrNull()?.let { it.startMs < position + horizon } == true
             val size = if (urgent || live) batchSize else BATCH_SIZE
-            val batch = (if (urgent) ahead.filter { it.startMs < position + REALTIME_HORIZON_MS } else ahead.ifEmpty { pending }).take(size)
+            val batch = (if (urgent) quick.filter { it.startMs < position + horizon } else ahead.ifEmpty { pending }).take(size)
             if (!urgent && !live && snapshot.transcribing && batch.size < size && running > 0) {
                 delay(250)
                 continue
