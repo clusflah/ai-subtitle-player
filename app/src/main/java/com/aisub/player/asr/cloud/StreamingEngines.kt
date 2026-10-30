@@ -114,10 +114,17 @@ abstract class StreamingCloudEngine : SpeechEngine {
     protected var cancelled = false
 
     /** 已经发出去的样本数 */
+    @Volatile
     private var sent = 0L
     private val packet = ByteBuffer.allocate(PACKET_SAMPLES * 2).order(ByteOrder.LITTLE_ENDIAN)
     private var pacingStart = 0L
+
+    /** 这路连接开始时已发的样本数 */
+    @Volatile
     private var pacingFrom = 0L
+
+    /** 这路连接已经发出的音频长度（毫秒）；结果不带时间的接口用它来估 */
+    protected val sessionAudioMs: Long get() = (sent - pacingFrom) * 1000 / SAMPLE_RATE
 
     override fun accept(samples: FloatArray, onCue: (Cue) -> Unit) {
         for (s in samples) {

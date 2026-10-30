@@ -80,6 +80,7 @@ import com.aisub.player.streamingAvailable
 import com.aisub.player.supportsStreaming
 import com.aisub.player.withAsrValue
 import com.aisub.player.asrValue
+import com.aisub.player.GEMINI_STREAMING_NOTE
 import kotlinx.coroutines.launch
 
 /** 离线翻译：没有要填的，只说明用法；没装时给下载地址。 */
@@ -214,14 +215,15 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                                 LocalModels(s, vm) { s = it }
                             } else {
                                 engine.fields.forEach { f ->
-                                    if (f.key == "model" && engine in ASR_MODEL_LISTS) {
+                                    if ((f.key == "model" || f.key == "liveModel") && engine in ASR_MODEL_LISTS) {
+                                        val live = f.key == "liveModel"
                                         val apiKey = s.asrValue(engine, "apiKey")
                                         val endpoint = s.asrValue(engine, if (engine == AsrEngine.GEMINI) "endpoint" else "baseUrl")
                                         ModelField(
                                             s.asrConfigs[engine]?.get(f.key) ?: "", { s = s.withAsrValue(engine, f.key, it) },
                                             f.placeholder.ifEmpty { f.default },
-                                            listKey = "${engine.name}|$endpoint|$apiKey",
-                                            fetch = { ModelList.fetchAsr(engine, apiKey, endpoint) },
+                                            listKey = "${engine.name}|$live|$endpoint|$apiKey",
+                                            fetch = { ModelList.fetchAsr(engine, apiKey, endpoint, live) },
                                             label = f.label,
                                         )
                                     } else {
@@ -243,8 +245,10 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 ListRow(
                     title = "流式识别（直播和远程视频）",
                     subtitle = when {
-                        !s.asrEngine.supportsStreaming -> "支持 Azure、火山豆包、阿里；当前引擎照用分段识别"
+                        !s.asrEngine.supportsStreaming -> "支持 Azure、火山豆包、阿里、Gemini；当前引擎照用分段识别"
                         !s.streamingAvailable -> "Azure 流式识别要在下面选定视频语言，选「自动」时照用分段识别"
+                        s.asrEngine == AsrEngine.GEMINI -> "打开后直播和网盘、NAS 上的视频边播边识别，用上面填的 live 模型。注意：$GEMINI_STREAMING_NOTE；" +
+                            "也不能识别的同时翻译，要翻译得在「字幕翻译」里另选服务。关闭时照用分段识别"
                         else -> "打开后直播和网盘、NAS 上的视频边播边识别，一两秒出字；需要在控制台开通对应的流式（实时）语音识别。关闭时照用分段识别"
                     },
                     trailing = { Switch(checked = s.streamingAsr, onCheckedChange = { s = s.copy(streamingAsr = it) }) },

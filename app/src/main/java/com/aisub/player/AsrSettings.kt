@@ -10,6 +10,7 @@ import com.aisub.player.asr.cloud.AzureTranscriber
 import com.aisub.player.asr.cloud.ChunkedCloudEngine
 import com.aisub.player.asr.cloud.DeepgramTranscriber
 import com.aisub.player.asr.cloud.ElevenLabsTranscriber
+import com.aisub.player.asr.cloud.GeminiStreamingTranscriber
 import com.aisub.player.asr.cloud.GeminiTranscriber
 import com.aisub.player.asr.cloud.OpenAiTranscriber
 import com.aisub.player.asr.cloud.VolcEngineTranscriber
@@ -73,6 +74,7 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
             AsrField("apiKey", "Gemini API Key", secret = true),
             AsrField("model", "模型", default = GeminiTranscriber.DEFAULT_MODEL),
             AsrField("endpoint", "接口地址", default = GeminiTranscriber.DEFAULT_ENDPOINT, required = false),
+            AsrField("liveModel", "流式识别用的 live 模型", required = false, default = GeminiStreamingTranscriber.DEFAULT_MODEL),
             PARALLEL,
         ),
     ),
@@ -146,7 +148,11 @@ fun AppSettings.createCloudEngine(): SpeechEngine {
 }
 
 /** 支持流式识别的引擎 */
-val AsrEngine.supportsStreaming: Boolean get() = this == AsrEngine.AZURE || this == AsrEngine.VOLC || this == AsrEngine.ALIYUN
+val AsrEngine.supportsStreaming: Boolean
+    get() = this == AsrEngine.AZURE || this == AsrEngine.VOLC || this == AsrEngine.ALIYUN || this == AsrEngine.GEMINI
+
+/** Gemini 流式用 live 模型，转写不带每句的准确时间 */
+const val GEMINI_STREAMING_NOTE = "live 模型识别出来的文字不带每句的准确时间，字幕时间只能按到达的先后来估计"
 
 /** 当前设置能用流式识别（Azure 流式必须选定视频语言，选「自动」时照用分段识别） */
 val AppSettings.streamingAvailable: Boolean
@@ -168,6 +174,10 @@ fun AppSettings.createStreamingEngine(): SpeechEngine? {
         }
         AsrEngine.VOLC -> VolcStreamingTranscriber(v("appKey"), v("accessKey"))
         AsrEngine.ALIYUN -> AliyunStreamingTranscriber(v("apiKey"), v("endpoint"), AsrLanguages.primary(asrLanguage))
+        AsrEngine.GEMINI -> GeminiStreamingTranscriber(
+            v("apiKey"), v("liveModel"), v("endpoint"),
+            AsrLanguages.label(asrLanguage).takeIf { AsrLanguages.primary(asrLanguage) != "auto" }.orEmpty(),
+        )
         else -> null
     }
 }

@@ -949,7 +949,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // 播放页顶部显示用的是哪家、哪个模型（流式识别的模型由引擎自己定，不写）
                 val asrModel = settings.asrValue(settings.asrEngine, "model").takeIf { !streaming && settings.asrEngine != AsrEngine.LOCAL && it.isNotEmpty() }
                 val asrInfo = "识别：$engineName" + (asrModel?.let { " · $it" } ?: "")
-                _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f, streamingAsr = streaming) }
+                // Gemini 流式：先说清字幕时间是估的
+                val note = if (streaming && settings.asrEngine == AsrEngine.GEMINI) "；$GEMINI_STREAMING_NOTE" else ""
+                _state.update { it.copy(status = "正在识别语音（$engineName）…$note", progress = 0f, streamingAsr = streaming) }
                 val cuesBefore = _state.value.cues.size
                 asrInfoWatch = launch {
                     _state.map { it.cues.size }.first { it > cuesBefore }

@@ -140,6 +140,49 @@ class StreamingEnginesTest {
     }
 
     @Test
+    fun geminiLiveProtocol() {
+        val kinds = Collections.synchronizedList(ArrayList<String>())
+        var audioChunks = 0
+        val url = serve(object : WebSocketListener() {
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                val json = JSONObject(text)
+                when {
+                    json.has("setup") -> {
+                        val setup = json.getJSONObject("setup")
+                        assertEquals("models/gemini-3.8-live", setup.getString("model"))
+                        assertTrue(setup.has("inputAudioTranscription"))
+                        kinds.add("setup")
+                        // 服务端的 JSON 用二进制帧发
+                        webSocket.send(JSONObject().put("setupComplete", JSONObject()).toString().toByteArray().toByteString())
+                    }
+                    json.getJSONObject("realtimeInput").optBoolean("audioStreamEnd") -> {
+                        kinds.add("end")
+                        fun transcript(text: String, extra: JSONObject.() -> Unit = {}) = webSocket.send(
+                            JSONObject().put("serverContent", JSONObject().put("inputTranscription", JSONObject().put("text", text).apply(extra))).toString(),
+                        )
+                        transcript("你好，") { put("startOffset", "0.200s") }
+                        transcript("世界。") { put("endOffset", "0.900s") }
+                        transcript("第二句")
+                        webSocket.send(JSONObject().put("serverContent", JSONObject().put("turnComplete", true)).toString())
+                    }
+                    else -> {
+                        assertEquals("audio/pcm;rate=16000", json.getJSONObject("realtimeInput").getJSONObject("audio").getString("mimeType"))
+                        audioChunks++
+                    }
+                }
+            }
+        })
+        val cues = run(GeminiStreamingTranscriber("key", "", url.replace("ws://", "http://"), ""))
+        assertEquals(listOf("setup", "end"), kinds)
+        assertTrue(server.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS)!!.path!!.contains("BidiGenerateContent?key=key"))
+        assertEquals(10, audioChunks)
+        assertEquals(listOf("你好，世界。", "第二句"), cues.map { it.text })
+        // 第一句用服务端给的时间；第二句没给，接在后面估
+        assertEquals(200L, cues.first().startMs)
+        assertTrue(cues[1].startMs >= 900L)
+    }
+
+    @Test
     fun azureSpeechProtocol() {
         val paths = Collections.synchronizedList(ArrayList<String>())
         var firstAudio: ByteArray? = null

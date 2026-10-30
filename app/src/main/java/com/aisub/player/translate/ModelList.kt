@@ -61,7 +61,7 @@ object ModelList {
      * 语音识别用的模型列表。Gemini 用原生接口，只留能 generateContent、听得懂音频的 gemini 模型；
      * OpenAI 兼容接口只留转写模型（whisper、transcribe）。
      */
-    suspend fun fetchAsr(engine: com.aisub.player.AsrEngine, apiKey: String, endpoint: String): List<String> = withContext(Dispatchers.IO) {
+    suspend fun fetchAsr(engine: com.aisub.player.AsrEngine, apiKey: String, endpoint: String, live: Boolean = false): List<String> = withContext(Dispatchers.IO) {
         if (apiKey.isEmpty()) throw IOException("请先填写 API Key")
         val gemini = engine == com.aisub.player.AsrEngine.GEMINI
         val request = if (gemini) {
@@ -84,11 +84,16 @@ object ModelList {
             (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
                 .filter { o ->
                     val methods = o.optJSONArray("supportedGenerationMethods")
-                    methods != null && (0 until methods.length()).any { methods.optString(it) == "generateContent" }
+                    // 流式识别用 Live 接口（bidiGenerateContent），分段识别用 generateContent
+                    val method = if (live) "bidiGenerateContent" else "generateContent"
+                    methods != null && (0 until methods.length()).any { methods.optString(it) == method }
                 }
                 .map { it.optString("name").removePrefix("models/") }
-                // 只留对话模型：画图、朗读、向量、实时语音这些用不了
-                .filter { n -> n.startsWith("gemini") && listOf("image", "tts", "embedding", "live", "native-audio").none { it in n } }
+                // 分段识别只留对话模型：画图、朗读、向量、实时语音这些用不了；流式只留 live 模型
+                .filter { n ->
+                    n.startsWith("gemini") && if (live) "translate" !in n
+                    else listOf("image", "tts", "embedding", "live", "native-audio").none { it in n }
+                }
                 .distinct().sortedDescending()
         } else {
             parse(text).filter { "whisper" in it || "transcribe" in it }.sorted()
