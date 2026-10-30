@@ -129,12 +129,11 @@ private val ASR_MODEL_LISTS = setOf(AsrEngine.GEMINI, AsrEngine.OPENAI)
 
 private fun Set<String>.toggle(key: String) = if (key in this) this - key else this + key
 
-/** 选中的服务行尾的箭头：配置项展开时朝上，收起时朝下 */
+/** 服务行尾的箭头：配置项展开时朝上，收起时朝下 */
 @Composable
-private fun FoldArrow(selected: Boolean, collapsed: Boolean) {
-    if (!selected) return
+private fun FoldArrow(expanded: Boolean) {
     Icon(
-        if (collapsed) AppIcons.ExpandMore else AppIcons.ArrowDropUp, if (collapsed) "展开" else "收起",
+        if (expanded) AppIcons.ArrowDropUp else AppIcons.ExpandMore, if (expanded) "收起" else "展开设置",
         tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 4.dp).size(20.dp),
     )
 }
@@ -164,7 +163,8 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
     BackHandler(onBack = leave)
 
     // 选中的服务再点一下收起它的配置项（键同测试结果），换一个服务时自动展开
-    var collapsed by remember { mutableStateOf(emptySet<String>()) }
+    // 点服务这一行只展开 / 收起它的设置，选中用左边的圆钮：设置和选用互不影响。一开始展开选中的那个
+    var expanded by remember { mutableStateOf(setOf("asr:${initial.asrEngine.name}", "tr:${initial.provider.name}")) }
     // 连接测试结果：键为 "asr:<引擎>" 或 "tr:<服务商>"
     val testResults = remember { mutableStateMapOf<String, String>() }
     val testing = remember { mutableStateMapOf<String, Boolean>() }
@@ -204,12 +204,12 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     ListRow(
                         title = engine.label,
                         subtitle = engine.hint,
-                        subtitleMaxLines = if (selected) Int.MAX_VALUE else 2,
-                        leading = { RadioButton(selected = selected, onClick = { s = s.copy(asrEngine = engine); collapsed -= key }) },
-                        trailing = { Row(verticalAlignment = Alignment.CenterVertically) { AsrStatus(engine, s, vm, testResults[key]); FoldArrow(selected, key in collapsed) } },
-                        onClick = { if (selected) collapsed = collapsed.toggle(key) else { s = s.copy(asrEngine = engine); collapsed -= key } },
+                        subtitleMaxLines = if (key in expanded) Int.MAX_VALUE else 2,
+                        leading = { RadioButton(selected = selected, onClick = { s = s.copy(asrEngine = engine) }) },
+                        trailing = { Row(verticalAlignment = Alignment.CenterVertically) { AsrStatus(engine, s, vm, testResults[key]); FoldArrow(key in expanded) } },
+                        onClick = { expanded = expanded.toggle(key) },
                     )
-                    AnimatedVisibility(selected && key !in collapsed) {
+                    AnimatedVisibility(key in expanded) {
                         ConfigBlock {
                             if (engine == AsrEngine.LOCAL) {
                                 LocalModels(s, vm) { s = it }
@@ -236,7 +236,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                                         )
                                     }
                                 }
-                                TestRow(testing[key] == true, testResults[key]) { runTest(key) { vm.testAsr(s) } }
+                                TestRow(testing[key] == true, testResults[key]) { runTest(key) { vm.testAsr(s.copy(asrEngine = engine)) } }
                             }
                         }
                     }
@@ -343,12 +343,12 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     ListRow(
                         title = p.label,
                         subtitle = PROVIDER_HINTS[p],
-                        subtitleMaxLines = if (selected) Int.MAX_VALUE else 2,
-                        leading = { RadioButton(selected = selected, onClick = { s = s.copy(provider = p); collapsed -= key }) },
-                        trailing = { Row(verticalAlignment = Alignment.CenterVertically) { ProviderStatus(p, s, testResults[key]); FoldArrow(selected, key in collapsed) } },
-                        onClick = { if (selected) collapsed = collapsed.toggle(key) else { s = s.copy(provider = p); collapsed -= key } },
+                        subtitleMaxLines = if (key in expanded) Int.MAX_VALUE else 2,
+                        leading = { RadioButton(selected = selected, onClick = { s = s.copy(provider = p) }) },
+                        trailing = { Row(verticalAlignment = Alignment.CenterVertically) { ProviderStatus(p, s, testResults[key]); FoldArrow(key in expanded) } },
+                        onClick = { expanded = expanded.toggle(key) },
                     )
-                    AnimatedVisibility(selected && key !in collapsed) {
+                    AnimatedVisibility(key in expanded) {
                         ConfigBlock {
                             val raw = s.providerConfigs[p] ?: ProviderConfig()
                             if (p.editableBaseUrl) {
@@ -385,7 +385,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                                     fetch = { ModelList.fetch(p, cfg) },
                                 )
                             }
-                            TestRow(testing[key] == true, testResults[key]) { runTest(key) { vm.testTranslator(s) } }
+                            TestRow(testing[key] == true, testResults[key]) { runTest(key) { vm.testTranslator(s.copy(provider = p)) } }
                         }
                     }
                 }
@@ -633,7 +633,7 @@ private fun TtsSettings(s: AppSettings, vm: MainViewModel, onChange: (AppSetting
             trailing = { Switch(checked = s.ttsEnabled, onCheckedChange = { onChange(s.copy(ttsEnabled = it)) }) },
             onClick = { onChange(s.copy(ttsEnabled = !s.ttsEnabled)) },
         )
-        var ttsCollapsed by remember { mutableStateOf(false) }
+        var ttsExpanded by remember { mutableStateOf(s.ttsEngine == TtsEngineType.AZURE) }
         TtsEngineType.entries.forEach { engine ->
             CardDivider(inset = 64.dp)
             val selected = s.ttsEngine == engine
@@ -641,12 +641,12 @@ private fun TtsSettings(s: AppSettings, vm: MainViewModel, onChange: (AppSetting
             ListRow(
                 title = engine.label,
                 subtitle = engine.hint,
-                subtitleMaxLines = if (selected) Int.MAX_VALUE else 2,
-                leading = { RadioButton(selected = selected, onClick = { onChange(s.copy(ttsEngine = engine)); ttsCollapsed = false }) },
-                trailing = if (hasConfig) ({ FoldArrow(selected, ttsCollapsed) }) else null,
-                onClick = { if (selected) ttsCollapsed = !ttsCollapsed else { onChange(s.copy(ttsEngine = engine)); ttsCollapsed = false } },
+                leading = { RadioButton(selected = selected, onClick = { onChange(s.copy(ttsEngine = engine)) }) },
+                trailing = if (hasConfig) ({ FoldArrow(ttsExpanded) }) else null,
+                // 有设置的（Azure）点这一行展开设置；没有设置的点这一行就是选用
+                onClick = { if (hasConfig) ttsExpanded = !ttsExpanded else onChange(s.copy(ttsEngine = engine)) },
             )
-            AnimatedVisibility(selected && hasConfig && !ttsCollapsed) {
+            AnimatedVisibility(hasConfig && ttsExpanded) {
                 ConfigBlock {
                     val asrKey = s.asrConfigs[AsrEngine.AZURE]?.get("key").orEmpty()
                     ConfigField(
