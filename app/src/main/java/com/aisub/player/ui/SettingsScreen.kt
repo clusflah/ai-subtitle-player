@@ -76,6 +76,8 @@ import com.aisub.player.translate.OfflineTranslator
 import com.aisub.player.tts.TtsEngineType
 import com.aisub.player.tts.TtsReader
 import com.aisub.player.asrProblem
+import com.aisub.player.streamingAvailable
+import com.aisub.player.supportsStreaming
 import com.aisub.player.withAsrValue
 import kotlinx.coroutines.launch
 
@@ -206,6 +208,17 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         }
                     }
                 }
+                CardDivider()
+                ListRow(
+                    title = "流式识别（直播和远程视频）",
+                    subtitle = when {
+                        !s.asrEngine.supportsStreaming -> "支持 Azure、火山豆包、阿里；当前引擎照用分段识别"
+                        !s.streamingAvailable -> "Azure 流式识别要在下面选定视频语言，选「自动」时照用分段识别"
+                        else -> "打开后直播和网盘、NAS 上的视频边播边识别，一两秒出字；需要在控制台开通对应的流式（实时）语音识别。关闭时照用分段识别"
+                    },
+                    trailing = { Switch(checked = s.streamingAsr, onCheckedChange = { s = s.copy(streamingAsr = it) }) },
+                    onClick = { s = s.copy(streamingAsr = !s.streamingAsr) },
+                )
                 CardDivider()
                 Column(Modifier.padding(16.dp)) {
                     Text("视频语言", style = MaterialTheme.typography.bodyLarge)

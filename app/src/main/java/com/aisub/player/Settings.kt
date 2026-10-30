@@ -26,7 +26,11 @@ enum class Provider(
     /** 是否允许用户修改 Base URL（自定义服务商必须填，其余预置） */
     val editableBaseUrl: Boolean,
 ) {
-    // 免费的排第一（设置页按这个顺序列出）
+    // 设置页按这个顺序列出：本地的排最前面，然后是免费的
+    // 手机或局域网电脑上跑的模型（Ollama、LM Studio、llama.cpp 等）：不用 Key、不花钱，字幕内容不出本地
+    LOCAL("本地模型", "http://127.0.0.1:11434/v1", "", needsApiKey = false, editableBaseUrl = true),
+    // 另外安装的 Offline Translator App（Bergamot 机器翻译）：完全离线，不用地址、Key 和模型
+    OFFLINE_TRANSLATOR("离线翻译（Offline Translator App）", "", "", needsApiKey = false, editableBaseUrl = false),
     INDEX_TRANSLATE(
         "Index-Translate（免费）", "https://index-translate.bilibili.com/v1", "Index-Translate-35B-A3B",
         needsApiKey = false, editableBaseUrl = false,
@@ -50,11 +54,11 @@ enum class Provider(
         "Azure 翻译", "https://api.cognitive.microsofttranslator.com", "global",
         needsApiKey = true, editableBaseUrl = false,
     ),
-    // 手机或局域网电脑上跑的模型（Ollama、LM Studio、llama.cpp 等）：不用 Key、不花钱，字幕内容不出本地
-    LOCAL("本地模型", "http://127.0.0.1:11434/v1", "", needsApiKey = false, editableBaseUrl = true),
-    // 另外安装的 Offline Translator App（Bergamot 机器翻译）：完全离线，不用地址、Key 和模型
-    OFFLINE_TRANSLATOR("离线翻译（Offline Translator App）", "", "", needsApiKey = false, editableBaseUrl = false),
     OPENAI_COMPAT("自定义", "https://api.openai.com/v1", "", needsApiKey = false, editableBaseUrl = true),
+    ;
+
+    /** 在手机或局域网里翻译：没有限流，实时翻译时识别出来就翻 */
+    val isLocal: Boolean get() = this == LOCAL || this == OFFLINE_TRANSLATOR
 }
 
 data class ProviderConfig(val apiKey: String = "", val model: String = "", val baseUrl: String = "")
@@ -67,8 +71,8 @@ enum class VideoLeaveAction(val label: String) {
 }
 
 data class AppSettings(
-    // 默认用免费、不用 Key 的翻译，装好就能用
-    val provider: Provider = Provider.INDEX_TRANSLATE,
+    // 识别和翻译默认都在本地：字幕不出手机、不花钱（本地模型要先选好模型，没设置好时会提示）
+    val provider: Provider = Provider.LOCAL,
     val providerConfigs: Map<Provider, ProviderConfig> = emptyMap(),
     val targetLanguage: String = "简体中文",
     val asrEngine: AsrEngine = AsrEngine.LOCAL,
@@ -79,6 +83,8 @@ data class AppSettings(
     /** 各云端识别引擎的配置（Key、区域等），键见 AsrEngine.fields */
     val asrConfigs: Map<AsrEngine, Map<String, String>> = emptyMap(),
     val autoTranslate: Boolean = true,
+    /** 直播和远程视频用流式识别（Azure、火山、阿里）：边播边识别，一两秒出字 */
+    val streamingAsr: Boolean = false,
     /** 识别、翻译、编辑后在本地视频旁边写一个同名 .srt，给别的播放器用 */
     val autoSaveSrt: Boolean = false,
     /** 播放音乐时，没有内嵌歌词、封面就在线查找 */
@@ -256,6 +262,23 @@ data class AppSettings(
 class SettingsRepository(context: Context) {
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
+    /**
+     * 没改过设置的老用户（从 2.8.1 以前升级上来）一直用的是默认的 Index-Translate；默认改成本地模型后，
+     * 他们不该突然变成没设置好的本地模型。新安装才用新的默认值。
+     */
+    private val legacyDefaultProvider: Provider? = runCatching {
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        if (info.firstInstallTime < info.lastUpdateTime) Provider.INDEX_TRANSLATE else null
+    }.getOrNull()
+
+    /** 存着的翻译服务；第一次读时按新装 / 升级定下来并存好，以后再升级也不会变 */
+    private fun provider(default: Provider): Provider {
+        prefs.getString("provider", null)?.let { name -> runCatching { Provider.valueOf(name) }.getOrNull()?.let { return it } }
+        val chosen = legacyDefaultProvider ?: default
+        prefs.edit().putString("provider", chosen.name).apply()
+        return chosen
+    }
+
     fun load(): AppSettings {
         val d = AppSettings()
         val configs = Provider.entries.associateWith { p ->
@@ -266,7 +289,7 @@ class SettingsRepository(context: Context) {
             )
         }
         return AppSettings(
-            provider = runCatching { Provider.valueOf(prefs.getString("provider", d.provider.name)!!) }.getOrDefault(d.provider),
+            provider = provider(d.provider),
             providerConfigs = configs,
             targetLanguage = prefs.getString("targetLanguage", d.targetLanguage)!!,
             asrEngine = runCatching { AsrEngine.valueOf(prefs.getString("asrEngine", d.asrEngine.name)!!) }.getOrDefault(d.asrEngine),
@@ -275,6 +298,7 @@ class SettingsRepository(context: Context) {
             modelBaseUrl = prefs.getString("modelBaseUrl", d.modelBaseUrl)!!,
             asrConfigs = loadAsrConfigs(),
             autoTranslate = prefs.getBoolean("autoTranslate", d.autoTranslate),
+            streamingAsr = prefs.getBoolean("streamingAsr", d.streamingAsr),
             autoSaveSrt = prefs.getBoolean("autoSaveSrt", d.autoSaveSrt),
             musicOnlineLookup = prefs.getBoolean("musicOnlineLookup", d.musicOnlineLookup),
             musicBackground = prefs.getBoolean("musicBackground", d.musicBackground),
@@ -332,6 +356,7 @@ class SettingsRepository(context: Context) {
             .putString("localModel", s.localModel)
             .putString("modelBaseUrl", s.modelBaseUrl)
             .putBoolean("autoTranslate", s.autoTranslate)
+            .putBoolean("streamingAsr", s.streamingAsr)
             .putBoolean("autoSaveSrt", s.autoSaveSrt)
             .putBoolean("musicOnlineLookup", s.musicOnlineLookup)
             .putBoolean("musicBackground", s.musicBackground)
