@@ -632,7 +632,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 12.dp),
                     )
                     // 播放队列（直播时是频道列表），点一项切过去
-                    if (vm.queueSize > 1 && !vm.usingVlc) {
+                    // 兼容模式下直播也保留频道列表（换台时按各频道记住的内核打开）
+                    if (vm.queueSize > 1 && (!vm.usingVlc || isLive)) {
                         TextButton(onClick = { showChannels = true }) {
                             Icon(AppIcons.ListIcon, null, tint = Color.White, modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(4.dp))
@@ -641,10 +642,20 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                 }
                 TaskChip(state, onClick = { showTracks = true }, modifier = Modifier.padding(start = 52.dp, bottom = 4.dp))
+                // 字幕用的识别、翻译服务和模型
+                val models = listOfNotNull(state.asrInfo, state.translateInfo)
+                if (models.isNotEmpty()) {
+                    Text(
+                        models.joinToString("　"), color = Color(0xCCFFFFFF), fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = 52.dp, end = 12.dp, bottom = 4.dp),
+                    )
+                }
                 // 没有目标语言字幕的视频：一键翻译外语字幕，或识别 + 翻译，不用去面板里找
-                val quick = remember(state.cues, embeddedTracks, state.settings.targetLanguage, state.asrSettings.asrLanguage) {
+                val quick = remember(state.cues, embeddedTracks, state.settings.targetLanguage, state.asrSettings.asrLanguage, isLive) {
                     val target = state.settings.ttsLocale
-                    QuickSubtitles.decide(state.cues, embeddedTracks, target) {
+                    // 直播流里的字幕轨（多是隐藏式字幕）读不出来翻译：只看有没有目标语言的，没有就实时识别
+                    val tracks = if (isLive) embeddedTracks.filter { QuickSubtitles.isTargetTrack(it, target) } else embeddedTracks
+                    QuickSubtitles.decide(state.cues, tracks, target) {
                         LanguageCheck.alreadyTarget(it, target, state.asrSettings.asrLanguage, ChineseScript::variant)
                     }
                 }
@@ -711,10 +722,25 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         FrameButton(AppIcons.SkipNext, "下一帧") { indicator = null to formatTime(vm.extras.stepFrame(true)); interactions++ }
                     }
                 }
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (isLive) {
                         Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium)
                         Spacer(Modifier.weight(1f))
+                        // 实时字幕和画面对不上时手动对齐：字幕早了点「推后」，晚了点「提前」；点中间的数字细调
+                        if (state.transcribing || state.cues.isNotEmpty()) {
+                            val step = 500L
+                            Text("字幕", color = Color.White, fontSize = 13.sp)
+                            TextButton(onClick = { vm.setSubtitleDelay(state.subtitleDelayMs - step); interactions++ }, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                                Text("提前", color = Color.White, fontSize = 13.sp)
+                            }
+                            Text(
+                                "%+.1f 秒".format(state.subtitleDelayMs / 1000f), color = Orange, fontSize = 13.sp,
+                                modifier = Modifier.clickable { dialog = PlayerDialog.DELAY },
+                            )
+                            TextButton(onClick = { vm.setSubtitleDelay(state.subtitleDelayMs + step); interactions++ }, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                                Text("推后", color = Color.White, fontSize = 13.sp)
+                            }
+                        }
                     } else {
                         Text(formatClock(dragging?.toLong() ?: positionMs), color = Color.White, fontSize = 14.sp)
                         Spacer(Modifier.weight(1f))
