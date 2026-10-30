@@ -1,6 +1,7 @@
 package com.aisub.player
 
 import android.app.Application
+import android.content.Context
 import android.app.PendingIntent
 import android.content.Intent
 import androidx.media3.session.MediaSession
@@ -410,6 +411,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         override fun onPlayerError(error: PlaybackException) {
             android.util.Log.e("Voxtitle", "播放失败", error)
             if (retryLiveAsOtherType(error)) return
+            if (autoSwitchLiveToVlc(error)) return
+            // 记住要用兼容模式的频道，兼容模式也打不开：忘掉，下次先用默认内核试
+            _state.value.current?.takeIf { usingVlc && it.isLive }?.let { forgetVlcChannel(it.uri) }
             _state.update { it.copy(playbackError = describePlaybackError(error)) }
         }
 
@@ -514,11 +518,47 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
-    /** 用 VLC 内核播放一个文件（不带播放队列）。 */
-    private fun playWithVlc(entry: MediaEntry, positionMs: Long) {
+    // ---- 直播：默认内核打不开的频道自动换兼容模式（VLC 内核），并按频道记住 ----
+
+    private val playbackPrefs = getApplication<Application>().getSharedPreferences("playback", Context.MODE_PRIVATE)
+
+    /** 要用兼容模式播放的直播频道地址 */
+    private val vlcChannels: MutableSet<String> = HashSet(playbackPrefs.getStringSet("vlcChannels", emptySet()).orEmpty())
+
+    /** 这次打开后已经自动换过兼容模式的频道，兼容模式也不行时不再来回换 */
+    private val vlcAutoTried = HashSet<String>()
+
+    private fun rememberVlcChannel(uri: String) {
+        if (vlcChannels.add(uri)) playbackPrefs.edit().putStringSet("vlcChannels", HashSet(vlcChannels)).apply()
+    }
+
+    private fun forgetVlcChannel(uri: String) {
+        if (vlcChannels.remove(uri)) playbackPrefs.edit().putStringSet("vlcChannels", HashSet(vlcChannels)).apply()
+    }
+
+    /**
+     * 直播用默认内核打不开：自动改用兼容模式。网络不通、源失效（HTTP 4xx/5xx）换内核也没用，照常报错。
+     * 返回是否已切换。
+     */
+    private fun autoSwitchLiveToVlc(error: PlaybackException): Boolean {
+        val entry = _state.value.current?.takeIf { it.isLive } ?: return false
+        if (usingVlc || !vlcAutoTried.add(entry.uri)) return false
+        if (error.errorCode in setOf(
+                PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+                PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+                PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+            )
+        ) return false
+        android.util.Log.i("Voxtitle", "直播默认内核打不开，自动换兼容模式：${entry.uri}")
+        switchToVlc()
+        return true
+    }
+
+    /** 用 VLC 内核播放一个文件。直播保留频道列表，换台时每个频道再按记住的内核打开。 */
+    private fun playWithVlc(entry: MediaEntry, positionMs: Long, channels: List<MediaEntry>? = null) {
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
-        queue = listOf(entry)
+        queue = channels ?: listOf(entry)
         val v = vlc()
         v.setMediaItem(itemOf(entry), positionMs)
         _state.update { it.copy(playbackError = null) }
@@ -532,7 +572,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** ExoPlayer 播放失败时，从当前位置改用 VLC 内核重试。 */
     fun switchToVlc() {
         val entry = _state.value.current ?: return
-        playWithVlc(entry, exoPlayer.currentPosition.coerceAtLeast(0))
+        if (entry.isLive) {
+            rememberVlcChannel(entry.uri)
+            // 换内核前先停掉实时字幕：兼容模式下字幕无法工作
+            cancelAll()
+            playWithVlc(entry, 0, queue.takeIf { entry in it })
+        } else {
+            playWithVlc(entry, exoPlayer.currentPosition.coerceAtLeast(0))
+        }
     }
 
     /**
@@ -563,6 +610,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // 光盘镜像只能用 VLC 内核播放
         if (VlcPlayer.needsVlc(start.title)) {
             playWithVlc(start, resume)
+            return
+        }
+        // 上次默认内核打不开、换了兼容模式的直播频道：直接用兼容模式，不用再先报错一次
+        if (start.isLive && start.uri in vlcChannels) {
+            playWithVlc(start, 0, entries)
             return
         }
         vlcPlayer?.stop()
@@ -833,8 +885,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val keep = resume || (_state.value.current?.isLive != true && coverageActive && _state.value.failedTask == Task.TRANSCRIBE)
         val uri = _state.value.videoUri ?: return
         if (transcribeJob?.isActive == true) return
-        translateJob?.cancel()
         val live = _state.value.current?.isLive == true
+        if (live && usingVlc) {
+            _state.update { it.copy(error = VLC_NO_SUBTITLES, failedTask = Task.TRANSCRIBE) }
+            return
+        }
+        translateJob?.cancel()
         if (!keep || live) {
             coverage.clear()
             coverageActive = !live
@@ -1774,7 +1830,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 切到队列里的第 index 个。直播从最新画面开始，其他的从上次看到的地方继续。 */
     fun playQueueIndex(index: Int) {
-        if (usingVlc || index !in queue.indices) return
+        if (index !in queue.indices) return
+        // 兼容模式下没有播放队列：直播换台时重新打开，按这个频道记住的内核播放
+        if (usingVlc) {
+            if (queue[index].isLive) play(queue, index)
+            return
+        }
         val e = queue[index]
         savePosition()
         if (e.isLive) exoPlayer.seekToDefaultPosition(index) else exoPlayer.seekTo(index, resumePosition(e))
@@ -1916,6 +1977,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private const val LIVE_CHUNK_SEC = 6
         private const val LIVE_KEEP_CUES = 200
         private const val LIVE_MAX_BACKLOG_MS = 8_000L
+
+        /** 兼容模式下直播不能出字幕时给的提示（播放页也用） */
+        const val VLC_NO_SUBTITLES = "兼容模式（VLC 内核）下字幕无法工作"
         private const val LIVE_MIN_CUE_MS = 1_200L
 
         /** 字幕至少要比画面早这么久换算好，留给翻译 */

@@ -20,7 +20,7 @@
 3. 网盘直连：在「浏览 → 网盘」里登录——115 和阿里云盘用手机 App 扫码；百度网盘用自己申请的 AppKey 扫码，或粘贴 refresh_token；PikPak 用账号密码（可能需要人机验证）。也可以添加 WebDAV、OpenList。
 4. 翻译默认用**本地模型**（Ollama、LM Studio、llama.cpp 等，在设置里选好模型），也可以装 Offline Translator App 完全离线翻译；不想自己跑模型，选免费、无需 Key 的 **Index-Translate**，或 Claude、DeepSeek、Gemini、阿里云百炼、火山方舟、Azure 翻译和自定义 OpenAI 兼容接口。
 
-## 本版更新（2.9.2）
+## 2.9.2 更新
 
 - **桌面小组件按大小换样式**，深色半透明圆角卡片，在亮色壁纸上也看得清：
   - **4×1、2×2**：封面、歌名、正在唱的那句歌词（没有歌词时显示歌手），带播放键
