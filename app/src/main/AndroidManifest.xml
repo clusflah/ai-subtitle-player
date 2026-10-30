@@ -32,6 +32,8 @@
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="https" />
         </intent>
+        <!-- 离线翻译：绑定 Offline Translator App 的翻译服务 -->
+        <package android:name="dev.davidv.translator" />
     </queries>
 
     <application

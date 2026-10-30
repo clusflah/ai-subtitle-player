@@ -1,5 +1,7 @@
 package com.aisub.player.ui
 
+import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -55,6 +57,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -69,11 +72,32 @@ import com.aisub.player.asr.ModelCatalog
 import com.aisub.player.asrLanguageWarning
 import com.aisub.player.subtitle.Pinyin
 import com.aisub.player.translate.ModelList
+import com.aisub.player.translate.OfflineTranslator
 import com.aisub.player.tts.TtsEngineType
 import com.aisub.player.tts.TtsReader
 import com.aisub.player.asrProblem
 import com.aisub.player.withAsrValue
 import kotlinx.coroutines.launch
+
+/** 离线翻译：没有要填的，只说明用法；没装时给下载地址。 */
+@Composable
+private fun OfflineTranslatorInfo() {
+    val context = LocalContext.current
+    val installed = remember { OfflineTranslator.isInstalled(context) }
+    Text(
+        if (installed) "已安装。语言包在 Offline Translator 里下载（中文、英语、日语等，每个几十 MB）；原文语言按「语音识别」里选的视频语言，选「自动」时由它自己判断"
+        else "还没有安装。它是开源 App，下载安装后在里面下载要用的语言包（原文语言和目标语言都要）",
+        style = MaterialTheme.typography.bodySmall,
+        color = if (installed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+    )
+    if (!installed) {
+        TextButton(onClick = {
+            runCatching {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/DavidVentura/offline-translator/releases")))
+            }
+        }) { Text("去下载 Offline Translator") }
+    }
+}
 
 /** 本地模型常见的服务地址（在手机上运行时） */
 private val LOCAL_LLM_SERVERS = listOf(
@@ -92,6 +116,7 @@ private val PROVIDER_HINTS = mapOf(
     Provider.AZURE_TRANSLATOR to "机器翻译：最快、最便宜，译文偏直译；「模型」一栏填资源区域，如 eastasia，全局资源填 global",
     Provider.LOCAL to "Ollama、LM Studio、llama.cpp 等在本机或局域网电脑上运行的模型，免费、不用 Key，字幕不出本地。" +
         "电脑上运行时把地址改成 http://电脑IP:11434/v1（LM Studio 是 1234 端口），Ollama 要设置 OLLAMA_HOST=0.0.0.0",
+    Provider.OFFLINE_TRANSLATOR to "另外安装的开源 App，在手机上运行 Firefox 翻译用的 Bergamot 模型：完全离线、免费、最快，字幕不会离开手机；译文偏直译，不能识别角色",
     Provider.OPENAI_COMPAT to "兼容 OpenAI 接口的服务：Kimi、OpenRouter 等",
 )
 
@@ -291,18 +316,22 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                                     }
                                 }
                             }
-                            ConfigField(
-                                raw.apiKey, { s = s.withConfig(p, raw.copy(apiKey = it)) },
-                                if (p.needsApiKey) "API Key" else "API Key（可不填）", "", secret = true,
-                            )
-                            val cfg = s.configOf(p)
-                            ModelField(
-                                raw.model, { s = s.withConfig(p, raw.copy(model = it)) },
-                                p.defaultModel.ifEmpty { if (p == Provider.LOCAL) "例如 qwen3:4b、gemma3:4b" else "例如 qwen-plus、moonshot-v1-8k" },
-                                // Key 或地址变了，之前拉到的列表作废
-                                listKey = "${p.name}|${cfg.baseUrl}|${cfg.apiKey}",
-                                fetch = { ModelList.fetch(p, cfg) },
-                            )
+                            if (p == Provider.OFFLINE_TRANSLATOR) {
+                                OfflineTranslatorInfo()
+                            } else {
+                                ConfigField(
+                                    raw.apiKey, { s = s.withConfig(p, raw.copy(apiKey = it)) },
+                                    if (p.needsApiKey) "API Key" else "API Key（可不填）", "", secret = true,
+                                )
+                                val cfg = s.configOf(p)
+                                ModelField(
+                                    raw.model, { s = s.withConfig(p, raw.copy(model = it)) },
+                                    p.defaultModel.ifEmpty { if (p == Provider.LOCAL) "例如 qwen3:4b、gemma3:4b" else "例如 qwen-plus、moonshot-v1-8k" },
+                                    // Key 或地址变了，之前拉到的列表作废
+                                    listKey = "${p.name}|${cfg.baseUrl}|${cfg.apiKey}",
+                                    fetch = { ModelList.fetch(p, cfg) },
+                                )
+                            }
                             TestRow(testing[key] == true, testResults[key]) { runTest(key) { vm.testTranslator(s) } }
                         }
                     }
