@@ -26,6 +26,13 @@ sealed interface Recognized {
 
     /** 识别的同时已经翻译好了（Gemini）：整句直接成一条字幕，不再拆分，也不用再翻译 */
     data class Translated(val text: String, val translation: String, val startMs: Long, val endMs: Long) : Recognized
+
+    /** 时间整体后移 [ms] */
+    fun shifted(ms: Long): Recognized = when (this) {
+        is Words -> Words(tokens.map { it.copy(startMs = it.startMs + ms) }, endMs + ms)
+        is Sentence -> copy(startMs = startMs + ms, endMs = endMs + ms)
+        is Translated -> copy(startMs = startMs + ms, endMs = endMs + ms)
+    }
 }
 
 /**

@@ -88,6 +88,57 @@ class StreamingEnginesTest {
         assertEquals(100L, cues.first().startMs)
     }
 
+    /** 火山假服务器：收到最后一包时给一句结果 */
+    private fun volcServer(text: String) = object : WebSocketListener() {
+        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            val b = bytes.toByteArray()
+            if (b[1].toInt() and 0x02 == 0) return
+            // 流式输入模式的结果不一定带 definite
+            val json = JSONObject().put(
+                "result",
+                JSONObject().put("utterances", org.json.JSONArray().put(JSONObject().put("text", text).put("start_time", 100).put("end_time", 900))),
+            ).toString().toByteArray()
+            webSocket.send(
+                ByteBuffer.allocate(12 + json.size).order(ByteOrder.BIG_ENDIAN)
+                    .put(0x11).put(0x93.toByte()).put(0x10).put(0).putInt(-2).putInt(json.size).put(json).array().toByteString(),
+            )
+        }
+    }
+
+    @Test
+    fun volcFallsBackToV1WhenV2NotGranted() {
+        // 第一路连接：资源没开通，服务端回错误帧
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                    val message = "requested resource not granted".toByteArray()
+                    webSocket.send(
+                        ByteBuffer.allocate(12 + message.size).order(ByteOrder.BIG_ENDIAN)
+                            .put(0x11).put(0xf0.toByte()).put(0x10).put(0).putInt(45_000_030).putInt(message.size).put(message).array().toByteString(),
+                    )
+                }
+            }),
+        )
+        server.enqueue(MockResponse().withWebSocketUpgrade(volcServer("第二个资源。")))
+        server.start()
+        val engine = VolcStreamingTranscriber("fallback-key", "", "ws://${server.hostName}:${server.port}")
+        val result = engine.recognizeAll(ByteArray(32_000)) { false }
+        engine.close()
+        assertEquals("volc.seedasr.sauc.duration", server.takeRequest().getHeader("X-Api-Resource-Id"))
+        assertEquals("volc.bigasr.sauc.duration", server.takeRequest().getHeader("X-Api-Resource-Id"))
+        assertEquals(listOf(Recognized.Sentence("第二个资源。", 100, 900)), result)
+    }
+
+    @Test
+    fun volcNotGrantedAnywhereIsExplained() {
+        repeat(2) { server.enqueue(MockResponse().setResponseCode(403).setHeader("X-Api-Status-Code", "45000030").setBody("not granted")) }
+        server.start()
+        val engine = VolcStreamingTranscriber("none-key", "", "ws://${server.hostName}:${server.port}")
+        val error = runCatching { engine.recognizeAll(ByteArray(3_200)) { false } }.exceptionOrNull()
+        assertTrue(error?.message, error is java.io.IOException && error.message!!.contains("流式语音识别 2.0"))
+        assertEquals(2, server.requestCount)
+    }
+
     @Test
     fun azureSpeechProtocol() {
         val paths = Collections.synchronizedList(ArrayList<String>())

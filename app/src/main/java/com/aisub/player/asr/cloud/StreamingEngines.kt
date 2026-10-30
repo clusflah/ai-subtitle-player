@@ -68,6 +68,11 @@ abstract class StreamingCloudEngine : SpeechEngine {
         internal var any = false
         internal val done = CountDownLatch(1)
 
+        /** 连上了，或者没连上就结束了 */
+        internal val opened = CountDownLatch(1)
+
+        fun open() = opened.countDown()
+
         fun result(items: List<Recognized>) {
             if (items.isEmpty()) return
             any = true
@@ -87,6 +92,7 @@ abstract class StreamingCloudEngine : SpeechEngine {
         fun end() {
             ended = true
             done.countDown()
+            opened.countDown()
         }
     }
 
@@ -133,6 +139,56 @@ abstract class StreamingCloudEngine : SpeechEngine {
         // Key 错、没开通，或者这路连接一句没出就出错：说出来，不要悄悄地没有字幕
         fatalError?.let { throw IOException(it) }
         if (e != null && !e.any && !cancelled) lastError?.let { throw IOException(it) }
+    }
+
+    /**
+     * 一整段 PCM 走一遍流式识别，取回全部结果（时间相对这段开头）；给分段识别借用。
+     * [isCancelled] 是借用方的取消状态。
+     */
+    internal fun recognizeAll(pcm: ByteArray, isCancelled: () -> Boolean): List<Recognized> {
+        // 先连上再发音频：没连上（比如资源没开通，要换一个）就从头重来，不丢开头的音频
+        repeat(MAX_FAILURES) {
+            if (isCancelled()) throw IOException("已取消")
+            lastError = null
+            val e = Events(0)
+            events = e
+            session = openSession(e)
+            e.opened.await(20, TimeUnit.SECONDS)
+            fatalError?.let { throw IOException(it) }
+            if (!e.ended) sendAll(e, pcm, isCancelled)?.let { return it }
+            session?.close()
+            session = null
+        }
+        throw IOException(lastError ?: "流式识别连接失败")
+    }
+
+    /** 发完一整段、取回结果；一句没出就出错了时返回 null，从头重来 */
+    private fun sendAll(first: Events, pcm: ByteArray, isCancelled: () -> Boolean): List<Recognized>? {
+        sent = 0
+        packet.clear()
+        pacingStart = System.currentTimeMillis()
+        pacingFrom = 0
+        var offset = 0
+        while (offset < pcm.size) {
+            if (isCancelled()) cancel()
+            if (first.ended && !first.any) return null
+            val n = minOf(packet.remaining(), pcm.size - offset)
+            packet.put(pcm, offset, n)
+            offset += n
+            if (!packet.hasRemaining()) flushPacket()
+        }
+        if (packet.position() > 0) flushPacket()
+        if (first.ended && !first.any) return null
+        val e = events
+        session?.finish()
+        // 流式输入模式发完最后一包才开始给结果
+        if (e != null && !e.ended) e.done.await(60, TimeUnit.SECONDS)
+        session?.close()
+        session = null
+        fatalError?.let { throw IOException(it) }
+        // 出错了、一句结果也没有：从头重来
+        if (e != null && !e.any && !cancelled && lastError != null) return null
+        return generateSequence { results.poll() }.toList()
     }
 
     override fun cancel() {
@@ -202,14 +258,10 @@ abstract class StreamingCloudEngine : SpeechEngine {
         }
     }
 
-    private fun Recognized.shifted(ms: Long): Recognized = when (this) {
-        is Recognized.Words -> Recognized.Words(tokens.map { it.copy(startMs = it.startMs + ms) }, endMs + ms)
-        is Recognized.Sentence -> copy(startMs = startMs + ms, endMs = endMs + ms)
-        is Recognized.Translated -> copy(startMs = startMs + ms, endMs = endMs + ms)
-    }
-
     /** 统一的 WebSocket 监听：把握手失败转成好懂的提示 */
     protected abstract inner class Listener(private val events: Events, private val name: String) : WebSocketListener() {
+        override fun onOpen(webSocket: WebSocket, response: Response) = events.open()
+
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             if (cancelled) return events.end()
             val code = response?.code
@@ -364,13 +416,35 @@ class VolcStreamingTranscriber(
     private val appKey: String,
     private val accessKey: String,
     private val url: String = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
+    /** 两种资源都没开通时的提示 */
+    private val notGrantedHint: String = NOT_GRANTED,
 ) : StreamingCloudEngine() {
 
     override fun openSession(events: Events): Session = VolcSession(events)
 
+    /**
+     * 先用 2.0（新账号只能开通 2.0），没开通（45000030）再试 1.0；
+     * 试出来能用的记下来，这次运行里不再每次先碰一下壁。
+     */
+    private fun resource(): String = granted[appKey] ?: RESOURCES[tried]
+
+    @Volatile
+    private var tried = 0
+
+    /** 没开通这个资源：还有别的可以试就换一个重连，否则报错 */
+    private fun notGranted(events: Events, detail: String) {
+        if (granted[appKey] == null && tried + 1 < RESOURCES.size) {
+            tried++
+            events.failed("火山流式识别资源没开通，换 ${RESOURCES[tried]} 重试：$detail")
+        } else {
+            events.failed("$notGrantedHint。$detail", fatal = true)
+        }
+    }
+
     private inner class VolcSession(private val events: Events) : Session() {
         /** 已经交出去的句子（按开始时间），服务端每次返回全部结果 */
         private val emitted = HashSet<Long>()
+        private val resource = resource()
         private val socket: WebSocket
 
         init {
@@ -380,11 +454,23 @@ class VolcStreamingTranscriber(
                         if (accessKey.isBlank()) header("X-Api-Key", appKey)
                         else header("X-Api-App-Key", appKey).header("X-Api-Access-Key", accessKey)
                     }
-                    .header("X-Api-Resource-Id", "volc.bigasr.sauc.duration")
+                    .header("X-Api-Resource-Id", resource)
                     .header("X-Api-Connect-Id", UUID.randomUUID().toString())
                     .build(),
                 object : Listener(events, "火山") {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        granted.putIfAbsent(appKey, resource)
+                        super.onOpen(webSocket, response)
+                    }
+
                     override fun onMessage(webSocket: WebSocket, bytes: ByteString) = handle(bytes.toByteArray())
+
+                    override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                        val body = runCatching { response?.peekBody(2048)?.string() }.getOrNull().orEmpty()
+                        if (!cancelled && (response?.header("X-Api-Status-Code") == NOT_GRANTED_CODE || NOT_GRANTED_CODE in body)) {
+                            notGranted(events, body.take(200))
+                        } else super.onFailure(webSocket, t, response)
+                    }
                 },
             )
             val request = JSONObject()
@@ -416,7 +502,8 @@ class VolcStreamingTranscriber(
         }
 
         private fun handle(data: ByteArray) {
-            if (data.size < 8) return
+            // 出错之后服务端可能还回几个错误帧，这路连接已经作废了
+            if (data.size < 8 || events.ended) return
             val buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN)
             val headerSize = (data[0].toInt() and 0x0f) * 4
             val type = (data[1].toInt() shr 4) and 0x0f
@@ -427,6 +514,10 @@ class VolcStreamingTranscriber(
                 val code = buf.int
                 val size = buf.int
                 val message = String(data, buf.position(), minOf(size, data.size - buf.position()))
+                if (code.toString() == NOT_GRANTED_CODE) {
+                    granted.remove(appKey, resource)
+                    return notGranted(events, message)
+                }
                 // 4500xxxx 是请求或鉴权的问题，重连没用
                 return events.failed("火山流式识别出错（$code）：$message", fatal = code in 45_000_000..45_999_999)
             }
@@ -436,26 +527,36 @@ class VolcStreamingTranscriber(
             var payload = data.copyOfRange(buf.position(), minOf(buf.position() + size, data.size))
             if (gzip) payload = GZIPInputStream(ByteArrayInputStream(payload)).readBytes()
             val json = runCatching { JSONObject(String(payload)) }.getOrNull()
+            // 负序号 / 最后一包：这次识别结束，剩下的句子都算定稿
+            val last = flags and 0x02 != 0
             json?.optJSONObject("result")?.optJSONArray("utterances").objects()
-                .filter { it.optBoolean("definite") && it.optString("text").isNotBlank() }
+                .filter { (last || it.optBoolean("definite")) && it.optString("text").isNotBlank() }
                 .forEach { u ->
                     val start = u.optLong("start_time")
                     if (!emitted.add(start)) return@forEach
                     val words = u.optJSONArray("words").objects().map { w -> Triple(w.optString("text"), w.optLong("start_time"), w.optLong("end_time")) }
                     events.result(listOf(sentence(u.optString("text"), start, u.optLong("end_time"), words)))
                 }
-            // 负序号 / 最后一包：这次识别结束
-            if (flags and 0x02 != 0) events.end()
+            if (last) events.end()
         }
     }
 
-    private companion object {
-        const val FULL_CLIENT_REQUEST = 0b0001
-        const val AUDIO_ONLY = 0b0010
-        const val FULL_SERVER_RESPONSE = 0b1001
-        const val SERVER_ERROR = 0b1111
-        const val LAST_PACKET = 0b0010
-        const val JSON = 0b0001
+    companion object {
+        /** 流式输入模式：音频发完后一次给出结果，准确率比边说边出字的模式高，给分段识别用 */
+        const val FILE_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"
+
+        private val RESOURCES = listOf("volc.seedasr.sauc.duration", "volc.bigasr.sauc.duration")
+        private val granted = java.util.concurrent.ConcurrentHashMap<String, String>()
+        private const val NOT_GRANTED_CODE = "45000030"
+        private const val NOT_GRANTED = "火山引擎账号没开通流式语音识别（45000030）。到豆包语音控制台（console.volcengine.com/speech/new）" +
+            "开通「流式语音识别 2.0」（有免费试用额度）；开通后如果还报错，检查这个 API Key 是否勾选了该服务"
+
+        private const val FULL_CLIENT_REQUEST = 0b0001
+        private const val AUDIO_ONLY = 0b0010
+        private const val FULL_SERVER_RESPONSE = 0b1001
+        private const val SERVER_ERROR = 0b1111
+        private const val LAST_PACKET = 0b0010
+        private const val JSON = 0b0001
     }
 }
 
