@@ -83,6 +83,8 @@ data class AppSettings(
     /** 各云端识别引擎的配置（Key、区域等），键见 AsrEngine.fields */
     val asrConfigs: Map<AsrEngine, Map<String, String>> = emptyMap(),
     val autoTranslate: Boolean = true,
+    /** 直播和远程视频用流式识别（Azure、火山、阿里）：边播边识别，一两秒出字 */
+    val streamingAsr: Boolean = false,
     /** 识别、翻译、编辑后在本地视频旁边写一个同名 .srt，给别的播放器用 */
     val autoSaveSrt: Boolean = false,
     /** 播放音乐时，没有内嵌歌词、封面就在线查找 */
@@ -296,6 +298,7 @@ class SettingsRepository(context: Context) {
             modelBaseUrl = prefs.getString("modelBaseUrl", d.modelBaseUrl)!!,
             asrConfigs = loadAsrConfigs(),
             autoTranslate = prefs.getBoolean("autoTranslate", d.autoTranslate),
+            streamingAsr = prefs.getBoolean("streamingAsr", d.streamingAsr),
             autoSaveSrt = prefs.getBoolean("autoSaveSrt", d.autoSaveSrt),
             musicOnlineLookup = prefs.getBoolean("musicOnlineLookup", d.musicOnlineLookup),
             musicBackground = prefs.getBoolean("musicBackground", d.musicBackground),
@@ -353,6 +356,7 @@ class SettingsRepository(context: Context) {
             .putString("localModel", s.localModel)
             .putString("modelBaseUrl", s.modelBaseUrl)
             .putBoolean("autoTranslate", s.autoTranslate)
+            .putBoolean("streamingAsr", s.streamingAsr)
             .putBoolean("autoSaveSrt", s.autoSaveSrt)
             .putBoolean("musicOnlineLookup", s.musicOnlineLookup)
             .putBoolean("musicBackground", s.musicBackground)

@@ -125,6 +125,8 @@
 | Deepgram | 英语又快又便宜 |
 | OpenAI Whisper | 也可填 Groq 等兼容接口 |
 
+**流式识别**（「语音识别」里的开关，默认关闭）：打开后，直播和网盘、NAS 上的视频改用流式（实时）语音识别，边播边识别，一般一两秒出字；关闭或其他情况照用分段识别（把音频切成一段段上传）。目前支持 Azure（要选定视频语言）、火山豆包（需开通「大模型流式语音识别」）、阿里百炼（中英日用 Fun-ASR 实时版，其他语言用 Paraformer 实时版）。手机里的视频不受影响。
+
 ### 字幕翻译
 
 <p><img src="docs/screenshots/settings-target-language.jpg" width="240" alt="目标语言"> <img src="docs/screenshots/settings-translate.jpg" width="240" alt="翻译服务与模型下拉"></p>

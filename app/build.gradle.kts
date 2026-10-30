@@ -14,8 +14,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 60
-        versionName = "2.8.1"
+        versionCode = 61
+        versionName = "2.9.0"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用
@@ -151,6 +151,8 @@ dependencies {
     testImplementation("org.json:json:20240303") // android.jar 里的 org.json 只是空壳
     // 需要真实 Android 类（Html、Bundle 等）的测试，如读取视频内嵌字幕
     testImplementation("org.robolectric:robolectric:4.14.1")
+    // 流式识别：用本地 WebSocket 服务器模拟各家协议
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
 
 androidComponents {

@@ -3,6 +3,9 @@ package com.aisub.player
 import com.aisub.player.asr.AsrLanguages
 import com.aisub.player.asr.SpeechEngine
 import com.aisub.player.asr.cloud.AliyunFunAsrTranscriber
+import com.aisub.player.asr.cloud.AliyunStreamingTranscriber
+import com.aisub.player.asr.cloud.AzureStreamingTranscriber
+import com.aisub.player.asr.cloud.VolcStreamingTranscriber
 import com.aisub.player.asr.cloud.AzureTranscriber
 import com.aisub.player.asr.cloud.DeepgramTranscriber
 import com.aisub.player.asr.cloud.ElevenLabsTranscriber
@@ -122,6 +125,33 @@ fun AppSettings.createCloudEngine(): SpeechEngine {
         AsrEngine.ELEVENLABS -> ElevenLabsTranscriber(v("apiKey"), v("model"), lang)
         AsrEngine.DEEPGRAM -> DeepgramTranscriber(v("apiKey"), v("model"), asrLanguage)
         AsrEngine.OPENAI -> OpenAiTranscriber(v("apiKey"), v("baseUrl"), v("model"), lang)
+    }
+}
+
+/** 支持流式识别的引擎 */
+val AsrEngine.supportsStreaming: Boolean get() = this == AsrEngine.AZURE || this == AsrEngine.VOLC || this == AsrEngine.ALIYUN
+
+/** 当前设置能用流式识别（Azure 流式必须选定视频语言，选「自动」时照用分段识别） */
+val AppSettings.streamingAvailable: Boolean
+    get() = asrEngine.supportsStreaming && (asrEngine != AsrEngine.AZURE || AsrLanguages.azureLocale(asrLanguage) != null)
+
+/**
+ * 流式识别引擎；当前引擎不支持流式、或者条件不够（Azure 流式要选定视频语言）时返回 null，照用分段识别。
+ */
+fun AppSettings.createStreamingEngine(): SpeechEngine? {
+    val v = { key: String -> asrValue(asrEngine, key) }
+    return when (asrEngine) {
+        AsrEngine.AZURE -> {
+            val locale = AsrLanguages.azureLocale(asrLanguage) ?: return null
+            // 中国区的自定义地址形如 https://chinanorth3.api.cognitive.azure.cn，区域取第一段
+            val endpoint = v("endpoint")
+            val china = ".azure.cn" in endpoint
+            val region = if (china) endpoint.substringAfter("://").substringBefore('.') else v("region").trim()
+            AzureStreamingTranscriber(v("key"), region, china, locale)
+        }
+        AsrEngine.VOLC -> VolcStreamingTranscriber(v("appKey"), v("accessKey"))
+        AsrEngine.ALIYUN -> AliyunStreamingTranscriber(v("apiKey"), v("endpoint"), AsrLanguages.primary(asrLanguage))
+        else -> null
     }
 }
 

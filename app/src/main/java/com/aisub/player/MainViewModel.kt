@@ -854,7 +854,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         _state.update { it.copy(status = msg, progress = p) }
                     }
                 }
-                val engineName = if (settings.asrEngine == AsrEngine.LOCAL) localModel.label else settings.asrEngine.label
+                val engineName = (if (settings.asrEngine == AsrEngine.LOCAL) localModel.label else settings.asrEngine.label) +
+                    if (useStreaming(settings)) " 流式" else ""
                 _state.update { it.copy(status = "正在识别语音（$engineName）…", progress = 0f) }
                 val translate = (settings.autoTranslate || alsoTranslate) && settings.createTranslator() != null
                 if ((settings.autoTranslate || alsoTranslate) && !translate) {
@@ -1247,7 +1248,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         generateSubtitles(alsoTranslate = false, resume = true)
     }
 
-    private fun createEngine(settings: AppSettings): SpeechEngine = when (settings.asrEngine) {
+    /** 这次识别用流式：打开了流式识别开关、引擎支持、正在放直播或远程视频（本地视频照用分段识别，跑得比播放快） */
+    private fun useStreaming(settings: AppSettings): Boolean {
+        val current = _state.value.current ?: return false
+        return settings.streamingAsr && settings.streamingAvailable && (current.isLive || isRemote(current))
+    }
+
+    private fun createEngine(settings: AppSettings): SpeechEngine {
+        if (useStreaming(settings)) settings.createStreamingEngine()?.let { return it }
+        return createChunkedEngine(settings)
+    }
+
+    private fun createChunkedEngine(settings: AppSettings): SpeechEngine = when (settings.asrEngine) {
         AsrEngine.LOCAL -> {
             val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
             Transcriber(ModelCatalog.byId(settings.localModel), models, com.aisub.player.asr.AsrLanguages.primary(settings.asrLanguage), threads)
