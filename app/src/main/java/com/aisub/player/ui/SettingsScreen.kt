@@ -79,6 +79,7 @@ import com.aisub.player.asrProblem
 import com.aisub.player.streamingAvailable
 import com.aisub.player.supportsStreaming
 import com.aisub.player.withAsrValue
+import com.aisub.player.asrValue
 import kotlinx.coroutines.launch
 
 /** 离线翻译：没有要填的，只说明用法；没装时给下载地址。 */
@@ -115,12 +116,27 @@ private val PROVIDER_HINTS = mapOf(
     Provider.INDEX_TRANSLATE to "B 站开源翻译模型，公共接口免费、无需 Key（预览版）",
     Provider.ALIYUN to "通义千问，国内直连、速度快；API Key 在百炼控制台获取",
     Provider.VOLC to "豆包，国内直连、速度快；模型一栏可填模型名或接入点 ID（ep-…）",
-    Provider.AZURE_TRANSLATOR to "机器翻译：最快、最便宜，译文偏直译；「模型」一栏填资源区域，如 eastasia，全局资源填 global",
+    Provider.AZURE_TRANSLATOR to "机器翻译：最快、最便宜，译文偏直译；区域填资源所在区域，如 eastasia，全局资源填 global",
     Provider.LOCAL to "Ollama、LM Studio、llama.cpp 等在本机或局域网电脑上运行的模型，免费、不用 Key，字幕不出本地。" +
         "电脑上运行时把地址改成 http://电脑IP:11434/v1（LM Studio 是 1234 端口），Ollama 要设置 OLLAMA_HOST=0.0.0.0",
     Provider.OFFLINE_TRANSLATOR to "另外安装的开源 App，在手机上运行 Firefox 翻译用的 Bergamot 模型：完全离线、免费、最快，字幕不会离开手机；译文偏直译，不能识别角色",
     Provider.OPENAI_COMPAT to "兼容 OpenAI 接口的服务：Kimi、OpenRouter 等",
 )
+
+/** 语音识别里能从服务商获取模型列表的引擎 */
+private val ASR_MODEL_LISTS = setOf(AsrEngine.GEMINI, AsrEngine.OPENAI)
+
+private fun Set<String>.toggle(key: String) = if (key in this) this - key else this + key
+
+/** 选中的服务行尾的箭头：配置项展开时朝上，收起时朝下 */
+@Composable
+private fun FoldArrow(selected: Boolean, collapsed: Boolean) {
+    if (!selected) return
+    Icon(
+        if (collapsed) AppIcons.ExpandMore else AppIcons.ArrowDropUp, if (collapsed) "展开" else "收起",
+        tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 4.dp).size(20.dp),
+    )
+}
 
 private val TARGET_LANGUAGES = listOf("简体中文", "繁體中文", "English", "日本語", "한국어")
 
@@ -146,6 +162,8 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
     }
     BackHandler(onBack = leave)
 
+    // 选中的服务再点一下收起它的配置项（键同测试结果），换一个服务时自动展开
+    var collapsed by remember { mutableStateOf(emptySet<String>()) }
     // 连接测试结果：键为 "asr:<引擎>" 或 "tr:<服务商>"
     val testResults = remember { mutableStateMapOf<String, String>() }
     val testing = remember { mutableStateMapOf<String, Boolean>() }
@@ -185,23 +203,36 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     ListRow(
                         title = engine.label,
                         subtitle = engine.hint,
-                        leading = { RadioButton(selected = selected, onClick = { s = s.copy(asrEngine = engine) }) },
-                        trailing = { AsrStatus(engine, s, vm, testResults[key]) },
-                        onClick = { s = s.copy(asrEngine = engine) },
+                        subtitleMaxLines = if (selected) Int.MAX_VALUE else 2,
+                        leading = { RadioButton(selected = selected, onClick = { s = s.copy(asrEngine = engine); collapsed -= key }) },
+                        trailing = { Row(verticalAlignment = Alignment.CenterVertically) { AsrStatus(engine, s, vm, testResults[key]); FoldArrow(selected, key in collapsed) } },
+                        onClick = { if (selected) collapsed = collapsed.toggle(key) else { s = s.copy(asrEngine = engine); collapsed -= key } },
                     )
-                    AnimatedVisibility(selected) {
+                    AnimatedVisibility(selected && key !in collapsed) {
                         ConfigBlock {
                             if (engine == AsrEngine.LOCAL) {
                                 LocalModels(s, vm) { s = it }
                             } else {
                                 engine.fields.forEach { f ->
-                                    ConfigField(
-                                        value = s.asrConfigs[engine]?.get(f.key) ?: "",
-                                        onChange = { s = s.withAsrValue(engine, f.key, it) },
-                                        label = f.label,
-                                        placeholder = f.placeholder.ifEmpty { f.default },
-                                        secret = f.secret,
-                                    )
+                                    if (f.key == "model" && engine in ASR_MODEL_LISTS) {
+                                        val apiKey = s.asrValue(engine, "apiKey")
+                                        val endpoint = s.asrValue(engine, if (engine == AsrEngine.GEMINI) "endpoint" else "baseUrl")
+                                        ModelField(
+                                            s.asrConfigs[engine]?.get(f.key) ?: "", { s = s.withAsrValue(engine, f.key, it) },
+                                            f.placeholder.ifEmpty { f.default },
+                                            listKey = "${engine.name}|$endpoint|$apiKey",
+                                            fetch = { ModelList.fetchAsr(engine, apiKey, endpoint) },
+                                            label = f.label,
+                                        )
+                                    } else {
+                                        ConfigField(
+                                            value = s.asrConfigs[engine]?.get(f.key) ?: "",
+                                            onChange = { s = s.withAsrValue(engine, f.key, it) },
+                                            label = f.label,
+                                            placeholder = f.placeholder.ifEmpty { f.default },
+                                            secret = f.secret,
+                                        )
+                                    }
                                 }
                                 TestRow(testing[key] == true, testResults[key]) { runTest(key) { vm.testAsr(s) } }
                             }
@@ -308,11 +339,12 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     ListRow(
                         title = p.label,
                         subtitle = PROVIDER_HINTS[p],
-                        leading = { RadioButton(selected = selected, onClick = { s = s.copy(provider = p) }) },
-                        trailing = { ProviderStatus(p, s, testResults[key]) },
-                        onClick = { s = s.copy(provider = p) },
+                        subtitleMaxLines = if (selected) Int.MAX_VALUE else 2,
+                        leading = { RadioButton(selected = selected, onClick = { s = s.copy(provider = p); collapsed -= key }) },
+                        trailing = { Row(verticalAlignment = Alignment.CenterVertically) { ProviderStatus(p, s, testResults[key]); FoldArrow(selected, key in collapsed) } },
+                        onClick = { if (selected) collapsed = collapsed.toggle(key) else { s = s.copy(provider = p); collapsed -= key } },
                     )
-                    AnimatedVisibility(selected) {
+                    AnimatedVisibility(selected && key !in collapsed) {
                         ConfigBlock {
                             val raw = s.providerConfigs[p] ?: ProviderConfig()
                             if (p.editableBaseUrl) {
@@ -337,7 +369,11 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                                     if (p.needsApiKey) "API Key" else "API Key（可不填）", "", secret = true,
                                 )
                                 val cfg = s.configOf(p)
-                                ModelField(
+                                // Azure 机器翻译没有模型，这一栏存的是资源区域
+                                if (p == Provider.AZURE_TRANSLATOR) ConfigField(
+                                    raw.model, { s = s.withConfig(p, raw.copy(model = it)) }, "区域（Region）",
+                                    p.defaultModel.ifEmpty { "eastasia；全局资源填 global" },
+                                ) else ModelField(
                                     raw.model, { s = s.withConfig(p, raw.copy(model = it)) },
                                     p.defaultModel.ifEmpty { if (p == Provider.LOCAL) "例如 qwen3:4b、gemma3:4b" else "例如 qwen-plus、moonshot-v1-8k" },
                                     // Key 或地址变了，之前拉到的列表作废
@@ -593,16 +629,20 @@ private fun TtsSettings(s: AppSettings, vm: MainViewModel, onChange: (AppSetting
             trailing = { Switch(checked = s.ttsEnabled, onCheckedChange = { onChange(s.copy(ttsEnabled = it)) }) },
             onClick = { onChange(s.copy(ttsEnabled = !s.ttsEnabled)) },
         )
+        var ttsCollapsed by remember { mutableStateOf(false) }
         TtsEngineType.entries.forEach { engine ->
             CardDivider(inset = 64.dp)
             val selected = s.ttsEngine == engine
+            val hasConfig = engine == TtsEngineType.AZURE
             ListRow(
                 title = engine.label,
                 subtitle = engine.hint,
-                leading = { RadioButton(selected = selected, onClick = { onChange(s.copy(ttsEngine = engine)) }) },
-                onClick = { onChange(s.copy(ttsEngine = engine)) },
+                subtitleMaxLines = if (selected) Int.MAX_VALUE else 2,
+                leading = { RadioButton(selected = selected, onClick = { onChange(s.copy(ttsEngine = engine)); ttsCollapsed = false }) },
+                trailing = if (hasConfig) ({ FoldArrow(selected, ttsCollapsed) }) else null,
+                onClick = { if (selected) ttsCollapsed = !ttsCollapsed else { onChange(s.copy(ttsEngine = engine)); ttsCollapsed = false } },
             )
-            AnimatedVisibility(selected && engine == TtsEngineType.AZURE) {
+            AnimatedVisibility(selected && hasConfig && !ttsCollapsed) {
                 ConfigBlock {
                     val asrKey = s.asrConfigs[AsrEngine.AZURE]?.get("key").orEmpty()
                     ConfigField(
@@ -677,6 +717,7 @@ private fun ModelField(
     placeholder: String,
     listKey: String,
     fetch: suspend () -> List<String>,
+    label: String = "模型",
 ) {
     var models by remember(listKey) { mutableStateOf<List<String>?>(null) }
     var loading by remember(listKey) { mutableStateOf(false) }
@@ -700,7 +741,7 @@ private fun ModelField(
     Box {
         OutlinedTextField(
             value = value, onValueChange = onChange,
-            label = { Text("模型") },
+            label = { Text(label) },
             placeholder = { if (placeholder.isNotEmpty()) Text(placeholder) },
             singleLine = true,
             trailingIcon = {

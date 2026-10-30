@@ -40,7 +40,7 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
         ),
     ),
     VOLC(
-        "火山豆包", "字节跳动豆包语音，中文影视口语效果好；新账号开通「流式语音识别 2.0」即可",
+        "火山豆包", "中文影视口语效果好；新账号开通「流式语音识别 2.0」即可",
         listOf(
             AsrField("appKey", "API Key（旧版控制台填 APP ID）", secret = true),
             AsrField("accessKey", "Access Token（仅旧版控制台需要）", secret = true, required = false),
@@ -65,7 +65,7 @@ enum class AsrEngine(val label: String, val hint: String, val fields: List<AsrFi
         ),
     ),
     GEMINI(
-        "Gemini", "Google Gemini：一次请求同时识别和翻译成中文，出字幕最快，多语种强（需要能访问 Google）",
+        "Gemini", "一次请求同时识别和翻译，出字幕最快，多语种强（需能访问 Google）",
         listOf(
             AsrField("apiKey", "Gemini API Key", secret = true),
             AsrField("model", "模型", default = GeminiTranscriber.DEFAULT_MODEL),
