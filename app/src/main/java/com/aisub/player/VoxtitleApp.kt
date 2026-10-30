@@ -10,6 +10,7 @@ import com.aisub.player.remote.cloud.CloudRegistry
 class VoxtitleApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        instance = this
         // 网盘客户端刷新 token 后写回存储；播放器按 ID 找账号
         val store = AppStore(this)
         CloudRegistry.serverLookup = { id -> store.servers().firstOrNull { it.id == id } }
@@ -19,5 +20,11 @@ class VoxtitleApp : Application() {
             override fun onAvailable(network: Network) = Endpoints.invalidate()
             override fun onLost(network: Network) = Endpoints.invalidate()
         })
+    }
+
+    companion object {
+        /** 设置里创建翻译服务时用（离线翻译要绑定另一个 App 的服务） */
+        lateinit var instance: VoxtitleApp
+            private set
     }
 }

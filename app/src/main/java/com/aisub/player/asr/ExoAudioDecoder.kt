@@ -38,6 +38,12 @@ class ExoAudioDecoder(
     private val context: Context,
     private val uri: Uri,
     private val dataSourceFactory: DataSource.Factory,
+    /** 要解码的条目；直播要带上和屏幕播放器一样的类型（地址看不出是 HLS 时） */
+    private val mediaItem: MediaItem = MediaItem.fromUri(uri),
+    /** 直播识别：选最低码率，只为了声音，少占流量 */
+    private val lowestBitrate: Boolean = false,
+    /** 解码线程上每 300 毫秒回调一次：解码用的播放器、已交出的音频长度（毫秒）。用来对齐直播时间轴 */
+    private val onTick: ((Player, Long) -> Unit)? = null,
 ) {
     fun decode(
         targetRate: Int = 16_000,
@@ -65,6 +71,7 @@ class ExoAudioDecoder(
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                .setForceLowestBitrate(lowestBitrate)
                 .build()
             player.addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(state: Int) {
@@ -77,7 +84,7 @@ class ExoAudioDecoder(
                 }
             })
             player.volume = 0f
-            player.setMediaItem(MediaItem.fromUri(uri), startMs)
+            if (startMs > 0) player.setMediaItem(mediaItem, startMs) else player.setMediaItem(mediaItem)
             player.prepare()
             player.play()
         }
@@ -88,6 +95,7 @@ class ExoAudioDecoder(
                 handler.post {
                     val d = player.duration
                     if (d > 0) onProgress((sink.writtenUs / 1000f / d).coerceIn(0f, 1f))
+                    onTick?.invoke(player, sink.emitted * 1000L / targetRate)
                 }
             }
         } finally {
@@ -116,6 +124,10 @@ class ExoAudioDecoder(
 
         @Volatile
         var writtenUs = 0L
+
+        /** 交出去的样本数（目标采样率），拖动、重置时也不清零 */
+        @Volatile
+        var emitted = 0L
 
         override fun setListener(listener: AudioSink.Listener) {
             this.listener = listener
@@ -152,7 +164,10 @@ class ExoAudioDecoder(
             framesWritten += mono.size
             writtenUs = framesToUs(framesWritten) // 只算音频长度，不含播放器内部的时间偏移
             val out = resampler?.process(mono) ?: mono
-            if (out.isNotEmpty()) onChunk(out)
+            if (out.isNotEmpty()) {
+                onChunk(out)
+                emitted += out.size
+            }
             return true
         }
 
