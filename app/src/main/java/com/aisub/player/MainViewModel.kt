@@ -2140,7 +2140,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 直播字幕加进列表：按开始时间排好，和后一句重叠的前一句提前结束（同一时间只显示一句） */
-    private fun addCaptionCues(new: List<Cue>, status: String) {
+    private fun addCaptionCues(cues: List<Cue>, status: String) {
+        // 电视台的隐藏式字幕多是全大写：改成普通写法，读起来不费劲
+        val new = cues.map { c -> if (com.aisub.player.subtitle.CueSplitter.isAllCaps(c.text)) c.copy(text = com.aisub.player.subtitle.CueSplitter.sentenceCase(c.text)) else c }
         _state.update { s ->
             val all = (s.cues + new).sortedBy { it.startMs }
             val trimmed = all.mapIndexed { i, c ->

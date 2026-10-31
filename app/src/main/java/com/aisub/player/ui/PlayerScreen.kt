@@ -123,6 +123,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -271,6 +272,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     var locked by remember { mutableStateOf(false) }
     var interactions by remember { mutableIntStateOf(0) }
     var resizeIndex by remember { mutableIntStateOf(0) }
+    /** 画面在播放区域里的下沿和播放区域的高度（像素）；竖屏放横视频时下面有一大块黑边，字幕放到画面正下方 */
+    var videoBottomPx by remember { mutableIntStateOf(0) }
+    var viewHeightPx by remember { mutableIntStateOf(0) }
     var indicator by remember { mutableStateOf<Pair<ImageVector?, String>?>(null) }
     var speed by remember { mutableFloatStateOf(player.playbackParameters.speed) }
     var audioOnly by remember { mutableStateOf(false) }
@@ -479,6 +483,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     useController = false
                     // 遮罩透明：画面背景本来就是黑色；VLC 内核不一定按 ExoPlayer 的方式通知首帧
                     setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    findViewById<android.view.View>(androidx.media3.ui.R.id.exo_content_frame)
+                        ?.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, _ ->
+                            videoBottomPx = bottom
+                            viewHeightPx = height
+                        }
                 }.also { playerView = it }
             },
             update = {
@@ -507,8 +516,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         }
 
         // ---- 字幕（音乐有歌词时不显示，避免和歌词重复） ----
+        // 画面下面的黑边够放字幕：放在画面正下方，不用贴着屏幕最底下（离画面太远，看字幕要来回移视线）
+        val density = LocalDensity.current
+        val below = with(density) {
+            val bar = (viewHeightPx - videoBottomPx).toDp()
+            videoBottomPx.toDp().takeIf { resizeIndex == 0 && videoBottomPx > 0 && bar >= 100.dp && !audioOnly && !PipState.inPip }
+        }
         if (!musicMode) SubtitleOverlay(
-            cue = current, settings = state.settings,
+            cue = current, settings = state.settings, below = below?.plus(12.dp),
             // 暂停时底栏多一行逐帧、截图按钮，字幕再往上让一些
             bottomPadding = when {
                 !controls || PipState.inPip -> 0
@@ -1374,14 +1389,17 @@ private fun TaskChip(state: UiState, onClick: () -> Unit, modifier: Modifier = M
 
 /** 画面上的 AI 字幕。译文行、原文行的样式和位置见 [StyledSubtitleLines]。 */
 @Composable
-private fun BoxScope.SubtitleOverlay(cue: Cue?, settings: AppSettings, bottomPadding: Dp, topPadding: Dp) {
+private fun BoxScope.SubtitleOverlay(cue: Cue?, settings: AppSettings, bottomPadding: Dp, topPadding: Dp, below: Dp? = null) {
     if (cue == null || !settings.showAiSubtitles) return
     // 原文已是目标语言时译文和原文相同，只显示一行
     val lines = if (cue.translation == cue.text) listOf(cue.text to true) else buildList {
         if (settings.showTranslation && cue.translation != null) add(cue.translation to true)
         if (settings.showOriginal || cue.translation == null) add(cue.text to false)
     }
-    StyledSubtitleLines(lines, settings, bottomPadding, topPadding)
+    // 放在画面正下方时两行叠在一起（不再分上下）
+    if (below != null) Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(top = below)) {
+        StyledSubtitleLines(lines, settings.copy(topLineFromTop = -1), 0.dp)
+    } else StyledSubtitleLines(lines, settings, bottomPadding, topPadding)
 }
 
 /**
