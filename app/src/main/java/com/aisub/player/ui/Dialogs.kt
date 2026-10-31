@@ -138,6 +138,23 @@ fun ServerDialog(initial: Server, hint: String? = null, onDismiss: () -> Unit, o
                     s.rootPath, { s = s.copy(rootPath = it) }, label = { Text("起始目录") },
                     placeholder = { Text("/") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
                 )
+                // 电视：地址、密码用手机输入
+                PhoneInputButton(
+                    listOf(
+                        PhoneField("name", "名称", s.name),
+                        PhoneField("url", "地址", s.baseUrl),
+                        PhoneField("lan", "内网地址（可不填）", s.lanUrl),
+                        PhoneField("user", "用户名（可不填）", s.username),
+                        PhoneField("pass", "密码", s.password, secret = true),
+                        PhoneField("root", "起始目录", s.rootPath),
+                    ),
+                    title = s.type.label,
+                ) { v ->
+                    s = s.copy(
+                        name = v["name"] ?: s.name, baseUrl = v["url"] ?: s.baseUrl, lanUrl = v["lan"] ?: s.lanUrl,
+                        username = v["user"] ?: s.username, password = v["pass"] ?: s.password, rootPath = v["root"] ?: s.rootPath,
+                    )
+                }
             }
         },
         confirmButton = {
