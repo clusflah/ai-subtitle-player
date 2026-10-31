@@ -192,8 +192,22 @@ class PlaybackFeatures(
         historyThumbJob?.cancel()
         historyThumbJob = scope.launch {
             val bmp = withContext(grabDispatcher) { if (entry == e) grabber()?.frameAt(pos, maxWidth = 480) else null } ?: return@launch
+            // 黑场（或者网盘视频取帧失败给的全黑图）不存，留着以前的或者显示图标，别让卡片一片黑
+            if (isMostlyBlack(bmp)) return@launch
             withContext(Dispatchers.IO) { runCatching { com.aisub.player.ui.HistoryThumbs.save(app, e.uri, bmp) } }
         }
+    }
+
+    /** 抽一些点看平均亮度：几乎全黑就算黑画面 */
+    private fun isMostlyBlack(bmp: android.graphics.Bitmap): Boolean {
+        var sum = 0L
+        var n = 0
+        for (yi in 1..9) for (xi in 1..16) {
+            val c = bmp.getPixel(bmp.width * xi / 17, bmp.height * yi / 10)
+            sum += (android.graphics.Color.red(c) * 3 + android.graphics.Color.green(c) * 6 + android.graphics.Color.blue(c)) / 10
+            n++
+        }
+        return sum / n < 16
     }
 
     // ---------------- 1. 缩略图与片段 ----------------
