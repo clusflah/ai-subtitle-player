@@ -666,6 +666,9 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             ) {
                 TtsSettings(s, vm) { s = it }
             }
+
+            // ---------------- 备份与迁移 ----------------
+            BackupCard(flush = { if (s != vm.state.value.settings) vm.updateSettings(s) })
         }
     }
 }
