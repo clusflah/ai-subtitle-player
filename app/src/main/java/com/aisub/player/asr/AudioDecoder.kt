@@ -41,20 +41,35 @@ class AudioDecoder(
         onProgress: (Float) -> Unit,
         onChunk: (FloatArray) -> Unit,
     ) {
+        // 网盘直接走 ExoPlayer：系统的读取遇到 403 等会每 3 秒重试、连试十次（半分钟），
+        // 短时间反复连网盘容易被拒（115 会一直 403）；DTS 等系统解不了的格式最后还是要走 ExoPlayer
+        if (fallbackDataSource != null && CloudRegistry.isCloud(uri.toString())) {
+            return decodeWithExo(fallbackDataSource, targetRate, startMs, isActive, onProgress, onChunk)
+        }
         try {
             decodeWithMediaCodec(targetRate, startMs, isActive, onProgress, onChunk)
         } catch (e: Exception) {
             // 系统解析器有时会直接丢掉自己不支持的音轨（例如 MKV 里的 AC3），表现为"没有音轨"，
             // 所以这两种情况都再用 ExoPlayer + FFmpeg 试一次
             if (e !is UnsupportedBySystem && e !is NoAudioTrackException) throw e
-            val factory = fallbackDataSource ?: throw e
-            var gotAudio = false
-            ExoAudioDecoder(context, uri, factory).decode(targetRate, startMs, isActive, onProgress) { chunk ->
-                gotAudio = true
-                onChunk(chunk)
-            }
-            if (!gotAudio && isActive()) throw NoAudioTrackException()
+            decodeWithExo(fallbackDataSource ?: throw e, targetRate, startMs, isActive, onProgress, onChunk)
         }
+    }
+
+    private fun decodeWithExo(
+        factory: androidx.media3.datasource.DataSource.Factory,
+        targetRate: Int,
+        startMs: Long,
+        isActive: () -> Boolean,
+        onProgress: (Float) -> Unit,
+        onChunk: (FloatArray) -> Unit,
+    ) {
+        var gotAudio = false
+        ExoAudioDecoder(context, uri, factory).decode(targetRate, startMs, isActive, onProgress) { chunk ->
+            gotAudio = true
+            onChunk(chunk)
+        }
+        if (!gotAudio && isActive()) throw NoAudioTrackException()
     }
 
     private fun decodeWithMediaCodec(

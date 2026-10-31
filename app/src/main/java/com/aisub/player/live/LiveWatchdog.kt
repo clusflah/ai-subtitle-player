@@ -29,7 +29,7 @@ class LiveWatchdog(
 
     fun hint(now: Long): String? = when {
         firstAudio < 0 && now - startedAt > NO_AUDIO_MS ->
-            "${(now - startedAt) / 1000} 秒还没收到直播的声音。直播源可能不允许同时连两路，或者网络太慢；可以换个频道，或者关掉实时字幕再打开试试"
+            "${(now - startedAt) / 1000} 秒还没收到直播的声音。实时字幕要另开一路连接，直播源可能限制同时连接数，或者网络太慢；可以换个频道、关掉实时字幕再打开试试，有自带字幕时改用「翻译自带字幕」"
         firstAudio >= 0 && now - lastAudio > AUDIO_GAP_MS -> "直播的声音断了，正在重连…"
         lastCue < 0 && firstAudio >= 0 && now - firstAudio > NO_CUE_MS -> buildString {
             append("已经听了 ${(now - firstAudio) / 1000} 秒，还没识别出一句话。可能这段没人说话（音乐、广告、比赛画面）")

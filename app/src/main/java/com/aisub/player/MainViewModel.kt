@@ -10,6 +10,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
 import com.aisub.player.live.LiveAnchors
+import com.aisub.player.live.LiveCaptions
 import com.aisub.player.live.LiveClock
 import com.aisub.player.live.LiveTimeline
 import androidx.media3.common.MediaItem
@@ -95,6 +96,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -148,6 +150,8 @@ data class UiState(
     val translateInfo: String? = null,
     /** 直播实时字幕一直出不来时的说明（显示在字幕的位置）；正常时为 null */
     val liveHint: String? = null,
+    /** 正在边播边翻译直播自带的隐藏式字幕（见 [MainViewModel.startLiveCaptions]）；这时画面上不再原样显示自带字幕 */
+    val liveCaptions: Boolean = false,
 ) {
     /** 当前视频识别时用的设置：语音语言换成这个视频单独选的 */
     val asrSettings: AppSettings get() = videoAsrLanguage?.let { settings.copy(asrLanguage = it) } ?: settings
@@ -358,6 +362,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var inlineTranslate = false
     private var roleJob: Job? = null
     private var embeddedJob: Job? = null
+    private var captionJob: Job? = null
     /** 读出的自带字幕轨载入后一定翻译（播放页的「翻译成…字幕」按钮），不看自动翻译设置 */
     private var translateEmbedded = false
     private var linkJob: Job? = null
@@ -431,7 +436,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (autoSwitchLiveToVlc(error)) return
             // 记住要用兼容模式的频道，兼容模式也打不开：忘掉，下次先用默认内核试
             _state.value.current?.takeIf { usingVlc && it.isLive }?.let { forgetVlcChannel(it.uri) }
-            _state.update { it.copy(playbackError = describePlaybackError(error)) }
+            // 识别另开了一路连接：直播源、网盘限制同时连接数时，可能就是它把画面挤断了
+            val extra = _state.value.takeIf { s -> s.transcribing && s.current?.let { it.isLive || isRemote(it) } == true }
+                ?.let { s -> "\n\n$CONCURRENCY_HINT。可以先停止识别再播放" + if (s.current?.isLive == true) "，有自带字幕时改用「翻译自带字幕」" else "" }
+            _state.update { it.copy(playbackError = describePlaybackError(error) + extra.orEmpty()) }
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -918,6 +926,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         translateJob?.cancel()
+        // 手动改用语音识别：停掉直播自带字幕的翻译
+        captionJob?.cancel()
         if (!keep || live) {
             coverage.clear()
             coverageActive = !live
@@ -1048,11 +1058,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 persistCues(uri)
                 // 断开前识别了不少：不算连续失败
                 if (coverage.coveredMs(duration) > coveredBefore + 30_000) readFailures = 0
-                if (++readFailures > REMOTE_READ_RETRIES) throw e
+                val cloud = CloudRegistry.isCloud(uri.toString())
+                // 播放正常、识别这一路被拒（115 等网盘限制同时连接时是 403，换新直链也一样）：多等一会儿再试，别一直连
+                val refused = e.httpCode in REFUSED_CODES
+                if (++readFailures > REMOTE_READ_RETRIES) {
+                    val why = if (refused) "网盘拒绝了识别另开的连接（HTTP ${e.httpCode}），播放那一路不受影响。" else "${e.message}\n"
+                    throw com.aisub.player.asr.SourceReadException("$why$CONCURRENCY_HINT。可以先下载到手机再识别", e)
+                }
                 android.util.Log.w("Voxtitle", "识别时读取视频中断（第 $readFailures 次），重连：${e.message}")
-                if (CloudRegistry.isCloud(uri.toString())) CloudRegistry.invalidate(uri.toString())
-                _state.update { it.copy(status = "读取视频中断，正在重连…") }
-                delay(2_000L * readFailures)
+                if (cloud) CloudRegistry.invalidate(uri.toString())
+                val wait = if (refused) 10_000L * readFailures else 2_000L * readFailures
+                val reason = e.httpCode?.let { "HTTP $it" + if (refused) "，服务器拒绝了识别另开的连接" else "" } ?: "网络断了或太慢"
+                _state.update { it.copy(status = "读取视频中断（$reason），${wait / 1000} 秒后重连…") }
+                delay(wait)
                 continue
             }
             readFailures = 0
@@ -1304,11 +1322,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             delay(2000)
-            if (_state.value.cues.isEmpty() && lastError != null) throw java.io.IOException("直播的声音连不上：$lastError")
+            if (_state.value.cues.isEmpty() && lastError != null) throw java.io.IOException("直播的声音连不上：$lastError。$CONCURRENCY_HINT；直播有自带字幕时可改用「翻译自带字幕」，不用另开连接")
             _state.update { it.copy(status = "直播字幕已停止：直播的声音断了" + (lastError?.let { "（$it）" } ?: "")) }
         } finally {
             shower.cancel()
-            _state.update { it.copy(liveClock = null, liveHint = null) }
+            // 时钟留着：已有字幕的时间是按它算的，清掉后会按播放器的窗口位置比，旧字幕反复冒出来。
+            // 换台、重新识别、改看自带字幕时各自会重设
+            _state.update { it.copy(liveHint = null) }
             if (liveDelayAdded > 0) restoreLivePlayback(entry)
         }
     }
@@ -1598,7 +1618,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // 直播：画面已经播过去的不翻了
             val pending = snapshot.cues.filter { it.translation == null && it.id !in inFlight && (!live || it.endMs >= position - 2_000) }
             if (pending.isEmpty()) {
-                if (running > 0 || snapshot.transcribing) {
+                if (running > 0 || snapshot.transcribing || snapshot.liveCaptions) {
                     delay(250)
                     continue
                 }
@@ -1682,6 +1702,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         transcribeJob?.cancel()
         translateJob?.cancel()
         embeddedJob?.cancel()
+        captionJob?.cancel()
     }
 
     /** 重新翻译某一句（带前后文）。 */
@@ -1820,6 +1841,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * @param translate 载入后一定翻译，不看自动翻译设置
      */
     fun extractEmbeddedSubtitles(translate: Boolean = false) {
+        // 直播读不完整个文件：改成边播边翻译
+        if (_state.value.current?.isLive == true) return startLiveCaptions()
         val uri = _state.value.videoUri ?: return
         if (embeddedJob?.isActive == true) return
         translateEmbedded = translate
@@ -1846,6 +1869,83 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 _state.update { it.copy(extractingEmbedded = false) }
             }
+        }
+    }
+
+    /**
+     * 直播自带的隐藏式字幕（CEA-608 等）：屏幕播放器每刷新一次字幕，就拼进 [LiveCaptions]，
+     * 凑成整句后加进 AI 字幕、交给实时翻译。字幕和画面本来就同步，时间直接用屏幕播放器的位置（[LiveClock.Stream]）。
+     * 一句说完才出现（原文先出，译文随后补上），这期间画面上不再原样显示自带字幕，免得同一句出现两遍。
+     * 想改用语音识别时点「语音识别生成字幕」，会先停掉这里。
+     */
+    fun startLiveCaptions() {
+        if (_state.value.current?.isLive != true) return
+        if (usingVlc) {
+            _state.update { it.copy(error = VLC_NO_SUBTITLES) }
+            return
+        }
+        val p = exoPlayer
+        val texts = p.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
+        if (texts.isEmpty()) {
+            _state.update { it.copy(error = "这个直播没有自带字幕，可以用语音识别生成字幕") }
+            return
+        }
+        // 正在进行的语音识别、翻译：停掉，等它们真正收尾（收尾时会改状态）后再接手
+        val previous = listOfNotNull(transcribeJob, translateJob, embeddedJob, captionJob)
+        cancelAll()
+        // 自带字幕关着（选了「不显示」）时打开第一条，不然收不到字幕
+        if (C.TRACK_TYPE_TEXT in p.trackSelectionParameters.disabledTrackTypes || texts.none { it.isSelected }) {
+            extras.selectTrack(C.TRACK_TYPE_TEXT, texts[0], 0)
+        }
+        // 编号接着往后排：还没回来的旧翻译按编号找字幕，不能和新字幕撞号
+        fun takeOver() = _state.update {
+            it.copy(
+                cues = emptyList(), liveClock = LiveClock.Stream, liveHint = null, liveCaptions = true,
+                asrInfo = "字幕：直播自带", translateInfo = null, status = "正在读取直播自带的字幕…（一句说完才出现）",
+                error = null, failedTask = null,
+            )
+        }
+        takeOver()
+        val assembler = LiveCaptions()
+        val listener = object : Player.Listener {
+            override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
+                // 各行按在屏幕上的位置从上到下排（隐藏式字幕每行一个 Cue）
+                val lines = cueGroup.cues
+                    .sortedBy { if (it.line == androidx.media3.common.text.Cue.DIMEN_UNSET) 0f else it.line }
+                    .mapNotNull { it.text?.toString() }
+                    .flatMap { it.split('\n') }
+                publishCaptions(assembler.update(lines, android.os.SystemClock.elapsedRealtime()))
+            }
+        }
+        captionJob = viewModelScope.launch {
+            try {
+                previous.joinAll()
+                takeOver()
+                p.addListener(listener)
+                // 翻译没设置好时也调用，好提示出原因；原文照样显示
+                startTranslation()
+                while (true) {
+                    delay(500)
+                    publishCaptions(assembler.tick(android.os.SystemClock.elapsedRealtime()))
+                }
+            } finally {
+                p.removeListener(listener)
+                // 被新开的一次顶掉时不要把它的状态清掉；时钟留着，已有字幕按它算时间（见 runLive 的收尾）
+                if (captionJob?.isActive != true) {
+                    _state.update { it.copy(liveCaptions = false) }
+                }
+            }
+        }
+    }
+
+    /** 拼好的整句上屏：从现在开始显示，上一句显示到这一句出现为止 */
+    private fun publishCaptions(sentences: List<String>) {
+        if (sentences.isEmpty() || !_state.value.liveCaptions) return
+        val start = subtitleTime()
+        val cue = Cue(nextCueId++, start, start + LIVE_CAPTION_MAX_MS, sentences.joinToString(" "))
+        _state.update { s ->
+            val earlier = s.cues.map { if (it.endMs > start) it.copy(endMs = maxOf(it.startMs, start)) else it }
+            s.copy(cues = (earlier + cue).takeLast(LIVE_KEEP_CUES), status = "实时翻译直播自带字幕")
         }
     }
 
@@ -2169,6 +2269,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private const val LIVE_FIRST_CHUNK_SEC = 4
         private const val LIVE_CHUNK_SEC = 6
         private const val LIVE_KEEP_CUES = 200
+
+        /** 识别另开连接被服务器拒绝（并发限制、风控）时的状态码 */
+        private val REFUSED_CODES = setOf(403, 429, 503)
+
+        /** 直播自带字幕拼成的一句，下一句没来时最多显示多久 */
+        private const val LIVE_CAPTION_MAX_MS = 8_000L
         private const val LIVE_MAX_BACKLOG_MS = 8_000L
 
         /** 直播声音这么久没有新的就断开重连；刚连上时等第一段声音放宽一些 */
@@ -2176,6 +2282,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private const val LIVE_AUDIO_FIRST_MS = 25_000L
 
         /** 兼容模式下直播不能出字幕时给的提示（播放页也用） */
+        /** 识别要另开一路连接读视频（直播、网盘、NAS）：源有并发限制时会出问题 */
+        const val CONCURRENCY_HINT = "语音识别要另开一路连接读取视频，直播源、网盘等限制同时连接数时，可能连不上，或把正在播放的画面挤断"
+
         const val VLC_NO_SUBTITLES = "兼容模式（VLC 内核）下字幕无法工作"
         private const val LIVE_MIN_CUE_MS = 1_200L
 

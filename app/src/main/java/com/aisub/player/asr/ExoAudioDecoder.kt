@@ -27,7 +27,13 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /** 读取视频数据失败（不是格式解不了）：网络、直链过期这类，重连可能就好了 */
-class SourceReadException(message: String, cause: Throwable) : IOException(message, cause)
+class SourceReadException(message: String, cause: Throwable) : IOException(message, cause) {
+    /** 服务器返回的 HTTP 状态码（403 等）；不是 HTTP 错误时为 null */
+    val httpCode: Int?
+        get() = generateSequence(cause) { it.cause }
+            .filterIsInstance<androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException>()
+            .firstOrNull()?.responseCode
+}
 
 /**
  * 备用音频解码：用一个不出声的 ExoPlayer（带 FFmpeg 扩展）把音轨解码成 PCM。
