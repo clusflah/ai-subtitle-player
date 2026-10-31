@@ -1957,7 +1957,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // 自带字幕关着（选了「不显示」）时打开第一条，不然收不到字幕
         val chosen = texts.firstOrNull { it.isSelected }?.takeIf { C.TRACK_TYPE_TEXT !in p.trackSelectionParameters.disabledTrackTypes }
             ?: texts[0].also { extras.selectTrack(C.TRACK_TYPE_TEXT, it, 0) }
-        val language = chosen.getTrackFormat(0).language
+        val format = chosen.getTrackFormat(0)
+        // 听写的隐藏式字幕（CEA-608 / 708）比说话晚几秒，要往前挪；WebVTT 等事先对好时间的不用
+        val leadMs = if (isDictatedCaptions(format)) LIVE_CAPTION_LEAD_MS else 0L
+        val sameTrack: (androidx.media3.common.Format) -> Boolean = { f ->
+            f.language == format.language && f.label == format.label && captionCodec(f) == captionCodec(format)
+        }
         // 编号接着往后排：还没回来的旧翻译按编号找字幕，不能和新字幕撞号
         fun takeOver() = _state.update {
             it.copy(
@@ -1990,7 +1995,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 startTranslation()
                 launch(Dispatchers.IO) {
                     try {
-                        readCaptionsAhead(entry, language, ahead) { isActive && aheadUsable.get() }
+                        readCaptionsAhead(entry, sameTrack, ahead) { isActive && aheadUsable.get() }
                     } catch (e: Exception) {
                         if (!isActive) throw e
                         android.util.Log.w("Voxtitle", "提前读直播字幕失败，改读屏幕上的字幕：${e.message}")
@@ -1998,7 +2003,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         aheadUsable.set(false)
                     }
                 }
-                val ps = AheadPublishState()
+                val ps = AheadPublishState(leadMs)
                 while (true) {
                     delay(300)
                     val now = android.os.SystemClock.elapsedRealtime()
@@ -2029,7 +2034,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private data class AheadCaption(val text: String, val start: LiveKey, val end: LiveKey)
 
     /** 提前读的字幕上屏时要记住的东西（只在主线程用） */
-    private class AheadPublishState {
+    private class AheadPublishState(
+        /** 字幕整体往前挪多少（听写字幕比说话晚） */
+        val leadMs: Long,
+    ) {
         /** 连续几批都换算不了时间 */
         var unmapped = 0
     }
@@ -2038,7 +2046,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * 另开一路在直播最新处读自带字幕，拼成整句放进 [out]。阻塞调用，断了重连，[isActive] 返回 false 时结束。
      * 解码线程上：字幕变化时、每 300 毫秒各拼一次，句子的起点记成这句第一次出现字时的直播内容位置。
      */
-    private fun readCaptionsAhead(entry: MediaEntry, language: String?, out: java.util.Queue<AheadCaption>, isActive: () -> Boolean) {
+    private fun readCaptionsAhead(
+        entry: MediaEntry, track: (androidx.media3.common.Format) -> Boolean, out: java.util.Queue<AheadCaption>, isActive: () -> Boolean,
+    ) {
         var quickEnds = 0
         while (isActive() && quickEnds < 3) {
             val assembler = LiveCaptions()
@@ -2063,10 +2073,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     onCues = { player, cues ->
                         val key = LiveTimeline.keyOf(player)
                         val lines = captionLines(cues)
+                        // 诊断：字幕原样的各行和位置（adb logcat 看 "Voxtitle-cc"），排查拼句拼错
+                        if (lines.isNotEmpty()) android.util.Log.d("Voxtitle-cc", cues.joinToString(" | ") { "${it.line}/${it.lineType}:${it.text}" })
                         if (startKey == null && lines.isNotEmpty()) startKey = key
                         emit(assembler.update(lines, android.os.SystemClock.elapsedRealtime()), key)
                     },
-                    captionLanguage = language,
+                    captionTrack = track,
                 ).decode(isActive = isActive, onProgress = {}, onChunk = {})
             } catch (e: java.io.IOException) {
                 android.util.Log.w("Voxtitle", "提前读直播字幕中断：${e.message}")
@@ -2084,9 +2096,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!_state.value.liveCaptions) return true
         val now = LiveTimeline.periodPosition(exoPlayer)
         val mapped = batch.mapNotNull { c ->
-            // 隐藏式字幕是听写的，比说话晚几秒：往前挪回说话的时候
-            val start = (LiveTimeline.positionOf(c.start, exoPlayer) ?: return@mapNotNull null) - LIVE_CAPTION_LEAD_MS
-            val end = LiveTimeline.positionOf(c.end, exoPlayer)?.minus(LIVE_CAPTION_LEAD_MS) ?: start
+            // 听写的隐藏式字幕比说话晚几秒：往前挪回说话的时候
+            val start = (LiveTimeline.positionOf(c.start, exoPlayer) ?: return@mapNotNull null) - ps.leadMs
+            val end = LiveTimeline.positionOf(c.end, exoPlayer)?.minus(ps.leadMs) ?: start
             Triple(c.text, start, end).takeIf { start in now - 60_000..now + 180_000 }
         }
         if (mapped.isEmpty()) return false
@@ -2481,6 +2493,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         const val LIKED_PLAYLIST = com.aisub.player.media.LIKED_PLAYLIST
     }
 }
+
+/** 字幕轨的原始格式：新版 Media3 解析后 sampleMimeType 统一成 cues，原始格式在 codecs 里 */
+private fun captionCodec(f: androidx.media3.common.Format) = f.codecs ?: f.sampleMimeType
+
+/** 听写的隐藏式字幕（CEA-608 / 708）：字幕员边听边打，比说话晚几秒 */
+private fun isDictatedCaptions(f: androidx.media3.common.Format) = captionCodec(f).orEmpty().let { "cea-608" in it || "cea-708" in it } ||
+    f.sampleMimeType.orEmpty().let { "cea-608" in it || "cea-708" in it }
 
 /** 隐藏式字幕的各行：按在屏幕上的位置从上到下排（每行一个 Cue） */
 private fun captionLines(cues: List<androidx.media3.common.text.Cue>): List<String> = cues

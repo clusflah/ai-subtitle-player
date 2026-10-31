@@ -23,6 +23,7 @@ import androidx.compose.runtime.setValue
 import com.aisub.player.ui.FileDetailScreen
 import com.aisub.player.ui.ImageViewerScreen
 import com.aisub.player.ui.LiveScreen
+import com.aisub.player.ui.WebScreen
 import com.aisub.player.ui.LocalOpenDetail
 import com.aisub.player.ui.LocalTv
 import com.aisub.player.ui.ProvideScreenClass
@@ -145,6 +146,7 @@ class MainActivity : ComponentActivity() {
                         )
                         is Screen.History -> HistoryScreen(lib, screen.music, back, play)
                         Screen.Live -> LiveScreen(back, play)
+                        Screen.Web -> WebScreen(main, back, play)
                         is Screen.LocalFolder -> LocalFolderScreen(
                             lib, screen.path, screen.title, back,
                             openFolder = { path, title -> nav.push(Screen.LocalFolder(path, title)) },

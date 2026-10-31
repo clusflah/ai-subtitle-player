@@ -111,5 +111,11 @@ object LiveHeaders {
         if (headers.isEmpty()) byHost.remove(host) else byHost[host] = headers
     }
 
+    /** 网页里找到的视频地址：带上网页的 Referer、User-Agent、Cookie，不然很多网站会拒绝 */
+    fun put(url: String, headers: Map<String, String>) {
+        val host = Uri.parse(url).host ?: return
+        byHost[host] = headers
+    }
+
     fun headersFor(url: String): Map<String, String> = Uri.parse(url).host?.let { byHost[it] }.orEmpty()
 }
