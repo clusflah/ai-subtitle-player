@@ -12,6 +12,7 @@ import androidx.media3.common.C
 import com.aisub.player.live.LiveAnchors
 import com.aisub.player.live.LiveCaptions
 import com.aisub.player.live.LiveClock
+import com.aisub.player.live.LiveKey
 import com.aisub.player.live.LiveTimeline
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -1378,7 +1379,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             delay(2000)
-            if (_state.value.cues.isEmpty() && lastError != null) throw java.io.IOException("直播的声音连不上：$lastError。$CONCURRENCY_HINT；直播有自带字幕时可改用「翻译自带字幕」，不用另开连接")
+            if (_state.value.cues.isEmpty() && lastError != null) throw java.io.IOException("直播的声音连不上：$lastError。$CONCURRENCY_HINT；直播有自带字幕时可改用「翻译自带字幕」，连不上也能读屏幕上的字幕")
             _state.update { it.copy(status = "直播字幕已停止：直播的声音断了" + (lastError?.let { "（$it）" } ?: "")) }
         } finally {
             shower.cancel()
@@ -1929,13 +1930,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 直播自带的隐藏式字幕（CEA-608 等）：屏幕播放器每刷新一次字幕，就拼进 [LiveCaptions]，
-     * 凑成整句后加进 AI 字幕、交给实时翻译。字幕和画面本来就同步，时间直接用屏幕播放器的位置（[LiveClock.Stream]）。
-     * 一句说完才出现（原文先出，译文随后补上），这期间画面上不再原样显示自带字幕，免得同一句出现两遍。
-     * 想改用语音识别时点「语音识别生成字幕」，会先停掉这里。
+     * 直播自带的隐藏式字幕（CEA-608 等）翻译成目标语言，和画面对齐：
+     * 1. 另开一路不出声的解码（[ExoAudioDecoder]，和语音识别的实时字幕一样），在直播最新处读字幕，
+     *    比屏幕上的画面早十几秒；字幕拼成整句（[LiveCaptions]），记下这句在直播内容里的位置（[LiveKey]）；
+     * 2. 每句换算到屏幕播放器的时间上（[LiveClock.Stream]），提前交给实时翻译，到时候原文、译文一起出现；
+     *    赶不上画面时把画面往回拖一点（[delayLive]）；
+     * 3. 那一路连不上、读不到字幕或者换算不了时间（不是 HLS、也没有绝对时间）时，退回读屏幕播放器自己的字幕：
+     *    一句说完才出现，比画面晚一点。
+     * 这期间画面上不再原样显示自带字幕，免得同一句出现两遍。想改用语音识别时点「语音识别生成字幕」，会先停掉这里。
      */
     fun startLiveCaptions() {
-        if (_state.value.current?.isLive != true) return
+        val entry = _state.value.current?.takeIf { it.isLive } ?: return
         if (usingVlc) {
             _state.update { it.copy(error = VLC_NO_SUBTITLES) }
             return
@@ -1950,58 +1955,168 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val previous = listOfNotNull(transcribeJob, translateJob, embeddedJob, captionJob)
         cancelAll()
         // 自带字幕关着（选了「不显示」）时打开第一条，不然收不到字幕
-        if (C.TRACK_TYPE_TEXT in p.trackSelectionParameters.disabledTrackTypes || texts.none { it.isSelected }) {
-            extras.selectTrack(C.TRACK_TYPE_TEXT, texts[0], 0)
-        }
+        val chosen = texts.firstOrNull { it.isSelected }?.takeIf { C.TRACK_TYPE_TEXT !in p.trackSelectionParameters.disabledTrackTypes }
+            ?: texts[0].also { extras.selectTrack(C.TRACK_TYPE_TEXT, it, 0) }
+        val language = chosen.getTrackFormat(0).language
         // 编号接着往后排：还没回来的旧翻译按编号找字幕，不能和新字幕撞号
         fun takeOver() = _state.update {
             it.copy(
                 cues = emptyList(), liveClock = LiveClock.Stream, liveHint = null, liveCaptions = true,
-                asrInfo = "字幕：直播自带", translateInfo = null, status = "正在读取直播自带的字幕…（一句说完才出现）",
+                asrInfo = "字幕：直播自带", translateInfo = null, status = "正在读取直播自带的字幕…",
                 error = null, failedTask = null,
             )
         }
         takeOver()
-        val assembler = LiveCaptions()
+
+        // 提前读的那一路：拼好的句子和它在直播内容里的起止位置
+        val ahead = java.util.concurrent.ConcurrentLinkedQueue<AheadCaption>()
+        // 那一路读到了字幕，而且时间换算得了：屏幕播放器的字幕就不再用
+        val useAhead = java.util.concurrent.atomic.AtomicBoolean(false)
+        val aheadUsable = java.util.concurrent.atomic.AtomicBoolean(true)
+        val screen = LiveCaptions()
         val listener = object : Player.Listener {
             override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
-                // 各行按在屏幕上的位置从上到下排（隐藏式字幕每行一个 Cue）
-                val lines = cueGroup.cues
-                    .sortedBy { if (it.line == androidx.media3.common.text.Cue.DIMEN_UNSET) 0f else it.line }
-                    .mapNotNull { it.text?.toString() }
-                    .flatMap { it.split('\n') }
-                publishCaptions(assembler.update(lines, android.os.SystemClock.elapsedRealtime()))
+                if (!useAhead.get()) publishCaptions(screen.update(captionLines(cueGroup.cues), android.os.SystemClock.elapsedRealtime()))
             }
         }
         captionJob = viewModelScope.launch {
             try {
                 previous.joinAll()
                 takeOver()
+                liveDelayAdded = 0
+                liveDelayChangedAt = 0
                 p.addListener(listener)
                 // 翻译没设置好时也调用，好提示出原因；原文照样显示
                 startTranslation()
+                launch(Dispatchers.IO) {
+                    try {
+                        readCaptionsAhead(entry, language, ahead) { isActive && aheadUsable.get() }
+                    } catch (e: Exception) {
+                        if (!isActive) throw e
+                        android.util.Log.w("Voxtitle", "提前读直播字幕失败，改读屏幕上的字幕：${e.message}")
+                    } finally {
+                        aheadUsable.set(false)
+                    }
+                }
+                val ps = AheadPublishState()
                 while (true) {
-                    delay(500)
-                    publishCaptions(assembler.tick(android.os.SystemClock.elapsedRealtime()))
+                    delay(300)
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    val batch = generateSequence { ahead.poll() }.toList()
+                    if (batch.isNotEmpty() && aheadUsable.get()) {
+                        if (publishAhead(batch, ps)) {
+                            if (!useAhead.getAndSet(true)) android.util.Log.i("Voxtitle", "直播字幕：改用提前读的字幕，和画面对齐")
+                        } else if (++ps.unmapped >= 3) {
+                            android.util.Log.w("Voxtitle", "直播字幕：提前读的字幕换算不了时间，改读屏幕上的字幕")
+                            aheadUsable.set(false)
+                        }
+                    }
+                    if (!aheadUsable.get()) useAhead.set(false)
+                    if (!useAhead.get()) publishCaptions(screen.tick(now))
                 }
             } finally {
                 p.removeListener(listener)
                 // 被新开的一次顶掉时不要把它的状态清掉；时钟留着，已有字幕按它算时间（见 runLive 的收尾）
                 if (captionJob?.isActive != true) {
                     _state.update { it.copy(liveCaptions = false) }
+                    if (liveDelayAdded > 0 && !_state.value.transcribing) restoreLivePlayback(entry)
                 }
             }
         }
     }
 
-    /** 拼好的整句上屏：从现在开始显示，上一句显示到这一句出现为止 */
+    /** 提前读到的一句直播字幕：起止是直播内容位置 */
+    private data class AheadCaption(val text: String, val start: LiveKey, val end: LiveKey)
+
+    /** 提前读的字幕上屏时要记住的东西（只在主线程用） */
+    private class AheadPublishState {
+        /** 连续几批都换算不了时间 */
+        var unmapped = 0
+    }
+
+    /**
+     * 另开一路在直播最新处读自带字幕，拼成整句放进 [out]。阻塞调用，断了重连，[isActive] 返回 false 时结束。
+     * 解码线程上：字幕变化时、每 300 毫秒各拼一次，句子的起点记成这句第一次出现字时的直播内容位置。
+     */
+    private fun readCaptionsAhead(entry: MediaEntry, language: String?, out: java.util.Queue<AheadCaption>, isActive: () -> Boolean) {
+        var quickEnds = 0
+        while (isActive() && quickEnds < 3) {
+            val assembler = LiveCaptions()
+            var startKey: LiveKey? = null
+            fun emit(sentences: List<String>, key: LiveKey?) {
+                if (key == null || sentences.isEmpty()) return
+                // 一次凑成好几句时，把这段时间平分给它们
+                val from = startKey ?: key
+                val span = if (from.seq == key.seq) key.ms - from.ms else 0L
+                sentences.forEachIndexed { i, s ->
+                    val a = from + span * i / sentences.size
+                    out.add(AheadCaption(s, a, from + span * (i + 1) / sentences.size))
+                }
+                startKey = null
+            }
+            val startedAt = System.currentTimeMillis()
+            try {
+                com.aisub.player.asr.ExoAudioDecoder(
+                    getApplication(), Uri.parse(entry.uri), authDataSourceFactory(getApplication()),
+                    mediaItem = itemOf(entry), lowestBitrate = true,
+                    onTick = { player, _ -> emit(assembler.tick(android.os.SystemClock.elapsedRealtime()), LiveTimeline.keyOf(player)) },
+                    onCues = { player, cues ->
+                        val key = LiveTimeline.keyOf(player)
+                        val lines = captionLines(cues)
+                        if (startKey == null && lines.isNotEmpty()) startKey = key
+                        emit(assembler.update(lines, android.os.SystemClock.elapsedRealtime()), key)
+                    },
+                    captionLanguage = language,
+                ).decode(isActive = isActive, onProgress = {}, onChunk = {})
+            } catch (e: java.io.IOException) {
+                android.util.Log.w("Voxtitle", "提前读直播字幕中断：${e.message}")
+            }
+            if (System.currentTimeMillis() - startedAt < 10_000) quickEnds++ else quickEnds = 0
+            if (isActive()) Thread.sleep(500)
+        }
+    }
+
+    /**
+     * 提前读到的字幕换算到屏幕播放器的时间上，加进字幕列表；赶不上画面时把画面往回拖。
+     * @return 是否换算成功（一句都换算不了说明这个直播流对不上时间）
+     */
+    private fun publishAhead(batch: List<AheadCaption>, ps: AheadPublishState): Boolean {
+        if (!_state.value.liveCaptions) return true
+        val now = LiveTimeline.periodPosition(exoPlayer)
+        val mapped = batch.mapNotNull { c ->
+            val start = LiveTimeline.positionOf(c.start, exoPlayer) ?: return@mapNotNull null
+            val end = LiveTimeline.positionOf(c.end, exoPlayer) ?: start
+            Triple(c.text, start, end).takeIf { start in now - 60_000..now + 180_000 }
+        }
+        if (mapped.isEmpty()) return false
+        ps.unmapped = 0
+        // 字幕得比画面早一点到（留出翻译的时间），赶不上就把画面往回拖
+        val late = mapped.maxOf { now + LIVE_SAFETY_MS - it.second }
+        val after = if (late > 0 && delayLive(late)) LiveTimeline.periodPosition(exoPlayer) else now
+        val cues = mapped.map { (text, start, end) ->
+            val from = maxOf(start, after)
+            Cue(nextCueId++, from, (end + LIVE_CAPTION_LINGER_MS).coerceIn(from + LIVE_MIN_CUE_MS, from + LIVE_CAPTION_MAX_MS), text)
+        }
+        addCaptionCues(cues, if (liveDelayAdded > 0) "实时翻译直播自带字幕 · 画面延后了 ${liveDelayAdded / 1000} 秒，和字幕对齐" else "实时翻译直播自带字幕")
+        return true
+    }
+
+    /** 拼好的整句上屏（读屏幕播放器字幕时）：从现在开始显示，上一句显示到这一句出现为止 */
     private fun publishCaptions(sentences: List<String>) {
         if (sentences.isEmpty() || !_state.value.liveCaptions) return
         val start = subtitleTime()
-        val cue = Cue(nextCueId++, start, start + LIVE_CAPTION_MAX_MS, sentences.joinToString(" "))
+        addCaptionCues(listOf(Cue(nextCueId++, start, start + LIVE_CAPTION_MAX_MS, sentences.joinToString(" "))), "实时翻译直播自带字幕")
+    }
+
+    /** 直播字幕加进列表：按开始时间排好，和后一句重叠的前一句提前结束（同一时间只显示一句） */
+    private fun addCaptionCues(new: List<Cue>, status: String) {
         _state.update { s ->
-            val earlier = s.cues.map { if (it.endMs > start) it.copy(endMs = maxOf(it.startMs, start)) else it }
-            s.copy(cues = (earlier + cue).takeLast(LIVE_KEEP_CUES), status = "实时翻译直播自带字幕")
+            val all = (s.cues + new).sortedBy { it.startMs }
+            val trimmed = all.mapIndexed { i, c ->
+                val next = all.getOrNull(i + 1)
+                if (next != null && c.endMs > next.startMs) c.copy(endMs = maxOf(c.startMs, next.startMs)) else c
+            }
+            s.copy(cues = trimmed.takeLast(LIVE_KEEP_CUES), status = status)
         }
     }
 
@@ -2334,6 +2449,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         /** 直播自带字幕拼成的一句，下一句没来时最多显示多久 */
         private const val LIVE_CAPTION_MAX_MS = 8_000L
+
+        /** 提前读的直播字幕：一句的字在屏幕上消失后再留多久（自带字幕本来就比说话晚一点） */
+        private const val LIVE_CAPTION_LINGER_MS = 1_500L
         private const val LIVE_MAX_BACKLOG_MS = 8_000L
 
         /** 直播声音这么久没有新的就断开重连；刚连上时等第一段声音放宽一些 */
@@ -2359,6 +2477,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         const val LIKED_PLAYLIST = com.aisub.player.media.LIKED_PLAYLIST
     }
 }
+
+/** 隐藏式字幕的各行：按在屏幕上的位置从上到下排（每行一个 Cue） */
+private fun captionLines(cues: List<androidx.media3.common.text.Cue>): List<String> = cues
+    .sortedBy { if (it.line == androidx.media3.common.text.Cue.DIMEN_UNSET) 0f else it.line }
+    .mapNotNull { it.text?.toString() }
+    .flatMap { it.split('\n') }
 
 /** 给已登记的 WebDAV 地址加上鉴权头，其他地址原样访问。 */
 @UnstableApi

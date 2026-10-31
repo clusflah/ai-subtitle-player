@@ -55,6 +55,12 @@ class ExoAudioDecoder(
     private val onTick: ((Player, Long) -> Unit)? = null,
     /** 直播识别：把这一路的下载、状态和缓冲写进日志（adb logcat 看 "Voxtitle-dec"），排查声音为什么停 */
     private val diagnostics: Boolean = false,
+    /**
+     * 直播自带字幕：不为 null 时同时选上字幕轨（优先这个语言），字幕每变一次在解码线程上回调一次。
+     * 字幕按解码用的播放器的时钟出现（由声音推进），和 [onTick] 报的位置是同一个时钟
+     */
+    private val onCues: ((Player, List<androidx.media3.common.text.Cue>) -> Unit)? = null,
+    private val captionLanguage: String? = null,
 ) {
     private fun log(message: String) {
         try {
@@ -159,12 +165,27 @@ class ExoAudioDecoder(
                 .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory, DefaultExtractorsFactory().withAiff()))
                 .setLooper(thread.looper)
                 .build()
-            // 只要音频
+            // 只要音频（读自带字幕时加上字幕：隐藏式字幕藏在视频数据里，画面不解码也能读出来）
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, onCues == null)
                 .setForceLowestBitrate(lowestBitrate)
                 .build()
+            onCues?.let { output ->
+                player.addListener(object : Player.Listener {
+                    override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) = output(player, cueGroup.cues)
+
+                    // 隐藏式字幕默认不选：选上和屏幕上同语言的那条（没有就第一条）
+                    override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                        val texts = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
+                        if (texts.isEmpty() || texts.any { it.isSelected }) return
+                        val pick = texts.firstOrNull { captionLanguage != null && it.getTrackFormat(0).language == captionLanguage } ?: texts[0]
+                        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                            .setOverrideForType(androidx.media3.common.TrackSelectionOverride(pick.mediaTrackGroup, 0))
+                            .build()
+                    }
+                })
+            }
             player.addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(state: Int) {
                     if (state == Player.STATE_ENDED) done.countDown()

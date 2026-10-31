@@ -1715,7 +1715,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                         state.extractingEmbedded -> "停止读取（${state.progress?.let { "${(it * 100).toInt()}%" } ?: "准备中"}）"
                         else -> "翻译自带字幕"
                     },
-                    subtitle = if (live) "边播边把自带字幕翻译成${state.settings.targetLanguage}，一句说完才出现（比语音识别准）"
+                    subtitle = if (live) "提前读出自带字幕翻译成${state.settings.targetLanguage}，和画面对齐（画面会延后几秒，比语音识别准）"
                     else "读出自带字幕的文字，翻译成${state.settings.targetLanguage}，也能朗读、导出（比语音识别准）",
                 ) { onSubtitleAction(SubtitleAction.EMBEDDED) }
             }
