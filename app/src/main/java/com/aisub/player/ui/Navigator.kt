@@ -10,6 +10,8 @@ sealed interface Screen {
     data object Settings : Screen
     /** 直播：M3U / TXT 直播源的频道列表 */
     data object Live : Screen
+    /** 网页：内置浏览器里看视频，边播边生成 AI 字幕 */
+    data object Web : Screen
     /** 下载版：分享链接后的下载进度页 */
     data object Link : Screen
     data class LocalFolder(val path: String, val title: String) : Screen

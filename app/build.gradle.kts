@@ -14,8 +14,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 79
-        versionName = "2.9.18"
+        versionCode = 80
+        versionName = "2.9.19"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用
@@ -107,6 +107,8 @@ dependencies {
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
 
     implementation("androidx.core:core-ktx:1.15.0")
+    // 网页：把读取视频声音的脚本注入到每个框架（含 iframe 里的播放器）
+    implementation("androidx.webkit:webkit:1.12.1")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
