@@ -543,60 +543,63 @@ private fun BrowseTab(
 ) {
     val all = remember(state.videos, state.audios) { state.videos + state.audios }
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
-        SectionHeader("本机")
-        val local = listOf(
-            Triple("内部存储", AppIcons.Phone, ""),
-            Triple("Download", AppIcons.Download, "Download"),
-            Triple("Movies", AppIcons.Movie, "Movies"),
-            Triple("Music", AppIcons.MusicNote, "Music"),
-            Triple("DCIM", AppIcons.Folder, "DCIM"),
-        )
-        data class Card(val icon: ImageVector, val title: String, val subtitle: String, val onClick: () -> Unit)
-        val cards = remember(all, state.hasPermission) {
-            local.map { (name, icon, path) ->
-                val sum = LocalBrowser.summary(all, path)
-                Card(icon, name, if (state.hasPermission) countText(sum.folderCount, sum.fileCount) else "需要权限") {
-                    if (state.hasPermission) openLocal(path, name) else onRequestPermission()
+        CollapsibleSection("browse.local", "本机") {
+            val local = listOf(
+                Triple("内部存储", AppIcons.Phone, ""),
+                Triple("Download", AppIcons.Download, "Download"),
+                Triple("Movies", AppIcons.Movie, "Movies"),
+                Triple("Music", AppIcons.MusicNote, "Music"),
+                Triple("DCIM", AppIcons.Folder, "DCIM"),
+            )
+            data class Card(val icon: ImageVector, val title: String, val subtitle: String, val onClick: () -> Unit)
+            val cards = remember(all, state.hasPermission) {
+                local.map { (name, icon, path) ->
+                    val sum = LocalBrowser.summary(all, path)
+                    Card(icon, name, if (state.hasPermission) countText(sum.folderCount, sum.fileCount) else "需要权限") {
+                        if (state.hasPermission) openLocal(path, name) else onRequestPermission()
+                    }
+                } + Card(AppIcons.File, "选择文件…", "系统文件选择器", pickFile)
+            }
+            // 两列网格（大屏四列）
+            val columns = if (LocalWideLayout.current) 4 else 2
+            cards.chunked(columns).forEach { row ->
+                Row(Modifier.padding(horizontal = 16.dp, vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    row.forEach { c -> SourceCard(c.icon, c.title, c.subtitle, Modifier.weight(1f), c.onClick) }
+                    repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
                 }
-            } + Card(AppIcons.File, "选择文件…", "系统文件选择器", pickFile)
-        }
-        // 两列网格（大屏四列）
-        val columns = if (LocalWideLayout.current) 4 else 2
-        cards.chunked(columns).forEach { row ->
-            Row(Modifier.padding(horizontal = 16.dp, vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                row.forEach { c -> SourceCard(c.icon, c.title, c.subtitle, Modifier.weight(1f), c.onClick) }
-                repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
             }
         }
 
-        SectionHeader("网络与网盘", actionLabel = "添加", onAction = addSource)
-        SurfaceCard {
-            if (state.servers.isEmpty()) {
-                ListRow(
-                    title = "添加网络位置或网盘",
-                    subtitle = "WebDAV、OpenList、115、阿里云盘、百度网盘、PikPak",
-                    icon = AppIcons.Add, mutedIcon = true, onClick = addSource,
-                )
-            }
-            state.servers.forEachIndexed { i, s ->
-                if (i > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                ListRow(
-                    title = s.name,
-                    subtitle = s.type.label + if (s.type.isCloud) " · 已登录" else " · ${s.baseUrl}",
-                    icon = if (s.type.isCloud || s.type == ServerType.OPENLIST) AppIcons.Cloud else AppIcons.Dns,
-                    trailing = { OverflowMenu(serverMenu(s)) },
-                    onClick = { openRemote(s) },
-                )
+        CollapsibleSection("browse.servers", "网络与网盘", actionLabel = "添加", onAction = addSource) {
+            SurfaceCard {
+                if (state.servers.isEmpty()) {
+                    ListRow(
+                        title = "添加网络位置或网盘",
+                        subtitle = "WebDAV、OpenList、115、阿里云盘、百度网盘、PikPak",
+                        icon = AppIcons.Add, mutedIcon = true, onClick = addSource,
+                    )
+                }
+                state.servers.forEachIndexed { i, s ->
+                    if (i > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    ListRow(
+                        title = s.name,
+                        subtitle = s.type.label + if (s.type.isCloud) " · 已登录" else " · ${s.baseUrl}",
+                        icon = if (s.type.isCloud || s.type == ServerType.OPENLIST) AppIcons.Cloud else AppIcons.Dns,
+                        trailing = { OverflowMenu(serverMenu(s)) },
+                        onClick = { openRemote(s) },
+                    )
+                }
             }
         }
 
-        SectionHeader("直播与串流")
-        SurfaceCard {
-            ListRow("直播", "添加 M3U / TXT 直播源，按分组看电视直播", AppIcons.Live, onClick = openLive)
-            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-            ListRow("新建串流", "播放网络地址（http、rtsp、m3u8 等）", AppIcons.Link, onClick = openStream)
-            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-            ListRow("网页", "在网页里看视频，边播边生成 AI 字幕", AppIcons.Web, onClick = openWeb)
+        CollapsibleSection("browse.streams", "直播与串流") {
+            SurfaceCard {
+                ListRow("直播", "添加 M3U / TXT 直播源，按分组看电视直播", AppIcons.Live, onClick = openLive)
+                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow("新建串流", "播放网络地址（http、rtsp、m3u8 等）", AppIcons.Link, onClick = openStream)
+                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow("网页", "在网页里看视频，边播边生成 AI 字幕", AppIcons.Web, onClick = openWeb)
+            }
         }
     }
 }

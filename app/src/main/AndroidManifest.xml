@@ -12,6 +12,9 @@
     <!-- 后台播放：前台服务（媒体播放）、播放网络文件时保持网络和 CPU 唤醒 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- 网页字幕：读不到声音的网页视频（有版权保护等）用系统的播放捕获读取译幕自己放出的声音，用到时才申请 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- 识别、翻译进度显示在通知栏（Android 13 起要用户允许） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -83,6 +86,11 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
+        <!-- 网页字幕：读取系统声音（播放捕获） -->
+        <service
+            android:name=".web.CaptureService"
+            android:foregroundServiceType="mediaProjection"
+            android:exported="false" />
         <!-- 桌面小组件：正在播放的歌曲和播放控制 -->
         <receiver
             android:name=".NowPlayingWidget"

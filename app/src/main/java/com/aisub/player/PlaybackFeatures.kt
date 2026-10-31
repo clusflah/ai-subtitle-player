@@ -118,6 +118,11 @@ class PlaybackFeatures(
 
     // ---------------- 切换视频 ----------------
 
+    /** 直播频道上次调好的字幕延迟（没调过为 0） */
+    fun liveSubtitleDelay(e: MediaEntry): Long = store.liveSubtitleDelay(e.uri)
+
+    fun saveLiveSubtitleDelay(e: MediaEntry, ms: Long) = store.saveLiveSubtitleDelay(e.uri, ms)
+
     fun onEntryChanged(e: MediaEntry) {
         entry = e
         chapterJob?.cancel()

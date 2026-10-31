@@ -104,6 +104,14 @@ class PlaybackStore(private val context: Context) {
     private fun keyFor(entry: MediaEntry, series: Boolean) =
         if (series) seriesKey(entry)?.let { "skip.series.$it" } ?: "skip.file.${entry.uri}" else "skip.file.${entry.uri}"
 
+    // ---- 直播频道的字幕延迟：每个台的直播流延迟不一样，调过一次就记住 ----
+
+    fun liveSubtitleDelay(uri: String): Long = prefs.getLong("delay.live.$uri", 0)
+
+    fun saveLiveSubtitleDelay(uri: String, ms: Long) {
+        prefs.edit().apply { if (ms == 0L) remove("delay.live.$uri") else putLong("delay.live.$uri", ms) }.apply()
+    }
+
     // ---- 轨道 ----
 
     fun trackMemory(uri: String): TrackMemory? {

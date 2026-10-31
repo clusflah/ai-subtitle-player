@@ -138,7 +138,7 @@ private fun FoldArrow(expanded: Boolean) {
     )
 }
 
-private val TARGET_LANGUAGES = listOf("简体中文", "繁體中文", "English", "日本語", "한국어")
+internal val TARGET_LANGUAGES = listOf("简体中文", "繁體中文", "English", "日本語", "한국어")
 
 /**
  * 设置页：按工作流程分组（语音识别 → 字幕翻译 → 字幕样式…），每组可折叠，收起时显示当前配置摘要；
