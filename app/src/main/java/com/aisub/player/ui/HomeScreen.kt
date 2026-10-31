@@ -62,6 +62,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -306,7 +307,7 @@ fun HomeScreen(
             }
             when (tab) {
                 Tab.HOME -> HomeTab(
-                    lib, state, play,
+                    lib, state, main.state.collectAsStateWithLifecycle().value.settings, play,
                     openServer = openServer,
                     openServerItem = { s, item -> nav.push(Screen.ServerDetail(s.id, item.ratingKey)) },
                     openFavorite = { f ->
@@ -636,6 +637,7 @@ private fun AddSourceDialog(onDismiss: () -> Unit, onPick: (ServerType) -> Unit)
 private fun HomeTab(
     lib: LibraryViewModel,
     state: LibraryState,
+    settings: com.aisub.player.AppSettings,
     play: (List<MediaEntry>, Int) -> Unit,
     openServer: (Server) -> Unit,
     openServerItem: (Server, com.aisub.player.remote.cloud.ServerItem) -> Unit,
@@ -666,7 +668,7 @@ private fun HomeTab(
             item { SectionHeader("继续观看") }
             item {
                 LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items(resume, key = { it.entry.uri }) { h -> ResumeTile(h) { play(listOf(h.entry), 0) } }
+                    items(resume, key = { it.entry.uri }) { h -> ResumeTile(h, settings) { play(listOf(h.entry), 0) } }
                 }
             }
         }
@@ -763,12 +765,21 @@ private fun SongTile(entry: MediaEntry, positionMs: Long = 0, onClick: () -> Uni
     }
 }
 
-/** 「继续观看」卡片：横版画面 + 进度条 + 名字 */
+/** 「继续观看」卡片：横版画面（封面图，没有用播放时截的画面）+ 进度条 + 名字 */
 @Composable
-private fun ResumeTile(item: HistoryItem, onClick: () -> Unit) {
+private fun ResumeTile(item: HistoryItem, settings: com.aisub.player.AppSettings, onClick: () -> Unit) {
+    val context = LocalContext.current
+    val cover by produceState(com.aisub.player.meta.VideoCovers.saved(context, item.entry.uri)?.ifEmpty { null }, item.entry.uri) {
+        if (value == null) value = com.aisub.player.meta.VideoCovers.find(context, settings, item.entry)
+    }
+    var coverFailed by remember(cover) { mutableStateOf(false) }
     Column(Modifier.width(180.dp).tvFocusRing(MaterialTheme.shapes.medium, scale = true).clip(MaterialTheme.shapes.medium).clickable(onClick = onClick)) {
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(MaterialTheme.shapes.medium)) {
-            MediaThumbnail(item.entry, Modifier.fillMaxSize())
+            if (cover != null && !coverFailed) {
+                NetImage(cover, Modifier.fillMaxSize(), maxSize = 480, onError = { coverFailed = true })
+            } else {
+                MediaThumbnail(item.entry, Modifier.fillMaxSize())
+            }
             val d = item.entry.durationMs
             if (d > 0) {
                 Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color(0x66000000))) {

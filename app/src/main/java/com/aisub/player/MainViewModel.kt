@@ -2084,8 +2084,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!_state.value.liveCaptions) return true
         val now = LiveTimeline.periodPosition(exoPlayer)
         val mapped = batch.mapNotNull { c ->
-            val start = LiveTimeline.positionOf(c.start, exoPlayer) ?: return@mapNotNull null
-            val end = LiveTimeline.positionOf(c.end, exoPlayer) ?: start
+            // 隐藏式字幕是听写的，比说话晚几秒：往前挪回说话的时候
+            val start = (LiveTimeline.positionOf(c.start, exoPlayer) ?: return@mapNotNull null) - LIVE_CAPTION_LEAD_MS
+            val end = LiveTimeline.positionOf(c.end, exoPlayer)?.minus(LIVE_CAPTION_LEAD_MS) ?: start
             Triple(c.text, start, end).takeIf { start in now - 60_000..now + 180_000 }
         }
         if (mapped.isEmpty()) return false
@@ -2452,6 +2453,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         /** 提前读的直播字幕：一句的字在屏幕上消失后再留多久（自带字幕本来就比说话晚一点） */
         private const val LIVE_CAPTION_LINGER_MS = 1_500L
+
+        /** 直播隐藏式字幕比说话晚的时间（听写打字）：提前读到的字幕整体往前挪这么多；各台不一样的用播放页的「提前 / 推后」微调 */
+        private const val LIVE_CAPTION_LEAD_MS = 4_000L
         private const val LIVE_MAX_BACKLOG_MS = 8_000L
 
         /** 直播声音这么久没有新的就断开重连；刚连上时等第一段声音放宽一些 */

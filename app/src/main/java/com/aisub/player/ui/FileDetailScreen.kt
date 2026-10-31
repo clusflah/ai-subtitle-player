@@ -184,6 +184,10 @@ fun FileDetailScreen(
         meta?.posterUrl != null && meta.posterRatio < 1f -> meta.posterUrl
         else -> local?.posterUrl ?: info?.posterUrl ?: meta?.posterUrl
     }
+    // 首页「继续观看」用这张做封面
+    LaunchedEffect(backdrop, poster) {
+        if (isVideo && item.playUrl != null) com.aisub.player.meta.VideoCovers.remember(context, item.playUrl, backdrop ?: poster)
+    }
 
     fun download() {
         scope.launch {
