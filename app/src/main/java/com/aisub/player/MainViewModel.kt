@@ -432,6 +432,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         override fun onPlayerError(error: PlaybackException) {
             android.util.Log.e("Voxtitle", "播放失败", error)
+            if (recoverLive(error)) return
             if (retryLiveAsOtherType(error)) return
             if (autoSwitchLiveToVlc(error)) return
             // 记住要用兼容模式的频道，兼容模式也打不开：忘掉，下次先用默认内核试
@@ -443,8 +444,38 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
-            if (playbackState == Player.STATE_READY) _state.update { it.copy(playbackError = null) }
+            if (playbackState == Player.STATE_READY) {
+                _state.update { it.copy(playbackError = null) }
+                _state.value.current?.takeIf { it.isLive && !usingVlc }?.let { liveWorked += it.uri }
+            }
         }
+    }
+
+    /** 这次打开后默认内核放出过画面的直播频道：中途出错是直播流的问题，不是内核打不开 */
+    private val liveWorked = HashSet<String>()
+
+    /** 直播中途出错后原地重连的时间（elapsedRealtime），用来限制次数 */
+    private val liveRecoveries = ArrayDeque<Long>()
+
+    /**
+     * 默认内核放得好好的直播中途出错（落后直播窗口、分片暂时下载失败等）：回到直播最新处重新加载，
+     * 不换兼容模式、也不记住（不然这个频道以后都用兼容模式，有的直播在兼容模式下根本放不出来）。
+     * 一分钟内最多重连 3 次，还不行就照常报错。
+     */
+    private fun recoverLive(error: PlaybackException): Boolean {
+        val entry = _state.value.current?.takeIf { it.isLive } ?: return false
+        if (usingVlc) return false
+        val behind = error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW
+        if (!behind && entry.uri !in liveWorked) return false
+        val now = android.os.SystemClock.elapsedRealtime()
+        while (liveRecoveries.isNotEmpty() && now - liveRecoveries.first() > 60_000) liveRecoveries.removeFirst()
+        if (liveRecoveries.size >= 3) return false
+        liveRecoveries.addLast(now)
+        android.util.Log.w("Voxtitle", "直播中途出错（${error.errorCodeName}），回到最新处重连：${entry.uri}")
+        exoPlayer.seekToDefaultPosition()
+        exoPlayer.prepare()
+        exoPlayer.play()
+        return true
     }
 
     init {
@@ -592,7 +623,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         startPlaybackService()
         _player.value = v
         onEntryChanged(entry)
+        if (entry.isLive) watchVlcLive(entry)
     }
+
+    private var vlcLiveWatch: Job? = null
+
+    /**
+     * 记成要用兼容模式的直播频道，兼容模式一直放不出来（不报错，只是黑屏不动）：忘掉，改回默认内核。
+     * 每个频道只回退一次，免得两个内核来回换。
+     */
+    private fun watchVlcLive(entry: MediaEntry) {
+        vlcLiveWatch?.cancel()
+        vlcLiveWatch = viewModelScope.launch {
+            delay(VLC_LIVE_START_MS)
+            val v = vlcPlayer ?: return@launch
+            if (!usingVlc || _state.value.current?.uri != entry.uri || v.playbackState == Player.STATE_READY) return@launch
+            if (!vlcFallbackTried.add(entry.uri)) return@launch
+            android.util.Log.w("Voxtitle", "兼容模式 ${VLC_LIVE_START_MS / 1000} 秒还没放出直播，改回默认内核：${entry.uri}")
+            forgetVlcChannel(entry.uri)
+            vlcAutoTried += entry.uri
+            val channels = queue
+            play(channels, channels.indexOf(entry).coerceAtLeast(0))
+        }
+    }
+
+    /** 这次打开后已经从兼容模式退回过默认内核的频道 */
+    private val vlcFallbackTried = HashSet<String>()
 
     /** ExoPlayer 播放失败时，从当前位置改用 VLC 内核重试。 */
     fun switchToVlc() {
@@ -2269,6 +2325,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private const val LIVE_FIRST_CHUNK_SEC = 4
         private const val LIVE_CHUNK_SEC = 6
         private const val LIVE_KEEP_CUES = 200
+
+        /** 兼容模式这么久还没放出直播，就退回默认内核 */
+        private const val VLC_LIVE_START_MS = 20_000L
 
         /** 识别另开连接被服务器拒绝（并发限制、风控）时的状态码 */
         private val REFUSED_CODES = setOf(403, 429, 503)
