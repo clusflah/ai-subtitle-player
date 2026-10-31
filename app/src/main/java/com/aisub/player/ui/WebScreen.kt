@@ -1,9 +1,28 @@
 package com.aisub.player.ui
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import com.aisub.player.web.CaptureService
+import android.content.res.Configuration
+import android.net.Uri
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.RadioButton
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.style.TextAlign
+import com.aisub.player.asr.AsrLanguages
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -114,6 +133,16 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     var fullscreen by remember { mutableStateOf<Pair<View, WebChromeClient.CustomViewCallback>?>(null) }
     var showSniffed by remember { mutableStateOf(false) }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    var menu by remember { mutableStateOf(false) }
+    var dialog by remember { mutableStateOf<WebDialog?>(null) }
+    /** 当前页面地址（地址栏里可能是正在输入的文字） */
+    var pageUrl by remember { mutableStateOf(url) }
+    /** 网页全屏时横屏还是竖屏（竖着拍的视频可以切成竖屏） */
+    var fullscreenLandscape by remember { mutableStateOf(true) }
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    var zoom by remember { mutableIntStateOf(100) }
+    // 每个网站、横竖屏分别记住缩放；网页脚本每 250 毫秒读一次
+    LaunchedEffect(pageUrl?.let { Uri.parse(it).host }, landscape) { zoom = vm.zoomFor(pageUrl, landscape) }
 
     val script = remember { context.assets.open("web_captions.js").bufferedReader().use { it.readText() } }
 
@@ -130,6 +159,24 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
         play(listOf(vm.entryFor(mediaUrl, page, title, webView?.settings?.userAgentString.orEmpty())), 0)
     }
 
+    // 读取系统声音：先要录音权限，再请用户在系统对话框里同意捕获
+    val projectionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        val data = r.data
+        if (r.resultCode == Activity.RESULT_OK && data != null) CaptureService.start(context, r.resultCode, data)
+        else vm.captions.note("没有同意读取系统声音")
+    }
+    val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) projectionLauncher.launch(context.getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
+        else vm.captions.note("读取系统声音需要录音权限（只读取译幕自己放出的声音，不录麦克风）")
+    }
+
+    fun startCapture() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            projectionLauncher.launch(context.getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
+        } else micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+    }
+
     // 网页视频开始放了：音乐、播放页的视频先停下
     LaunchedEffect(Unit) { main.player.pause() }
     DisposableEffect(Unit) {
@@ -140,27 +187,40 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
         }
     }
 
-    // 网页全屏：横屏、隐藏状态栏
-    DisposableEffect(fullscreen != null) {
+    /** 退出网页全屏。自己调回调时 WebView 不一定再通知 onHideCustomView，这里先清掉 */
+    fun exitFullscreen() {
+        val callback = fullscreen?.second
+        fullscreen = null
+        callback?.onCustomViewHidden()
+    }
+
+    // 网页全屏：隐藏状态栏，按选的方向横屏或竖屏；退出时恢复
+    val inFullscreen = fullscreen != null
+    DisposableEffect(inFullscreen) {
         val window = activity?.window
-        if (fullscreen != null && window != null) {
-            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        if (inFullscreen && window != null) {
+            fullscreenLandscape = true
             WindowCompat.getInsetsController(window, window.decorView).apply {
                 systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 hide(WindowInsetsCompat.Type.systemBars())
             }
         }
         onDispose {
-            if (fullscreen != null && window != null) {
+            // 用进入时的值判断：到这里时 fullscreen 已经是 null 了
+            if (inFullscreen && window != null) {
                 activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                 WindowCompat.getInsetsController(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
             }
         }
     }
+    LaunchedEffect(inFullscreen, fullscreenLandscape) {
+        if (inFullscreen) activity?.requestedOrientation =
+            if (fullscreenLandscape) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+    }
 
     BackHandler {
         when {
-            fullscreen != null -> fullscreen?.second?.onCustomViewHidden()
+            fullscreen != null -> exitFullscreen()
             editing && url != null -> editing = false
             canGoBack -> webView?.goBack()
             url != null -> {
@@ -199,12 +259,19 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                         }
                     }
                     IconButton(onClick = {
-                        if (captionState.running) vm.captions.stop() else vm.captions.start(main.state.value.settings)
+                        if (captionState.running) vm.captions.stop() else vm.captions.start(vm.captionSettings(main.state.value.settings))
                     }) {
                         Icon(
                             AppIcons.Subtitles, if (captionState.running) "关闭 AI 字幕" else "开启 AI 字幕",
                             tint = if (captionState.running) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                    }
+                    Box {
+                        IconButton(onClick = { menu = true }) { Icon(AppIcons.MoreVert, "更多") }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(text = { Text("字幕语言") }, onClick = { menu = false; dialog = WebDialog.LANGUAGE })
+                            DropdownMenuItem(text = { Text("页面缩放（$zoom%）") }, onClick = { menu = false; dialog = WebDialog.ZOOM })
+                        }
                     }
                 }
             }
@@ -242,9 +309,10 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                                         return scheme != "http" && scheme != "https"
                                     }
 
-                                    override fun onPageStarted(view: WebView, pageUrl: String, favicon: Bitmap?) {
-                                        vm.onPageStarted(pageUrl)
-                                        if (!editing) address = pageUrl
+                                    override fun onPageStarted(view: WebView, startedUrl: String, favicon: Bitmap?) {
+                                        vm.onPageStarted(startedUrl)
+                                        pageUrl = startedUrl
+                                        if (!editing) address = startedUrl
                                     }
 
                                     override fun onPageFinished(view: WebView, pageUrl: String) {
@@ -254,9 +322,10 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                                         canGoBack = view.canGoBack()
                                     }
 
-                                    override fun doUpdateVisitedHistory(view: WebView, pageUrl: String, isReload: Boolean) {
+                                    override fun doUpdateVisitedHistory(view: WebView, visitedUrl: String, isReload: Boolean) {
                                         canGoBack = view.canGoBack()
-                                        if (!editing) address = pageUrl
+                                        pageUrl = visitedUrl
+                                        if (!editing) address = visitedUrl
                                     }
 
                                     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
@@ -281,6 +350,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                                     }
                                 }
                                 webView = this
+                                vm.captions.userAgent = getSettings().userAgentString
                                 loadUrl(url!!)
                             }
                         },
@@ -290,22 +360,95 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                         if (r.viewportWidth <= 0) return@let null
                         val bottomDp = viewWidth * (r.bottom / r.viewportWidth)
                         (viewHeight - bottomDp + 6.dp).takeIf { bottomDp in 40.dp..viewHeight }
-                    } ?: 24.dp
-                    WebSubtitles(vm, captionState, settings, bottom) { playInPlayer(it, webView?.url.orEmpty(), webView?.title.orEmpty()) }
+                    }
+                    // 网页报告的位置有小抖动（滚动条、工具栏伸缩）：变化超过一点才挪，字幕不会跟着颤；暂时不知道位置时留在原处
+                    var stableBottom by remember { mutableStateOf(24.dp) }
+                    if (bottom != null && (bottom - stableBottom).value.let { kotlin.math.abs(it) } > 12f) stableBottom = bottom
+                    if (fullscreen == null) WebSubtitles(
+                        vm, captionState, settings, stableBottom,
+                        onOpenDirect = { playInPlayer(it, webView?.url.orEmpty(), webView?.title.orEmpty()) },
+                        onCapture = ::startCapture,
+                    )
                 }
             }
         }
 
         // 网页全屏的画面（含字幕）
         fullscreen?.let { (view, _) ->
-            Box(Modifier.fillMaxSize().background(Color.Black)) {
+            // 右上角的「横竖屏」「退出全屏」按钮：碰一下屏幕出现，4 秒后自动隐藏
+            var controlsAt by remember(view) { mutableLongStateOf(System.currentTimeMillis()) }
+            var showControls by remember(view) { mutableStateOf(true) }
+            LaunchedEffect(controlsAt) {
+                showControls = true
+                delay(4_000)
+                showControls = false
+            }
+            Box(
+                Modifier.fillMaxSize().background(Color.Black).pointerInput(view) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            // 只看不拦：触摸照常交给网页的播放器
+                            awaitPointerEvent(PointerEventPass.Initial)
+                            controlsAt = System.currentTimeMillis()
+                        }
+                    }
+                },
+            ) {
                 AndroidView(factory = { view }, modifier = Modifier.fillMaxSize())
-                WebSubtitles(vm, captionState, settings, settings.subtitleOffset.dp) {
-                    fullscreen?.second?.onCustomViewHidden()
-                    playInPlayer(it, webView?.url.orEmpty(), webView?.title.orEmpty())
+                WebSubtitles(
+                    vm, captionState, settings, settings.subtitleOffset.dp,
+                    onOpenDirect = {
+                        exitFullscreen()
+                        playInPlayer(it, webView?.url.orEmpty(), webView?.title.orEmpty())
+                    },
+                    onCapture = ::startCapture,
+                )
+                if (showControls) Row(Modifier.align(Alignment.TopEnd).padding(12.dp)) {
+                    IconButton(
+                        onClick = { fullscreenLandscape = !fullscreenLandscape },
+                        modifier = Modifier.clip(RoundedCornerShape(50)).background(Color(0x66000000)),
+                    ) { Icon(AppIcons.ScreenRotation, if (fullscreenLandscape) "切换到竖屏" else "切换到横屏", tint = Color.White) }
+                    Spacer(Modifier.size(8.dp))
+                    IconButton(
+                        onClick = ::exitFullscreen,
+                        modifier = Modifier.clip(RoundedCornerShape(50)).background(Color(0x66000000)),
+                    ) { Icon(AppIcons.FullscreenExit, "退出全屏", tint = Color.White) }
                 }
             }
         }
+    }
+
+    when (dialog) {
+        WebDialog.LANGUAGE -> WebLanguageDialog(
+            asr = vm.asrLanguage.collectAsStateWithLifecycle().value,
+            target = vm.targetLanguage.collectAsStateWithLifecycle().value,
+            settings = settings,
+            onConfirm = { asr, target ->
+                dialog = null
+                vm.setLanguages(main.state.value.settings, asr, target)
+            },
+            onDismiss = { dialog = null },
+        )
+        WebDialog.ZOOM -> AlertDialog(
+            onDismissRequest = { dialog = null },
+            title = { Text("页面缩放") },
+            text = {
+                Column {
+                    Text(
+                        "网页内容太大（横屏时常见）或太小时调整。每个网站的横屏、竖屏分别记住；也可以双指缩放。",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(Modifier.fillMaxWidth().padding(top = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { zoom = (zoom - 10).coerceAtLeast(WebViewModel.ZOOM_MIN); vm.setPageZoom(zoom) }, enabled = zoom > WebViewModel.ZOOM_MIN) { Text("缩小", fontSize = 16.sp) }
+                        Text("$zoom%", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+                        TextButton(onClick = { zoom = (zoom + 10).coerceAtMost(WebViewModel.ZOOM_MAX); vm.setPageZoom(zoom) }, enabled = zoom < WebViewModel.ZOOM_MAX) { Text("放大", fontSize = 16.sp) }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { dialog = null }) { Text("完成") } },
+            dismissButton = { TextButton(onClick = { zoom = 100; vm.setPageZoom(100) }) { Text("恢复 100%") } },
+        )
+        null -> {}
     }
 
     if (showSniffed) {
@@ -346,16 +489,17 @@ private fun androidx.compose.foundation.layout.BoxScope.WebSubtitles(
     settings: AppSettings,
     bottom: androidx.compose.ui.unit.Dp,
     onOpenDirect: (String) -> Unit,
+    onCapture: () -> Unit,
 ) {
     if (!state.running && state.cues.isEmpty() && state.status == null) return
     var now by remember { mutableLongStateOf(0L) }
     LaunchedEffect(Unit) {
         while (true) {
-            now = vm.captions.videoTimeNow() ?: -1
+            now = vm.captions.displayTime() ?: -1
             delay(100)
         }
     }
-    val cue: Cue? = if (now >= 0) state.cues.cueAt(now) else null
+    val cue: Cue? = if (now >= 0) cueNear(state.cues, now) else null
     if (cue != null && settings.showAiSubtitles) {
         val lines = if (cue.translation == cue.text) listOf(cue.text to true) else buildList {
             if (settings.showTranslation && cue.translation != null) add(cue.translation to true)
@@ -364,20 +508,102 @@ private fun androidx.compose.foundation.layout.BoxScope.WebSubtitles(
         // 上下两行分开放的设置在网页里不好用（不知道画面顶部在哪）：始终叠在一起
         StyledSubtitleLines(lines, settings.copy(topLineFromTop = -1), bottom)
     } else if (state.status != null) {
-        Row(
+        Column(
             Modifier.align(Alignment.BottomCenter).padding(bottom = bottom, start = 24.dp, end = 24.dp).widthIn(max = 520.dp)
                 .clip(RoundedCornerShape(8.dp)).background(Color(0xCC000000)).padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(state.status, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f, fill = false))
-            state.directUrl?.let { direct ->
-                Spacer(Modifier.size(8.dp))
-                Text(
-                    "用播放器打开", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp,
-                    modifier = Modifier.clickable { onOpenDirect(direct) },
-                )
+            Text(state.status, color = Color.White, fontSize = 13.sp)
+            if (state.directUrl != null || state.canCapture) {
+                Row(Modifier.padding(top = 6.dp)) {
+                    state.directUrl?.let { direct ->
+                        Text(
+                            "用播放器打开", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp,
+                            modifier = Modifier.clickable { onOpenDirect(direct) }.padding(end = 16.dp),
+                        )
+                    }
+                    if (state.canCapture) {
+                        Text(
+                            "读取系统声音", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp,
+                            modifier = Modifier.clickable(onClick = onCapture),
+                        )
+                    }
+                }
             }
         }
+    }
+}
+
+/** 句子之间常有几百毫秒的停顿：上一句在下一句出来前多留一会儿，不会一下没了又出来（看起来像闪烁） */
+private const val LINGER_MS = 1_200L
+
+private fun cueNear(cues: List<Cue>, positionMs: Long): Cue? {
+    var lo = 0
+    var hi = cues.size - 1
+    var i = -1
+    while (lo <= hi) {
+        val mid = (lo + hi) ushr 1
+        if (cues[mid].startMs <= positionMs) {
+            i = mid
+            lo = mid + 1
+        } else hi = mid - 1
+    }
+    if (i < 0) return null
+    // 识别有时会出时间重叠的句子：从最近开始的往前找，还没结束的优先
+    for (k in i downTo maxOf(0, i - 3)) if (positionMs <= cues[k].endMs) return cues[k]
+    return cues[i].takeIf { positionMs <= it.endMs + LINGER_MS }
+}
+
+private enum class WebDialog { LANGUAGE, ZOOM }
+
+/** 网页字幕的视频语言和翻译语言；「跟随设置」表示用设置页里的 */
+@Composable
+private fun WebLanguageDialog(
+    asr: String?,
+    target: String?,
+    settings: AppSettings,
+    onConfirm: (String?, String?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var asrChoice by remember { mutableStateOf(asr) }
+    var targetChoice by remember { mutableStateOf(target) }
+    val targets = (TARGET_LANGUAGES + listOfNotNull(target, settings.targetLanguage)).distinct()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("字幕语言") },
+        text = {
+            LazyColumn {
+                item { Text("视频说的语言", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(bottom = 4.dp)) }
+                item {
+                    LanguageOption("跟随设置（${AsrLanguages.label(settings.asrLanguage)}）", asrChoice == null) { asrChoice = null }
+                }
+                items(AsrLanguages.COMMON) { (code, label) ->
+                    LanguageOption(label, asrChoice == code) { asrChoice = code }
+                }
+                item { Text("翻译成", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp)) }
+                item { LanguageOption("跟随设置（${settings.targetLanguage}）", targetChoice == null) { targetChoice = null } }
+                items(targets) { lang -> LanguageOption(lang, targetChoice == lang) { targetChoice = lang } }
+                item {
+                    Text(
+                        "换了视频语言会从当前位置重新识别；只换翻译语言时保留原文、重新翻译。",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 12.dp),
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(asrChoice, targetChoice) }) { Text("确定") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun LanguageOption(label: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Text(label, style = MaterialTheme.typography.bodyLarge)
     }
 }
 

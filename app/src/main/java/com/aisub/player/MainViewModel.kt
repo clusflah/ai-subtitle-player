@@ -774,6 +774,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 current = entry,
                 videoUri = uri,
                 cues = cached,
+                // 直播频道用这个台上次调好的延迟；从直播切回普通视频时不带着直播的延迟
+                subtitleDelayMs = when {
+                    entry.isLive -> extras.liveSubtitleDelay(entry)
+                    it.current?.isLive == true -> 0
+                    else -> it.subtitleDelayMs
+                },
                 roles = store.loadRoles(uri),
                 videoAsrLanguage = videoLanguage,
                 roleStatus = null,
@@ -1832,7 +1838,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------------- 播放器"更多"菜单 ----------------
 
-    fun setSubtitleDelay(ms: Long) = _state.update { it.copy(subtitleDelayMs = ms) }
+    fun setSubtitleDelay(ms: Long) {
+        _state.update { it.copy(subtitleDelayMs = ms) }
+        // 直播频道：按频道记住，下次看这个台不用再调
+        _state.value.current?.takeIf { it.isLive }?.let { extras.saveLiveSubtitleDelay(it, ms) }
+    }
 
     private var sleepJob: Job? = null
 

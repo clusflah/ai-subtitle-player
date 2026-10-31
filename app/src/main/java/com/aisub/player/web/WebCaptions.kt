@@ -45,15 +45,28 @@ data class WebCaptionState(
     val cues: List<Cue> = emptyList(),
     /** 读不到声音、但能拿到地址的视频：可以改用播放器打开 */
     val directUrl: String? = null,
+    /** 网页里读不到声音：可以改用系统的播放捕获读取（Android 10 起，要用户授权） */
+    val canCapture: Boolean = false,
+    /** 正在用系统的播放捕获读取声音 */
+    val capturing: Boolean = false,
 )
 
 /**
- * 网页视频的 AI 字幕：注入网页的脚本（assets/web_captions.js）读出视频的声音、报告播放位置，
- * 这里把声音交给识别引擎，识别出的句子换算到视频的播放位置上，再按播放位置就近翻译。
- *
- * 和直播字幕一样是边播边识别，字幕会比声音晚一两秒出来；同一个视频拖回已经识别过的地方不再重复识别。
+ * 网页视频的 AI 字幕：注入网页的脚本（assets/web_captions.js）报告视频的播放位置，声音按能拿到的方式取：
+ * 1. 网页用 MSE 播放：脚本截下网页缓冲好的音频（比画面提前十几到几十秒）解码后送来，字幕能赶在声音前面；
+ * 2. 跨域的视频文件、播放列表（网页读不到声音）：App 带上网页的 Cookie、Referer 直接解码这个地址，同样提前识别；
+ * 3. 普通视频：脚本用 Web Audio 读出正在播放的声音，字幕晚一两秒；
+ * 4. 都不行（有版权保护等）：用户授权后用系统的播放捕获读取 App 放出来的声音（见 [CaptureService]）。
+ * 识别出的句子换算到视频的播放位置上，再按播放位置就近翻译；同一个视频拖回已经识别过的地方不再重复识别。
  */
 class WebCaptions(private val app: Application, private val scope: CoroutineScope) {
+    init {
+        current = this
+    }
+
+    /** 网页的 User-Agent，App 直接读取视频地址时带上 */
+    @Volatile
+    var userAgent: String? = null
     private val models = ModelManager(app)
     private val _state = MutableStateFlow(WebCaptionState())
     val state: StateFlow<WebCaptionState> = _state.asStateFlow()
@@ -80,9 +93,26 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
         return (c.videoMs + minOf(elapsed, 1_000.0)).toLong()
     }
 
+    @Volatile
+    private var shownAt = -1L
+
+    /**
+     * 显示字幕用的时间：网页报告的位置有几十毫秒的抖动，按经过的时间推算时会稍微往回跳，
+     * 正好落在两句交界处就会一闪；播放中小幅往回跳时不回退（拖动进度那种大跳照常跟上）。
+     */
+    fun displayTime(): Long? {
+        val t = videoTimeNow() ?: return null
+        val last = shownAt
+        val c = clock
+        val shown = if (c != null && !c.paused && t < last && last - t < 500) last else t
+        shownAt = shown
+        return shown
+    }
+
     // ---- 识别 ----
 
-    private class Chunk(val samples: FloatArray, val videoMs: Double, val rate: Double)
+    /** ahead：比播放提前送来的声音（网页缓冲、直接读地址）；否则是边播边读的 */
+    private class Chunk(val samples: FloatArray, val videoMs: Double, val rate: Double, val ahead: Boolean)
     private class Anchor(val audioMs: Long, val videoMs: Double, val rate: Double)
 
     private val chunks = LinkedBlockingQueue<Chunk>()
@@ -101,6 +131,7 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
             return
         }
         enabled = true
+        aheadNoted = false
         chunks.clear()
         _state.update { it.copy(running = true, status = "播放网页里的视频后开始识别…", directUrl = null) }
         job = scope.launch {
@@ -111,20 +142,69 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
             } catch (e: Exception) {
                 _state.update { it.copy(status = "识别失败：${e.message}") }
             } finally {
-                enabled = false
-                translateJob?.cancel()
-                _state.update { it.copy(running = false) }
+                // 换语言时会马上开始新的一次：旧的收尾不能把新的关掉
+                if (job === coroutineContext.job) {
+                    enabled = false
+                    translateJob?.cancel()
+                    _state.update { it.copy(running = false) }
+                }
             }
         }
-        settings.createTranslator()?.let { t -> if (settings.autoTranslate) translateJob = scope.launch { translateLoop(t, settings) } }
+        startTranslation(settings)
+    }
+
+    private fun startTranslation(settings: AppSettings) {
+        translateJob?.cancel()
+        translateJob = null
+        val t = settings.createTranslator() ?: return
+        if (settings.autoTranslate) translateJob = scope.launch { translateLoop(t, settings) }
+    }
+
+    /** 换了视频语言：已有字幕作废，用新的设置从头识别（正在识别时才重新开始） */
+    fun restart(settings: AppSettings) {
+        val running = job?.isActive == true
+        val direct = directSource
+        if (running) {
+            job?.cancel()
+            translateJob?.cancel()
+        }
+        stopDirect()
+        // 网页脚本看到它变了，会把缓冲好的声音重新送一遍
+        generation++
+        synchronized(anchors) {
+            anchors.clear()
+            covered.clear()
+        }
+        chunks.clear()
+        _state.update { it.copy(cues = emptyList()) }
+        if (running) {
+            start(settings)
+            direct?.let { startDirect(it) }
+        }
+    }
+
+    /** 换语言后要从头识别的次数（网页脚本读） */
+    @Volatile
+    var generation = 0
+        private set
+
+    /** 只换了翻译语言：识别出的原文留着，译文重新翻 */
+    fun retranslate(settings: AppSettings) {
+        _state.update { s -> s.copy(cues = s.cues.map { it.copy(translation = null) }) }
+        if (job?.isActive == true) startTranslation(settings)
     }
 
     fun stop() {
         enabled = false
         job?.cancel()
         translateJob?.cancel()
-        _state.update { it.copy(running = false, status = null) }
+        stopDirect()
+        stopCapture()
+        _state.update { it.copy(running = false, status = null, canCapture = false) }
     }
+
+    /** 在字幕的位置显示一句说明 */
+    fun note(text: String) = _state.update { it.copy(status = text) }
 
     /** 换了一个网页：旧字幕不再对得上 */
     fun reset() {
@@ -135,7 +215,10 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
         chunks.clear()
         clock = null
         pageKey = null
-        _state.update { it.copy(cues = emptyList(), directUrl = null, status = if (it.running) "播放网页里的视频后开始识别…" else null) }
+        stopDirect()
+        _state.update {
+            it.copy(cues = emptyList(), directUrl = null, canCapture = false, status = if (it.running && !it.capturing) "播放网页里的视频后开始识别…" else null)
+        }
     }
 
     private suspend fun run(settings: AppSettings) = withContext(Dispatchers.Default) {
@@ -148,15 +231,23 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
                 }
             }
         }
-        createEngine(settings).use { engine ->
-            val cancelHandle = coroutineContext.job.invokeOnCompletion { engine.cancel() }
-            try {
-                // 识别引擎收到的音频总长（毫秒），字幕时间都相对它
-                var audioMs = 0L
-                var heard = false
-                val onCue: (Cue) -> Unit = { c -> publish(c) }
-                while (isActive) {
+        // 引擎等第一段声音来了再建：提前送来的声音（网页缓冲、直接读地址）用分段识别，能比播放快很多；
+        // 边播边读的声音用流式识别（引擎支持时），一两秒出字。流式识别按实时速度发送，提前送来的声音会被它拖回和播放同步
+        var engine: SpeechEngine? = null
+        var engineAhead = false
+        val job = coroutineContext.job
+        val cancelHandle = job.invokeOnCompletion { engine?.cancel() }
+        try {
+            // 送进识别的音频总长（毫秒），字幕时间都相对它；换引擎时新引擎从 engineBase 开始数
+            var audioMs = 0L
+            var engineBase = 0L
+            var heard = false
+            while (isActive) {
                     val chunk = chunks.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                    // 识别跟不上、或者拖动过进度：已经播过去的声音不用识别了
+                    val playing = videoTimeNow()
+                    val chunkEnd = chunk.videoMs + chunk.samples.size * 1000.0 / Transcriber.SAMPLE_RATE * chunk.rate
+                    if (playing != null && chunkEnd < playing - STALE_MS) continue
                     if (!heard) {
                         heard = true
                         _state.update { it.copy(status = if (it.cues.isEmpty()) "正在识别…（第一句要等几秒）" else null) }
@@ -173,23 +264,30 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
                         }
                     }
                     if (skip) continue
+                    if (engine == null || engineAhead != chunk.ahead) {
+                        engine?.close()
+                        engine = createEngine(settings, chunk.ahead)
+                        engineAhead = chunk.ahead
+                        engineBase = audioMs
+                    }
+                    val base = engineBase
                     audioMs += lenMs
-                    engine.accept(chunk.samples, onCue)
+                    engine!!.accept(chunk.samples) { c -> publish(c.copy(startMs = c.startMs + base, endMs = c.endMs + base)) }
                 }
             } finally {
                 cancelHandle.dispose()
+                engine?.close()
             }
-        }
     }
 
-    private fun createEngine(s: AppSettings): SpeechEngine {
-        if (s.streamingAsr && s.streamingAvailable) s.createStreamingEngine()?.let { return it }
+    private fun createEngine(s: AppSettings, ahead: Boolean): SpeechEngine {
+        if (!ahead && s.streamingAvailable) s.createStreamingEngine()?.let { return it }
         return if (s.asrEngine == AsrEngine.LOCAL) {
             val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
             Transcriber(ModelCatalog.byId(s.localModel), models, AsrLanguages.primary(s.asrLanguage), threads)
         } else s.createCloudEngine().also {
-            // 边播边识别：分段短一点，字幕出得快
-            (it as? com.aisub.player.asr.cloud.ChunkedCloudEngine)?.useChunks(4, 6)
+            // 提前送来的声音不急，按直播的分段；边播边读时分段再短一点，字幕出得快
+            (it as? com.aisub.player.asr.cloud.ChunkedCloudEngine)?.useChunks(if (ahead) 4 else 2, if (ahead) 6 else 3)
         }
     }
 
@@ -263,8 +361,9 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
 
     fun onTick(frame: String, href: String, videoMs: Double, paused: Boolean, rate: Double) {
         val c = clock
-        // 另一个框架里的视频在放、而当前的停了：跟着正在放的那个
-        if (c != null && c.frame != frame && !c.paused && paused) return
+        // 页面上有好几个框架都在放视频（例如角落里静音的广告）：一直跟着原来那个，
+        // 它停了或者一秒多没报告了才换，不然时间来回跳，字幕一闪一闪
+        if (c != null && c.frame != frame && !c.paused && SystemClock.elapsedRealtime() - c.at < 1_200) return
         if (pageKey != href) {
             if (pageKey != null) reset()
             pageKey = href
@@ -272,27 +371,183 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
         clock = Clock(frame, videoMs, paused, rate, SystemClock.elapsedRealtime())
     }
 
+    /** 边播边读的声音（Web Audio） */
     fun onAudio(frame: String, base64: String, startMs: Double, rate: Double) {
+        if (!enabled || capturing || clock?.frame?.let { it != frame } == true) return
+        decodePcm(base64)?.let { chunks.add(Chunk(it, startMs, rate, ahead = false)) }
+    }
+
+    /** 网页缓冲好、提前解码的声音（MSE），startMs 是这段声音在视频里的位置 */
+    fun onAhead(frame: String, base64: String, startMs: Double) {
         if (!enabled || clock?.frame?.let { it != frame } == true) return
+        decodePcm(base64)?.let { chunks.add(Chunk(it, startMs, 1.0, ahead = true)) }
+        if (!aheadNoted) {
+            aheadNoted = true
+            _state.update { it.copy(status = if (it.cues.isEmpty()) "正在提前识别网页缓冲好的声音…" else it.status, canCapture = false) }
+        }
+    }
+
+    @Volatile
+    private var aheadNoted = false
+
+    private fun decodePcm(base64: String): FloatArray? {
         val bytes = Base64.decode(base64, Base64.DEFAULT)
         val samples = FloatArray(bytes.size / 2) { i ->
             ((bytes[2 * i].toInt() and 0xFF) or (bytes[2 * i + 1].toInt() shl 8)).toShort() / 32768f
         }
-        if (samples.isNotEmpty()) chunks.add(Chunk(samples, startMs, rate))
+        return samples.takeIf { it.isNotEmpty() }
     }
 
     fun onProblem(kind: String, detail: String) {
-        val msg = when (kind) {
-            "drm" -> "这个视频有版权保护，读不到声音，无法生成字幕"
-            "cors" -> "这个网站不允许读取视频的声音。可以点「用播放器打开」，在译幕播放器里看并生成字幕"
-            else -> "读取视频声音失败：$detail"
+        if (capturing) return
+        val capture = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q
+        when {
+            kind == "cors" && detail.startsWith("http") -> {
+                _state.update { it.copy(status = "网页读不到这个视频的声音，改由译幕直接读取视频地址…", directUrl = detail) }
+                startDirect(detail)
+            }
+            kind == "drm" -> _state.update {
+                it.copy(
+                    status = "这个视频有版权保护，网页里读不到声音" + if (capture) "。可以改为读取系统声音（边播边识别）" else "，无法生成字幕",
+                    canCapture = capture,
+                )
+            }
+            else -> _state.update {
+                it.copy(status = "读取视频声音失败：$detail" + if (capture) "。可以改为读取系统声音" else "", canCapture = capture)
+            }
         }
-        _state.update { it.copy(status = msg, directUrl = detail.takeIf { kind == "cors" && it.startsWith("http") }) }
+    }
+
+    // ---- 跨域视频：App 直接解码视频地址，提前识别 ----
+
+    private var directJob: Job? = null
+    private var directSource: String? = null
+
+    private fun stopDirect() {
+        directJob?.cancel()
+        directJob = null
+        directSource = null
+    }
+
+    private fun startDirect(url: String) {
+        if (directJob?.isActive == true && directSource == url) return
+        directJob?.cancel()
+        directSource = url
+        directJob = scope.launch(Dispatchers.IO) {
+            val headers = buildMap {
+                pageKey?.let { put("Referer", it) }
+                userAgent?.let { put("User-Agent", it) }
+                android.webkit.CookieManager.getInstance().getCookie(url)?.let { put("Cookie", it) }
+            }
+            val http = androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                .setDefaultRequestProperties(headers)
+                .setAllowCrossProtocolRedirects(true)
+            val factory = androidx.media3.datasource.DefaultDataSource.Factory(app, http)
+            val job = coroutineContext.job
+            var from = videoTimeNow() ?: 0L
+            var ended = false
+            while (isActive) {
+                val start = from
+                var produced = 0L
+                var seekTo = -1L
+                val frontier = { start + produced * 1000 / Transcriber.SAMPLE_RATE }
+                if (!ended) try {
+                    com.aisub.player.asr.ExoAudioDecoder(app, android.net.Uri.parse(url), factory).decode(
+                        Transcriber.SAMPLE_RATE, start,
+                        isActive = {
+                            val now = videoTimeNow() ?: start
+                            if (now < start - 3_000 || now > frontier() + 5_000) seekTo = now
+                            job.isActive && seekTo < 0 && frontier() < now + DIRECT_AHEAD_MS
+                        },
+                        onProgress = {},
+                    ) { chunk ->
+                        chunks.add(Chunk(chunk, frontier().toDouble(), 1.0, ahead = true))
+                        produced += chunk.size
+                    }
+                    if (produced == 0L) ended = true
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.w("Voxtitle", "网页视频直接读取失败：$url", e)
+                    val capture = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q
+                    _state.update {
+                        it.copy(
+                            status = "译幕也读不到这个视频的声音（${e.message?.take(60)}）。可以点「用播放器打开」" + if (capture) "，或改为读取系统声音" else "",
+                            canCapture = capture,
+                        )
+                    }
+                    return@launch
+                }
+                if (seekTo >= 0) {
+                    from = seekTo
+                    ended = false
+                    continue
+                }
+                // 已经提前读够了（或读到了结尾）：等播放追上来，或者拖动了进度
+                val end = frontier()
+                while (isActive) {
+                    delay(500)
+                    val now = videoTimeNow() ?: continue
+                    if (now < start - 3_000 || now > end + 5_000) {
+                        from = now
+                        ended = false
+                        break
+                    }
+                    if (!ended && end < now + DIRECT_AHEAD_MS / 2) {
+                        from = end
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- 系统的播放捕获（见 CaptureService） ----
+
+    @Volatile
+    var capturing = false
+        private set
+
+    fun onCaptureStarted() {
+        capturing = true
+        _state.update { it.copy(capturing = true, canCapture = false, status = if (it.cues.isEmpty()) "正在读取系统声音，边播边识别…" else null) }
+    }
+
+    fun onCaptureStopped(error: String? = null) {
+        capturing = false
+        _state.update { it.copy(capturing = false, status = error ?: it.status) }
+    }
+
+    /** 捕获到的一小段声音：刚刚播出来的，按现在的播放位置往前推它的长度 */
+    fun onCaptured(samples: FloatArray) {
+        if (!enabled) return
+        val c = clock ?: return
+        if (c.paused) return
+        val now = videoTimeNow() ?: return
+        val startMs = now - samples.size * 1000.0 / Transcriber.SAMPLE_RATE * c.rate
+        chunks.add(Chunk(samples, startMs, c.rate, ahead = false))
+    }
+
+    private fun stopCapture() {
+        if (capturing) app.stopService(android.content.Intent(app, CaptureService::class.java))
+        capturing = false
+        _state.update { it.copy(capturing = false) }
     }
 
     companion object {
         private const val MIN_SHOW_MS = 1_800L
         private const val BATCH = 4
         private const val CONTEXT = 6
+
+        /** 早于播放位置这么多的声音不再识别 */
+        private const val STALE_MS = 2_000L
+
+        /** 直接读取视频地址时最多比播放位置提前多少 */
+        private const val DIRECT_AHEAD_MS = 90_000L
+
+        /** 捕获服务把声音交给正在用的那一个 */
+        @Volatile
+        var current: WebCaptions? = null
+            private set
     }
 }

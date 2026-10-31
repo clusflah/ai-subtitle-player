@@ -93,6 +93,45 @@ fun SectionHeader(title: String, actionLabel: String? = null, onAction: (() -> U
     }
 }
 
+/**
+ * 可折叠的分区：标题栏和 [SectionHeader] 一样，右边多一个箭头，点标题栏收起或展开下面的内容。
+ * 收起与否按 key 记在本机，下次打开照旧；默认展开。
+ */
+@Composable
+fun CollapsibleSection(
+    key: String,
+    title: String,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val prefs = remember { context.getSharedPreferences("app", android.content.Context.MODE_PRIVATE) }
+    val prefKey = "section.collapsed.$key"
+    var expanded by remember(key) { mutableStateOf(!prefs.getBoolean(prefKey, false)) }
+    val arrow by animateFloatAsState(if (expanded) 180f else 0f, label = "arrow")
+    Row(
+        Modifier.fillMaxWidth()
+            .clickable {
+                expanded = !expanded
+                prefs.edit().apply { if (expanded) remove(prefKey) else putBoolean(prefKey, true) }.apply()
+            }
+            .padding(start = 20.dp, end = 8.dp, top = 20.dp, bottom = 6.dp).heightIn(min = 36.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Icon(
+            AppIcons.ExpandMore, contentDescription = if (expanded) "收起" else "展开",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 4.dp).size(20.dp).rotate(arrow),
+        )
+        Spacer(Modifier.weight(1f))
+        if (actionLabel != null && onAction != null) TextButton(onClick = onAction) { Text(actionLabel) }
+    }
+    AnimatedVisibility(expanded, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+        Column(content = content)
+    }
+}
+
 /** 白色圆角卡片，用背景层次与浅灰页面区分，不加边框和阴影。 */
 @Composable
 fun SurfaceCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {

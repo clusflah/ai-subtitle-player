@@ -42,6 +42,53 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
     private val _history = MutableStateFlow(loadHistory())
     val history: StateFlow<List<WebPage>> = _history.asStateFlow()
 
+    // ---- 网页字幕的语言：不填就跟设置里的一样 ----
+
+    private val _asrLanguage = MutableStateFlow(prefs.getString("asrLanguage", null))
+    /** 网页视频说的语言（识别用）；null 跟设置 */
+    val asrLanguage: StateFlow<String?> = _asrLanguage.asStateFlow()
+
+    private val _targetLanguage = MutableStateFlow(prefs.getString("targetLanguage", null))
+    /** 翻译成的语言；null 跟设置 */
+    val targetLanguage: StateFlow<String?> = _targetLanguage.asStateFlow()
+
+    /** 网页字幕实际用的设置 */
+    fun captionSettings(base: com.aisub.player.AppSettings) = base.copy(
+        asrLanguage = _asrLanguage.value ?: base.asrLanguage,
+        targetLanguage = _targetLanguage.value ?: base.targetLanguage,
+    )
+
+    fun setLanguages(base: com.aisub.player.AppSettings, asr: String?, target: String?) {
+        val asrChanged = asr != _asrLanguage.value
+        val targetChanged = target != _targetLanguage.value
+        _asrLanguage.value = asr
+        _targetLanguage.value = target
+        prefs.edit().putString("asrLanguage", asr).putString("targetLanguage", target).apply()
+        val s = captionSettings(base)
+        if (asrChanged) captions.restart(s) else if (targetChanged) captions.retranslate(s)
+    }
+
+    // ---- 页面缩放：每个网站、横竖屏分别记住 ----
+
+    /** 网页脚本读的当前缩放（百分比） */
+    @Volatile
+    var pageZoom = 100
+        private set
+    private var zoomKey: String? = null
+
+    /** 当前网站和屏幕方向：读出这个组合记住的缩放 */
+    fun zoomFor(url: String?, landscape: Boolean): Int {
+        val host = url?.let { Uri.parse(it).host } ?: return 100.also { pageZoom = it; zoomKey = null }
+        zoomKey = "zoom.$host.${if (landscape) "land" else "port"}"
+        pageZoom = prefs.getInt(zoomKey, 100)
+        return pageZoom
+    }
+
+    fun setPageZoom(percent: Int) {
+        pageZoom = percent.coerceIn(ZOOM_MIN, ZOOM_MAX)
+        zoomKey?.let { k -> prefs.edit().apply { if (pageZoom == 100) remove(k) else putInt(k, pageZoom) }.apply() }
+    }
+
     /** 上次看的网页：离开网页页面（例如去播放页）再回来时接着打开 */
     var lastUrl: String?
         get() = prefs.getString("last", null)
@@ -99,7 +146,17 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
         fun enabled(): Boolean = captions.enabled
 
         @JavascriptInterface
+        fun generation(): Int = captions.generation
+
+        /** 顶层网页的缩放（百分比） */
+        @JavascriptInterface
+        fun pageZoom(): Int = this@WebViewModel.pageZoom
+
+        @JavascriptInterface
         fun audio(frame: String, base64: String, startMs: Double, rate: Double) = captions.onAudio(frame, base64, startMs, rate)
+
+        @JavascriptInterface
+        fun ahead(frame: String, base64: String, startMs: Double) = captions.onAhead(frame, base64, startMs)
 
         @JavascriptInterface
         fun tick(frame: String, href: String, ms: Double, paused: Boolean, rate: Double, top: Double, bottom: Double, viewport: Double) {
@@ -117,6 +174,8 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val MAX_HISTORY = 30
+        const val ZOOM_MIN = 40
+        const val ZOOM_MAX = 150
 
         /** 视频文件和播放列表；DASH、HLS 的分片（m4s、ts）不算 */
         private val MEDIA = Regex("\\.(m3u8|mpd|mp4|m4v|webm|flv|mov|mkv)$", RegexOption.IGNORE_CASE)
