@@ -16,7 +16,6 @@ import android.content.res.Configuration
 import android.net.Uri
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.RadioButton
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -35,7 +34,9 @@ import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -49,11 +50,15 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -74,6 +79,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -123,11 +137,16 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     val sniffed by vm.sniffed.collectAsStateWithLifecycle()
     val history by vm.history.collectAsStateWithLifecycle()
     val rect by vm.videoRect.collectAsStateWithLifecycle()
+    val videoAspect by vm.videoAspect.collectAsStateWithLifecycle()
     val settings = main.state.collectAsStateWithLifecycle().value.settings
 
     var url by remember { mutableStateOf(vm.lastUrl) }
     var address by remember { mutableStateOf(url.orEmpty()) }
     var editing by remember { mutableStateOf(false) }
+    /** 地址栏里正在输入的内容（含选中范围） */
+    var field by remember { mutableStateOf(TextFieldValue(address)) }
+    val focusManager = LocalFocusManager.current
+    val clipboard = LocalClipboardManager.current
     var progress by remember { mutableStateOf(100) }
     var canGoBack by remember { mutableStateOf(false) }
     var fullscreen by remember { mutableStateOf<Pair<View, WebChromeClient.CustomViewCallback>?>(null) }
@@ -149,6 +168,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     fun go(input: String) {
         val target = toUrl(input) ?: return
         editing = false
+        field = TextFieldValue(target)
         if (url == null) url = target else webView?.loadUrl(target)
         address = target
     }
@@ -199,7 +219,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     DisposableEffect(inFullscreen) {
         val window = activity?.window
         if (inFullscreen && window != null) {
-            fullscreenLandscape = true
+            // 竖着拍的视频竖屏全屏，其余横屏（横着的视频转到竖屏时 WebView 会自己退出全屏）
+            fullscreenLandscape = vm.videoAspect.value?.let { it >= 1f } ?: true
             WindowCompat.getInsetsController(window, window.decorView).apply {
                 systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 hide(WindowInsetsCompat.Type.systemBars())
@@ -221,7 +242,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     BackHandler {
         when {
             fullscreen != null -> exitFullscreen()
-            editing && url != null -> editing = false
+            editing && url != null -> focusManager.clearFocus()
             canGoBack -> webView?.goBack()
             url != null -> {
                 vm.captions.stop()
@@ -230,29 +251,64 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 url = null
                 vm.lastUrl = null
                 address = ""
+                field = TextFieldValue("")
             }
             else -> onBack()
         }
     }
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerLowest)) {
+    // Surface 提供文字颜色（深色模式下标题不会变成黑字）
+    androidx.compose.material3.Surface(color = MaterialTheme.colorScheme.surfaceContainerLowest) {
+    Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
             // 地址栏
             Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回") }
-                OutlinedTextField(
-                    value = address,
-                    onValueChange = { address = it; editing = true },
-                    modifier = Modifier.weight(1f),
+                // 没在输入时只显示网站名，给右边的按钮留地方；点一下展开完整网址（全选，直接输入就替换）
+                val showingHost = !(editing || url == null)
+                val shown = if (!showingHost) field else TextFieldValue(pageUrl?.let { Uri.parse(it).host?.removePrefix("www.") } ?: address)
+                BasicTextField(
+                    value = shown,
+                    onValueChange = { v ->
+                        // 点进来那一下的光标变化还带着网站名：忽略，用上面换好的完整网址
+                        if (!(showingHost && v.text == shown.text)) {
+                            field = v
+                            address = v.text
+                            editing = true
+                        }
+                    },
                     singleLine = true,
-                    placeholder = { Text("输入网址或搜索") },
-                    textStyle = MaterialTheme.typography.bodyMedium,
-                    shape = RoundedCornerShape(24.dp),
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
-                    keyboardActions = KeyboardActions(onGo = { go(address) }),
+                    keyboardActions = KeyboardActions(onGo = { focusManager.clearFocus(); go(field.text) }),
+                    modifier = Modifier.weight(1f).height(40.dp).clip(RoundedCornerShape(20.dp))
+                        // 实体键盘、电视遥控器的确认键：输入法的「前往」管不到
+                        .onPreviewKeyEvent { e ->
+                            val enter = e.key == androidx.compose.ui.input.key.Key.Enter || e.key == androidx.compose.ui.input.key.Key.NumPadEnter
+                            if (enter && editing && e.type == androidx.compose.ui.input.key.KeyEventType.KeyUp) {
+                                focusManager.clearFocus()
+                                go(field.text)
+                            }
+                            enter && editing
+                        }
+                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                        .onFocusChanged { f ->
+                            if (f.isFocused && !editing) {
+                                val full = pageUrl ?: address
+                                field = TextFieldValue(full, TextRange(0, full.length))
+                                editing = true
+                            } else if (!f.isFocused) editing = false
+                        }
+                        .padding(horizontal = 14.dp),
+                    decorationBox = { inner ->
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                            if (shown.text.isEmpty()) Text("输入网址或搜索", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            inner()
+                        }
+                    },
                 )
                 if (url != null) {
-                    IconButton(onClick = { webView?.reload() }) { Icon(AppIcons.Refresh, "刷新") }
                     if (sniffed.isNotEmpty()) {
                         IconButton(onClick = { showSniffed = true }) {
                             BadgedBox(badge = { Badge { Text("${sniffed.size}") } }) { Icon(AppIcons.Movie, "网页里的视频地址") }
@@ -269,6 +325,11 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     Box {
                         IconButton(onClick = { menu = true }) { Icon(AppIcons.MoreVert, "更多") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(text = { Text("刷新") }, onClick = { menu = false; webView?.reload() })
+                            DropdownMenuItem(text = { Text("复制网址") }, onClick = {
+                                menu = false
+                                pageUrl?.let { clipboard.setText(androidx.compose.ui.text.AnnotatedString(it)) }
+                            })
                             DropdownMenuItem(text = { Text("字幕语言") }, onClick = { menu = false; dialog = WebDialog.LANGUAGE })
                             DropdownMenuItem(text = { Text("页面缩放（$zoom%）") }, onClick = { menu = false; dialog = WebDialog.ZOOM })
                         }
@@ -286,6 +347,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     AndroidView(
                         modifier = Modifier.fillMaxSize(),
                         factory = { ctx ->
+                            // 调试版可以用电脑上的 chrome://inspect 查看网页和注入的脚本
+                            if (com.aisub.player.BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
                             WebView(ctx).apply {
                                 layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                                 with(getSettings()) {
@@ -325,6 +388,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                                     override fun doUpdateVisitedHistory(view: WebView, visitedUrl: String, isReload: Boolean) {
                                         canGoBack = view.canGoBack()
                                         pageUrl = visitedUrl
+                                        // 单页应用里点进视频只改地址、不重新加载：也记下来，回来时打开的是这个视频
+                                        if (visitedUrl.startsWith("http")) vm.lastUrl = visitedUrl
                                         if (!editing) address = visitedUrl
                                     }
 
@@ -339,6 +404,10 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                                 webChromeClient = object : WebChromeClient() {
                                     override fun onProgressChanged(view: WebView, newProgress: Int) {
                                         progress = newProgress
+                                    }
+
+                                    override fun onReceivedTitle(view: WebView, title: String?) {
+                                        vm.onTitle(title, view.url)
                                     }
 
                                     override fun onShowCustomView(view: View, callback: CustomViewCallback) {
@@ -356,16 +425,18 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                         },
                     )
                     // 字幕放在网页视频的下沿；不知道视频在哪（iframe 里的）就放在底部
-                    val bottom = rect?.let { r ->
-                        if (r.viewportWidth <= 0) return@let null
-                        val bottomDp = viewWidth * (r.bottom / r.viewportWidth)
-                        (viewHeight - bottomDp + 6.dp).takeIf { bottomDp in 40.dp..viewHeight }
-                    }
+                    val videoBottom = rect?.let { r -> if (r.viewportWidth <= 0) null else viewWidth * (r.bottom / r.viewportWidth) }
+                    val bottom = videoBottom?.let { b -> (viewHeight - b + 6.dp).takeIf { b in 40.dp..viewHeight } }
+                    // 竖屏时视频下面通常还有地方：字幕放在视频下面，不挡画面、也不和视频里烧进去的字幕叠在一起
+                    val below = videoBottom?.takeIf { !landscape && it >= 40.dp && viewHeight - it >= 96.dp }
                     // 网页报告的位置有小抖动（滚动条、工具栏伸缩）：变化超过一点才挪，字幕不会跟着颤；暂时不知道位置时留在原处
                     var stableBottom by remember { mutableStateOf(24.dp) }
                     if (bottom != null && (bottom - stableBottom).value.let { kotlin.math.abs(it) } > 12f) stableBottom = bottom
+                    var stableBelow by remember { mutableStateOf<androidx.compose.ui.unit.Dp?>(null) }
+                    if (below == null) stableBelow = null
+                    else if (stableBelow.let { it == null || kotlin.math.abs((below - it).value) > 12f }) stableBelow = below
                     if (fullscreen == null) WebSubtitles(
-                        vm, captionState, settings, stableBottom,
+                        vm, captionState, settings, stableBottom, stableBelow,
                         onOpenDirect = { playInPlayer(it, webView?.url.orEmpty(), webView?.title.orEmpty()) },
                         onCapture = ::startCapture,
                     )
@@ -396,7 +467,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             ) {
                 AndroidView(factory = { view }, modifier = Modifier.fillMaxSize())
                 WebSubtitles(
-                    vm, captionState, settings, settings.subtitleOffset.dp,
+                    vm, captionState, settings, settings.subtitleOffset.dp, null,
                     onOpenDirect = {
                         exitFullscreen()
                         playInPlayer(it, webView?.url.orEmpty(), webView?.title.orEmpty())
@@ -404,7 +475,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     onCapture = ::startCapture,
                 )
                 if (showControls) Row(Modifier.align(Alignment.TopEnd).padding(12.dp)) {
-                    IconButton(
+                    // 横着的视频转成竖屏时 WebView 会直接退出全屏：只有竖视频才给切换横竖屏
+                    if (videoAspect?.let { it < 1f } == true) IconButton(
                         onClick = { fullscreenLandscape = !fullscreenLandscape },
                         modifier = Modifier.clip(RoundedCornerShape(50)).background(Color(0x66000000)),
                     ) { Icon(AppIcons.ScreenRotation, if (fullscreenLandscape) "切换到竖屏" else "切换到横屏", tint = Color.White) }
@@ -416,6 +488,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 }
             }
         }
+    }
     }
 
     when (dialog) {
@@ -488,6 +561,8 @@ private fun androidx.compose.foundation.layout.BoxScope.WebSubtitles(
     state: WebCaptionState,
     settings: AppSettings,
     bottom: androidx.compose.ui.unit.Dp,
+    /** 不为 null 时字幕放在视频下面（这里是视频下沿离顶部的距离），否则叠在视频底部 */
+    below: androidx.compose.ui.unit.Dp?,
     onOpenDirect: (String) -> Unit,
     onCapture: () -> Unit,
 ) {
@@ -499,17 +574,26 @@ private fun androidx.compose.foundation.layout.BoxScope.WebSubtitles(
             delay(100)
         }
     }
-    val cue: Cue? = if (now >= 0) cueNear(state.cues, now) else null
+    // 只看正在放的那一路（放广告时不显示正片的字幕）
+    val visible = remember(state.cues, state.source) { state.cues.filter { state.sources[it.id] == state.source } }
+    val cue: Cue? = if (now >= 0) cueNear(visible, now) else null
     if (cue != null && settings.showAiSubtitles) {
         val lines = if (cue.translation == cue.text) listOf(cue.text to true) else buildList {
             if (settings.showTranslation && cue.translation != null) add(cue.translation to true)
             if (settings.showOriginal || cue.translation == null) add(cue.text to false)
         }
         // 上下两行分开放的设置在网页里不好用（不知道画面顶部在哪）：始终叠在一起
-        StyledSubtitleLines(lines, settings.copy(topLineFromTop = -1), bottom)
+        val style = settings.copy(topLineFromTop = -1)
+        if (below != null) {
+            // 视频下面接一条深色底，像是播放器的延伸，网页是白底也看得清
+            Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(top = below).background(Color(0xE6000000)).padding(vertical = 6.dp)) {
+                StyledSubtitleLines(lines, style, 0.dp)
+            }
+        } else StyledSubtitleLines(lines, style, bottom)
     } else if (state.status != null) {
         Column(
-            Modifier.align(Alignment.BottomCenter).padding(bottom = bottom, start = 24.dp, end = 24.dp).widthIn(max = 520.dp)
+            (if (below != null) Modifier.align(Alignment.TopCenter).padding(top = below + 8.dp, start = 24.dp, end = 24.dp)
+            else Modifier.align(Alignment.BottomCenter).padding(bottom = bottom, start = 24.dp, end = 24.dp)).widthIn(max = 520.dp)
                 .clip(RoundedCornerShape(8.dp)).background(Color(0xCC000000)).padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
             Text(state.status, color = Color.White, fontSize = 13.sp)
@@ -556,6 +640,7 @@ private fun cueNear(cues: List<Cue>, positionMs: Long): Cue? {
 private enum class WebDialog { LANGUAGE, ZOOM }
 
 /** 网页字幕的视频语言和翻译语言；「跟随设置」表示用设置页里的 */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun WebLanguageDialog(
     asr: String?,
@@ -567,44 +652,34 @@ private fun WebLanguageDialog(
     var asrChoice by remember { mutableStateOf(asr) }
     var targetChoice by remember { mutableStateOf(target) }
     val targets = (TARGET_LANGUAGES + listOfNotNull(target, settings.targetLanguage)).distinct()
+    // 选项用小标签平铺：两组都在一屏里，不用往下翻
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("字幕语言") },
         text = {
-            LazyColumn {
-                item { Text("视频说的语言", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(bottom = 4.dp)) }
-                item {
-                    LanguageOption("跟随设置（${AsrLanguages.label(settings.asrLanguage)}）", asrChoice == null) { asrChoice = null }
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("视频说的语言", style = MaterialTheme.typography.titleSmall)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(asrChoice == null, { asrChoice = null }, label = { Text("同设置（${AsrLanguages.label(settings.asrLanguage)}）") })
+                    AsrLanguages.COMMON.forEach { (code, label) ->
+                        FilterChip(asrChoice == code, { asrChoice = code }, label = { Text(label) })
+                    }
                 }
-                items(AsrLanguages.COMMON) { (code, label) ->
-                    LanguageOption(label, asrChoice == code) { asrChoice = code }
+                Text("翻译成", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 16.dp))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(targetChoice == null, { targetChoice = null }, label = { Text("同设置（${settings.targetLanguage}）") })
+                    targets.forEach { lang -> FilterChip(targetChoice == lang, { targetChoice = lang }, label = { Text(lang) }) }
                 }
-                item { Text("翻译成", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp)) }
-                item { LanguageOption("跟随设置（${settings.targetLanguage}）", targetChoice == null) { targetChoice = null } }
-                items(targets) { lang -> LanguageOption(lang, targetChoice == lang) { targetChoice = lang } }
-                item {
-                    Text(
-                        "换了视频语言会从当前位置重新识别；只换翻译语言时保留原文、重新翻译。",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 12.dp),
-                    )
-                }
+                Text(
+                    "只对网页字幕生效。换了视频语言会从当前位置重新识别；只换翻译语言时保留原文、重新翻译。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 12.dp),
+                )
             }
         },
         confirmButton = { TextButton(onClick = { onConfirm(asrChoice, targetChoice) }) { Text("确定") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
-}
-
-@Composable
-private fun LanguageOption(label: String, selected: Boolean, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RadioButton(selected = selected, onClick = onClick)
-        Text(label, style = MaterialTheme.typography.bodyLarge)
-    }
 }
 
 /** 还没打开网页时：常用网站和最近看过的网页 */

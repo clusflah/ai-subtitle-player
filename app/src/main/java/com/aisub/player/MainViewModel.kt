@@ -1183,7 +1183,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 try {
                     val onCue: (Cue) -> Unit = { c ->
                         val start = c.startMs + from
-                        if (start < to) addCues(listOf(c.copy(startMs = start, endMs = c.endMs + from)))
+                        // 已经取消（换了语言重新识别等）：正在识别的这一段出来的结果不要，免得混进新的字幕
+                        if (start < to && ctx.isActive) addCues(listOf(c.copy(startMs = start, endMs = c.endMs + from)))
                     }
                     var lastProgress = 0L
                     try {
@@ -1289,7 +1290,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         try {
             withContext(dispatcher) {
-                createEngine(settings).use { engine ->
+                createEngine(settings, live = true).use { engine ->
                     (engine as? com.aisub.player.asr.cloud.ChunkedCloudEngine)?.useChunks(LIVE_FIRST_CHUNK_SEC, LIVE_CHUNK_SEC)
                     val cancelHandle = coroutineContext.job.invokeOnCompletion { engine.cancel() }
                     val onCue: (Cue) -> Unit = { incoming.add(it to android.os.SystemClock.elapsedRealtime()) }
@@ -1303,6 +1304,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             val chunk = pending.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS)
                             if (chunk == null) {
                                 if (decodingDone.get()) break else continue
+                            }
+                            // 重连了：断开前没说完的那段先识别完，不和重连后的声音连成一句（本地识别才能接着用，云端的分段会自己断开）
+                            if (chunk === LIVE_RECONNECTED) {
+                                if (engine is Transcriber) engine.finish(onCue)
+                                continue
                             }
                             engine.accept(chunk, onCue)
                         }
@@ -1318,6 +1324,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             val gotAudio = java.util.concurrent.atomic.AtomicBoolean(false)
                             val stalled = java.util.concurrent.atomic.AtomicBoolean(false)
                             android.util.Log.i("Voxtitle", "直播声音：第 ${++connects} 次连接 ${entry.uri}")
+                            if (connects > 1) pending.add(LIVE_RECONNECTED)
                             val baseMs = samples.get() * 1000 / Transcriber.SAMPLE_RATE
                             anchors.newSegment(baseMs)
                             var lastWall = -1L
@@ -1574,15 +1581,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return settings.streamingAsr && settings.streamingAvailable && (current.isLive || isRemote(current))
     }
 
-    private fun createEngine(settings: AppSettings): SpeechEngine {
+    /** live：直播实时字幕，本地模型一段话最长 6 秒（要等一段说完才出字，太长字幕就赶不上画面） */
+    private fun createEngine(settings: AppSettings, live: Boolean = false): SpeechEngine {
         if (useStreaming(settings)) settings.createStreamingEngine()?.let { return it }
-        return createChunkedEngine(settings)
+        return createChunkedEngine(settings, live)
     }
 
-    private fun createChunkedEngine(settings: AppSettings): SpeechEngine = when (settings.asrEngine) {
+    private fun createChunkedEngine(settings: AppSettings, live: Boolean = false): SpeechEngine = when (settings.asrEngine) {
         AsrEngine.LOCAL -> {
             val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
-            Transcriber(ModelCatalog.byId(settings.localModel), models, com.aisub.player.asr.AsrLanguages.primary(settings.asrLanguage), threads)
+            Transcriber(ModelCatalog.byId(settings.localModel), models, com.aisub.player.asr.AsrLanguages.primary(settings.asrLanguage), threads, if (live) 6f else 12f)
         }
         else -> settings.createCloudEngine().also { e ->
             if (e is com.aisub.player.asr.cloud.GeminiTranscriber && inlineTranslate) e.translateTo = settings.targetLanguage
@@ -2462,6 +2470,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         /** 直播云端识别的分段（秒）：段越短字幕越早出来，太短识别不准 */
         private const val LIVE_FIRST_CHUNK_SEC = 4
         private const val LIVE_CHUNK_SEC = 6
+
+        /** 直播声音重连时塞进识别队列的记号 */
+        private val LIVE_RECONNECTED = FloatArray(0)
         private const val LIVE_KEEP_CUES = 200
 
         /** 兼容模式这么久还没放出直播，就退回默认内核 */

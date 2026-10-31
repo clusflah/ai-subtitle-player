@@ -77,4 +77,13 @@ class TokenToolsTest {
         // 短于 5 秒不拆
         assertEquals(1, CueSplitter.splitProportional("一句。两句。", 0, 3000).size)
     }
+
+    @Test
+    fun allCapsBecomesSentenceCase() {
+        assertTrue(CueSplitter.isAllCaps("IN THE PAST YEAR WON'T YOU"))
+        assertTrue(!CueSplitter.isAllCaps("NASA said hello"))
+        assertTrue(!CueSplitter.isAllCaps("你好 OK"))
+        assertEquals("If you've had stress. I think I", CueSplitter.sentenceCase("IF YOU'VE HAD STRESS. I THINK I"))
+        assertEquals("I'm here, and I know", CueSplitter.sentenceCase("I'M HERE, AND I KNOW"))
+    }
 }

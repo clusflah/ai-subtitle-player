@@ -8,7 +8,8 @@
 // 读不到声音的视频（跨域且没开 CORS、有版权保护）不接管，免得把网页的声音弄没了，改为告诉 App，由 App 想办法。
 (function () {
   if (window.__voxtitle) return;
-  window.__voxtitle = true;
+  // 调试用：chrome://inspect 里看各个音频缓冲区的情况
+  window.__voxtitle = { feeders: function () { return feeders.map(function (f) { return { mime: f.mime, kind: f.kind, segments: f.segments.length, ok: f.ok, failures: f.failures, broken: f.broken, key: msIds.get(f.ms) }; }); } };
   var B = window.VoxBridge;
   if (!B) return;
 
@@ -18,6 +19,7 @@
   var ctx = null;
   var hooked = new WeakMap(); // video -> true（已接上 Web Audio）
   var reported = new WeakMap(); // video -> 已报告过的问题
+  var offered = new WeakMap(); // video -> 已交给 App 直接读取的地址
   var active = null;
   var enabled = false;
   /** 当前视频正在用（或还在尝试）提前识别：这时不用 Web Audio 边播边读 */
@@ -70,6 +72,17 @@
   var feeders = [];
   var feederOf = new WeakMap(); // SourceBuffer -> Feeder
   var sourceOf = {}; // blob 地址 -> MediaSource
+  // 每个 MediaSource 一个编号：YouTube 等在同一个 video 里先放广告、再放正片，各用各的 MediaSource，
+  // 时间都从 0 开始；App 按这个编号把字幕分开，放广告时不会显示正片的字幕
+  var msIds = new WeakMap();
+  var nextMs = 1;
+
+  /** 视频现在放的是哪一路：MSE 用 MediaSource 的编号，否则是视频地址 */
+  function keyOf(v) {
+    var src = v.currentSrc || v.src || '';
+    var ms = sourceOf[src];
+    return ms ? (msIds.get(ms) || src) : src;
+  }
   var MS = window.MediaSource || window.WebKitMediaSource;
 
   function u32(b, i) { return b[i] * 16777216 + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3]; }
@@ -278,26 +291,36 @@
     seg.done = true;
     this.busy = true;
     // 原始数据留着：换了视频语言要重新识别时还要再解一遍（总量由 push 里的上限管）
-    var data = concat(this.init, seg.bytes);
+    // 每段单独解码时开头会丢掉一点（Opus 的编码延迟、AAC 的预热），一句话里正好掉几个音：
+    // 带上紧挨着的前一段一起解，解码器热好了，再把前一段的部分切掉
+    var prev = null;
+    for (var q = 0; q < this.segments.length; q++) {
+      var c = this.segments[q];
+      if (c !== seg && c.bytes && c.start < seg.start && (!prev || c.start > prev.start)) prev = c;
+    }
+    if (prev && seg.start - prev.start > 30000) prev = null;
+    var data = prev ? concat(concat(this.init, prev.bytes), seg.bytes) : concat(this.init, seg.bytes);
+    var skip = prev ? Math.round((seg.start - prev.start) / 1000 * RATE) : 0;
     var start = seg.start;
     var oc = new OfflineAudioContext(1, 1, RATE);
     var done = function () { self.busy = false; };
     var onAudio = function (buf) {
       var n = buf.length, ch = buf.numberOfChannels;
-      var out = new Int16Array(n);
+      var from = skip < n ? skip : 0;
+      var out = new Int16Array(n - from);
       var chans = [];
       for (var c = 0; c < ch; c++) chans.push(buf.getChannelData(c));
-      for (var i = 0; i < n; i++) {
+      for (var i = from; i < n; i++) {
         var sum = 0;
         for (var c2 = 0; c2 < ch; c2++) sum += chans[c2][i];
         var x = sum / ch;
-        out[i] = x > 1 ? 32767 : x < -1 ? -32768 : x * 32767;
+        out[i - from] = x > 1 ? 32767 : x < -1 ? -32768 : x * 32767;
       }
       // 时间明显对不上（例如网页改过时间戳的偏移）：不用这条路
       if (Math.abs(start - now) > 10 * 60 * 1000) { self.broken = true; return done(); }
       self.ok++;
       self.failures = 0;
-      try { B.ahead(frameId, toBase64(out), start); } catch (e) {}
+      try { B.ahead(frameId, toBase64(out), start, msIds.get(self.ms) || ''); } catch (e) {}
       done();
     };
     var onError = function () {
@@ -324,7 +347,12 @@
       var create = URL.createObjectURL;
       URL.createObjectURL = function (o) {
         var u = create.apply(this, arguments);
-        try { if (o instanceof MS) sourceOf[u] = o; } catch (e) {}
+        try {
+          if (o instanceof MS) {
+            sourceOf[u] = o;
+            if (!msIds.has(o)) msIds.set(o, 'ms' + (nextMs++));
+          }
+        } catch (e) {}
         return u;
       };
       var add = MS.prototype.addSourceBuffer;
@@ -334,6 +362,7 @@
           var kind = /webm/i.test(mime) ? 'webm' : /mp4/i.test(mime) ? 'mp4' : null;
           if (kind && (/^audio\//i.test(mime) || /mp4a|opus|vorbis|ac-3|ec-3|flac/i.test(mime))) {
             var f = new Feeder(this, kind);
+            f.mime = mime;
             feederOf.set(sb, f);
             feeders.push(f);
           }
@@ -379,7 +408,7 @@
         pos -= n;
         // 这段声音的开头大约在当前播放位置之前一个缓冲区
         var startMs = v.currentTime * 1000 - n / ctx.sampleRate * 1000 * v.playbackRate;
-        try { B.audio(frameId, toBase64(k === out.length ? out : out.subarray(0, k)), startMs, v.playbackRate); } catch (err) {}
+        try { B.audio(frameId, toBase64(k === out.length ? out : out.subarray(0, k)), startMs, v.playbackRate, keyOf(v)); } catch (err) {}
       };
       source.connect(proc);
       proc.connect(ctx.destination); // 不接到输出上不会触发回调；输出是静音，不影响网页的声音
@@ -416,7 +445,10 @@
   var generation = -1;
 
   function tick() {
+    var was = enabled;
     try { enabled = B.enabled(); } catch (e) { return; }
+    // 重新打开 AI 字幕：App 那边已经停了，地址和问题要重新告诉它
+    if (enabled && !was) { offered = new WeakMap(); reported = new WeakMap(); }
     var g = generation;
     try { g = B.generation(); } catch (e) {}
     if (g !== generation) {
@@ -439,12 +471,20 @@
       return;
     }
     active = v;
+    // 先报告播放位置：换了视频（地址变了）App 先清掉旧的，再处理下面的新地址
+    report(v, v.paused);
     var feeder = v.mediaKeys ? null : feederFor(v);
     aheadBusy = !!feeder;
     if (enabled) {
       if (feeder) {
         feeder.decodeNext(v);
       } else {
+        // 普通的视频地址：交给 App 直接读取、提前识别（比边播边读快得多）；读不了 App 会接着用下面边播边读的声音
+        var src = v.currentSrc || v.src || '';
+        if (!v.mediaKeys && /^https?:/i.test(src) && offered.get(v) !== src) {
+          offered.set(v, src);
+          try { B.problem(frameId, 'src', src); } catch (e) {}
+        }
         var p = problemOf(v);
         if (p && !hooked.get(v)) {
           if (reported.get(v) !== p) {
@@ -456,7 +496,6 @@
         }
       }
     }
-    report(v, v.paused);
   }
 
   function report(v, paused) {
@@ -466,7 +505,7 @@
       var r = v.getBoundingClientRect();
       top = r.top; bottom = r.bottom;
     }
-    try { B.tick(frameId, location.href, v.currentTime * 1000, paused, v.playbackRate, top, bottom, window.innerWidth); } catch (e) {}
+    try { B.tick(frameId, location.href, v.currentTime * 1000, paused, v.playbackRate, top, bottom, window.innerWidth, v.videoWidth || 0, v.videoHeight || 0, keyOf(v)); } catch (e) {}
   }
 
   setInterval(tick, 250);

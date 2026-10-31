@@ -11,11 +11,12 @@ android {
     compileSdk = 36
 
     defaultConfig {
+        manifestPlaceholders["appLabel"] = "译幕"
         applicationId = "com.aisub.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 82
-        versionName = "2.9.21"
+        versionCode = 83
+        versionName = "2.9.22"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用
@@ -37,6 +38,12 @@ android {
     }
 
     buildTypes {
+        // 调试版换个包名，和装好的正式版并存（签名不同，不能覆盖安装）
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            manifestPlaceholders["appLabel"] = "译幕 调试"
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

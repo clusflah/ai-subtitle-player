@@ -26,6 +26,8 @@ class Transcriber(
     models: ModelManager,
     language: String,
     numThreads: Int,
+    /** 一段语音最长几秒：边播边识别时短一点，字幕出得快 */
+    maxSpeechSeconds: Float = 12f,
 ) : SpeechEngine {
 
     private val vad = Vad(
@@ -36,7 +38,7 @@ class Transcriber(
                 minSilenceDuration = 0.35f,
                 minSpeechDuration = 0.25f,
                 windowSize = VAD_WINDOW,
-                maxSpeechDuration = 12f,
+                maxSpeechDuration = maxSpeechSeconds,
             ),
             sampleRate = SAMPLE_RATE,
             numThreads = 1,
@@ -67,9 +69,11 @@ class Transcriber(
         }
     }
 
+    /** 把还没说完的那段也识别出来。之后还能接着送声音（直播重连、网页拖动进度后从新位置继续） */
     override fun finish(onCue: (Cue) -> Unit) {
         vad.flush()
         drain(onCue)
+        vad.reset()
     }
 
     private fun drain(onCue: (Cue) -> Unit) {
@@ -91,6 +95,9 @@ class Transcriber(
         }
         var text = result.text.trim()
         if (text.isEmpty() || text.all { it in CueSplitter.PUNCTUATION || it.isWhitespace() }) return emptyList()
+        // 片头音乐、掌声常被认成一个「嗯」：一大段只有一个语气词的不要（不然一个「嗯」挂好几秒）
+        val bare = text.filterNot { it in CueSplitter.PUNCTUATION || it.isWhitespace() }
+        if (bare.length <= 2 && bare.all { it in "嗯呃啊哦额唔" } && segment.samples.size > 2 * SAMPLE_RATE) return emptyList()
         punctuation?.let { text = it.addPunctuation(text) }
 
         val startMs = segment.start * 1000L / SAMPLE_RATE
@@ -108,7 +115,9 @@ class Transcriber(
         } else {
             CueSplitter.splitProportional(text, startMs, endMs)
         }
-        return lines.map { (s, e, t) -> Cue(nextId++, s, e, t) }
+        // 有的模型英文全输出大写（SenseVoice 等）：整段都是大写时改成普通的大小写，读起来不费劲
+        val caps = CueSplitter.isAllCaps(text)
+        return lines.map { (s, e, t) -> Cue(nextId++, s, e, if (caps) CueSplitter.sentenceCase(t) else t) }
     }
 
     override fun close() {

@@ -39,6 +39,10 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
     private val _videoRect = MutableStateFlow<VideoRect?>(null)
     val videoRect: StateFlow<VideoRect?> = _videoRect.asStateFlow()
 
+    private val _videoAspect = MutableStateFlow<Float?>(null)
+    /** 正在放的视频的宽高比（宽 / 高）；网页全屏时按它选横屏还是竖屏 */
+    val videoAspect: StateFlow<Float?> = _videoAspect.asStateFlow()
+
     private val _history = MutableStateFlow(loadHistory())
     val history: StateFlow<List<WebPage>> = _history.asStateFlow()
 
@@ -98,22 +102,35 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
     fun onPageStarted(url: String) {
         _sniffed.value = emptyList()
         _videoRect.value = null
+        _videoAspect.value = null
         lastUrl = url
     }
 
     fun onPageFinished(title: String?, url: String) {
         if (!url.startsWith("http")) return
-        val page = WebPage(title?.takeIf { it.isNotBlank() && !it.startsWith("http") } ?: Uri.parse(url).host.orEmpty(), url)
-        val list = (listOf(page) + _history.value.filter { it.url != url }).take(MAX_HISTORY)
+        val key = historyKey(url)
+        val known = _history.value.firstOrNull { historyKey(it.url) == key }
+        val page = WebPage(goodTitle(title) ?: known?.title ?: Uri.parse(url).host.orEmpty(), url)
+        saveHistory((listOf(page) + _history.value.filter { historyKey(it.url) != key }).take(MAX_HISTORY))
+    }
+
+    /** 单页网站（YouTube、B 站）加载完以后才换标题：换了就更新最近访问里的那一条 */
+    fun onTitle(title: String?, url: String?) {
+        val t = goodTitle(title) ?: return
+        val key = historyKey(url ?: return)
+        if (_history.value.none { historyKey(it.url) == key && it.title != t }) return
+        saveHistory(_history.value.map { if (historyKey(it.url) == key) it.copy(title = t) else it })
+    }
+
+    fun removeHistory(page: WebPage) = saveHistory(_history.value.filter { it.url != page.url })
+
+    private fun saveHistory(list: List<WebPage>) {
         _history.value = list
         prefs.edit().putString("history", JSONArray(list.map { JSONObject().put("t", it.title).put("u", it.url) }).toString()).apply()
     }
 
-    fun removeHistory(page: WebPage) {
-        val list = _history.value.filter { it.url != page.url }
-        _history.value = list
-        prefs.edit().putString("history", JSONArray(list.map { JSONObject().put("t", it.title).put("u", it.url) }).toString()).apply()
-    }
+    /** 标题是网址、空的，或者只是网站名（还没换成视频标题）时不用 */
+    private fun goodTitle(title: String?): String? = title?.trim()?.takeIf { it.isNotEmpty() && !it.startsWith("http") }
 
     private fun loadHistory(): List<WebPage> = runCatching {
         val arr = JSONArray(prefs.getString("history", "[]"))
@@ -153,14 +170,15 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
         fun pageZoom(): Int = this@WebViewModel.pageZoom
 
         @JavascriptInterface
-        fun audio(frame: String, base64: String, startMs: Double, rate: Double) = captions.onAudio(frame, base64, startMs, rate)
+        fun audio(frame: String, base64: String, startMs: Double, rate: Double, source: String) = captions.onAudio(frame, base64, startMs, rate, source)
 
         @JavascriptInterface
-        fun ahead(frame: String, base64: String, startMs: Double) = captions.onAhead(frame, base64, startMs)
+        fun ahead(frame: String, base64: String, startMs: Double, source: String) = captions.onAhead(frame, base64, startMs, source)
 
         @JavascriptInterface
-        fun tick(frame: String, href: String, ms: Double, paused: Boolean, rate: Double, top: Double, bottom: Double, viewport: Double) {
-            captions.onTick(frame, href, ms, paused, rate)
+        fun tick(frame: String, href: String, ms: Double, paused: Boolean, rate: Double, top: Double, bottom: Double, viewport: Double, width: Double, height: Double, source: String) {
+            captions.onTick(frame, href, ms, paused, rate, source)
+            if (width > 0 && height > 0) _videoAspect.value = (width / height).toFloat()
             _videoRect.value = if (bottom > 0) VideoRect(top.toFloat(), bottom.toFloat(), viewport.toFloat()) else null
         }
 
@@ -176,6 +194,16 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
         private const val MAX_HISTORY = 30
         const val ZOOM_MIN = 40
         const val ZOOM_MAX = 150
+
+        /** 分享、统计用的参数：同一个视频带不带它算同一条最近访问 */
+        private val TRACKING = Regex("^(pp|si|feature|spm_id_from|vd_source|share_.*|from_.*|utm_.*|t|ref|from|source)$")
+
+        fun historyKey(url: String): String {
+            val u = Uri.parse(url)
+            val query = u.queryParameterNames.filterNot { TRACKING.matches(it) }.sorted()
+                .joinToString("&") { "$it=" + u.getQueryParameter(it) }
+            return (u.host.orEmpty().removePrefix("www.").removePrefix("m.") + u.path.orEmpty().trimEnd('/') + "?" + query)
+        }
 
         /** 视频文件和播放列表；DASH、HLS 的分片（m4s、ts）不算 */
         private val MEDIA = Regex("\\.(m3u8|mpd|mp4|m4v|webm|flv|mov|mkv)$", RegexOption.IGNORE_CASE)
