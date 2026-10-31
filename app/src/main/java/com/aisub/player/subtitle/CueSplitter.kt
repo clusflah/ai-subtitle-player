@@ -133,4 +133,25 @@ object CueSplitter {
             block == Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION ||
             block == Character.UnicodeBlock.HALFWIDTH_AND_FULLWIDTH_FORMS
     }
+
+    /** 纯西文、字母全是大写（模型的输出习惯，不是原文就这样）；夹着中文的 OK、AI 之类不算 */
+    fun isAllCaps(text: String): Boolean {
+        val letters = text.filter { it in 'A'..'Z' || it in 'a'..'z' }
+        return letters.length >= 2 && letters.all { it in 'A'..'Z' } && text.none { isCjk(it) }
+    }
+
+    /** 全大写改成普通写法：句首、I 和 I'm 之类大写，其余小写 */
+    fun sentenceCase(text: String): String {
+        val lower = text.lowercase()
+        val sb = StringBuilder(lower.length)
+        var capitalize = true
+        for (c in lower) {
+            if (capitalize && c.isLetter()) {
+                sb.append(c.uppercaseChar())
+                capitalize = false
+            } else sb.append(c)
+            if (c == '.' || c == '!' || c == '?' || c == '。' || c == '！' || c == '？') capitalize = true
+        }
+        return sb.toString().replace(Regex("(?<![\\p{L}'])i(?=$|[\\s'’,.!?])"), "I")
+    }
 }

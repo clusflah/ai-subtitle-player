@@ -33,7 +33,7 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
-import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.LinkedBlockingDeque
 import java.util.concurrent.TimeUnit
 
 data class WebCaptionState(
@@ -43,6 +43,10 @@ data class WebCaptionState(
     val status: String? = null,
     /** 字幕，时间是网页视频的播放位置（毫秒），按开始时间排序 */
     val cues: List<Cue> = emptyList(),
+    /** 每句字幕来自哪一路声音（MediaSource 编号或视频地址），见 [source] */
+    val sources: Map<Int, String> = emptyMap(),
+    /** 视频现在放的是哪一路：同一个 video 里先放广告再放正片时，只显示正在放的那一路的字幕 */
+    val source: String? = null,
     /** 读不到声音、但能拿到地址的视频：可以改用播放器打开 */
     val directUrl: String? = null,
     /** 网页里读不到声音：可以改用系统的播放捕获读取（Android 10 起，要用户授权） */
@@ -78,7 +82,7 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
 
     // ---- 视频的播放位置（网页脚本报告） ----
 
-    private class Clock(val frame: String, val videoMs: Double, val paused: Boolean, val rate: Double, val at: Long)
+    private class Clock(val frame: String, val videoMs: Double, val paused: Boolean, val rate: Double, val at: Long, val source: String)
 
     @Volatile
     private var clock: Clock? = null
@@ -112,14 +116,23 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
     // ---- 识别 ----
 
     /** ahead：比播放提前送来的声音（网页缓冲、直接读地址）；否则是边播边读的 */
-    private class Chunk(val samples: FloatArray, val videoMs: Double, val rate: Double, val ahead: Boolean)
-    private class Anchor(val audioMs: Long, val videoMs: Double, val rate: Double)
+    private class Chunk(val samples: FloatArray, val videoMs: Double, val rate: Double, val ahead: Boolean, val source: String)
+    private class Anchor(val audioMs: Long, val videoMs: Double, val rate: Double, val source: String)
 
-    private val chunks = LinkedBlockingQueue<Chunk>()
-    private val anchors = ArrayList<Anchor>()
+    /**
+     * 一次识别用到的数据：换语言重新识别、换了网页时整个换掉。
+     * 旧的识别循环被取消后还可能收个尾，它手里拿的是旧的这份，碰不到新的（不然两次识别的时间对应混在一起，字幕错位）
+     */
+    private class Session {
+        val chunks = LinkedBlockingDeque<Chunk>()
+        val anchors = ArrayList<Anchor>()
 
-    /** 已经送去识别的视频时间段：拖回来重看时不再重复识别 */
-    private val covered = RangeSet()
+        /** 每一路已经送去识别的视频时间段：拖回来重看时不再重复识别 */
+        val covered = HashMap<String, RangeSet>()
+    }
+
+    @Volatile
+    private var session = Session()
     private var job: Job? = null
     private var translateJob: Job? = null
     private var nextId = 1
@@ -132,7 +145,7 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
         }
         enabled = true
         aheadNoted = false
-        chunks.clear()
+        session = Session()
         _state.update { it.copy(running = true, status = "播放网页里的视频后开始识别…", directUrl = null) }
         job = scope.launch {
             try {
@@ -163,6 +176,7 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
     /** 换了视频语言：已有字幕作废，用新的设置从头识别（正在识别时才重新开始） */
     fun restart(settings: AppSettings) {
         val running = job?.isActive == true
+        log("换视频语言，重新识别（${settings.asrLanguage}），正在识别：$running")
         val direct = directSource
         if (running) {
             job?.cancel()
@@ -171,12 +185,8 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
         stopDirect()
         // 网页脚本看到它变了，会把缓冲好的声音重新送一遍
         generation++
-        synchronized(anchors) {
-            anchors.clear()
-            covered.clear()
-        }
-        chunks.clear()
-        _state.update { it.copy(cues = emptyList()) }
+        session = Session()
+        _state.update { it.copy(cues = emptyList(), sources = emptyMap()) }
         if (running) {
             start(settings)
             direct?.let { startDirect(it) }
@@ -208,16 +218,12 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
 
     /** 换了一个网页：旧字幕不再对得上 */
     fun reset() {
-        synchronized(anchors) {
-            anchors.clear()
-            covered.clear()
-        }
-        chunks.clear()
+        session = Session()
         clock = null
         pageKey = null
         stopDirect()
         _state.update {
-            it.copy(cues = emptyList(), directUrl = null, canCapture = false, status = if (it.running && !it.capturing) "播放网页里的视频后开始识别…" else null)
+            it.copy(cues = emptyList(), sources = emptyMap(), directUrl = null, canCapture = false, status = if (it.running && !it.capturing) "播放网页里的视频后开始识别…" else null)
         }
     }
 
@@ -242,12 +248,30 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
             var audioMs = 0L
             var engineBase = 0L
             var heard = false
+            // 上一段送进引擎的声音是哪一路、到视频的哪儿结束
+            var fedSource: String? = null
+            var fedEnd = 0L
+            var current: Session? = null
             while (isActive) {
-                    val chunk = chunks.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                    val s = session
+                    val chunk = s.chunks.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                    // 刚被取消（换语言了）：这段是新一次识别的，放回去
+                    if (!isActive) {
+                        s.chunks.offerFirst(chunk)
+                        break
+                    }
+                    // 换了网页：引擎里没识别完的是旧网页的声音，不要了
+                    if (s !== current) {
+                        engine?.close()
+                        engine = null
+                        current = s
+                        audioMs = 0L
+                        fedSource = null
+                    }
                     // 识别跟不上、或者拖动过进度：已经播过去的声音不用识别了
                     val playing = videoTimeNow()
                     val chunkEnd = chunk.videoMs + chunk.samples.size * 1000.0 / Transcriber.SAMPLE_RATE * chunk.rate
-                    if (playing != null && chunkEnd < playing - STALE_MS) continue
+                    if (playing != null && chunk.source == clock?.source && chunkEnd < playing - STALE_MS) { log("跳过过时的声音 ${chunk.videoMs.toLong()}（播放到 $playing）"); continue }
                     if (!heard) {
                         heard = true
                         _state.update { it.copy(status = if (it.cues.isEmpty()) "正在识别…（第一句要等几秒）" else null) }
@@ -255,15 +279,27 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
                     val lenMs = chunk.samples.size * 1000L / Transcriber.SAMPLE_RATE
                     val start = chunk.videoMs.toLong()
                     val end = start + (lenMs * chunk.rate).toLong()
-                    val skip = synchronized(anchors) {
-                        if (covered.contains(start) && covered.contains(end - 1)) true else {
-                            anchors.add(Anchor(audioMs, chunk.videoMs, chunk.rate))
-                            if (anchors.size > 2000) anchors.subList(0, 500).clear()
-                            covered.add(start, end)
+                    val skip = synchronized(s.anchors) {
+                        val done = s.covered.getOrPut(chunk.source) { RangeSet() }
+                        if (done.contains(start) && done.contains(end - 1)) true else {
+                            s.anchors.add(Anchor(audioMs, chunk.videoMs, chunk.rate, chunk.source))
+                            if (s.anchors.size > 2000) s.anchors.subList(0, 500).clear()
+                            done.add(start, end)
                             false
                         }
                     }
-                    if (skip) continue
+                    if (skip) { log("跳过已识别 $start-$end"); continue }
+                    // 声音接不上（拖了进度、换了一路）：先把引擎里还没出结果的那段识别完，再从新位置开始，
+                    // 不然拖动前后的声音会被当成一句话，出来一条横跨几分钟的字幕
+                    if (engine != null && (chunk.source != fedSource || kotlin.math.abs(start - fedEnd) > GAP_MS)) {
+                        log("声音接不上（$fedSource $fedEnd → ${chunk.source} $start），重新开始识别")
+                        val base = engineBase
+                        engine?.finish { c -> publish(c.copy(startMs = c.startMs + base, endMs = c.endMs + base), s) }
+                        engine?.close()
+                        engine = null
+                    }
+                    fedSource = chunk.source
+                    fedEnd = end
                     if (engine == null || engineAhead != chunk.ahead) {
                         engine?.close()
                         engine = createEngine(settings, chunk.ahead)
@@ -272,7 +308,7 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
                     }
                     val base = engineBase
                     audioMs += lenMs
-                    engine!!.accept(chunk.samples) { c -> publish(c.copy(startMs = c.startMs + base, endMs = c.endMs + base)) }
+                    engine!!.accept(chunk.samples) { c -> publish(c.copy(startMs = c.startMs + base, endMs = c.endMs + base), s) }
                 }
             } finally {
                 cancelHandle.dispose()
@@ -284,28 +320,32 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
         if (!ahead && s.streamingAvailable) s.createStreamingEngine()?.let { return it }
         return if (s.asrEngine == AsrEngine.LOCAL) {
             val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
-            Transcriber(ModelCatalog.byId(s.localModel), models, AsrLanguages.primary(s.asrLanguage), threads)
+            // 本地模型要等一段话说完才出字：边播边读时一段最长 4 秒，不然字幕会晚十几秒
+            Transcriber(ModelCatalog.byId(s.localModel), models, AsrLanguages.primary(s.asrLanguage), threads, if (ahead) 12f else 4f)
         } else s.createCloudEngine().also {
             // 提前送来的声音不急，按直播的分段；边播边读时分段再短一点，字幕出得快
             (it as? com.aisub.player.asr.cloud.ChunkedCloudEngine)?.useChunks(if (ahead) 4 else 2, if (ahead) 6 else 3)
         }
     }
 
-    /** 引擎时间（送进去的音频的第几毫秒）→ 视频播放位置 */
-    private fun videoMsAt(audioMs: Long): Long? = synchronized(anchors) {
-        val a = anchors.lastOrNull { it.audioMs <= audioMs } ?: anchors.firstOrNull() ?: return null
-        (a.videoMs + (audioMs - a.audioMs) * a.rate).toLong()
+    /** 引擎时间（送进去的音频的第几毫秒）→ 那一路和视频播放位置 */
+    private fun videoMsAt(s: Session, audioMs: Long): Pair<String, Long>? = synchronized(s.anchors) {
+        val a = s.anchors.lastOrNull { it.audioMs <= audioMs } ?: s.anchors.firstOrNull() ?: return null
+        a.source to (a.videoMs + (audioMs - a.audioMs) * a.rate).toLong()
     }
 
-    private fun publish(c: Cue) {
-        val start = videoMsAt(c.startMs) ?: return
-        var end = maxOf(videoMsAt(c.endMs) ?: start, start + 800)
+    private fun publish(c: Cue, s: Session) {
+        // 已经换过一次识别（换语言、换网页）：旧的结果不要
+        if (s !== session) return
+        val (source, start) = videoMsAt(s, c.startMs) ?: return
+        var end = maxOf(videoMsAt(s, c.endMs)?.takeIf { it.first == source }?.second ?: start, start + 800)
         // 字幕出来时这句已经说完了：至少再显示一会儿，不然一闪而过
-        val now = videoTimeNow()
+        val now = videoTimeNow()?.takeIf { clock?.source == source }
         if (now != null && end < now + MIN_SHOW_MS) end = now + minOf(maxOf(end - start, MIN_SHOW_MS), 4_000)
         val cue = Cue(nextId++, start, end, c.text)
+        log("字幕 $start-$end（播放到 $now）：${c.text}")
         _state.update { s ->
-            s.copy(cues = (s.cues + cue).sortedBy { it.startMs }, status = null)
+            s.copy(cues = (s.cues + cue).sortedBy { it.startMs }, sources = s.sources + (cue.id to source), status = if (source == s.source) null else s.status)
         }
     }
 
@@ -329,7 +369,8 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
                 }
                 val now = videoTimeNow() ?: 0L
                 val cues = _state.value.cues
-                val batch = cues.filter { it.translation == null && it.id !in inFlight && it.endMs >= now - 3_000 }.take(BATCH)
+                val st = _state.value
+                val batch = cues.filter { it.translation == null && it.id !in inFlight && it.endMs >= now - 3_000 && st.sources[it.id] == st.source }.take(BATCH)
                 if (batch.isEmpty() || !slots.tryAcquire()) continue
                 val ids = batch.map { it.id }
                 inFlight += ids
@@ -359,7 +400,7 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
 
     // ---- 网页脚本的回调（在 WebView 的 JavaBridge 线程上） ----
 
-    fun onTick(frame: String, href: String, videoMs: Double, paused: Boolean, rate: Double) {
+    fun onTick(frame: String, href: String, videoMs: Double, paused: Boolean, rate: Double, source: String) {
         val c = clock
         // 页面上有好几个框架都在放视频（例如角落里静音的广告）：一直跟着原来那个，
         // 它停了或者一秒多没报告了才换，不然时间来回跳，字幕一闪一闪
@@ -368,19 +409,23 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
             if (pageKey != null) reset()
             pageKey = href
         }
-        clock = Clock(frame, videoMs, paused, rate, SystemClock.elapsedRealtime())
+        clock = Clock(frame, videoMs, paused, rate, SystemClock.elapsedRealtime(), source)
+        if (_state.value.source != source) _state.update { it.copy(source = source) }
     }
 
     /** 边播边读的声音（Web Audio） */
-    fun onAudio(frame: String, base64: String, startMs: Double, rate: Double) {
+    fun onAudio(frame: String, base64: String, startMs: Double, rate: Double, source: String) {
         if (!enabled || capturing || clock?.frame?.let { it != frame } == true) return
-        decodePcm(base64)?.let { chunks.add(Chunk(it, startMs, rate, ahead = false)) }
+        // 正在（或准备）直接读取视频地址、提前识别：边播边读的声音不要，免得两路混着来回换识别引擎
+        // 直接读取 8 秒还没读出声音（卡住了）：先边播边读
+        if (directJob?.isActive == true && directSource == source && (directProduced || SystemClock.elapsedRealtime() - directSince < 8_000)) return
+        decodePcm(base64)?.let { session.chunks.add(Chunk(it, startMs, rate, ahead = false, source)) }
     }
 
     /** 网页缓冲好、提前解码的声音（MSE），startMs 是这段声音在视频里的位置 */
-    fun onAhead(frame: String, base64: String, startMs: Double) {
+    fun onAhead(frame: String, base64: String, startMs: Double, source: String) {
         if (!enabled || clock?.frame?.let { it != frame } == true) return
-        decodePcm(base64)?.let { chunks.add(Chunk(it, startMs, 1.0, ahead = true)) }
+        decodePcm(base64)?.let { session.chunks.add(Chunk(it, startMs, 1.0, ahead = true, source)) }
         if (!aheadNoted) {
             aheadNoted = true
             _state.update { it.copy(status = if (it.cues.isEmpty()) "正在提前识别网页缓冲好的声音…" else it.status, canCapture = false) }
@@ -399,9 +444,15 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
     }
 
     fun onProblem(kind: String, detail: String) {
+        log("网页报告：$kind $detail")
         if (capturing) return
         val capture = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q
         when {
+            // 视频是普通地址（不是 MSE、没加密）：先试试直接读取、提前识别，比边播边读快得多；读不了再边播边读
+            kind == "src" -> if (detail.startsWith("http")) {
+                _state.update { it.copy(directUrl = detail) }
+                startDirect(detail, quiet = true)
+            }
             kind == "cors" && detail.startsWith("http") -> {
                 _state.update { it.copy(status = "网页读不到这个视频的声音，改由译幕直接读取视频地址…", directUrl = detail) }
                 startDirect(detail)
@@ -423,16 +474,33 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
     private var directJob: Job? = null
     private var directSource: String? = null
 
+    @Volatile
+    private var directQuiet = false
+
+    /** 这次直接读取开始的时间、有没有读出过声音 */
+    @Volatile
+    private var directSince = 0L
+
+    @Volatile
+    private var directProduced = false
+
     private fun stopDirect() {
         directJob?.cancel()
         directJob = null
         directSource = null
     }
 
-    private fun startDirect(url: String) {
-        if (directJob?.isActive == true && directSource == url) return
+    /** quiet：网页自己也能读到声音，读不了时不提示，回到边播边读 */
+    private fun startDirect(url: String, quiet: Boolean = false) {
+        if (directJob?.isActive == true && directSource == url) {
+            if (!quiet) directQuiet = false
+            return
+        }
         directJob?.cancel()
         directSource = url
+        directQuiet = quiet
+        directSince = SystemClock.elapsedRealtime()
+        directProduced = false
         directJob = scope.launch(Dispatchers.IO) {
             val headers = buildMap {
                 pageKey?.let { put("Referer", it) }
@@ -461,7 +529,9 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
                         },
                         onProgress = {},
                     ) { chunk ->
-                        chunks.add(Chunk(chunk, frontier().toDouble(), 1.0, ahead = true))
+                        if (produced == 0L) log("直接读取从 $start 开始")
+                        directProduced = true
+                        session.chunks.add(Chunk(chunk, frontier().toDouble(), 1.0, ahead = true, url))
                         produced += chunk.size
                     }
                     if (produced == 0L) ended = true
@@ -469,6 +539,7 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
                     throw e
                 } catch (e: Exception) {
                     android.util.Log.w("Voxtitle", "网页视频直接读取失败：$url", e)
+                    if (directQuiet) return@launch
                     val capture = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q
                     _state.update {
                         it.copy(
@@ -525,13 +596,18 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
         if (c.paused) return
         val now = videoTimeNow() ?: return
         val startMs = now - samples.size * 1000.0 / Transcriber.SAMPLE_RATE * c.rate
-        chunks.add(Chunk(samples, startMs, c.rate, ahead = false))
+        session.chunks.add(Chunk(samples, startMs, c.rate, ahead = false, c.source))
     }
 
     private fun stopCapture() {
         if (capturing) app.stopService(android.content.Intent(app, CaptureService::class.java))
         capturing = false
         _state.update { it.copy(capturing = false) }
+    }
+
+    /** 调试版的诊断日志（adb logcat -s VoxWeb）：每段声音、每句字幕怎么处理的 */
+    private fun log(msg: String) {
+        if (com.aisub.player.BuildConfig.DEBUG) android.util.Log.d("VoxWeb", msg)
     }
 
     companion object {
@@ -541,6 +617,9 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
 
         /** 早于播放位置这么多的声音不再识别 */
         private const val STALE_MS = 2_000L
+
+        /** 前后两段声音在视频里隔了这么多就算接不上 */
+        private const val GAP_MS = 1_000L
 
         /** 直接读取视频地址时最多比播放位置提前多少 */
         private const val DIRECT_AHEAD_MS = 90_000L
