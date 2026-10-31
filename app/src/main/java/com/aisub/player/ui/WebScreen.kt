@@ -33,6 +33,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -72,6 +73,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -86,6 +89,8 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.graphics.Color
@@ -140,43 +145,57 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     val videoAspect by vm.videoAspect.collectAsStateWithLifecycle()
     val settings = main.state.collectAsStateWithLifecycle().value.settings
 
-    var url by remember { mutableStateOf(vm.lastUrl) }
-    var address by remember { mutableStateOf(url.orEmpty()) }
+    val bookmarks by vm.bookmarks.collectAsStateWithLifecycle()
+    val script = remember { context.assets.open("web_captions.js").bufferedReader().use { it.readText() } }
+
+    // ---- 标签页 ----
+    var nextTabId by remember { mutableLongStateOf(1L) }
+    val tabs = remember {
+        mutableStateListOf<WebTab>().apply { vm.savedTabs().first.forEach { add(WebTab(nextTabId++, it)) } }
+    }
+    var activeIndex by remember { mutableIntStateOf(vm.savedTabs().second.coerceIn(0, tabs.lastIndex)) }
+    val tab = tabs[activeIndex.coerceIn(0, tabs.lastIndex)]
+    LaunchedEffect(Unit) { tab.active = true }
+    fun saveTabs() = vm.saveTabs(tabs.map { it.pageUrl ?: it.url }, activeIndex)
+
+    var address by remember { mutableStateOf(tab.pageUrl.orEmpty()) }
     var editing by remember { mutableStateOf(false) }
     /** 地址栏里正在输入的内容（含选中范围） */
     var field by remember { mutableStateOf(TextFieldValue(address)) }
     val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
     val clipboard = LocalClipboardManager.current
-    var progress by remember { mutableStateOf(100) }
-    var canGoBack by remember { mutableStateOf(false) }
     var fullscreen by remember { mutableStateOf<Pair<View, WebChromeClient.CustomViewCallback>?>(null) }
     var showSniffed by remember { mutableStateOf(false) }
-    var webView by remember { mutableStateOf<WebView?>(null) }
     var menu by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<WebDialog?>(null) }
-    /** 当前页面地址（地址栏里可能是正在输入的文字） */
-    var pageUrl by remember { mutableStateOf(url) }
     /** 网页全屏时横屏还是竖屏（竖着拍的视频可以切成竖屏） */
     var fullscreenLandscape by remember { mutableStateOf(true) }
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     var zoom by remember { mutableIntStateOf(100) }
     // 每个网站、横竖屏分别记住缩放；网页脚本每 250 毫秒读一次
-    LaunchedEffect(pageUrl?.let { Uri.parse(it).host }, landscape) { zoom = vm.zoomFor(pageUrl, landscape) }
+    LaunchedEffect(tab.pageUrl?.let { Uri.parse(it).host }, landscape) { zoom = vm.zoomFor(tab.pageUrl, landscape) }
 
-    val script = remember { context.assets.open("web_captions.js").bufferedReader().use { it.readText() } }
+    fun showAddress(text: String) {
+        editing = false
+        address = text
+        field = TextFieldValue(text)
+    }
 
     fun go(input: String) {
         val target = toUrl(input) ?: return
-        editing = false
-        field = TextFieldValue(target)
-        if (url == null) url = target else webView?.loadUrl(target)
-        address = target
+        showAddress(target)
+        if (tab.url == null) {
+            tab.url = target
+            tab.pageUrl = target
+            saveTabs()
+        } else tab.webView?.loadUrl(target)
     }
 
     fun playInPlayer(mediaUrl: String, page: String, title: String) {
         vm.captions.stop()
-        webView?.onPause()
-        play(listOf(vm.entryFor(mediaUrl, page, title, webView?.settings?.userAgentString.orEmpty())), 0)
+        tab.webView?.onPause()
+        play(listOf(vm.entryFor(mediaUrl, page, title, tab.webView?.settings?.userAgentString.orEmpty())), 0)
     }
 
     // 读取系统声音：先要录音权限，再请用户在系统对话框里同意捕获
@@ -202,8 +221,10 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     DisposableEffect(Unit) {
         onDispose {
             vm.captions.stop()
-            webView?.destroy()
-            webView = null
+            tabs.forEach { t ->
+                t.webView?.destroy()
+                t.webView = null
+            }
         }
     }
 
@@ -212,6 +233,64 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
         val callback = fullscreen?.second
         fullscreen = null
         callback?.onCustomViewHidden()
+    }
+
+    /** 切到另一个标签页：切走的那个暂停视频（网页留着，回来接着看），字幕跟着换 */
+    fun switchTo(index: Int) {
+        if (index == activeIndex || index !in tabs.indices) return
+        exitFullscreen()
+        tab.active = false
+        tab.webView?.let { pauseMedia(it); it.onPause() }
+        activeIndex = index
+        val next = tabs[index]
+        next.active = true
+        next.webView?.onResume()
+        vm.onTabSwitched()
+        showAddress(next.pageUrl.orEmpty())
+        saveTabs()
+    }
+
+    fun newTab(url: String? = null) {
+        tabs.add(WebTab(nextTabId++, url))
+        switchTo(tabs.lastIndex)
+        if (url == null) showAddress("")
+    }
+
+    fun closeTab(t: WebTab) {
+        val i = tabs.indexOf(t)
+        if (i < 0) return
+        val wasActive = i == activeIndex
+        if (wasActive) {
+            exitFullscreen()
+            vm.captions.stop()
+            vm.onTabSwitched()
+        }
+        t.active = false
+        t.webView?.destroy()
+        t.webView = null
+        tabs.removeAt(i)
+        if (tabs.isEmpty()) tabs.add(WebTab(nextTabId++, null))
+        if (wasActive) {
+            activeIndex = i.coerceAtMost(tabs.lastIndex)
+            tabs[activeIndex].let { it.active = true; it.webView?.onResume(); showAddress(it.pageUrl.orEmpty()) }
+        } else if (i < activeIndex) activeIndex--
+        saveTabs()
+    }
+
+    /** 这个标签页回到首页（常用网站、收藏、最近访问） */
+    fun goHome() {
+        exitFullscreen()
+        vm.captions.stop()
+        vm.onTabSwitched()
+        tab.webView?.destroy()
+        tab.webView = null
+        tab.url = null
+        tab.pageUrl = null
+        tab.title = ""
+        tab.canGoBack = false
+        tab.progress = 100
+        showAddress("")
+        saveTabs()
     }
 
     // 网页全屏：隐藏状态栏，按选的方向横屏或竖屏；退出时恢复
@@ -242,18 +321,93 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     BackHandler {
         when {
             fullscreen != null -> exitFullscreen()
-            editing && url != null -> focusManager.clearFocus()
-            canGoBack -> webView?.goBack()
-            url != null -> {
-                vm.captions.stop()
-                webView?.destroy()
-                webView = null
-                url = null
-                vm.lastUrl = null
-                address = ""
-                field = TextFieldValue("")
-            }
+            editing && tab.url != null -> focusManager.clearFocus()
+            tab.canGoBack -> tab.webView?.goBack()
+            tab.url != null -> goHome()
+            // 空白的标签页：关掉它，回到别的标签页
+            tabs.size > 1 -> closeTab(tab)
             else -> onBack()
+        }
+    }
+
+    /** 建一个标签页的网页 */
+    @SuppressLint("SetJavaScriptEnabled")
+    fun createWebView(ctx: android.content.Context, t: WebTab): WebView {
+        // 调试版可以用电脑上的 chrome://inspect 查看网页和注入的脚本
+        if (com.aisub.player.BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
+        return WebView(ctx).apply {
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            with(getSettings()) {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                mediaPlaybackRequiresUserGesture = false
+                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                useWideViewPort = true
+                loadWithOverviewMode = true
+                builtInZoomControls = true
+                displayZoomControls = false
+            }
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+            addJavascriptInterface(vm.Bridge { t.active }, "VoxBridge")
+            val startScript = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+            if (startScript) WebViewCompat.addDocumentStartJavaScript(this, script, setOf("*"))
+            webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                    // 「打开 App」之类的跳转（bilibili://、intent://）不处理，留在网页里
+                    val scheme = request.url.scheme?.lowercase()
+                    return scheme != "http" && scheme != "https"
+                }
+
+                override fun onPageStarted(view: WebView, startedUrl: String, favicon: Bitmap?) {
+                    t.pageUrl = startedUrl
+                    if (!t.active) return
+                    vm.onPageStarted()
+                    if (!editing) showAddress(startedUrl)
+                }
+
+                override fun onPageFinished(view: WebView, finishedUrl: String) {
+                    // 不支持开头注入的旧 WebView：加载完再注入（只有顶层页面）
+                    if (!startScript) view.evaluateJavascript(script, null)
+                    vm.onPageFinished(view.title, finishedUrl)
+                    t.canGoBack = view.canGoBack()
+                }
+
+                override fun doUpdateVisitedHistory(view: WebView, visitedUrl: String, isReload: Boolean) {
+                    t.canGoBack = view.canGoBack()
+                    t.pageUrl = visitedUrl
+                    // 单页应用里点进视频只改地址、不重新加载：也记下来，回来时打开的是这个视频
+                    saveTabs()
+                    if (t.active && !editing) showAddress(visitedUrl)
+                }
+
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                    if (!request.isForMainFrame && t.active) {
+                        val page = request.requestHeaders["Referer"] ?: t.pageUrl.orEmpty()
+                        vm.onRequest(request.url.toString(), page, "")
+                    }
+                    return null
+                }
+            }
+            webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(view: WebView, newProgress: Int) {
+                    t.progress = newProgress
+                }
+
+                override fun onReceivedTitle(view: WebView, title: String?) {
+                    t.title = title.orEmpty()
+                    vm.onTitle(title, view.url)
+                }
+
+                override fun onShowCustomView(view: View, callback: CustomViewCallback) {
+                    if (t.active) fullscreen = view to callback else callback.onCustomViewHidden()
+                }
+
+                override fun onHideCustomView() {
+                    if (t.active) fullscreen = null
+                }
+            }
+            vm.captions.userAgent = getSettings().userAgentString
+            t.url?.let { loadUrl(it) }
         }
     }
 
@@ -265,8 +419,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回") }
                 // 没在输入时只显示网站名，给右边的按钮留地方；点一下展开完整网址（全选，直接输入就替换）
-                val showingHost = !(editing || url == null)
-                val shown = if (!showingHost) field else TextFieldValue(pageUrl?.let { Uri.parse(it).host?.removePrefix("www.") } ?: address)
+                val showingHost = !(editing || tab.url == null)
+                val shown = if (!showingHost) field else TextFieldValue(tab.pageUrl?.let { Uri.parse(it).host?.removePrefix("www.") } ?: address)
                 BasicTextField(
                     value = shown,
                     onValueChange = { v ->
@@ -295,9 +449,11 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                         .background(MaterialTheme.colorScheme.surfaceContainerHigh)
                         .onFocusChanged { f ->
                             if (f.isFocused && !editing) {
-                                val full = pageUrl ?: address
+                                val full = tab.pageUrl ?: address
                                 field = TextFieldValue(full, TextRange(0, full.length))
                                 editing = true
+                                // 换了一整段文字后有的输入法不会自己弹出来：主动叫一下
+                                keyboard?.show()
                             } else if (!f.isFocused) editing = false
                         }
                         .padding(horizontal = 14.dp),
@@ -308,7 +464,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                         }
                     },
                 )
-                if (url != null) {
+                if (tab.url != null) {
                     if (sniffed.isNotEmpty()) {
                         IconButton(onClick = { showSniffed = true }) {
                             BadgedBox(badge = { Badge { Text("${sniffed.size}") } }) { Icon(AppIcons.Movie, "网页里的视频地址") }
@@ -322,13 +478,32 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                             tint = if (captionState.running) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Box {
-                        IconButton(onClick = { menu = true }) { Icon(AppIcons.MoreVert, "更多") }
-                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(text = { Text("刷新") }, onClick = { menu = false; webView?.reload() })
+                }
+                // 标签页：方框里是打开的个数
+                IconButton(onClick = { dialog = WebDialog.TABS }) {
+                    Box(
+                        Modifier.size(22.dp).border(1.5.dp, MaterialTheme.colorScheme.onSurfaceVariant, RoundedCornerShape(5.dp)),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("${tabs.size}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
+                Box {
+                    IconButton(onClick = { menu = true }) { Icon(AppIcons.MoreVert, "更多") }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("新标签页") }, onClick = { menu = false; newTab() })
+                        if (tab.url != null) {
+                            DropdownMenuItem(text = { Text("回到主页") }, onClick = { menu = false; goHome() })
+                            val marked = bookmarks.isNotEmpty() && vm.isBookmarked(tab.pageUrl)
+                            DropdownMenuItem(text = { Text(if (marked) "取消收藏" else "收藏本页") }, onClick = {
+                                menu = false
+                                tab.pageUrl?.let { u ->
+                                    val now = vm.toggleBookmark(tab.title, u)
+                                    android.widget.Toast.makeText(context, if (now) "已收藏，在主页的「收藏」里" else "已取消收藏", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            })
+                            DropdownMenuItem(text = { Text("刷新") }, onClick = { menu = false; tab.webView?.reload() })
                             DropdownMenuItem(text = { Text("复制网址") }, onClick = {
                                 menu = false
-                                pageUrl?.let { clipboard.setText(androidx.compose.ui.text.AnnotatedString(it)) }
+                                tab.pageUrl?.let { clipboard.setText(androidx.compose.ui.text.AnnotatedString(it)) }
                             })
                             DropdownMenuItem(text = { Text("字幕语言") }, onClick = { menu = false; dialog = WebDialog.LANGUAGE })
                             DropdownMenuItem(text = { Text("页面缩放（$zoom%）") }, onClick = { menu = false; dialog = WebDialog.ZOOM })
@@ -336,94 +511,27 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     }
                 }
             }
-            if (url != null && progress < 100) LinearProgressIndicator(progress = { progress / 100f }, modifier = Modifier.fillMaxWidth().height(2.dp))
+            if (tab.url != null && tab.progress < 100) LinearProgressIndicator(progress = { tab.progress / 100f }, modifier = Modifier.fillMaxWidth().height(2.dp))
 
-            if (url == null) {
-                WebHome(history, onOpen = { go(it) }, onRemove = vm::removeHistory)
+            if (tab.url == null) {
+                WebHome(
+                    bookmarks, history, onOpen = { go(it) },
+                    onRemoveBookmark = vm::removeBookmark, onRemove = vm::removeHistory,
+                )
             } else {
                 BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                     val viewHeight = maxHeight
                     val viewWidth = maxWidth
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { ctx ->
-                            // 调试版可以用电脑上的 chrome://inspect 查看网页和注入的脚本
-                            if (com.aisub.player.BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
-                            WebView(ctx).apply {
-                                layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                                with(getSettings()) {
-                                    javaScriptEnabled = true
-                                    domStorageEnabled = true
-                                    mediaPlaybackRequiresUserGesture = false
-                                    mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                                    useWideViewPort = true
-                                    loadWithOverviewMode = true
-                                    builtInZoomControls = true
-                                    displayZoomControls = false
-                                }
-                                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                                addJavascriptInterface(vm.Bridge(), "VoxBridge")
-                                val startScript = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
-                                if (startScript) WebViewCompat.addDocumentStartJavaScript(this, script, setOf("*"))
-                                webViewClient = object : WebViewClient() {
-                                    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                                        // 「打开 App」之类的跳转（bilibili://、intent://）不处理，留在网页里
-                                        val scheme = request.url.scheme?.lowercase()
-                                        return scheme != "http" && scheme != "https"
-                                    }
-
-                                    override fun onPageStarted(view: WebView, startedUrl: String, favicon: Bitmap?) {
-                                        vm.onPageStarted(startedUrl)
-                                        pageUrl = startedUrl
-                                        if (!editing) address = startedUrl
-                                    }
-
-                                    override fun onPageFinished(view: WebView, pageUrl: String) {
-                                        // 不支持开头注入的旧 WebView：加载完再注入（只有顶层页面）
-                                        if (!startScript) view.evaluateJavascript(script, null)
-                                        vm.onPageFinished(view.title, pageUrl)
-                                        canGoBack = view.canGoBack()
-                                    }
-
-                                    override fun doUpdateVisitedHistory(view: WebView, visitedUrl: String, isReload: Boolean) {
-                                        canGoBack = view.canGoBack()
-                                        pageUrl = visitedUrl
-                                        // 单页应用里点进视频只改地址、不重新加载：也记下来，回来时打开的是这个视频
-                                        if (visitedUrl.startsWith("http")) vm.lastUrl = visitedUrl
-                                        if (!editing) address = visitedUrl
-                                    }
-
-                                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-                                        if (!request.isForMainFrame) {
-                                            val page = request.requestHeaders["Referer"] ?: vm.lastUrl.orEmpty()
-                                            vm.onRequest(request.url.toString(), page, "")
-                                        }
-                                        return null
-                                    }
-                                }
-                                webChromeClient = object : WebChromeClient() {
-                                    override fun onProgressChanged(view: WebView, newProgress: Int) {
-                                        progress = newProgress
-                                    }
-
-                                    override fun onReceivedTitle(view: WebView, title: String?) {
-                                        vm.onTitle(title, view.url)
-                                    }
-
-                                    override fun onShowCustomView(view: View, callback: CustomViewCallback) {
-                                        fullscreen = view to callback
-                                    }
-
-                                    override fun onHideCustomView() {
-                                        fullscreen = null
-                                    }
-                                }
-                                webView = this
-                                vm.captions.userAgent = getSettings().userAgentString
-                                loadUrl(url!!)
-                            }
-                        },
-                    )
+                    // 每个标签页一个网页；切走时从这里拿下来（不销毁），切回来再放上
+                    key(tab.id) {
+                        AndroidView(
+                            modifier = Modifier.fillMaxSize(),
+                            factory = { ctx ->
+                                (tab.webView ?: createWebView(ctx, tab).also { tab.webView = it })
+                                    .also { (it.parent as? ViewGroup)?.removeView(it) }
+                            },
+                        )
+                    }
                     // 字幕放在网页视频的下沿；不知道视频在哪（iframe 里的）就放在底部
                     val videoBottom = rect?.let { r -> if (r.viewportWidth <= 0) null else viewWidth * (r.bottom / r.viewportWidth) }
                     val bottom = videoBottom?.let { b -> (viewHeight - b + 6.dp).takeIf { b in 40.dp..viewHeight } }
@@ -437,7 +545,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     else if (stableBelow.let { it == null || kotlin.math.abs((below - it).value) > 12f }) stableBelow = below
                     if (fullscreen == null) WebSubtitles(
                         vm, captionState, settings, stableBottom, stableBelow,
-                        onOpenDirect = { playInPlayer(it, webView?.url.orEmpty(), webView?.title.orEmpty()) },
+                        onOpenDirect = { playInPlayer(it, tab.webView?.url.orEmpty(), tab.webView?.title.orEmpty()) },
                         onCapture = ::startCapture,
                     )
                 }
@@ -470,7 +578,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     vm, captionState, settings, settings.subtitleOffset.dp, null,
                     onOpenDirect = {
                         exitFullscreen()
-                        playInPlayer(it, webView?.url.orEmpty(), webView?.title.orEmpty())
+                        playInPlayer(it, tab.webView?.url.orEmpty(), tab.webView?.title.orEmpty())
                     },
                     onCapture = ::startCapture,
                 )
@@ -490,6 +598,14 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
         }
     }
     }
+
+    if (dialog == WebDialog.TABS) WebTabsDialog(
+        tabs, activeIndex,
+        onPick = { dialog = null; switchTo(it) },
+        onClose = ::closeTab,
+        onNew = { dialog = null; newTab() },
+        onDismiss = { dialog = null },
+    )
 
     when (dialog) {
         WebDialog.LANGUAGE -> WebLanguageDialog(
@@ -521,7 +637,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             confirmButton = { TextButton(onClick = { dialog = null }) { Text("完成") } },
             dismissButton = { TextButton(onClick = { zoom = 100; vm.setPageZoom(100) }) { Text("恢复 100%") } },
         )
-        null -> {}
+        WebDialog.TABS, null -> {}
     }
 
     if (showSniffed) {
@@ -542,7 +658,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                             m.url, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.fillMaxWidth().clickable {
                                 showSniffed = false
-                                playInPlayer(m.url, m.page, webView?.title.orEmpty())
+                                playInPlayer(m.url, m.page, tab.webView?.title.orEmpty())
                             }.padding(vertical = 10.dp),
                         )
                         HorizontalDivider()
@@ -637,7 +753,64 @@ private fun cueNear(cues: List<Cue>, positionMs: Long): Cue? {
     return cues[i].takeIf { positionMs <= it.endMs + LINGER_MS }
 }
 
-private enum class WebDialog { LANGUAGE, ZOOM }
+private enum class WebDialog { LANGUAGE, ZOOM, TABS }
+
+/** 一个标签页。网页（WebView）第一次切到时才建，切走后留着（视频暂停），回来接着看 */
+private class WebTab(val id: Long, startUrl: String?) {
+    /** null：空白的新标签页，显示收藏、常用网站和最近访问 */
+    var url by mutableStateOf(startUrl)
+
+    /** 当前页面地址（地址栏里可能是正在输入的文字） */
+    var pageUrl by mutableStateOf(startUrl)
+    var title by mutableStateOf("")
+    var progress by mutableIntStateOf(100)
+    var canGoBack by mutableStateOf(false)
+    var webView: WebView? = null
+
+    /** 正在看的标签页；网页脚本（另一个线程）按它决定要不要送声音 */
+    @Volatile
+    var active = false
+}
+
+/** 切走的标签页：网页里的视频、音乐先停下 */
+private fun pauseMedia(view: WebView) =
+    view.evaluateJavascript("document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})", null)
+
+/** 标签页列表：点一个切过去，叉号关掉 */
+@Composable
+private fun WebTabsDialog(tabs: List<WebTab>, active: Int, onPick: (Int) -> Unit, onClose: (WebTab) -> Unit, onNew: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("标签页（${tabs.size}）") },
+        text = {
+            LazyColumn {
+                items(tabs.size, key = { tabs[it].id }) { i ->
+                    val t = tabs[i]
+                    val selected = i == active
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                            .background(if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                            .clickable { onPick(i) }.padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                t.title.ifBlank { t.pageUrl?.let { Uri.parse(it).host } ?: "新标签页" },
+                                style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                            t.pageUrl?.let {
+                                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        IconButton(onClick = { onClose(t) }) { Icon(AppIcons.Close, "关闭这个标签页") }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onNew) { Text("新标签页") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
+}
 
 /** 网页字幕的视频语言和翻译语言；「跟随设置」表示用设置页里的 */
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
@@ -684,7 +857,13 @@ private fun WebLanguageDialog(
 
 /** 还没打开网页时：常用网站和最近看过的网页 */
 @Composable
-private fun WebHome(history: List<com.aisub.player.web.WebPage>, onOpen: (String) -> Unit, onRemove: (com.aisub.player.web.WebPage) -> Unit) {
+private fun WebHome(
+    bookmarks: List<com.aisub.player.web.WebPage>,
+    history: List<com.aisub.player.web.WebPage>,
+    onOpen: (String) -> Unit,
+    onRemoveBookmark: (com.aisub.player.web.WebPage) -> Unit,
+    onRemove: (com.aisub.player.web.WebPage) -> Unit,
+) {
     LazyColumn(Modifier.fillMaxSize()) {
         item {
             Text(
@@ -693,6 +872,21 @@ private fun WebHome(history: List<com.aisub.player.web.WebPage>, onOpen: (String
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
             )
+        }
+        if (bookmarks.isNotEmpty()) {
+            item { SectionHeader("收藏") }
+            item {
+                SurfaceCard {
+                    bookmarks.forEachIndexed { i, page ->
+                        if (i > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                        ListRow(
+                            page.title, page.url, AppIcons.Star,
+                            trailing = { IconButton(onClick = { onRemoveBookmark(page) }) { Icon(AppIcons.Close, "取消收藏") } },
+                            onClick = { onOpen(page.url) },
+                        )
+                    }
+                }
+            }
         }
         item { SectionHeader("常用网站") }
         item {

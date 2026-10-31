@@ -93,17 +93,54 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
         zoomKey?.let { k -> prefs.edit().apply { if (pageZoom == 100) remove(k) else putInt(k, pageZoom) }.apply() }
     }
 
-    /** 上次看的网页：离开网页页面（例如去播放页）再回来时接着打开 */
-    var lastUrl: String?
-        get() = prefs.getString("last", null)
-        set(v) = prefs.edit().putString("last", v).apply()
+    // ---- 标签页：打开着的网页记下来，离开网页页面（例如去播放页）再回来、重开 App 时都还在 ----
 
-    /** 页面在加载新网址：之前找到的视频地址作废 */
-    fun onPageStarted(url: String) {
+    /** 记住的标签页（null 是新标签页）和当前是第几个 */
+    fun savedTabs(): Pair<List<String?>, Int> {
+        val saved = prefs.getString("tabs", null)
+        if (saved == null) return listOf(prefs.getString("last", null)) to 0 // 2.9.22 以前只记一个网页
+        val arr = runCatching { JSONArray(saved) }.getOrDefault(JSONArray())
+        val urls = List(arr.length()) { arr.optString(it).ifEmpty { null } }
+        return urls.ifEmpty { listOf(null) } to prefs.getInt("activeTab", 0)
+    }
+
+    fun saveTabs(urls: List<String?>, active: Int) {
+        prefs.edit().putString("tabs", JSONArray(urls.map { it.orEmpty() }).toString()).putInt("activeTab", active).remove("last").apply()
+    }
+
+    /** 页面在加载新网址、换了标签页：之前找到的视频地址、视频位置作废 */
+    fun onPageStarted() {
         _sniffed.value = emptyList()
         _videoRect.value = null
         _videoAspect.value = null
-        lastUrl = url
+    }
+
+    fun onTabSwitched() {
+        onPageStarted()
+        captions.reset()
+    }
+
+    // ---- 收藏 ----
+
+    private val _bookmarks = MutableStateFlow(loadPages("bookmarks"))
+    val bookmarks: StateFlow<List<WebPage>> = _bookmarks.asStateFlow()
+
+    fun isBookmarked(url: String?) = url != null && _bookmarks.value.any { historyKey(it.url) == historyKey(url) }
+
+    /** 收藏或取消收藏这个网页，返回现在是否收藏着 */
+    fun toggleBookmark(title: String?, url: String): Boolean {
+        val key = historyKey(url)
+        val now = !isBookmarked(url)
+        val list = if (now) listOf(WebPage(goodTitle(title) ?: Uri.parse(url).host.orEmpty(), url)) + _bookmarks.value
+        else _bookmarks.value.filter { historyKey(it.url) != key }
+        _bookmarks.value = list
+        savePages("bookmarks", list)
+        return now
+    }
+
+    fun removeBookmark(page: WebPage) {
+        _bookmarks.value = _bookmarks.value.filter { it.url != page.url }
+        savePages("bookmarks", _bookmarks.value)
     }
 
     fun onPageFinished(title: String?, url: String) {
@@ -126,16 +163,21 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun saveHistory(list: List<WebPage>) {
         _history.value = list
-        prefs.edit().putString("history", JSONArray(list.map { JSONObject().put("t", it.title).put("u", it.url) }).toString()).apply()
+        savePages("history", list)
     }
+
+    private fun savePages(key: String, list: List<WebPage>) =
+        prefs.edit().putString(key, JSONArray(list.map { JSONObject().put("t", it.title).put("u", it.url) }).toString()).apply()
+
+    private fun loadPages(key: String): List<WebPage> = runCatching {
+        val arr = JSONArray(prefs.getString(key, "[]"))
+        (0 until arr.length()).map { arr.getJSONObject(it).let { o -> WebPage(o.optString("t"), o.optString("u")) } }
+    }.getOrDefault(emptyList())
 
     /** 标题是网址、空的，或者只是网站名（还没换成视频标题）时不用 */
     private fun goodTitle(title: String?): String? = title?.trim()?.takeIf { it.isNotEmpty() && !it.startsWith("http") }
 
-    private fun loadHistory(): List<WebPage> = runCatching {
-        val arr = JSONArray(prefs.getString("history", "[]"))
-        (0 until arr.length()).map { arr.getJSONObject(it).let { o -> WebPage(o.optString("t"), o.optString("u")) } }
-    }.getOrDefault(emptyList())
+    private fun loadHistory(): List<WebPage> = loadPages("history")
 
     /** WebView 的每个请求（后台线程）：看起来是视频文件或播放列表的记下来 */
     fun onRequest(url: String, page: String, pageTitle: String) {
@@ -157,10 +199,13 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
         return MediaEntry(url, name, isVideo = true)
     }
 
-    /** 注入网页的接口（在 WebView 的后台线程上被调用） */
-    inner class Bridge {
+    /**
+     * 注入网页的接口（在 WebView 的后台线程上被调用）。每个标签页一个；
+     * 只有正在看的那个标签页的网页能送声音、报告播放位置（切走的标签页里网页的脚本还在跑）
+     */
+    inner class Bridge(private val active: () -> Boolean) {
         @JavascriptInterface
-        fun enabled(): Boolean = captions.enabled
+        fun enabled(): Boolean = captions.enabled && active()
 
         @JavascriptInterface
         fun generation(): Int = captions.generation
@@ -170,20 +215,27 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
         fun pageZoom(): Int = this@WebViewModel.pageZoom
 
         @JavascriptInterface
-        fun audio(frame: String, base64: String, startMs: Double, rate: Double, source: String) = captions.onAudio(frame, base64, startMs, rate, source)
+        fun audio(frame: String, base64: String, startMs: Double, rate: Double, source: String) {
+            if (active()) captions.onAudio(frame, base64, startMs, rate, source)
+        }
 
         @JavascriptInterface
-        fun ahead(frame: String, base64: String, startMs: Double, source: String) = captions.onAhead(frame, base64, startMs, source)
+        fun ahead(frame: String, base64: String, startMs: Double, source: String) {
+            if (active()) captions.onAhead(frame, base64, startMs, source)
+        }
 
         @JavascriptInterface
         fun tick(frame: String, href: String, ms: Double, paused: Boolean, rate: Double, top: Double, bottom: Double, viewport: Double, width: Double, height: Double, source: String) {
+            if (!active()) return
             captions.onTick(frame, href, ms, paused, rate, source)
             if (width > 0 && height > 0) _videoAspect.value = (width / height).toFloat()
             _videoRect.value = if (bottom > 0) VideoRect(top.toFloat(), bottom.toFloat(), viewport.toFloat()) else null
         }
 
         @JavascriptInterface
-        fun problem(frame: String, kind: String, detail: String) = captions.onProblem(kind, detail)
+        fun problem(frame: String, kind: String, detail: String) {
+            if (active()) captions.onProblem(kind, detail)
+        }
     }
 
     override fun onCleared() {
