@@ -493,6 +493,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 // 视频自带字幕和 AI 字幕同时显示时，把自带字幕抬高，避免叠在一起
                 val aiVisible = state.settings.showAiSubtitles && state.cues.isNotEmpty()
                 it.subtitleView?.setBottomPaddingFraction(if (aiVisible) 0.32f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
+                // 正在翻译直播自带字幕：原文已经在 AI 字幕里，自带字幕不再原样显示
+                it.subtitleView?.visibility = if (state.liveCaptions) android.view.View.GONE else android.view.View.VISIBLE
             },
             modifier = Modifier.fillMaxSize(),
         )
@@ -658,13 +660,13 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 // 没有目标语言字幕的视频：一键翻译外语字幕，或识别 + 翻译，不用去面板里找
                 val quick = remember(state.cues, embeddedTracks, state.settings.targetLanguage, state.asrSettings.asrLanguage, isLive) {
                     val target = state.settings.ttsLocale
-                    // 直播流里的字幕轨（多是隐藏式字幕）读不出来翻译：只看有没有目标语言的，没有就实时识别
-                    val tracks = if (isLive) embeddedTracks.filter { QuickSubtitles.isTargetTrack(it, target) } else embeddedTracks
+                    // 直播流里的文字字幕（多是隐藏式字幕）优先边播边翻译，没有才实时识别；兼容模式拿不到字幕的文字
+                    val tracks = if (isLive && vm.usingVlc) embeddedTracks.filter { QuickSubtitles.isTargetTrack(it, target) } else embeddedTracks
                     QuickSubtitles.decide(state.cues, tracks, target) {
                         LanguageCheck.alreadyTarget(it, target, state.asrSettings.asrLanguage, ChineseScript::variant)
                     }
                 }
-                val idle = !state.transcribing && !state.translating && !state.extractingEmbedded && state.playbackError == null
+                val idle = !state.transcribing && !state.translating && !state.extractingEmbedded && !state.liveCaptions && state.playbackError == null
                 if (isLive && vm.usingVlc && state.playbackError == null) {
                     // 兼容模式下直播不能出字幕：直接说明，不显示「实时生成字幕」
                     Text(
@@ -973,7 +975,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         SubtitleAction.EXPORT -> dialog = PlayerDialog.EXPORT
                         SubtitleAction.ERROR -> dialog = PlayerDialog.ERROR
                         SubtitleAction.ROLES -> { showTracks = false; showRoles = true }
-                        SubtitleAction.EMBEDDED -> if (state.extractingEmbedded) vm.cancelAll() else vm.extractEmbeddedSubtitles()
+                        SubtitleAction.EMBEDDED -> if (state.extractingEmbedded || state.liveCaptions) vm.cancelAll() else vm.extractEmbeddedSubtitles()
                         SubtitleAction.STYLE -> { showTracks = false; showStyle = true }
                     }
                 },
@@ -1702,11 +1704,19 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                 }
             }
             // 读出自带字幕的文字交给 AI 字幕，比语音识别准
-            if (textGroups.isNotEmpty() || vm.usingVlc || state.extractingEmbedded) {
+            val live = state.current?.isLive == true
+            // 兼容模式下直播拿不到字幕的文字
+            val canRead = if (live) !vm.usingVlc && textGroups.isNotEmpty() else textGroups.isNotEmpty() || vm.usingVlc
+            if (canRead || state.extractingEmbedded || state.liveCaptions) {
                 ActionRow(
                     AppIcons.Translate,
-                    if (state.extractingEmbedded) "停止读取（${state.progress?.let { "${(it * 100).toInt()}%" } ?: "准备中"}）" else "翻译自带字幕",
-                    subtitle = "读出自带字幕的文字，翻译成${state.settings.targetLanguage}，也能朗读、导出（比语音识别准）",
+                    when {
+                        state.liveCaptions -> "停止翻译自带字幕"
+                        state.extractingEmbedded -> "停止读取（${state.progress?.let { "${(it * 100).toInt()}%" } ?: "准备中"}）"
+                        else -> "翻译自带字幕"
+                    },
+                    subtitle = if (live) "边播边把自带字幕翻译成${state.settings.targetLanguage}，一句说完才出现（比语音识别准）"
+                    else "读出自带字幕的文字，翻译成${state.settings.targetLanguage}，也能朗读、导出（比语音识别准）",
                 ) { onSubtitleAction(SubtitleAction.EMBEDDED) }
             }
         }

@@ -82,6 +82,8 @@ object CloudRegistry {
         val server = serverLookup(serverId) ?: throw IOException("网盘账号已被删除")
         val client = client(server) ?: throw IOException("不支持的网盘类型")
         val link = client.resolve(fileRef)
+        // 诊断：多久申请一次直链（申请太频繁会被网盘风控）
+        android.util.Log.i("Voxtitle", "网盘直链：重新获取（${server.type}）")
         linkCache[uri] = link to System.currentTimeMillis() + link.validMs
         return link
     }
