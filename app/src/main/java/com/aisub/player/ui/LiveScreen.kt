@@ -187,6 +187,14 @@ private fun AddLiveSourceDialog(onDismiss: () -> Unit, onAdd: (name: String, url
                 OutlinedTextField(url, { url = it.trim() }, label = { Text("播放列表地址") }, placeholder = { Text("https://…/live.m3u") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 TextButton(onClick = { picker.launch(arrayOf("*/*")) }) { Text("或选择手机里的 M3U / TXT 文件") }
                 OutlinedTextField(name, { name = it }, label = { Text("名称（可不填）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                // 电视：长地址用手机粘贴
+                PhoneInputButton(
+                    listOf(PhoneField("url", "播放列表地址", url), PhoneField("name", "名称（可不填）", name)),
+                    title = "添加直播源",
+                ) { v ->
+                    url = v["url"]?.trim() ?: url
+                    name = v["name"] ?: name
+                }
                 Text(
                     "支持 M3U / M3U8 播放列表（含 tvg-logo、group-title 分组、User-Agent / Referer），以及「分组,#genre#」「频道名,地址」TXT 格式",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,

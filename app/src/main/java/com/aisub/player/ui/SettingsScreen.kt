@@ -236,6 +236,11 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                                         )
                                     }
                                 }
+                                // 电视：Key 这类长串用手机粘贴
+                                PhoneInputButton(
+                                    engine.fields.map { f -> PhoneField(f.key, f.label, s.asrConfigs[engine]?.get(f.key).orEmpty(), f.secret) },
+                                    title = engine.label,
+                                ) { v -> s = v.entries.fold(s) { acc, (k, value) -> acc.withAsrValue(engine, k, value) } }
                                 TestRow(testing[key] == true, testResults[key]) { runTest(key) { vm.testAsr(s.copy(asrEngine = engine)) } }
                             }
                         }
@@ -385,6 +390,19 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                                     fetch = { ModelList.fetch(p, cfg) },
                                 )
                             }
+                            if (p != Provider.OFFLINE_TRANSLATOR) {
+                                PhoneInputButton(
+                                    listOfNotNull(
+                                        PhoneField("baseUrl", "Base URL", raw.baseUrl).takeIf { p.editableBaseUrl },
+                                        PhoneField("apiKey", "API Key", raw.apiKey, secret = true),
+                                        PhoneField("model", if (p == Provider.AZURE_TRANSLATOR) "区域（Region）" else "模型", raw.model),
+                                    ),
+                                    title = p.label,
+                                ) { v ->
+                                    val c = s.providerConfigs[p] ?: ProviderConfig()
+                                    s = s.withConfig(p, c.copy(baseUrl = v["baseUrl"] ?: c.baseUrl, apiKey = v["apiKey"] ?: c.apiKey, model = v["model"] ?: c.model))
+                                }
+                            }
                             TestRow(testing[key] == true, testResults[key]) { runTest(key) { vm.testTranslator(s.copy(provider = p)) } }
                         }
                     }
@@ -414,6 +432,20 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     ConfigField(s.osUsername, { s = s.copy(osUsername = it) }, "用户名（可选）", "")
                     ConfigField(s.osPassword, { s = s.copy(osPassword = it) }, "密码（可选）", "", secret = true)
                     ConfigField(s.subtitleLanguages, { s = s.copy(subtitleLanguages = it) }, "搜索语言", "zh-cn,en")
+                    PhoneInputButton(
+                        listOf(
+                            PhoneField("assrt", "射手网 API Token", s.assrtToken, secret = true),
+                            PhoneField("osKey", "OpenSubtitles API Key", s.osApiKey, secret = true),
+                            PhoneField("osUser", "OpenSubtitles 用户名（可选）", s.osUsername),
+                            PhoneField("osPass", "OpenSubtitles 密码（可选）", s.osPassword, secret = true),
+                        ),
+                        title = "在线字幕",
+                    ) { v ->
+                        s = s.copy(
+                            assrtToken = v["assrt"] ?: s.assrtToken, osApiKey = v["osKey"] ?: s.osApiKey,
+                            osUsername = v["osUser"] ?: s.osUsername, osPassword = v["osPass"] ?: s.osPassword,
+                        )
+                    }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf("zh-cn,en" to "简中 + 英", "zh-cn,zh-tw" to "简中 + 繁中", "en" to "仅英文", "zh-cn,en,ja" to "简中 + 英 + 日").forEach { (v, label) ->
                             FilterChip(selected = s.subtitleLanguages == v, onClick = { s = s.copy(subtitleLanguages = v) }, label = { Text(label) })
@@ -457,6 +489,14 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     ConfigField(s.tmdbKey, { s = s.copy(tmdbKey = it) }, "API Key", "", secret = true)
                     ConfigField(s.tmdbBaseUrl, { s = s.copy(tmdbBaseUrl = it) }, "接口地址（可选）", com.aisub.player.meta.Tmdb.DEFAULT_BASE)
                     ConfigField(s.tmdbImageBase, { s = s.copy(tmdbImageBase = it) }, "图片地址（可选）", com.aisub.player.meta.Tmdb.DEFAULT_IMAGE_BASE)
+                    PhoneInputButton(
+                        listOf(
+                            PhoneField("key", "API Key", s.tmdbKey, secret = true),
+                            PhoneField("base", "接口地址（可选）", s.tmdbBaseUrl),
+                            PhoneField("image", "图片地址（可选）", s.tmdbImageBase),
+                        ),
+                        title = "TMDB",
+                    ) { v -> s = s.copy(tmdbKey = v["key"] ?: s.tmdbKey, tmdbBaseUrl = v["base"] ?: s.tmdbBaseUrl, tmdbImageBase = v["image"] ?: s.tmdbImageBase) }
                 }
                 CardDivider()
                 ListRow(
@@ -488,6 +528,14 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     ConfigField(s.fanartKey, { s = s.copy(fanartKey = it) }, "API Key", "", secret = true)
+                    PhoneInputButton(
+                        listOf(
+                            PhoneField("tvdbKey", "TheTVDB API Key", s.tvdbKey, secret = true),
+                            PhoneField("tvdbPin", "TheTVDB PIN（可选）", s.tvdbPin, secret = true),
+                            PhoneField("fanart", "Fanart.tv API Key", s.fanartKey, secret = true),
+                        ),
+                        title = "TheTVDB 与 Fanart.tv",
+                    ) { v -> s = s.copy(tvdbKey = v["tvdbKey"] ?: s.tvdbKey, tvdbPin = v["tvdbPin"] ?: s.tvdbPin, fanartKey = v["fanart"] ?: s.fanartKey) }
                 }
             }
 
@@ -655,6 +703,16 @@ private fun TtsSettings(s: AppSettings, vm: MainViewModel, onChange: (AppSetting
                     )
                     ConfigField(s.ttsAzureRegion, { onChange(s.copy(ttsAzureRegion = it)) }, "区域（Region）", s.ttsAzure().second.ifEmpty { "eastasia" })
                     ConfigField(s.ttsAzureEndpoint, { onChange(s.copy(ttsAzureEndpoint = it)) }, "自定义接口地址（可不填）", "中国区：https://chinanorth3.tts.speech.azure.cn")
+                    PhoneInputButton(
+                        listOf(
+                            PhoneField("key", "Speech 资源 Key", s.ttsAzureKey, secret = true),
+                            PhoneField("region", "区域（Region）", s.ttsAzureRegion),
+                            PhoneField("endpoint", "自定义接口地址（可不填）", s.ttsAzureEndpoint),
+                        ),
+                        title = "Azure 朗读",
+                    ) { v ->
+                        onChange(s.copy(ttsAzureKey = v["key"] ?: s.ttsAzureKey, ttsAzureRegion = v["region"] ?: s.ttsAzureRegion, ttsAzureEndpoint = v["endpoint"] ?: s.ttsAzureEndpoint))
+                    }
                 }
             }
         }
