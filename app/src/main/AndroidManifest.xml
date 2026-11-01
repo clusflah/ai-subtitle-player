@@ -35,6 +35,10 @@
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="https" />
         </intent>
+        <!-- 系统朗读：Android 11 起要声明才绑定得到手机里的 TTS 引擎 -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
         <!-- 离线翻译：绑定 Offline Translator App 的翻译服务 -->
         <package android:name="dev.davidv.translator" />
     </queries>

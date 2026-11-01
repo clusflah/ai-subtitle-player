@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -46,7 +45,7 @@ fun TextInputDialog(
     val text = field.text
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
@@ -72,7 +71,7 @@ fun AddToPlaylistDialog(
         TextInputDialog("新建播放列表", "名称", onDismiss = onDismiss, confirm = "创建并加入", onConfirm = onCreate)
         return
     }
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("加入播放列表") },
         text = {
@@ -98,7 +97,7 @@ fun AddToPlaylistDialog(
 @Composable
 fun ServerDialog(initial: Server, hint: String? = null, onDismiss: () -> Unit, onSave: (Server) -> Unit) {
     var s by remember { mutableStateOf(initial) }
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (initial.baseUrl.isEmpty()) "添加网络位置" else "编辑网络位置") },
         text = {
@@ -179,7 +178,7 @@ private fun String.isHttpUrl() = startsWith("http://") || startsWith("https://")
 
 @Composable
 fun AboutDialog(onDismiss: () -> Unit) {
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("关于") },
         text = {

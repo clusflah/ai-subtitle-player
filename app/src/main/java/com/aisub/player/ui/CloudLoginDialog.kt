@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -56,7 +55,7 @@ import okhttp3.Request
 fun CloudLoginDialog(type: ServerType, existing: Server?, onDismiss: () -> Unit, onLoggedIn: (Server) -> Unit) {
     val base = existing ?: Server(type = type, name = type.label, baseUrl = "")
     val finish: (String) -> Unit = { onLoggedIn(base.copy(extra = it)) }
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("登录${type.label}") },
         text = {

@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -154,7 +153,7 @@ private fun SectionChecklist(selected: Set<BackupSection>, available: Set<Backup
 @Composable
 private fun SectionPickDialog(title: String, confirm: String, initial: Set<BackupSection>, onDismiss: () -> Unit, onConfirm: (Set<BackupSection>) -> Unit) {
     var picked by remember { mutableStateOf(initial) }
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = { Column(Modifier.verticalScroll(rememberScrollState())) { SectionChecklist(picked) { picked = it } } },
@@ -193,7 +192,7 @@ private fun SendDialog(onDismiss: () -> Unit) {
         }
     }
 
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("发送到电视") },
         text = {
@@ -244,7 +243,7 @@ private fun ReceiveDialog(onDismiss: () -> Unit, onReceived: (BackupFile) -> Uni
             error = e.message
         }
     }
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("接收备份") },
         text = {
@@ -280,7 +279,7 @@ private fun ImportDialog(file: BackupFile, onDismiss: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    AlertDialog(
+    AppDialog(
         onDismissRequest = { if (!busy) onDismiss() },
         title = { Text("导入备份") },
         text = {

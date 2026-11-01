@@ -31,7 +31,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.NavigationRail
@@ -40,7 +39,6 @@ import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -227,7 +225,7 @@ fun HomeScreen(
                     var menu by remember { mutableStateOf(false) }
                     Box {
                         IconButton(onClick = { menu = true }) { Icon(AppIcons.MoreVert, "更多") }
-                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        AppMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             if (mediaTab) {
                                 val page = if (localVideo) "video" else "audio"
                                 val current = if (localVideo) state.videoSort else state.audioSort
@@ -620,7 +618,7 @@ private fun AddSourceDialog(onDismiss: () -> Unit, onPick: (ServerType) -> Unit)
         ServerType.WEBDAV to "NAS、Alist 等 WebDAV 服务",
         ServerType.OPENLIST to "OpenList / AList 站点",
     )
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("添加网络位置") },
         text = {

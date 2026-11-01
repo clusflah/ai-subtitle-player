@@ -151,7 +151,7 @@ class SystemTts(context: Context) : TtsEngine {
                 var engine: TextToSpeech? = null
                 engine = TextToSpeech(app) { status ->
                     if (status == TextToSpeech.SUCCESS) cont.resume(engine)
-                    else cont.resume(null)
+                    else { engine?.shutdown(); cont.resume(null) }
                 }
             }
         } ?: throw IOException("手机上没有可用的 TTS 引擎，可以在系统设置里安装（如 Google 文字转语音）")

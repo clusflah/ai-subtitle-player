@@ -28,7 +28,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
@@ -73,7 +72,7 @@ fun OverflowMenu(actions: List<MenuAction>, modifier: Modifier = Modifier, compa
                 modifier = if (compact) Modifier.size(18.dp) else Modifier,
             )
         }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+        AppMenu(expanded = open, onDismissRequest = { open = false }) {
             actions.forEach { a ->
                 DropdownMenuItem(text = { Text(a.label) }, enabled = a.enabled, onClick = { open = false; a.onClick() })
             }

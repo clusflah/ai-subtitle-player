@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -230,7 +229,7 @@ fun rememberFileManager(lib: LibraryViewModel, onAddToPlaylist: (List<MediaEntry
 @Composable
 private fun FileDialogs(fm: FileManager) {
     fm.copyProgress?.let { p ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = {},
             title = { Text("正在复制…") },
             text = { LinearProgressIndicator(progress = { p }, modifier = Modifier.fillMaxWidth()) },
@@ -252,7 +251,7 @@ private fun FileDialogs(fm: FileManager) {
         is FileDialog.Move -> {
             var custom by remember { mutableStateOf("") }
             val go: (String) -> Unit = { dir -> fm.dialog = null; if (d.copy) fm.doCopy(d.entries, dir) else fm.doMove(d.entries, dir) }
-            AlertDialog(
+            AppDialog(
                 onDismissRequest = { fm.dialog = null },
                 title = { Text("${if (d.copy) "复制" else "移动"} ${d.entries.size} 个文件到") },
                 text = {
@@ -287,7 +286,7 @@ private fun FileDialogs(fm: FileManager) {
                 x.mime.takeIf { it.isNotEmpty() }?.let { "类型" to it },
                 if (x.dateAdded > 0) "添加时间" to DateUtils.formatDateTime(null, x.dateAdded, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_SHOW_YEAR) else null,
             )
-            AlertDialog(
+            AppDialog(
                 onDismissRequest = { fm.dialog = null },
                 title = { Text("详细信息") },
                 text = {
@@ -303,7 +302,7 @@ private fun FileDialogs(fm: FileManager) {
                 confirmButton = { TextButton(onClick = { fm.dialog = null }) { Text("关闭") } },
             )
         }
-        is FileDialog.ConfirmDelete -> AlertDialog(
+        is FileDialog.ConfirmDelete -> AppDialog(
             onDismissRequest = { fm.dialog = null },
             title = { Text("删除 ${d.entries.size} 个文件？") },
             text = { Text("文件会从手机里永久删除，不能恢复。") },

@@ -47,7 +47,6 @@ class TtsReader(
 ) {
     private val cacheDir = File(context.cacheDir, "tts").apply { mkdirs() }
     private val ready = ConcurrentHashMap<String, File>()
-    private val failed = ConcurrentHashMap.newKeySet<String>()
 
     private var loop: Job? = null
     private var media: MediaPlayer? = null
@@ -55,8 +54,14 @@ class TtsReader(
     private var lastCueId = -1
     private var lastPos = -1L
     private var waitingCue: Cue? = null
-    private var ducked = false
+    /** 原声当前的音量：朗读时压低，读完过一会儿再慢慢放回来，对话密集时不会忽大忽小 */
+    private var volume = 1f
+    /** 上一句读完（或停掉）的时间 */
+    private var quietSince = 0L
     private var reportedError = false
+    /** 合成失败后先歇一会儿再试（网络断了、接口限流时不会一直请求） */
+    @Volatile private var retryAt = 0L
+    @Volatile private var backoffMs = 0L
 
     val running get() = loop?.isActive == true
 
@@ -64,6 +69,8 @@ class TtsReader(
         if (running) return
         trimCache()
         reportedError = false
+        retryAt = 0
+        backoffMs = 0
         loop = scope.launch(Dispatchers.Main) {
             var synth: Job? = null
             while (isActive) {
@@ -78,6 +85,7 @@ class TtsReader(
         loop?.cancel()
         loop = null
         stopSpeaking()
+        restoreVolume()
         lastCueId = -1
         lastPos = -1
         waitingCue = null
@@ -86,8 +94,10 @@ class TtsReader(
     /** 语音或角色变了：已合成的语音作废（文件留在缓存里，换回来时还能直接用）。 */
     fun reset() {
         ready.clear()
-        failed.clear()
+        retryAt = 0
+        backoffMs = 0
         stopSpeaking()
+        restoreVolume()
         lastCueId = -1
     }
 
@@ -110,6 +120,7 @@ class TtsReader(
             else if (playing && mediaPaused) { m.start(); mediaPaused = false }
         }
 
+        updateVolume(p, s)
         if (!playing) return
         val cue = s.cues.cueAt(pos)
         if (cue != null && cue.id != lastCueId) {
@@ -121,18 +132,18 @@ class TtsReader(
         if (pos > w.endMs - 200) { waitingCue = null; return }
         val file = ready[keyFor(w, s)] ?: return
         waitingCue = null
-        speak(w, file, s, p)
+        speak(w, file, s, p, pos)
     }
 
-    private fun speak(cue: Cue, file: File, s: TtsSnapshot, p: Player) {
+    private fun speak(cue: Cue, file: File, s: TtsSnapshot, p: Player, pos: Long) {
         stopSpeaking()
         try {
             val m = MediaPlayer()
             m.setDataSource(file.path)
             m.prepare()
-            // 可用时长：到下一句开始为止（至少是本句的显示时长）
+            // 可用时长：从现在到下一句开始（至少到本句结束）；语音晚到时剩下的时间更短，要读得更快
             val next = s.cues.firstOrNull { it.startMs > cue.startMs }
-            val slot = maxOf(cue.endMs - cue.startMs, (next?.startMs ?: cue.endMs) - cue.startMs - 150).coerceAtLeast(300)
+            val slot = (maxOf(cue.endMs, (next?.startMs ?: cue.endMs) - 150) - pos).coerceAtLeast(300)
             val fit = (m.duration.toFloat() / slot).coerceIn(1f, MAX_SPEED)
             val speed = fit * p.playbackParameters.speed
             if (abs(speed - 1f) > 0.01f) m.playbackParams = m.playbackParams.setSpeed(speed)
@@ -140,9 +151,9 @@ class TtsReader(
             m.start()
             media = m
             mediaPaused = false
-            if (!ducked) {
-                p.volume = s.duckVolume
-                ducked = true
+            if (volume > s.duckVolume) {
+                volume = s.duckVolume
+                p.volume = volume
             }
         } catch (e: Exception) {
             Log.w("Voxtitle", "朗读播放失败", e)
@@ -154,38 +165,60 @@ class TtsReader(
         media?.let { runCatching { it.stop() }; it.release() }
         media = null
         mediaPaused = false
-        if (ducked) {
-            runCatching { player().volume = 1f }
-            ducked = false
-        }
+        quietSince = System.currentTimeMillis()
     }
 
-    /** 合成接下来一段时间内的句子，一次一句，避免触发接口限流。 */
+    /** 没在朗读、安静了一会儿后，把原声一点点调回来 */
+    private fun updateVolume(p: Player, s: TtsSnapshot) {
+        if (volume >= 1f) return
+        if (media != null) {
+            // 朗读中改了「朗读时原声音量」
+            if (volume != s.duckVolume) { volume = s.duckVolume; p.volume = volume }
+            return
+        }
+        if (System.currentTimeMillis() - quietSince < DUCK_HOLD_MS) return
+        volume = (volume + VOLUME_STEP).coerceAtMost(1f)
+        p.volume = volume
+    }
+
+    private fun restoreVolume() {
+        if (volume < 1f) runCatching { player().volume = 1f }
+        volume = 1f
+    }
+
+    /**
+     * 合成接下来最近的一句还没准备好的字幕（一次一句，避免触发接口限流）。
+     * 每次都从当前位置重新挑，拖动进度后马上合成新位置的句子，不会先把原来位置的读完。
+     */
     private suspend fun prefetch() {
+        if (System.currentTimeMillis() < retryAt) return
         val s = snapshot()
         val pos = lastPos.coerceAtLeast(0)
+        val ext = if (s.engine == TtsEngineType.AZURE) "mp3" else "wav"
         val upcoming = s.cues.asSequence()
             .filter { it.endMs >= pos && it.startMs <= pos + PREFETCH_MS && !it.translation.isNullOrBlank() }
             .take(PREFETCH_COUNT)
-            .toList()
-        val engine = runCatching { engineFor(s.engine) }.getOrElse { report(it); return }
         for (cue in upcoming) {
             val key = keyFor(cue, s)
-            if (ready.containsKey(key) || key in failed) continue
-            val ext = if (s.engine == TtsEngineType.AZURE) "mp3" else "wav"
+            if (ready.containsKey(key)) continue
             val file = File(cacheDir, "$key.$ext")
             if (file.length() > 0) {
                 ready[key] = file
                 continue
             }
             try {
-                engine.synthesize(spokenText(cue.translation!!), voiceFor(cue, s), s.locale, file)
+                engineFor(s.engine).synthesize(spokenText(cue.translation!!), voiceFor(cue, s), s.locale, file)
                 ready[key] = file
+                backoffMs = 0
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
-                failed += key
+                file.delete()
+                backoffMs = (backoffMs * 2).coerceIn(RETRY_MIN_MS, RETRY_MAX_MS)
+                retryAt = System.currentTimeMillis() + backoffMs
                 report(e)
-                return
             }
+            return
         }
     }
 
@@ -223,5 +256,11 @@ class TtsReader(
         private const val PREFETCH_MS = 60_000L
         private const val PREFETCH_COUNT = 8
         const val MAX_SPEED = 1.6f
+        /** 读完一句后原声保持压低的时间，下一句紧跟着来时不放回去 */
+        private const val DUCK_HOLD_MS = 700L
+        /** 每 [TICK_MS] 调回的音量，约半秒回到原音量 */
+        private const val VOLUME_STEP = 0.15f
+        private const val RETRY_MIN_MS = 5_000L
+        private const val RETRY_MAX_MS = 60_000L
     }
 }

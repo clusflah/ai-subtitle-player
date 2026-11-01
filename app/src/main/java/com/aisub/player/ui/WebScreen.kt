@@ -14,7 +14,6 @@ import androidx.core.content.ContextCompat
 import com.aisub.player.web.CaptureService
 import android.content.res.Configuration
 import android.net.Uri
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -57,7 +56,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.BadgedBox
@@ -516,7 +514,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 }
                 Box {
                     IconButton(onClick = { menu = true }) { Icon(AppIcons.MoreVert, "更多") }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    AppMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(text = { Text("新标签页") }, onClick = { menu = false; newTab() })
                         if (tab.url != null) {
                             DropdownMenuItem(text = { Text("回到主页") }, onClick = { menu = false; goHome() })
@@ -661,7 +659,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             },
             onDismiss = { dialog = null },
         )
-        WebDialog.ZOOM -> AlertDialog(
+        WebDialog.ZOOM -> AppDialog(
             onDismissRequest = { dialog = null },
             title = { Text("页面缩放") },
             text = {
@@ -684,7 +682,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     }
 
     if (showSniffed) {
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { showSniffed = false },
             title = { Text("网页里的视频地址") },
             text = {
@@ -822,7 +820,7 @@ private fun pauseMedia(view: WebView) =
 /** 标签页列表：点一个切过去，叉号关掉 */
 @Composable
 private fun WebTabsDialog(tabs: List<WebTab>, active: Int, onPick: (Int) -> Unit, onClose: (WebTab) -> Unit, onNew: () -> Unit, onDismiss: () -> Unit) {
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("标签页（${tabs.size}）") },
         text = {
@@ -869,7 +867,7 @@ private fun WebLanguageDialog(
     var targetChoice by remember { mutableStateOf(target) }
     val targets = (TARGET_LANGUAGES + listOfNotNull(target, settings.targetLanguage)).distinct()
     // 选项用小标签平铺：两组都在一屏里，不用往下翻
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("字幕语言") },
         text = {
