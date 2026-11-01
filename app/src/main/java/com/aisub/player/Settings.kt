@@ -129,6 +129,10 @@ data class AppSettings(
     val showPinyin: Boolean = false,
     /** 播放时跟随字幕时间朗读译文 */
     val ttsEnabled: Boolean = false,
+    /** 网络代理（局域网代理）；本机和局域网地址始终直连 */
+    val proxyType: com.aisub.player.net.ProxyType = com.aisub.player.net.ProxyType.OFF,
+    val proxyHost: String = "",
+    val proxyPort: Int = 7890,
     val ttsEngine: TtsEngineType = TtsEngineType.AZURE,
     /** Azure 朗读的 Key、区域、接口地址；Key 留空时沿用语音识别里的 Azure 配置 */
     val ttsAzureKey: String = "",
@@ -324,6 +328,9 @@ class SettingsRepository(context: Context) {
             dlQuality = prefs.getInt("dlQuality", d.dlQuality),
             dlAutoAsr = prefs.getBoolean("dlAutoAsr", d.dlAutoAsr),
             ttsEnabled = prefs.getBoolean("ttsEnabled", d.ttsEnabled),
+            proxyType = runCatching { com.aisub.player.net.ProxyType.valueOf(prefs.getString("proxyType", d.proxyType.name)!!) }.getOrDefault(d.proxyType),
+            proxyHost = prefs.getString("proxyHost", d.proxyHost)!!,
+            proxyPort = prefs.getInt("proxyPort", d.proxyPort),
             ttsEngine = runCatching { TtsEngineType.valueOf(prefs.getString("ttsEngine", d.ttsEngine.name)!!) }.getOrDefault(d.ttsEngine),
             ttsAzureKey = prefs.getString("ttsAzureKey", "")!!,
             ttsAzureRegion = prefs.getString("ttsAzureRegion", "")!!,
@@ -381,6 +388,9 @@ class SettingsRepository(context: Context) {
             .putInt("dlQuality", s.dlQuality)
             .putBoolean("dlAutoAsr", s.dlAutoAsr)
             .putBoolean("ttsEnabled", s.ttsEnabled)
+            .putString("proxyType", s.proxyType.name)
+            .putString("proxyHost", s.proxyHost)
+            .putInt("proxyPort", s.proxyPort)
             .putString("ttsEngine", s.ttsEngine.name)
             .putString("ttsAzureKey", s.ttsAzureKey)
             .putString("ttsAzureRegion", s.ttsAzureRegion)

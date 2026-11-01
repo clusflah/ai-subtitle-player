@@ -4,6 +4,7 @@ import android.app.Application
 import android.net.ConnectivityManager
 import android.net.Network
 import com.aisub.player.media.AppStore
+import com.aisub.player.net.AppProxy
 import com.aisub.player.remote.Endpoints
 import com.aisub.player.remote.cloud.CloudRegistry
 
@@ -11,6 +12,9 @@ class VoxtitleApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        // 应用内代理：在任何网络客户端创建之前装好
+        AppProxy.install()
+        SettingsRepository(this).load().let { AppProxy.apply(this, it.proxyType, it.proxyHost, it.proxyPort) }
         // 网盘客户端刷新 token 后写回存储；播放器按 ID 找账号
         val store = AppStore(this)
         CloudRegistry.serverLookup = { id -> store.servers().firstOrNull { it.id == id } }
