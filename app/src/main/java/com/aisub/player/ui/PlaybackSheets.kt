@@ -27,7 +27,6 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Switch
@@ -143,7 +142,7 @@ fun BookmarksSheet(vm: MainViewModel, onAdd: () -> Unit, onSeek: (Long) -> Unit,
             }
             Box {
                 Thumb(image, formatMs(b.positionMs) + (if (b.note.isNotEmpty()) "  ${b.note}" else ""), onLongClick = { menu = true }) { onSeek(b.positionMs) }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                AppMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text("跳到这里") }, onClick = { menu = false; onSeek(b.positionMs) })
                     DropdownMenuItem(text = { Text("改备注") }, onClick = { menu = false; onRename(b) })
                     DropdownMenuItem(text = { Text("删除") }, onClick = { menu = false; vm.extras.removeBookmark(b) })

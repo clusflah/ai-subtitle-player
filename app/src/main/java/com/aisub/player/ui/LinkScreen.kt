@@ -248,7 +248,7 @@ private fun CookieSettings(vm: MainViewModel) {
     }
 
     if (choosing) {
-        androidx.compose.material3.AlertDialog(
+        AppDialog(
             onDismissRequest = { choosing = false },
             title = { Text("登录哪个网站？") },
             text = {

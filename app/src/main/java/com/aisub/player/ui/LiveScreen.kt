@@ -21,8 +21,6 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -70,7 +68,7 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
                 IconButton(onClick = vm::refresh, enabled = !state.loading) { Icon(AppIcons.Refresh, "刷新频道") }
                 Box {
                     IconButton(onClick = { menu = true }) { Icon(AppIcons.MoreVert, "更多") }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    AppMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(text = { Text("重命名「${src.name}」") }, onClick = { menu = false; renaming = src })
                         DropdownMenuItem(text = { Text("删除这个直播源") }, onClick = { menu = false; vm.remove(src) })
                     }
@@ -179,7 +177,7 @@ private fun AddLiveSourceDialog(onDismiss: () -> Unit, onAdd: (name: String, url
         }
     }
     val valid = url.startsWith("http://") || url.startsWith("https://") || url.startsWith("content://")
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("添加直播源") },
         text = {

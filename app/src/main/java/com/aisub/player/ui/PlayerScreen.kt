@@ -74,10 +74,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Switch
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -85,7 +83,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -279,6 +276,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     var speed by remember { mutableFloatStateOf(player.playbackParameters.speed) }
     var audioOnly by remember { mutableStateOf(false) }
     var showTracks by remember { mutableStateOf(false) }
+    // 打开的是 AI 字幕面板还是字幕与音轨面板
+    var tracksAi by remember { mutableStateOf(false) }
     var showMore by remember { mutableStateOf(false) }
     var showCues by remember { mutableStateOf(false) }
     var showOnline by remember { mutableStateOf(false) }
@@ -442,7 +441,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         }
         interactions++
         if (code == android.view.KeyEvent.KEYCODE_MENU) {
-            if (down) showTracks = true
+            if (down) { tracksAi = false; showTracks = true }
             return@handler true
         }
         // 焦点在按钮上（控制栏显示中）：方向键照常在按钮之间移动
@@ -634,7 +633,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         MusicAction.SPEED -> dialog = PlayerDialog.SPEED
                         MusicAction.EQUALIZER -> openEqualizer(context, (player as? androidx.media3.exoplayer.ExoPlayer)?.audioSessionId ?: 0)
                         MusicAction.INFO -> dialog = PlayerDialog.INFO
-                        MusicAction.TRACKS -> showTracks = true
+                        MusicAction.TRACKS -> { tracksAi = false; showTracks = true }
                         MusicAction.ADD_TO_PLAYLIST -> addingToPlaylist = true
                         MusicAction.SETTINGS -> onOpenSettings()
                     }
@@ -663,7 +662,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         }
                     }
                 }
-                TaskChip(state, onClick = { showTracks = true }, modifier = Modifier.padding(start = 52.dp, bottom = 4.dp))
+                TaskChip(state, onClick = { tracksAi = true; showTracks = true }, modifier = Modifier.padding(start = 52.dp, bottom = 4.dp))
                 // 字幕用的识别、翻译服务和模型
                 val models = listOfNotNull(state.asrInfo, state.translateInfo)
                 if (models.isNotEmpty()) {
@@ -804,7 +803,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     )
                 } else Spacer(Modifier.height(12.dp))
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    BarButton(AppIcons.Subtitles, "字幕与音轨") { showTracks = true }
+                    BarButton(AppIcons.Subtitles, "字幕与音轨") { tracksAi = false; showTracks = true }
+                    Spacer(Modifier.weight(1f))
+                    BarButton(AppIcons.AutoAwesome, "AI 字幕") { tracksAi = true; showTracks = true }
                     Spacer(Modifier.weight(1f))
                     // 电视不能转屏、不用锁屏，这两个按钮不显示
                     if (!tv) {
@@ -972,13 +973,13 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     AppTheme {
     // ---- 字幕与音轨面板 ----
     if (showTracks) {
-        ModalBottomSheet(
+        AppSheet(
             onDismissRequest = { showTracks = false },
             // 三项默认收起，面板按内容高度打开；横屏时半屏放不下三项标题，所以不用半展开
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
             TrackPanel(
-                vm = vm, state = state,
+                vm = vm, state = state, ai = tracksAi,
                 onSubtitleAction = { action ->
                     when (action) {
                         SubtitleAction.GENERATE -> if (state.transcribing) vm.cancelAll() else { showTracks = false; generateTranslate = false; dialog = PlayerDialog.ASR_LANGUAGE }
@@ -1001,7 +1002,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     // ---- 视频自带多条字幕轨时选择一条 ----
     if (state.choosingEmbedded) {
         val tracks = state.embeddedTracks.orEmpty().filter { it.cues.isNotEmpty() }
-        AlertDialog(
+        AppDialog(
             onDismissRequest = vm::dismissEmbeddedChoice,
             title = { Text("选择字幕轨") },
             text = {
@@ -1024,7 +1025,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     // ---- 角色与配音 ----
     if (showRoles) {
-        ModalBottomSheet(
+        AppSheet(
             onDismissRequest = { showRoles = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             
@@ -1045,7 +1046,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     // ---- 播放队列 / 直播频道列表 ----
     if (showChannels) {
-        ModalBottomSheet(onDismissRequest = { showChannels = false }) {
+        AppSheet(onDismissRequest = { showChannels = false }) {
             val channels = vm.queueEntries
             val currentIndex = channels.indexOfFirst { it.uri == state.current?.uri }
             val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 3).coerceAtLeast(0))
@@ -1075,14 +1076,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     // ---- 章节与片段 ----
     if (showNav) {
-        ModalBottomSheet(onDismissRequest = { showNav = false }) {
+        AppSheet(onDismissRequest = { showNav = false }) {
             NavigatorSheet(vm, positionMs) { ms -> player.seekTo(ms); showNav = false }
         }
     }
 
     // ---- 书签与关键帧 ----
     if (showBookmarks) {
-        ModalBottomSheet(onDismissRequest = { showBookmarks = false }) {
+        AppSheet(onDismissRequest = { showBookmarks = false }) {
             BookmarksSheet(
                 vm,
                 onAdd = { scope.launch { vm.extras.addBookmark(playerView?.videoSurfaceView) } },
@@ -1100,7 +1101,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     // ---- 片头片尾与跳过 ----
     if (showSkip) {
-        ModalBottomSheet(
+        AppSheet(
             onDismissRequest = { showSkip = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             
@@ -1119,7 +1120,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     // ---- 字幕样式（边调边看） ----
     if (showStyle) {
-        ModalBottomSheet(
+        AppSheet(
             onDismissRequest = { showStyle = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             
@@ -1138,7 +1139,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     // ---- 字幕列表 ----
     if (showCues) {
-        ModalBottomSheet(
+        AppSheet(
             onDismissRequest = { showCues = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
             
@@ -1177,7 +1178,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     // ---- 先下载识别模型 ----
     confirmDownload?.let { model ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { confirmDownload = null },
             title = { Text("先下载识别模型") },
             text = {
@@ -1253,7 +1254,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             dialog = null
             startGenerate(generateTranslate)
         }
-        PlayerDialog.ERROR -> AlertDialog(
+        PlayerDialog.ERROR -> AppDialog(
             onDismissRequest = { dialog = null },
             confirmButton = { TextButton(onClick = { dialog = null }) { Text("知道了") } },
             title = { Text("出错了") },
@@ -1545,7 +1546,7 @@ private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAct
         ),
     )
     Column(
-        Modifier.fillMaxHeight().width(300.dp).background(Color(0xF2111111))
+        Modifier.fillMaxHeight().width(300.dp).background(popupColor())
             .statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(vertical = 16.dp),
     ) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
@@ -1554,22 +1555,22 @@ private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAct
                     Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).clickable { onAction(action) }.padding(vertical = 10.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Icon(icon, null, tint = Color.White, modifier = Modifier.size(26.dp))
+                    Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(26.dp))
                     Spacer(Modifier.height(6.dp))
-                    Text(label, color = Color(0xFFDDDDDD), fontSize = 12.sp)
+                    Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp)
                 }
             }
         }
         groups.forEach { (title, items) ->
-            Text(title, color = Color(0xFF999999), fontSize = 12.sp, modifier = Modifier.padding(start = 24.dp, top = 16.dp, bottom = 2.dp))
+            Text(title, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(start = 24.dp, top = 16.dp, bottom = 2.dp))
             items.forEach { (action, icon, label) ->
                 Row(
                     Modifier.fillMaxWidth().clickable { onAction(action) }.heightIn(min = 50.dp).padding(horizontal = 24.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(icon, null, tint = Color.White, modifier = Modifier.size(24.dp))
+                    Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp))
                     Spacer(Modifier.width(22.dp))
-                    Text(label, color = Color.White, fontSize = 16.sp)
+                    Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp)
                 }
             }
         }
@@ -1607,19 +1608,17 @@ private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ON
 
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
-private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (SubtitleAction) -> Unit) {
+private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitleAction: (SubtitleAction) -> Unit) {
     val player by vm.playerFlow.collectAsStateWithLifecycle()
-    // 三项默认收起，打开面板先看到全部，点哪项展开哪项
+    // 字幕、音频两项默认收起，点哪项展开哪项
     var audioOpen by remember(state.current?.uri) { mutableStateOf(false) }
-    // 识别、翻译进行中时（例如点了顶部的任务进度）展开 AI 字幕，进度和停止按钮在里面
-    var aiOpen by remember { mutableStateOf(state.transcribing || state.translating || state.extractingEmbedded) }
     var embeddedOpen by remember { mutableStateOf(false) }
     var version by remember { mutableIntStateOf(0) } // 选轨后刷新
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
         // ---------------- AI 字幕：识别、外挂文件或提取出的字幕，由本应用显示 ----------------
-        SheetHeader("AI 字幕", aiOpen) { aiOpen = !aiOpen }
-        if (aiOpen) {
+        if (ai) {
+            Text("AI 字幕", color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp))
             PanelHint(
                 if (state.cues.isEmpty()) "语音识别、字幕文件或从视频提取的字幕，可以翻译、朗读，样式和位置可调"
                 else "当前 ${state.cues.size} 句" + (state.cues.count { it.translation != null }.takeIf { it > 0 }?.let { "，已翻译 $it 句" } ?: ""),
@@ -1637,8 +1636,6 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                 subtitle = if (state.transcribing) "语音语言：" + AsrLanguages.label(state.asrSettings.asrLanguage)
                 else "选择视频里说的语言，生成带时间轴的字幕",
             ) { onSubtitleAction(SubtitleAction.GENERATE) }
-            ActionRow(AppIcons.File, "选择字幕文件", subtitle = "SRT / VTT / ASS") { onSubtitleAction(SubtitleAction.IMPORT) }
-            ActionRow(AppIcons.Search, "在线下载字幕", subtitle = "射手网 / OpenSubtitles") { onSubtitleAction(SubtitleAction.ONLINE) }
             if (state.failedTask != null) {
                 ActionRow(AppIcons.Info, "上次${if (state.failedTask == Task.TRANSCRIBE) "识别" else "翻译"}失败，查看原因", tint = Color(0xFFFF6B5E)) {
                     onSubtitleAction(SubtitleAction.ERROR)
@@ -1688,12 +1685,12 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                 onSubtitleAction(SubtitleAction.LIST)
             }
             ActionRow(AppIcons.Download, "导出字幕", subtitle = "双语 / 仅译文 / 仅原文 SRT", enabled = state.cues.isNotEmpty()) { onSubtitleAction(SubtitleAction.EXPORT) }
+            return@Column
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
         // ---------------- 视频自带字幕：文件里的字幕轨，按原样显示 ----------------
         val textGroups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT } }
-        SheetHeader("视频自带字幕", embeddedOpen) { embeddedOpen = !embeddedOpen }
+        SheetHeader("字幕", embeddedOpen) { embeddedOpen = !embeddedOpen }
         if (embeddedOpen) {
             PanelHint("视频文件里的字幕轨，按字幕文件原样显示（ASS 的位置、字体、特效由文件决定）")
             if (textGroups.isEmpty() && !vm.usingVlc) {
@@ -1737,6 +1734,9 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, onSubtitleAction: (Sub
                     else "读出自带字幕的文字，翻译成${state.settings.targetLanguage}，也能朗读、导出（比语音识别准）",
                 ) { onSubtitleAction(SubtitleAction.EMBEDDED) }
             }
+            GroupLabel("字幕文件")
+            ActionRow(AppIcons.File, "选择字幕文件", subtitle = "SRT / VTT / ASS，可以翻译、朗读") { onSubtitleAction(SubtitleAction.IMPORT) }
+            ActionRow(AppIcons.Search, "在线下载字幕", subtitle = "射手网 / OpenSubtitles") { onSubtitleAction(SubtitleAction.ONLINE) }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
@@ -1915,7 +1915,7 @@ private fun CueList(
                         Icon(AppIcons.Edit, "编辑这句", tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f), modifier = Modifier.size(18.dp))
                     }
                 }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                AppMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text("从这里播放") }, onClick = { menu = false; onSeek(cue) })
                     DropdownMenuItem(text = { Text("编辑这句") }, onClick = { menu = false; onEdit(cue) })
                     DropdownMenuItem(text = { Text("复制原文") }, onClick = { menu = false; clipboard.setText(AnnotatedString(cue.text)) })
@@ -1935,7 +1935,7 @@ private fun CueList(
 
 @Composable
 private fun ChoiceDialog(title: String, options: List<String>, selected: Int, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
@@ -1979,7 +1979,7 @@ private fun CueEditDialog(
         endMs <= startMs -> "结束时间要晚于开始时间"
         else -> null
     }
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("编辑字幕") },
         text = {
@@ -2037,7 +2037,7 @@ private fun AsrLanguageDialog(
     // 能用的识别服务：手机上识别，加上设置里填好了的云端服务
     val engines = remember(settings) { AsrEngine.entries.filter { it == AsrEngine.LOCAL || settings.copy(asrEngine = it).asrProblem() == null } }
     var engine by remember { mutableStateOf(settings.asrEngine) }
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("用哪家识别、视频里说什么语言？") },
         text = {
@@ -2093,7 +2093,7 @@ private fun AsrLanguageDialog(
 private fun GotoDialog(onDismiss: () -> Unit, onGo: (Long) -> Unit) {
     var text by remember { mutableStateOf("") }
     val parsed = parseClock(text)
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("转到时间") },
         text = {
@@ -2110,7 +2110,7 @@ private fun GotoDialog(onDismiss: () -> Unit, onGo: (Long) -> Unit) {
 
 @Composable
 private fun DelayDialog(delayMs: Long, onChange: (Long) -> Unit, onDismiss: () -> Unit) {
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("字幕延迟") },
         text = {
@@ -2149,7 +2149,7 @@ private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
         a?.let { "音频" to "${it.sampleRate} Hz · ${it.channelCount} 声道" },
         "地址" to (entry?.uri ?: ""),
     )
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("视频信息") },
         text = {

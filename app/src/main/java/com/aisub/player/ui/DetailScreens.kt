@@ -10,7 +10,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import android.widget.Toast
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -337,7 +336,7 @@ fun RemoteFolderScreen(
     }
     deleting?.let { item ->
         val cloud = server?.type?.isCloud == true
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { deleting = null },
             title = { Text("删除「${item.name}」？") },
             text = {
@@ -355,7 +354,7 @@ fun RemoteFolderScreen(
         )
     }
     downloadPlan?.let { plan ->
-        AlertDialog(
+        AppDialog(
             onDismissRequest = { downloadPlan = null },
             title = { Text("下载 ${plan.jobs.size} 个文件？") },
             text = {

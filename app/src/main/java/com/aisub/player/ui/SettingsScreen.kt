@@ -22,9 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -823,7 +821,7 @@ private fun ModelField(
             colors = appFieldColors(),
             modifier = Modifier.fillMaxWidth(),
         )
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.heightIn(max = 360.dp)) {
+        AppMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.heightIn(max = 360.dp)) {
             DropdownMenuItem(
                 text = { Text("重新获取", color = MaterialTheme.colorScheme.primary) },
                 leadingIcon = { Icon(AppIcons.Refresh, null) },
@@ -926,7 +924,7 @@ private fun LanguageRow(title: String, value: String, onChange: (String) -> Unit
     val label = LANGUAGE_CHOICES.firstOrNull { it.first == value }?.second ?: value
     Box {
         ListRow(title = title, subtitle = label, onClick = { open = true })
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+        AppMenu(expanded = open, onDismissRequest = { open = false }) {
             LANGUAGE_CHOICES.forEach { (code, name) ->
                 DropdownMenuItem(text = { Text(name) }, onClick = { onChange(code); open = false })
             }

@@ -53,16 +53,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -127,7 +124,6 @@ enum class MusicAction {
 
 private val Dim = Color(0x99FFFFFF)
 private val Faint = Color(0x66FFFFFF)
-private val SheetColor = Color(0xFF2B2E2D)
 
 /** 上方两页：0 歌曲（唱片），1 歌词 */
 private const val LYRICS_PAGE = 1
@@ -246,13 +242,13 @@ fun MusicView(
         }
     }
 
-    if (showQueue) ModalBottomSheet(
-        onDismissRequest = { showQueue = false }, containerColor = SheetColor,
+    if (showQueue) AppSheet(
+        onDismissRequest = { showQueue = false },
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
     ) { QueueSheet(vm, player, current, onMessage) }
 
-    if (showMenu) ModalBottomSheet(
-        onDismissRequest = { showMenu = false }, containerColor = SheetColor,
+    if (showMenu) AppSheet(
+        onDismissRequest = { showMenu = false },
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
     ) {
         ActionSheet(music, current, liked, toggleLike) { action -> showMenu = false; onAction(action) }
@@ -517,7 +513,7 @@ private fun LyricsPage(
                         modifier = Modifier.clip(RoundedCornerShape(4.dp)).border(1.dp, Dim, RoundedCornerShape(4.dp))
                             .clickable { menu = true }.padding(horizontal = 6.dp, vertical = 4.dp),
                     )
-                    DropdownMenu(menu, onDismissRequest = { menu = false }, containerColor = Color(0xFF2E2E2E)) {
+                    AppMenu(menu, onDismissRequest = { menu = false }) {
                         val own = music.lyrics
                         MenuRow("调整歌词", AppIcons.SwapVert, enabled = own?.synced == true) { menu = false; adjusting = true }
                         when {
@@ -621,19 +617,19 @@ private fun QueueSheet(vm: MainViewModel, player: Player, current: MediaEntry?, 
     val currentIndex = entries.indexOfFirst { it.uri == current?.uri }
     val (mode, next) = rememberPlayMode(player)
     Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("播放列表", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-        Text("(${entries.size})", color = Dim, fontSize = 15.sp, modifier = Modifier.padding(start = 2.dp))
+        Text("播放列表", color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Text("(${entries.size})", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 15.sp, modifier = Modifier.padding(start = 2.dp))
         Spacer(Modifier.weight(1f))
         Row(
             Modifier.clip(RoundedCornerShape(50)).clickable { onMessage(next().label) }.padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(mode.icon, null, tint = Color.White, modifier = Modifier.size(20.dp))
+            Icon(mode.icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(4.dp))
-            Text(mode.label, color = Color.White, fontSize = 15.sp)
+            Text(mode.label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp)
         }
     }
-    HorizontalDivider(color = Color(0x22FFFFFF))
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 2).coerceAtLeast(0))
     LazyColumn(Modifier.fillMaxHeight(0.7f), state = listState) {
         itemsIndexed(entries, key = { i, e -> "$i:${e.uri}" }) { i, e ->
@@ -647,11 +643,11 @@ private fun QueueSheet(vm: MainViewModel, player: Player, current: MediaEntry?, 
                     Spacer(Modifier.width(6.dp))
                 }
                 Text(
-                    e.displayTitle, color = if (active) Orange else Color.White, fontSize = 17.sp,
+                    e.displayTitle, color = if (active) Orange else MaterialTheme.colorScheme.onSurface, fontSize = 17.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(vertical = 14.dp),
                 )
                 if (entries.size > 1) IconButton(onClick = { vm.removeQueueIndex(i); version++ }) {
-                    Icon(AppIcons.Close, "从播放列表移除", tint = Dim)
+                    Icon(AppIcons.Close, "从播放列表移除", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -665,23 +661,23 @@ private fun ActionSheet(music: MusicState, current: MediaEntry?, liked: Boolean,
     val tags = music.tags ?: return
     Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 16.dp)) {
         Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0x1FFFFFFF)).padding(10.dp),
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)).padding(10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.size(60.dp).clip(RoundedCornerShape(8.dp)).background(Color(0xFF2A2A2A)), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(60.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
                 music.cover?.let { Image(it.asImageBitmap(), null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
-                    ?: Icon(AppIcons.MusicNote, null, tint = Color(0xFF777777))
+                    ?: Icon(AppIcons.MusicNote, null, tint = MaterialTheme.colorScheme.outline)
             }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
-                Text(tags.title, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(tags.title, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
                     listOfNotNull(tags.artist, tags.album).joinToString(" - ").ifEmpty { current?.folder.orEmpty() },
-                    color = Dim, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
             IconButton(onClick = onLike) {
-                Icon(if (liked) AppIcons.Favorite else AppIcons.FavoriteBorder, if (liked) "取消喜欢" else "喜欢", tint = if (liked) Color(0xFFFF5A6E) else Color.White)
+                Icon(if (liked) AppIcons.Favorite else AppIcons.FavoriteBorder, if (liked) "取消喜欢" else "喜欢", tint = if (liked) Color(0xFFFF5A6E) else MaterialTheme.colorScheme.onSurface)
             }
         }
         ActionGroup(
@@ -716,17 +712,17 @@ private fun ActionSheet(music: MusicState, current: MediaEntry?, liked: Boolean,
 @Composable
 private fun ActionGroup(items: List<Triple<MusicAction, ImageVector, String>>, onAction: (MusicAction) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(14.dp)).background(Color(0x1FFFFFFF)).padding(vertical = 12.dp),
+        Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)).padding(vertical = 12.dp),
     ) {
         items.forEach { (action, icon, label) ->
             Column(
                 Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).clickable { onAction(action) }.padding(vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Box(Modifier.size(50.dp).clip(CircleShape).background(Color(0x26FFFFFF)), contentAlignment = Alignment.Center) {
-                    Icon(icon, null, tint = Color.White, modifier = Modifier.size(24.dp))
+                Box(Modifier.size(50.dp).clip(CircleShape).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)), contentAlignment = Alignment.Center) {
+                    Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp))
                 }
-                Text(label, color = Color.White, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
+                Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
             }
         }
         // 不满四个时留空，图标和上面一行对齐
@@ -763,7 +759,7 @@ fun MusicSearchDialog(
         }
     }
     LaunchedEffect(Unit) { if (title.isNotBlank()) run() }
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (covers) "更换封面" else "搜索歌词") },
         text = {
@@ -838,7 +834,7 @@ fun SongInfoDialog(
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("编辑歌曲信息") },
         text = {
