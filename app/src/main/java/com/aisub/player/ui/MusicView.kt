@@ -57,6 +57,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -551,6 +552,12 @@ private fun MenuRow(text: String, icon: ImageVector, enabled: Boolean = true, on
     text = { Text(text, fontSize = 17.sp, modifier = Modifier.widthIn(min = 150.dp)) },
     trailingIcon = { Icon(icon, null) },
     enabled = enabled, onClick = onClick,
+    colors = LocalPopupColors.current.let {
+        MenuDefaults.itemColors(
+            textColor = it.textPrimary, trailingIconColor = it.textPrimary,
+            disabledTextColor = it.disabled, disabledTrailingIconColor = it.disabled,
+        )
+    },
 )
 
 @Composable
@@ -629,22 +636,29 @@ private fun QueueSheet(vm: MainViewModel, player: Player, current: MediaEntry?, 
             Text(mode.label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp)
         }
     }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    val c = LocalPopupColors.current
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 2).coerceAtLeast(0))
-    LazyColumn(Modifier.fillMaxHeight(0.7f), state = listState) {
+    // 歌曲放在一块浅灰卡片里；正在播放的那首除了文字变色，整行也有底色
+    LazyColumn(
+        Modifier.heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.65f).dp).padding(start = 16.dp, end = 16.dp, bottom = 16.dp).clip(RoundedCornerShape(14.dp)).background(c.card),
+        state = listState, contentPadding = PaddingValues(vertical = 6.dp),
+    ) {
         itemsIndexed(entries, key = { i, e -> "$i:${e.uri}" }) { i, e ->
             val active = i == currentIndex
             Row(
-                Modifier.fillMaxWidth().clickable { vm.playQueueIndex(i) }.padding(start = 24.dp, end = 8.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 6.dp).clip(RoundedCornerShape(10.dp))
+                    .background(if (active) c.selectedBg else Color.Transparent)
+                    .clickable { vm.playQueueIndex(i) }.padding(start = 14.dp, end = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (active) {
-                    Icon(AppIcons.Equalizer, "正在播放", tint = Orange, modifier = Modifier.size(18.dp))
+                    Icon(AppIcons.Equalizer, "正在播放", tint = c.selectedText, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                 }
                 Text(
-                    e.displayTitle, color = if (active) Orange else MaterialTheme.colorScheme.onSurface, fontSize = 17.sp,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(vertical = 14.dp),
+                    e.displayTitle, color = if (active) c.selectedText else c.textPrimary, fontSize = 17.sp,
+                    fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(vertical = 12.dp),
                 )
                 if (entries.size > 1) IconButton(onClick = { vm.removeQueueIndex(i); version++ }) {
                     Icon(AppIcons.Close, "从播放列表移除", tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -661,10 +675,10 @@ private fun ActionSheet(music: MusicState, current: MediaEntry?, liked: Boolean,
     val tags = music.tags ?: return
     Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 16.dp)) {
         Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)).padding(10.dp),
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(LocalPopupColors.current.card).padding(10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.size(60.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(60.dp).clip(RoundedCornerShape(8.dp)).background(LocalPopupColors.current.button), contentAlignment = Alignment.Center) {
                 music.cover?.let { Image(it.asImageBitmap(), null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
                     ?: Icon(AppIcons.MusicNote, null, tint = MaterialTheme.colorScheme.outline)
             }
@@ -712,14 +726,15 @@ private fun ActionSheet(music: MusicState, current: MediaEntry?, liked: Boolean,
 @Composable
 private fun ActionGroup(items: List<Triple<MusicAction, ImageVector, String>>, onAction: (MusicAction) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)).padding(vertical = 12.dp),
+        Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(14.dp)).background(LocalPopupColors.current.card).padding(vertical = 12.dp),
     ) {
         items.forEach { (action, icon, label) ->
             Column(
                 Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).clickable { onAction(action) }.padding(vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Box(Modifier.size(50.dp).clip(CircleShape).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)), contentAlignment = Alignment.Center) {
+                // 亮色是浅灰按钮，暗色是中灰按钮
+                Box(Modifier.size(50.dp).clip(CircleShape).background(LocalPopupColors.current.button), contentAlignment = Alignment.Center) {
                     Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp))
                 }
                 Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))

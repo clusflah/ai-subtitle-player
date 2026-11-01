@@ -142,7 +142,7 @@ fun OnlineSubtitleSheet(vm: MainViewModel, onDismiss: () -> Unit, onOpenSettings
                     results != null -> LazyColumn {
                         items(results!!, key = { it.source.name + it.id }) { sub ->
                             ResultRow(sub, downloading = downloading == sub, onClick = { download(sub) })
-                            HorizontalDivider(color = Color(0xFF2A2A2A))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         }
                     }
                 }
