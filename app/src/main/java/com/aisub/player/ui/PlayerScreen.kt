@@ -103,6 +103,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -924,7 +926,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
         // ---- 更多菜单（右侧滑出） ----
         // 点空白处关闭；遥控器的焦点不落到这层上
-        if (showMore) Box(Modifier.fillMaxSize().focusProperties { canFocus = false }.clickable(onClick = { showMore = false }))
+        val moreScrim by animateFloatAsState(if (showMore) popupColors().scrim else 0f, label = "moreScrim")
+        if (showMore) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = moreScrim)).focusProperties { canFocus = false }.clickable(onClick = { showMore = false }))
         AnimatedVisibility(
             showMore, enter = slideInHorizontally { it }, exit = slideOutHorizontally { it },
             modifier = Modifier.align(Alignment.CenterEnd).focusRequester(moreFocus),
@@ -1545,8 +1548,11 @@ private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAct
             Triple(MoreAction.SETTINGS, AppIcons.Settings, "设置"),
         ),
     )
+    PopupTheme {
+    val c = LocalPopupColors.current
     Column(
-        Modifier.fillMaxHeight().width(300.dp).background(popupColor())
+        Modifier.fillMaxHeight().statusBarsPadding().navigationBarsPadding().padding(12.dp).width(300.dp)
+            .shadow(c.shadow, RoundedCornerShape(28.dp)).clip(RoundedCornerShape(28.dp)).background(c.surface)
             .statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(vertical = 16.dp),
     ) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
@@ -1574,6 +1580,7 @@ private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAct
                 }
             }
         }
+    }
     }
 }
 
