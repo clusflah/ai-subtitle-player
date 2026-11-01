@@ -1779,6 +1779,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         captionJob?.cancel()
     }
 
+    /** 全部重新翻译（例如换了翻译模型）：清掉已有译文，从头翻。 */
+    fun retranslateAll() {
+        if (translateJob?.isActive == true) return
+        if (_state.value.settings.translatorProblem() != null) return startTranslation()
+        _state.update { s -> s.copy(cues = s.cues.map { it.copy(translation = null) }) }
+        startTranslation()
+    }
+
     /** 重新翻译某一句（带前后文）。 */
     fun retranslate(cueId: Int) {
         val settings = _state.value.settings

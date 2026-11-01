@@ -184,7 +184,7 @@ private val RESIZE_MODES = listOf(
 )
 
 /** 播放页里弹出的对话框。 */
-private enum class PlayerDialog { SPEED, SLEEP, GOTO, DELAY, INFO, EXPORT, SAVE_PLAYLIST, ERROR, ASR_LANGUAGE }
+private enum class PlayerDialog { SPEED, SLEEP, GOTO, DELAY, INFO, EXPORT, SAVE_PLAYLIST, ERROR, ASR_LANGUAGE, TRANSLATE_MODEL }
 
 /** 画中画状态，由 MainActivity 更新。 */
 object PipState {
@@ -351,6 +351,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     }
     /** 选完语言后是否同时翻译：播放页的「生成字幕」按钮要翻译，菜单里的语音识别不翻译 */
     var generateTranslate by remember { mutableStateOf(false) }
+    /** 选好翻译模型后要做的事（翻译、识别后翻译、重新翻译） */
+    var afterModel by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var modelDialogTitle by remember { mutableStateOf("") }
+    fun chooseModel(title: String, then: () -> Unit) {
+        modelDialogTitle = title
+        afterModel = then
+        dialog = PlayerDialog.TRANSLATE_MODEL
+    }
     /** 本视频不再显示「生成字幕」提示 */
     var aiChipDismissed by remember(state.current?.uri) { mutableStateOf(false) }
     /** 视频自带的字幕轨（不在 state.cues 里，由播放器直接渲染） */
@@ -696,9 +704,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             Modifier.clip(RoundedCornerShape(50)).background(Orange).clickable {
                                 when (quick) {
                                     // 先选视频里说的语言（选错会降低准确率），再识别并翻译
+                                    // 生成：识别服务、语言、翻译模型在一个对话框里选；翻译：先选翻译模型
                                     QuickSubtitle.GENERATE -> { generateTranslate = true; dialog = PlayerDialog.ASR_LANGUAGE }
-                                    QuickSubtitle.TRANSLATE_LOADED -> vm.startTranslation()
-                                    QuickSubtitle.TRANSLATE_EMBEDDED -> vm.extractEmbeddedSubtitles(translate = true)
+                                    QuickSubtitle.TRANSLATE_LOADED -> chooseModel("选择翻译模型") { vm.startTranslation() }
+                                    QuickSubtitle.TRANSLATE_EMBEDDED -> chooseModel("选择翻译模型") { vm.extractEmbeddedSubtitles(translate = true) }
                                 }
                             }
                                 .padding(start = 10.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
@@ -986,7 +995,12 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 onSubtitleAction = { action ->
                     when (action) {
                         SubtitleAction.GENERATE -> if (state.transcribing) vm.cancelAll() else { showTracks = false; generateTranslate = false; dialog = PlayerDialog.ASR_LANGUAGE }
-                        SubtitleAction.TRANSLATE -> if (state.translating) vm.cancelAll() else vm.startTranslation()
+                        SubtitleAction.TRANSLATE -> when {
+                            state.translating -> vm.cancelAll()
+                            // 已经全部翻译过：换个模型重新翻译
+                            state.cues.none { it.translation == null } -> { showTracks = false; chooseModel("重新翻译") { vm.retranslateAll() } }
+                            else -> { showTracks = false; chooseModel("选择翻译模型") { vm.startTranslation() } }
+                        }
                         SubtitleAction.LIST -> { showTracks = false; showCues = true }
                         SubtitleAction.DELAY -> dialog = PlayerDialog.DELAY
                         SubtitleAction.IMPORT -> importLauncher.launch(arrayOf("application/x-subrip", "text/*", "application/octet-stream"))
@@ -1250,12 +1264,24 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         ) { name -> vm.saveQueueAsPlaylist(name); indicator = AppIcons.PlaylistAdd to "已保存"; dialog = null }
         // 语音识别前选语言：只对这个视频生效，选完直接开始识别
         PlayerDialog.ASR_LANGUAGE -> AsrLanguageDialog(
-            state.asrSettings.asrLanguage, state.settings, onDismiss = { dialog = null },
-        ) { code, engine ->
-            if (engine != state.settings.asrEngine) vm.updateSettings(state.settings.copy(asrEngine = engine))
+            state.asrSettings.asrLanguage, state.settings, translate = generateTranslate, onDismiss = { dialog = null },
+        ) { code, engine, pick ->
+            var updated = state.settings.copy(asrEngine = engine)
+            if (pick != null && pick.valid) updated = pick.applyTo(updated)
+            if (updated != state.settings) vm.updateSettings(updated)
             vm.setVideoAsrLanguage(code)
             dialog = null
             startGenerate(generateTranslate)
+        }
+        PlayerDialog.TRANSLATE_MODEL -> TranslateModelDialog(
+            settings = state.settings, title = modelDialogTitle,
+            onDismiss = { dialog = null; afterModel = null },
+        ) { updated ->
+            if (updated != state.settings) vm.updateSettings(updated)
+            dialog = null
+            val then = afterModel
+            afterModel = null
+            then?.invoke()
         }
         PlayerDialog.ERROR -> AppDialog(
             onDismissRequest = { dialog = null },
@@ -1652,9 +1678,13 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
             GroupLabel("翻译与朗读")
             ActionRow(
                 AppIcons.Translate,
-                if (state.translating) "停止翻译" else "翻译字幕",
-                subtitle = "翻译成${state.settings.targetLanguage}",
-                enabled = state.translating || state.cues.any { it.translation == null },
+                when {
+                    state.translating -> "停止翻译"
+                    state.cues.isNotEmpty() && state.cues.none { it.translation == null } -> "重新翻译"
+                    else -> "翻译字幕"
+                },
+                subtitle = "翻译成${state.settings.targetLanguage}，可以选择翻译模型",
+                enabled = state.translating || state.cues.isNotEmpty(),
             ) { onSubtitleAction(SubtitleAction.TRANSLATE) }
             if (Pinyin.available && state.settings.targetIsChinese) {
                 ActionRow(
@@ -2030,15 +2060,20 @@ private fun parseCueTime(s: String): Long? {
     return total * 60_000 + (seconds * 1000).roundToInt()
 }
 
-/** 开始识别前选识别服务和视频语言：服务只列能用的，语言常用的直接点选，其他填代码。语言只对这个视频生效。 */
+/**
+ * 开始识别前选识别服务和视频语言：服务只列能用的，语言常用的直接点选，其他填代码。语言只对这个视频生效。
+ * translate 为 true（识别后接着翻译）时，同一个对话框里也选翻译服务和模型。
+ */
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun AsrLanguageDialog(
     current: String,
     settings: AppSettings,
+    translate: Boolean,
     onDismiss: () -> Unit,
-    onPick: (code: String, engine: AsrEngine) -> Unit,
+    onPick: (code: String, engine: AsrEngine, pick: TranslatePick?) -> Unit,
 ) {
+    val pick = if (translate) rememberTranslatePick(settings) else null
     var custom by remember { mutableStateOf(if (AsrLanguages.isCommon(current)) "" else current) }
     val parsed = AsrLanguages.normalize(custom)
     // 能用的识别服务：手机上识别，加上设置里填好了的云端服务
@@ -2046,7 +2081,7 @@ private fun AsrLanguageDialog(
     var engine by remember { mutableStateOf(settings.asrEngine) }
     AppDialog(
         onDismissRequest = onDismiss,
-        title = { Text("用哪家识别、视频里说什么语言？") },
+        title = { Text(if (translate) "识别、翻译用哪家，视频里说什么语言？" else "用哪家识别、视频里说什么语言？") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text("识别服务", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -2059,10 +2094,15 @@ private fun AsrLanguageDialog(
                     "没出现的服务要先到 设置 → 语音识别 填好 Key。选的服务会记下来，下次默认用它。",
                     fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp),
                 )
+                if (pick != null) {
+                    Text("翻译服务和模型（会记下来，下次默认用它）", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TranslateModelPicker(pick, settings)
+                    Spacer(Modifier.height(12.dp))
+                }
                 Text("视频语言（只对这个视频生效，不确定选「自动」；点一下就开始识别）", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 AsrLanguages.COMMON.forEach { (code, label) ->
                     Row(
-                        Modifier.fillMaxWidth().clickable { onPick(code, engine) }.padding(vertical = 10.dp),
+                        Modifier.fillMaxWidth().clickable { onPick(code, engine, pick) }.padding(vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Box(Modifier.width(36.dp)) { if (code == current) Icon(AppIcons.Check, null, tint = Orange) }
@@ -2091,7 +2131,7 @@ private fun AsrLanguageDialog(
                 )
             }
         },
-        confirmButton = { TextButton(onClick = { parsed?.let { onPick(it, engine) } }, enabled = parsed != null) { Text("用这个代码识别") } },
+        confirmButton = { TextButton(onClick = { parsed?.let { onPick(it, engine, pick) } }, enabled = parsed != null) { Text("用这个代码识别") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
