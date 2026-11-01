@@ -61,6 +61,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -147,6 +148,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
 
     val bookmarks by vm.bookmarks.collectAsStateWithLifecycle()
     val script = remember { context.assets.open("web_captions.js").bufferedReader().use { it.readText() } }
+    val cleanScript = remember { context.assets.open("web_cleanup.js").bufferedReader().use { it.readText() } }
+    val cleanPages by vm.cleanPages.collectAsStateWithLifecycle()
 
     // ---- 标签页 ----
     var nextTabId by remember { mutableLongStateOf(1L) }
@@ -182,6 +185,19 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
         field = TextFieldValue(text)
     }
 
+    // 手机版、桌面版网页用的 User-Agent（桌面版按网站记住）
+    val mobileAgent = remember { WebSettings.getDefaultUserAgent(context) }
+    val desktopAgent = remember { desktopAgentFor(mobileAgent) }
+
+    /** 打开这个网址前换成它要的 User-Agent；换了返回 true */
+    fun WebView.agentFor(url: String): Boolean {
+        val want = if (vm.isDesktop(url)) desktopAgent else mobileAgent
+        if (getSettings().userAgentString == want) return false
+        getSettings().userAgentString = want
+        vm.captions.userAgent = want
+        return true
+    }
+
     fun go(input: String) {
         val target = toUrl(input) ?: return
         showAddress(target)
@@ -189,7 +205,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             tab.url = target
             tab.pageUrl = target
             saveTabs()
-        } else tab.webView?.loadUrl(target)
+        } else tab.webView?.let { it.agentFor(target); it.loadUrl(target) }
     }
 
     fun playInPlayer(mediaUrl: String, page: String, title: String) {
@@ -350,12 +366,21 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             addJavascriptInterface(vm.Bridge { t.active }, "VoxBridge")
             val startScript = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
-            if (startScript) WebViewCompat.addDocumentStartJavaScript(this, script, setOf("*"))
+            if (startScript) {
+                WebViewCompat.addDocumentStartJavaScript(this, script, setOf("*"))
+                WebViewCompat.addDocumentStartJavaScript(this, cleanScript, setOf("*"))
+            }
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     // 「打开 App」之类的跳转（bilibili://、intent://）不处理，留在网页里
                     val scheme = request.url.scheme?.lowercase()
-                    return scheme != "http" && scheme != "https"
+                    if (scheme != "http" && scheme != "https") return true
+                    // 去的网站要换手机版、桌面版：换好再打开
+                    if (request.isForMainFrame && view.agentFor(request.url.toString())) {
+                        view.loadUrl(request.url.toString())
+                        return true
+                    }
+                    return false
                 }
 
                 override fun onPageStarted(view: WebView, startedUrl: String, favicon: Bitmap?) {
@@ -367,7 +392,10 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
 
                 override fun onPageFinished(view: WebView, finishedUrl: String) {
                     // 不支持开头注入的旧 WebView：加载完再注入（只有顶层页面）
-                    if (!startScript) view.evaluateJavascript(script, null)
+                    if (!startScript) {
+                        view.evaluateJavascript(script, null)
+                        view.evaluateJavascript(cleanScript, null)
+                    }
                     vm.onPageFinished(view.title, finishedUrl)
                     t.canGoBack = view.canGoBack()
                 }
@@ -407,7 +435,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 }
             }
             vm.captions.userAgent = getSettings().userAgentString
-            t.url?.let { loadUrl(it) }
+            t.url?.let { agentFor(it); loadUrl(it) }
         }
     }
 
@@ -505,6 +533,21 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                                 menu = false
                                 tab.pageUrl?.let { clipboard.setText(androidx.compose.ui.text.AnnotatedString(it)) }
                             })
+                            val desktop = vm.isDesktop(tab.pageUrl)
+                            DropdownMenuItem(
+                                text = { Text("桌面版网页") },
+                                trailingIcon = { Checkbox(checked = desktop, onCheckedChange = null) },
+                                onClick = {
+                                    menu = false
+                                    vm.setDesktop(tab.pageUrl, !desktop)
+                                    tab.webView?.let { w -> tab.pageUrl?.let { w.agentFor(it) }; w.reload() }
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("屏蔽「打开 App」推广") },
+                                trailingIcon = { Checkbox(checked = cleanPages, onCheckedChange = null) },
+                                onClick = { menu = false; vm.setCleanPages(!cleanPages); tab.webView?.reload() },
+                            )
                             DropdownMenuItem(text = { Text("字幕语言") }, onClick = { menu = false; dialog = WebDialog.LANGUAGE })
                             DropdownMenuItem(text = { Text("页面缩放（$zoom%）") }, onClick = { menu = false; dialog = WebDialog.ZOOM })
                         }
@@ -922,4 +965,11 @@ private fun toUrl(input: String): String? {
     if (Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://").containsMatchIn(t)) return t
     if (!t.contains(' ') && Regex("^[^/]+\\.[a-zA-Z]{2,}(:\\d+)?(/.*)?$").matches(t)) return "https://$t"
     return "https://www.bing.com/search?q=" + java.net.URLEncoder.encode(t, "UTF-8")
+}
+
+/** 手机 WebView 的 User-Agent 改成同版本的电脑 Chrome（网站按它给电脑版网页） */
+private fun desktopAgentFor(mobile: String): String {
+    // 太旧的版本号有的网站会提示升级浏览器（实测 B 站电脑版在 87 的 WebView 上也能正常播放）
+    val chrome = Regex("Chrome/(\\d+)[\\d.]*").find(mobile)?.takeIf { it.groupValues[1].toInt() >= 120 }?.value?.removePrefix("Chrome/") ?: "120.0.0.0"
+    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chrome Safari/537.36"
 }
