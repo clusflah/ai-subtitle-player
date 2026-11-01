@@ -93,6 +93,28 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
         zoomKey?.let { k -> prefs.edit().apply { if (pageZoom == 100) remove(k) else putInt(k, pageZoom) }.apply() }
     }
 
+    // ---- 屏蔽「打开 App」推广（悬浮按钮、横幅、跳转失败的弹窗），见 web_cleanup.js ----
+
+    private val _cleanPages = MutableStateFlow(prefs.getBoolean("cleanPages", true))
+    val cleanPages: StateFlow<Boolean> = _cleanPages.asStateFlow()
+
+    fun setCleanPages(on: Boolean) {
+        _cleanPages.value = on
+        prefs.edit().putBoolean("cleanPages", on).apply()
+    }
+
+    // ---- 桌面版网页：按网站记住（手机网页功能不全的，例如 B 站手机网页没有进度条、不能换清晰度） ----
+
+    private var desktopSites: Set<String> = prefs.getStringSet("desktopSites", DEFAULT_DESKTOP).orEmpty().toSet()
+
+    fun isDesktop(url: String?): Boolean = siteOf(url)?.let { it in desktopSites } ?: false
+
+    fun setDesktop(url: String?, on: Boolean) {
+        val site = siteOf(url) ?: return
+        desktopSites = if (on) desktopSites + site else desktopSites - site
+        prefs.edit().putStringSet("desktopSites", desktopSites).apply()
+    }
+
     // ---- 标签页：打开着的网页记下来，离开网页页面（例如去播放页）再回来、重开 App 时都还在 ----
 
     /** 记住的标签页（null 是新标签页）和当前是第几个 */
@@ -210,6 +232,9 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
         @JavascriptInterface
         fun generation(): Int = captions.generation
 
+        @JavascriptInterface
+        fun cleanPage(): Boolean = _cleanPages.value
+
         /** 顶层网页的缩放（百分比） */
         @JavascriptInterface
         fun pageZoom(): Int = this@WebViewModel.pageZoom
@@ -247,8 +272,15 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
         const val ZOOM_MIN = 40
         const val ZOOM_MAX = 150
 
+        /** 默认用桌面版的网站：B 站手机网页只有 360P、没有进度条，换清晰度要开 App */
+        private val DEFAULT_DESKTOP = setOf("bilibili.com")
+
         /** 分享、统计用的参数：同一个视频带不带它算同一条最近访问 */
         private val TRACKING = Regex("^(pp|si|feature|spm_id_from|vd_source|share_.*|from_.*|utm_.*|t|ref|from|source)$")
+
+        /** 网站：手机版、电脑版算同一个（m.bilibili.com 和 www.bilibili.com） */
+        fun siteOf(url: String?): String? =
+            url?.let { Uri.parse(it).host }?.removePrefix("www.")?.removePrefix("m.")?.takeIf { it.isNotEmpty() }
 
         fun historyKey(url: String): String {
             val u = Uri.parse(url)
