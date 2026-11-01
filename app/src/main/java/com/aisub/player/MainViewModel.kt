@@ -833,6 +833,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             ttsReader.reset()
         }
         if (s.ttsEnabled) ttsReader.start() else ttsReader.stop()
+        if (old.proxyType != s.proxyType || old.proxyHost != s.proxyHost || old.proxyPort != s.proxyPort) {
+            com.aisub.player.net.AppProxy.apply(getApplication(), s.proxyType, s.proxyHost, s.proxyPort)
+        }
         if (old.preferredAudioLanguages != s.preferredAudioLanguages || old.preferredSubtitleLanguages != s.preferredSubtitleLanguages) {
             extras.applyTrackDefaults()
         }

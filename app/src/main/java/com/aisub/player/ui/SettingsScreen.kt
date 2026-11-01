@@ -1,5 +1,7 @@
 package com.aisub.player.ui
 
+import com.aisub.player.net.ProxyType
+
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
@@ -665,8 +667,50 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 TtsSettings(s, vm) { s = it }
             }
 
+            // ---------------- 网络代理 ----------------
+            CollapsibleCard(
+                "网络代理",
+                if (s.proxyType == ProxyType.OFF || s.proxyHost.isBlank()) "不使用" else "${s.proxyType.label} · ${s.proxyHost}:${s.proxyPort}",
+            ) {
+                ProxySettings(s) { s = it }
+            }
+
             // ---------------- 备份与迁移 ----------------
             BackupCard(flush = { if (s != vm.state.value.settings) vm.updateSettings(s) })
+        }
+    }
+}
+
+/** 网络代理：类型、地址、端口。填局域网里电脑或路由器的代理（如 Clash 打开「允许局域网连接」） */
+@Composable
+private fun ProxySettings(s: AppSettings, onChange: (AppSettings) -> Unit) {
+    Column {
+        ProxyType.entries.forEachIndexed { i, type ->
+            if (i > 0) CardDivider(inset = 64.dp)
+            ListRow(
+                title = type.label,
+                subtitle = when (type) {
+                    ProxyType.OFF -> "直接连接"
+                    ProxyType.HTTP -> "HTTP 代理（Clash、v2rayN 等的 HTTP / 混合端口）"
+                    ProxyType.SOCKS -> "SOCKS5 代理"
+                },
+                leading = { RadioButton(selected = s.proxyType == type, onClick = { onChange(s.copy(proxyType = type)) }) },
+                onClick = { onChange(s.copy(proxyType = type)) },
+            )
+        }
+        AnimatedVisibility(s.proxyType != ProxyType.OFF) {
+            ConfigBlock {
+                ConfigField(s.proxyHost, { onChange(s.copy(proxyHost = it.trim())) }, "代理地址", "例如 192.168.1.10")
+                ConfigField(
+                    if (s.proxyPort > 0) s.proxyPort.toString() else "",
+                    { v -> onChange(s.copy(proxyPort = v.filter(Char::isDigit).take(5).toIntOrNull() ?: 0)) },
+                    "端口", "例如 7890",
+                )
+                Text(
+                    "本机和局域网地址始终直连；离开设置页后生效，内置浏览器也走代理",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

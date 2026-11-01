@@ -35,6 +35,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -81,6 +82,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -176,6 +178,14 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     var zoom by remember { mutableIntStateOf(100) }
     // 每个网站、横竖屏分别记住缩放；网页脚本每 250 毫秒读一次
     LaunchedEffect(tab.pageUrl?.let { Uri.parse(it).host }, landscape) { zoom = vm.zoomFor(tab.pageUrl, landscape) }
+
+    // ---- 电视：网页里用方向键移动指针、确认键点击；地址用手机输入 ----
+    val tv = LocalTv.current
+    /** 指针位置（网页里的像素坐标）；null 时在中间 */
+    var cursor by remember { mutableStateOf<androidx.compose.ui.geometry.Offset?>(null) }
+    var webFocused by remember { mutableStateOf(false) }
+    val toolbarFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    val touchDown = remember { longArrayOf(0L) }
 
     fun showAddress(text: String) {
         editing = false
@@ -344,6 +354,60 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
         }
     }
 
+    /** 在指针位置模拟一次触摸 */
+    fun touch(w: WebView, at: androidx.compose.ui.geometry.Offset, action: Int) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (action == android.view.MotionEvent.ACTION_DOWN) touchDown[0] = now
+        val ev = android.view.MotionEvent.obtain(touchDown[0], now, action, at.x, at.y, 0)
+        ev.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
+        w.dispatchTouchEvent(ev)
+        ev.recycle()
+    }
+
+    /** 电视遥控器在网页上的按键：移动指针，到边缘滚动网页，顶端再按上回到工具栏 */
+    fun tvCursorKey(w: WebView, keyCode: Int, e: android.view.KeyEvent): Boolean {
+        val dx = when (keyCode) { android.view.KeyEvent.KEYCODE_DPAD_LEFT -> -1; android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> 1; else -> 0 }
+        val dy = when (keyCode) { android.view.KeyEvent.KEYCODE_DPAD_UP -> -1; android.view.KeyEvent.KEYCODE_DPAD_DOWN -> 1; else -> 0 }
+        val click = keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER || keyCode == android.view.KeyEvent.KEYCODE_ENTER ||
+            keyCode == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER
+        if (dx == 0 && dy == 0 && !click) return false
+        val c = cursor ?: androidx.compose.ui.geometry.Offset(w.width / 2f, w.height / 2f)
+        cursor = c
+        if (click) {
+            if (e.action == android.view.KeyEvent.ACTION_DOWN && e.repeatCount == 0) touch(w, c, android.view.MotionEvent.ACTION_DOWN)
+            else if (e.action == android.view.KeyEvent.ACTION_UP) touch(w, c, android.view.MotionEvent.ACTION_UP)
+            return true
+        }
+        if (e.action != android.view.KeyEvent.ACTION_DOWN) return true
+        val density = w.resources.displayMetrics.density
+        // 按住越久走得越快
+        val step = density * 10f * (1 + minOf(e.repeatCount, 24) / 4f)
+        val maxX = (w.width - 1).toFloat()
+        val maxY = (w.height - 1).toFloat()
+        val nx = (c.x + dx * step).coerceIn(0f, maxX)
+        val ny = (c.y + dy * step).coerceIn(0f, maxY)
+        // 已经在边上还往外按：滚动网页（指针下面能滚的区域优先，没有就滚整页）
+        val overX = dx != 0 && nx == c.x
+        val overY = dy != 0 && ny == c.y
+        if (overY && dy < 0 && e.repeatCount == 0 && !w.canScrollVertically(-1)) {
+            runCatching { toolbarFocus.requestFocus() }
+            return true
+        }
+        if (overX || overY) {
+            val sx = if (overX) dx * w.width * 0.25f / density else 0f
+            val sy = if (overY) dy * w.height * 0.25f / density else 0f
+            w.evaluateJavascript(
+                "(function(x,y,dx,dy){var e=document.elementFromPoint(x,y);while(e&&e!==document.body&&e!==document.documentElement){" +
+                    "var s=getComputedStyle(e);if((dy&&e.scrollHeight>e.clientHeight&&/(auto|scroll)/.test(s.overflowY))||" +
+                    "(dx&&e.scrollWidth>e.clientWidth&&/(auto|scroll)/.test(s.overflowX))){e.scrollBy({left:dx,top:dy,behavior:'smooth'});return}" +
+                    "e=e.parentElement}window.scrollBy({left:dx,top:dy,behavior:'smooth'})})(${c.x / density},${c.y / density},$sx,$sy)",
+                null,
+            )
+        }
+        cursor = androidx.compose.ui.geometry.Offset(nx, ny)
+        return true
+    }
+
     /** 建一个标签页的网页 */
     @SuppressLint("SetJavaScriptEnabled")
     fun createWebView(ctx: android.content.Context, t: WebTab): WebView {
@@ -433,6 +497,10 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 }
             }
             vm.captions.userAgent = getSettings().userAgentString
+            if (tv) {
+                isFocusable = true
+                post { requestFocus() }
+            }
             t.url?.let { agentFor(it); loadUrl(it) }
         }
     }
@@ -442,12 +510,36 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
             // 地址栏
-            Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp).onPreviewKeyEvent { e ->
+                    // 电视：从工具栏按下键回到网页指针；不让网页按方向去找链接（会跳到页面底部）
+                    val w = tab.webView
+                    val down = tv && w != null && fullscreen == null && e.key == androidx.compose.ui.input.key.Key.DirectionDown
+                    if (down && e.type == androidx.compose.ui.input.key.KeyEventType.KeyDown) w!!.requestFocus()
+                    down
+                },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回") }
                 // 没在输入时只显示网站名，给右边的按钮留地方；点一下展开完整网址（全选，直接输入就替换）
                 val showingHost = !(editing || tab.url == null)
                 val shown = if (!showingHost) field else TextFieldValue(tab.pageUrl?.let { Uri.parse(it).host?.removePrefix("www.") } ?: address)
-                BasicTextField(
+                // 电视：地址栏是个按钮，焦点经过时不弹输入法；按确认键用手机输入
+                if (tv) Box(
+                    Modifier.weight(1f).height(40.dp).clip(RoundedCornerShape(20.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                        .focusRequester(toolbarFocus)
+                        .clickable { dialog = WebDialog.ADDRESS }
+                        .padding(horizontal = 14.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    val empty = shown.text.isEmpty()
+                    Text(
+                        if (empty) "输入网址或搜索（可用手机输入）" else shown.text,
+                        style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        color = if (empty) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+                    )
+                } else BasicTextField(
                     value = shown,
                     onValueChange = { v ->
                         // 点进来那一下的光标变化还带着网站名：忽略，用上面换好的完整网址
@@ -566,12 +658,25 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     // 每个标签页一个网页；切走时从这里拿下来（不销毁），切回来再放上
                     key(tab.id) {
                         AndroidView(
-                            modifier = Modifier.fillMaxSize(),
+                            // 电视：按键先到这里（Compose 管焦点），方向键、确认键交给指针
+                            modifier = Modifier.fillMaxSize().then(
+                                if (!tv) Modifier else Modifier
+                                    .onFocusChanged { webFocused = it.hasFocus }
+                                    .onPreviewKeyEvent { e ->
+                                        val w = tab.webView
+                                        w != null && fullscreen == null && tvCursorKey(w, e.nativeKeyEvent.keyCode, e.nativeKeyEvent)
+                                    },
+                            ),
                             factory = { ctx ->
                                 (tab.webView ?: createWebView(ctx, tab).also { tab.webView = it })
                                     .also { (it.parent as? ViewGroup)?.removeView(it) }
                             },
                         )
+                    }
+                    if (tv && webFocused && fullscreen == null) {
+                        val density = LocalDensity.current
+                        val c = cursor ?: with(density) { androidx.compose.ui.geometry.Offset(viewWidth.toPx() / 2, viewHeight.toPx() / 2) }
+                        TvCursor(Modifier.offset { androidx.compose.ui.unit.IntOffset(c.x.toInt(), c.y.toInt()) })
                     }
                     // 字幕放在网页视频的下沿；不知道视频在哪（iframe 里的）就放在底部
                     val videoBottom = rect?.let { r -> if (r.viewportWidth <= 0) null else viewWidth * (r.bottom / r.viewportWidth) }
@@ -649,6 +754,11 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     )
 
     when (dialog) {
+        WebDialog.ADDRESS -> TvAddressDialog(
+            initial = tab.pageUrl.orEmpty(),
+            onGo = { dialog = null; go(it) },
+            onDismiss = { dialog = null },
+        )
         WebDialog.LANGUAGE -> WebLanguageDialog(
             asr = vm.asrLanguage.collectAsStateWithLifecycle().value,
             target = vm.targetLanguage.collectAsStateWithLifecycle().value,
@@ -794,7 +904,52 @@ private fun cueNear(cues: List<Cue>, positionMs: Long): Cue? {
     return cues[i].takeIf { positionMs <= it.endMs + LINGER_MS }
 }
 
-private enum class WebDialog { LANGUAGE, ZOOM, TABS }
+private enum class WebDialog { LANGUAGE, ZOOM, TABS, ADDRESS }
+
+/** 电视上输入网址：手机扫码输入（主要），也可以用遥控器打字 */
+@Composable
+private fun TvAddressDialog(initial: String, onGo: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    AppDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("输入网址或搜索") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                PhoneFormPanel(
+                    title = "在电视上打开网页",
+                    caption = "用手机扫码（手机和电视要在同一个局域网），输入网址或搜索词后提交，电视上直接打开。",
+                    fields = listOf(PhoneField("url", "网址或搜索词", initial)),
+                    onCancel = onDismiss,
+                    onValues = { v -> v["url"]?.trim()?.takeIf { it.isNotEmpty() }?.let(onGo) },
+                )
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it },
+                    label = { Text("或用遥控器输入") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
+                    keyboardActions = KeyboardActions(onGo = { if (text.isNotBlank()) onGo(text) }),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { onGo(text) }, enabled = text.isNotBlank()) { Text("打开") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+/** 电视上网页里的鼠标指针（尖端在左上角） */
+@Composable
+private fun TvCursor(modifier: Modifier) {
+    androidx.compose.foundation.Canvas(modifier.size(24.dp)) {
+        val w = size.width
+        val path = androidx.compose.ui.graphics.Path().apply {
+            moveTo(0f, 0f); lineTo(0f, w * 0.85f); lineTo(w * 0.24f, w * 0.64f)
+            lineTo(w * 0.40f, w); lineTo(w * 0.54f, w * 0.94f); lineTo(w * 0.38f, w * 0.58f)
+            lineTo(w * 0.66f, w * 0.58f); close()
+        }
+        drawPath(path, Color.White)
+        drawPath(path, Color.Black, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5.dp.toPx()))
+    }
+}
 
 /** 一个标签页。网页（WebView）第一次切到时才建，切走后留着（视频暂停），回来接着看 */
 private class WebTab(val id: Long, startUrl: String?) {
