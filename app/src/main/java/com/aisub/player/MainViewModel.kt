@@ -194,6 +194,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             .also(assHandler::init)
     }
 
+    /** 应用内均衡器，挂在默认内核上 */
+    val equalizer = AudioEqualizer(app, exoPlayer)
+
     /** VLC 内核：ISO 光盘镜像，或用户在 ExoPlayer 播放失败后手动切换。用到时才创建。 */
     private var vlcPlayer: VlcPlayer? = null
     private val proxy by lazy { MediaProxy(authDataSourceFactory(app)) }
@@ -2434,6 +2437,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        equalizer.release()
         ttsReader.stop()
         previewPlayer?.release()
         ttsEngines.values.forEach { it.close() }

@@ -74,6 +74,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material3.Switch
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
@@ -184,7 +185,7 @@ private val RESIZE_MODES = listOf(
 )
 
 /** 播放页里弹出的对话框。 */
-private enum class PlayerDialog { SPEED, SLEEP, GOTO, DELAY, INFO, EXPORT, SAVE_PLAYLIST, ERROR, ASR_LANGUAGE, TRANSLATE_MODEL }
+private enum class PlayerDialog { SPEED, SLEEP, GOTO, DELAY, INFO, EXPORT, SAVE_PLAYLIST, ERROR, ASR_LANGUAGE, TRANSLATE_MODEL, EQUALIZER }
 
 /** 画中画状态，由 MainActivity 更新。 */
 object PipState {
@@ -193,7 +194,7 @@ object PipState {
 
 /**
  * 全屏黑底播放页（仿 VLC）：顶部标题，底部进度条与五个按钮
- * （字幕/音轨、旋转、播放、锁定、更多），画面比例在“更多”第一排。AI 字幕功能收在"字幕/音轨"面板里。
+ * （字幕/音轨、AI 字幕、播放、旋转、更多），锁定按钮在画面右侧，画面比例在“更多”第一排。AI 字幕功能收在"字幕/音轨"面板里。
  */
 @androidx.annotation.OptIn(UnstableApi::class)
 @OptIn(ExperimentalMaterial3Api::class)
@@ -317,7 +318,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         }
     }
     BackHandler(enabled = showMore) { showMore = false }
-    BackHandler(enabled = locked) { indicator = AppIcons.Lock to "已锁定，点左侧锁图标解锁" }
+    BackHandler(enabled = locked) { indicator = AppIcons.Lock to "已锁定，点右侧锁图标解锁" }
 
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/x-subrip")) { uri ->
         if (uri != null) vm.exportSrt(uri, pendingExport)
@@ -641,7 +642,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         MusicAction.IMPORT_LYRICS -> lyricsImportLauncher.launch(arrayOf("*/*"))
                         MusicAction.SLEEP -> dialog = PlayerDialog.SLEEP
                         MusicAction.SPEED -> dialog = PlayerDialog.SPEED
-                        MusicAction.EQUALIZER -> openEqualizer(context, (player as? androidx.media3.exoplayer.ExoPlayer)?.audioSessionId ?: 0)
+                        MusicAction.EQUALIZER -> dialog = PlayerDialog.EQUALIZER
                         MusicAction.INFO -> dialog = PlayerDialog.INFO
                         MusicAction.TRACKS -> { tracksAi = false; showTracks = true }
                         MusicAction.ADD_TO_PLAYLIST -> addingToPlaylist = true
@@ -813,18 +814,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         onDragEnd = { dragging?.let { player.seekTo(it.toLong()) }; dragging = null; vm.extras.clearThumbnail() },
                     )
                 } else Spacer(Modifier.height(12.dp))
+                // 播放键居中：左边字幕、AI 字幕，右边旋转、更多；锁定按钮在画面右侧
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    BarButton(AppIcons.Subtitles, "字幕与音轨") { tracksAi = false; showTracks = true }
-                    Spacer(Modifier.weight(1f))
-                    BarButton(AppIcons.AutoAwesome, "AI 字幕") { tracksAi = true; showTracks = true }
-                    Spacer(Modifier.weight(1f))
-                    // 电视不能转屏、不用锁屏，这两个按钮不显示
-                    if (!tv) {
-                        BarButton(AppIcons.ScreenRotation, "旋转屏幕") {
-                            activity?.requestedOrientation =
-                                if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                        }
-                        Spacer(Modifier.weight(1f))
+                    Row(Modifier.weight(1f), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                        BarButton(AppIcons.Subtitles, "字幕与音轨") { tracksAi = false; showTracks = true }
+                        BarButton(AppIcons.AutoAwesome, "AI 字幕") { tracksAi = true; showTracks = true }
                     }
                     IconButton(
                         onClick = { vm.togglePlay(); interactions++ },
@@ -837,15 +831,16 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             Icon(if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow, if (wantsPlay) "暂停" else "播放", tint = Color.White, modifier = Modifier.size(36.dp))
                         }
                     }
-                    Spacer(Modifier.weight(1f))
-                    if (!tv) {
-                        BarButton(AppIcons.Lock, "锁定") {
-                            locked = true; controls = true; indicator = AppIcons.Lock to "已锁定屏幕"
-                            interactions++
+                    Row(Modifier.weight(1f), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                        // 电视不能转屏，不显示
+                        if (!tv) {
+                            BarButton(AppIcons.ScreenRotation, "旋转屏幕") {
+                                activity?.requestedOrientation =
+                                    if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                            }
                         }
-                        Spacer(Modifier.weight(1f))
+                        BarButton(AppIcons.MoreHoriz, "更多") { showMore = true }
                     }
-                    BarButton(AppIcons.MoreHoriz, "更多") { showMore = true }
                 }
             }
         }
@@ -890,12 +885,19 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             }
         }
 
-        // ---- 锁屏后只留一个解锁按钮 ----
-        if (locked && controls) {
+        // ---- 锁定按钮在画面右侧中间；锁屏后只留它（显示为已锁）用来解锁。电视不用锁屏 ----
+        AnimatedVisibility(
+            !tv && controls && (locked || (!musicMode && !showMore && !showTracks)), enter = fadeIn(), exit = fadeOut(),
+            modifier = Modifier.align(Alignment.CenterEnd).padding(end = 16.dp),
+        ) {
             IconButton(
-                onClick = { locked = false; interactions++ },
-                modifier = Modifier.align(Alignment.CenterStart).padding(start = 16.dp).clip(CircleShape).background(Color(0x66000000)),
-            ) { Icon(AppIcons.Lock, "解锁", tint = Color.White) }
+                onClick = {
+                    if (locked) locked = false
+                    else { locked = true; controls = true; indicator = AppIcons.Lock to "已锁定屏幕" }
+                    interactions++
+                },
+                modifier = Modifier.clip(CircleShape).background(Color(0x66000000)),
+            ) { Icon(if (locked) AppIcons.Lock else AppIcons.LockOpen, if (locked) "解锁" else "锁定", tint = Color.White) }
         }
 
         // ---- 横滑拖动进度时的画面预览 ----
@@ -956,7 +958,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         MoreAction.NAVIGATE -> showNav = true
                         MoreAction.BOOKMARKS -> showBookmarks = true
                         MoreAction.SKIP -> showSkip = true
-                        MoreAction.EQUALIZER -> openEqualizer(context, (player as? androidx.media3.exoplayer.ExoPlayer)?.audioSessionId ?: 0)
+                        MoreAction.EQUALIZER -> dialog = PlayerDialog.EQUALIZER
                         MoreAction.AUDIO_ONLY -> {
                             audioOnly = !audioOnly
                             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
@@ -1250,6 +1252,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         PlayerDialog.GOTO -> GotoDialog(onDismiss = { dialog = null }) { ms -> player.seekTo(ms); dialog = null }
         PlayerDialog.DELAY -> DelayDialog(state.subtitleDelayMs, onChange = vm::setSubtitleDelay, onDismiss = { dialog = null })
         PlayerDialog.INFO -> InfoDialog(vm, onDismiss = { dialog = null })
+        PlayerDialog.EQUALIZER -> EqualizerDialog(vm, onDismiss = { dialog = null })
         PlayerDialog.EXPORT -> ChoiceDialog(
             "导出字幕（SRT）", listOf("双语", "仅译文", "仅原文"), -1, onDismiss = { dialog = null },
         ) { i ->
@@ -1616,16 +1619,96 @@ private fun repeatLabel(mode: Int) = when (mode) {
     else -> "不循环"
 }
 
-private fun openEqualizer(context: Context, sessionId: Int) {
+/** 系统自带的均衡器面板（有的手机厂商有，比如杜比音效）；没有时提示 */
+private fun openSystemEqualizer(context: Context, sessionId: Int) {
     val intent = Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL)
         .putExtra(AudioEffect.EXTRA_AUDIO_SESSION, sessionId)
         .putExtra(AudioEffect.EXTRA_PACKAGE_NAME, context.packageName)
         .putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MOVIE)
     try {
-        (context as? Activity)?.startActivity(intent) ?: throw IllegalStateException()
+        context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     } catch (e: Exception) {
         Toast.makeText(context, "这台设备没有系统均衡器", Toast.LENGTH_SHORT).show()
     }
+}
+
+/**
+ * 应用内均衡器：开关、系统预设、每个频段一条滑杆。
+ * 设置马上生效并记住；兼容模式（VLC 内核）下用不了。
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+private fun EqualizerDialog(vm: MainViewModel, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val ctrl = vm.equalizer
+    val eq = remember { if (vm.usingVlc) null else ctrl.attach() }
+    var enabled by remember { mutableStateOf(ctrl.enabled) }
+    var preset by remember { mutableStateOf(ctrl.preset) }
+    val range = remember(eq) { eq?.let { runCatching { it.bandLevelRange }.getOrNull() } }
+    val bands = remember(eq) { eq?.let { runCatching { it.numberOfBands.toInt() }.getOrNull() } ?: 0 }
+    val presets = remember(eq) {
+        eq?.let { e -> runCatching { (0 until e.numberOfPresets).map { e.getPresetName(it.toShort()) } }.getOrNull() }.orEmpty()
+    }
+    val levels = remember(eq) {
+        androidx.compose.runtime.mutableStateListOf<Short>().apply {
+            eq?.let { e -> runCatching { repeat(bands) { add(e.getBandLevel(it.toShort())) } } }
+        }
+    }
+    // 调了预设或滑杆就自动打开
+    fun turnOn() { if (!enabled) { enabled = true; ctrl.setEnabled(true) } }
+    fun reloadLevels() {
+        eq?.let { e -> runCatching { repeat(bands) { levels[it] = e.getBandLevel(it.toShort()) } } }
+    }
+
+    AppDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("均衡器", Modifier.weight(1f))
+                if (eq != null) Switch(checked = enabled, onCheckedChange = { enabled = it; ctrl.setEnabled(it) })
+            }
+        },
+        text = {
+            if (eq == null || range == null || bands == 0) {
+                Text(if (vm.usingVlc) "兼容模式（VLC 内核）下不能用均衡器" else "这台设备不支持应用内均衡器，可以试试系统均衡器")
+            } else Column(Modifier.verticalScroll(rememberScrollState())) {
+                if (presets.isNotEmpty()) {
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(selected = preset == -1, onClick = { turnOn(); ctrl.reset(); preset = -1; reloadLevels() }, label = { Text("平直") })
+                        presets.forEachIndexed { i, name ->
+                            FilterChip(
+                                selected = preset == i,
+                                onClick = { turnOn(); ctrl.usePreset(i); preset = i; reloadLevels() },
+                                label = { Text(name) },
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+                val min = range[0].toFloat()
+                val max = range[1].toFloat()
+                repeat(bands) { b ->
+                    val hz = runCatching { eq.getCenterFreq(b.toShort()) / 1000 }.getOrDefault(0)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (hz >= 1000) "${hz / 1000}k" else "$hz", fontSize = 13.sp, modifier = Modifier.width(44.dp))
+                        Slider(
+                            value = levels[b].toFloat(), valueRange = min..max,
+                            onValueChange = { v -> turnOn(); levels[b] = v.toInt().toShort(); ctrl.setBandLevel(b, levels[b]); preset = -1 },
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text("%+d".format(levels[b] / 100), fontSize = 13.sp, modifier = Modifier.width(36.dp))
+                    }
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = {
+                onDismiss()
+                openSystemEqualizer(context, if (vm.usingVlc) 0 else vm.exoPlayer.audioSessionId)
+            }) { Text("系统均衡器") }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
+    )
 }
 
 private fun enterPip(activity: Activity?) {
