@@ -135,6 +135,12 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { AdBlock.update(getApplication()) }
     }
 
+    // 广告规则订阅：勾选常用的、加自己的
+    fun loadAdLists() = AdBlock.loadInfo(getApplication(), viewModelScope)
+    fun setAdListEnabled(id: String, on: Boolean) = AdBlock.setListEnabled(getApplication(), viewModelScope, id, on)
+    fun addAdList(name: String, url: String): Boolean = AdBlock.addList(getApplication(), viewModelScope, name, url)
+    fun removeAdList(id: String) = AdBlock.removeList(getApplication(), viewModelScope, id)
+
     /** 自己写的广告规则（原文） */
     fun customAdRules(): String = AdBlock.customText(getApplication())
 

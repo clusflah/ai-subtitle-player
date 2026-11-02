@@ -39,7 +39,9 @@ val LocalWideLayout = staticCompositionLocalOf { false }
 
 fun isTvDevice(context: Context): Boolean =
     context.getSystemService(UiModeManager::class.java)?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION ||
-        context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+        context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
+        // 调试版在手机上模拟电视：adb shell run-as <包名> touch files/force_tv
+        (com.aisub.player.BuildConfig.DEBUG && java.io.File(context.filesDir, "force_tv").exists())
 
 /**
  * 提供 LocalTv / LocalWideLayout。电视上字号整体放大一点，

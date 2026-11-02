@@ -152,7 +152,7 @@ class MainActivity : ComponentActivity() {
                         Screen.Live -> LiveScreen(back, play)
                         Screen.Web -> WebScreen(main, back, play)
                         Screen.Telegram -> TelegramScreen(back) { chat -> nav.push(Screen.TelegramChat(chat.id, chat.title)) }
-                        is Screen.TelegramChat -> TelegramChatScreen(screen.chatId, screen.title, back, play)
+                        is Screen.TelegramChat -> TelegramChatScreen(screen.chatId, screen.title, lib, back, play)
                         is Screen.LocalFolder -> LocalFolderScreen(
                             lib, screen.path, screen.title, back,
                             openFolder = { path, title -> nav.push(Screen.LocalFolder(path, title)) },

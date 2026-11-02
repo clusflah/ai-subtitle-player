@@ -125,6 +125,30 @@ import com.aisub.player.web.WebCaptionState
 import com.aisub.player.web.WebViewModel
 import kotlinx.coroutines.delay
 
+/**
+ * 电视：按遥控器的这几秒里，网页播放器的控制栏（进度条、全屏按钮）一直显示，不自动藏起来；
+ * 不然指针还没挪到全屏按钮，控制栏就藏了，再点只会暂停。认得西瓜播放器、video.js、DPlayer
+ */
+private val TV_ACTIVE_JS = """
+    (function(){var d=document.documentElement;if(!d)return;
+    if(!window.__voxTvCss&&window.CSSStyleSheet&&document.adoptedStyleSheets){try{var s=new CSSStyleSheet();s.replaceSync(
+    '.vox-tv-active .xgplayer.xgplayer-inactive .controls-autohide{visibility:visible!important;opacity:1!important;pointer-events:auto!important}'+
+    '.vox-tv-active .video-js.vjs-user-inactive .vjs-control-bar{visibility:visible!important;opacity:1!important;pointer-events:auto!important}'+
+    '.vox-tv-active .dplayer.dplayer-hide-controller .dplayer-controller,.vox-tv-active .dplayer.dplayer-hide-controller .dplayer-controller-mask{opacity:1!important;transform:none!important;pointer-events:auto!important}');
+    document.adoptedStyleSheets=document.adoptedStyleSheets.concat([s]);window.__voxTvCss=1}catch(e){}}
+    d.classList.add('vox-tv-active');clearTimeout(window.__voxTvT);
+    window.__voxTvT=setTimeout(function(){d.classList.remove('vox-tv-active')},4000)})()
+""".trimIndent()
+
+/** 电视上网页全屏时遥控器控制视频：确认键暂停 / 继续，左右键快退 / 快进 10 秒 */
+private fun tvMediaJs(action: String) = """
+    (function(){var v=null,a=0;document.querySelectorAll('video').forEach(function(e){var r=e.getBoundingClientRect(),s=r.width*r.height;if(s>a){a=s;v=e}});
+    if(!v)return;var f=document.fullscreenElement||document.webkitFullscreenElement;if(f&&f!==v&&!f.contains(v)&&f.querySelector('video'))v=f.querySelector('video');
+    ${TV_ACTIVE_JS.replace("\n", "")};
+    if('$action'==='toggle'){if(v.paused)v.play();else v.pause()}
+    else{var d='$action'==='back'?-10:10;v.currentTime=Math.max(0,Math.min((v.duration||1e9)-1,v.currentTime+d))}})()
+""".trimIndent()
+
 /** 首页上的常用视频网站 */
 private val QUICK_SITES = listOf(
     "哔哩哔哩" to "https://m.bilibili.com",
@@ -200,6 +224,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     var webFocused by remember { mutableStateOf(false) }
     val toolbarFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     val touchDown = remember { longArrayOf(0L) }
+    /** 电视：网页全屏时遥控器按键的处理（全屏画面那边设置） */
+    val fullscreenKey = remember { arrayOfNulls<(Int, android.view.KeyEvent) -> Boolean>(1) }
 
     fun showAddress(text: String) {
         editing = false
@@ -424,6 +450,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
         val click = keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER || keyCode == android.view.KeyEvent.KEYCODE_ENTER ||
             keyCode == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER
         if (dx == 0 && dy == 0 && !click) return false
+        if (e.action == android.view.KeyEvent.ACTION_DOWN) w.evaluateJavascript(TV_ACTIVE_JS, null)
         val c = cursor ?: androidx.compose.ui.geometry.Offset(w.width / 2f, w.height / 2f)
         cursor = c
         if (click) {
@@ -447,13 +474,22 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             return true
         }
         if (overX || overY) {
-            val sx = if (overX) dx * w.width * 0.25f / density else 0f
-            val sy = if (overY) dy * w.height * 0.25f / density else 0f
+            // 坐标按比例给网页（网页的 CSS 像素不一定是 px / density）。找指针下面还能往这个方向滚的区域，
+            // 没有就找画面中间的；整页也滚不动（有的网站把 body 锁住、内容放在一个能滚的 div 里）就滚画面上最大的那个
             w.evaluateJavascript(
-                "(function(x,y,dx,dy){var e=document.elementFromPoint(x,y);while(e&&e!==document.body&&e!==document.documentElement){" +
-                    "var s=getComputedStyle(e);if((dy&&e.scrollHeight>e.clientHeight&&/(auto|scroll)/.test(s.overflowY))||" +
-                    "(dx&&e.scrollWidth>e.clientWidth&&/(auto|scroll)/.test(s.overflowX))){e.scrollBy({left:dx,top:dy,behavior:'smooth'});return}" +
-                    "e=e.parentElement}window.scrollBy({left:dx,top:dy,behavior:'smooth'})})(${c.x / density},${c.y / density},$sx,$sy)",
+                "(function(fx,fy,ux,uy){var dx=ux*innerWidth*0.25,dy=uy*innerHeight*0.25;" +
+                    "function can(e){var s=getComputedStyle(e);if(dy){if(!/(auto|scroll|overlay)/.test(s.overflowY))return false;" +
+                    "return dy>0?e.scrollTop+e.clientHeight<e.scrollHeight-1:e.scrollTop>0}" +
+                    "if(!/(auto|scroll|overlay)/.test(s.overflowX))return false;return dx>0?e.scrollLeft+e.clientWidth<e.scrollWidth-1:e.scrollLeft>0}" +
+                    "function up(e){while(e&&e!==document.body&&e!==document.documentElement){if(can(e))return e;e=e.parentElement}return null}" +
+                    "var t=up(document.elementFromPoint(fx*innerWidth,fy*innerHeight))||up(document.elementFromPoint(innerWidth/2,innerHeight/2));" +
+                    "if(!t){var se=document.scrollingElement||document.documentElement;" +
+                    "var win=dy?(dy>0?innerHeight+scrollY<se.scrollHeight-1:scrollY>0):(dx>0?innerWidth+scrollX<se.scrollWidth-1:scrollX>0);" +
+                    "if(!win){var area=0;document.querySelectorAll('body *').forEach(function(e){if(e.clientHeight<40||!can(e))return;" +
+                    "var r=e.getBoundingClientRect(),a=Math.max(0,Math.min(r.right,innerWidth)-Math.max(r.left,0))*Math.max(0,Math.min(r.bottom,innerHeight)-Math.max(r.top,0));" +
+                    "if(a>area){area=a;t=e}})}}" +
+                    "(t||window).scrollBy({left:dx,top:dy,behavior:'smooth'})})" +
+                    "(${c.x / w.width},${c.y / w.height},${if (overX) dx else 0},${if (overY) dy else 0})",
                 null,
             )
         }
@@ -466,7 +502,20 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     fun createWebView(ctx: android.content.Context, t: WebTab): WebView {
         // 调试版可以用电脑上的 chrome://inspect 查看网页和注入的脚本
         if (com.aisub.player.BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
-        return WebView(ctx).apply {
+        return object : WebView(ctx) {
+            // 电视：网页有焦点时系统把它当输入框，按键先给输入法；有的输入法没弹出来也会吞掉方向键。
+            // 输入法没在显示就先接住遥控器的方向键、确认键交给指针（在网页输入框里打字时照常给输入法）
+            override fun dispatchKeyEventPreIme(event: android.view.KeyEvent): Boolean {
+                val ime = androidx.core.view.ViewCompat.getRootWindowInsets(this)
+                    ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
+                if (tv && t.active && !ime) {
+                    val handled = if (fullscreen == null) tvCursorKey(this, event.keyCode, event)
+                    else fullscreenKey[0]?.invoke(event.keyCode, event) == true
+                    if (handled) return true
+                }
+                return super.dispatchKeyEventPreIme(event)
+            }
+        }.apply {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             with(getSettings()) {
                 javaScriptEnabled = true
@@ -556,6 +605,10 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             if (tv) {
                 isFocusable = true
                 post { requestFocus() }
+                // 从播放器、网页全屏回来，或者界面重建后，网页有焦点但 Compose 不知道：按键直接到网页，
+                // 网页会自己按方向找链接、不会滚动。网页这一层也接一下，交给指针
+                setOnKeyListener { v, keyCode, e -> t.active && fullscreen == null && tvCursorKey(v as WebView, keyCode, e) }
+                setOnFocusChangeListener { _, has -> if (t.active) webFocused = has }
             }
             t.url?.let { agentFor(it); loadUrl(it) }
         }
@@ -716,11 +769,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                                 trailingIcon = { Checkbox(checked = adBlock, onCheckedChange = null) },
                                 onClick = { menu = false; vm.setAdBlock(!adBlock); tab.webView?.reload() },
                             )
-                            if (adBlock) DropdownMenuItem(
-                                text = { Text(if (adInfo.updating) "正在更新广告规则…" else "更新广告规则") },
-                                enabled = !adInfo.updating,
-                                onClick = { menu = false; vm.updateAdRules() },
-                            )
+                            DropdownMenuItem(text = { Text("广告规则订阅") }, onClick = { menu = false; dialog = WebDialog.AD_LISTS })
                             if (tab.url != null) DropdownMenuItem(text = { Text("点选屏蔽广告") }, onClick = { menu = false; startPicking() })
                             DropdownMenuItem(text = { Text("自定义广告规则") }, onClick = { menu = false; dialog = WebDialog.AD_RULES })
                             DropdownMenuItem(text = { Text("字幕语言") }, onClick = { menu = false; dialog = WebDialog.LANGUAGE })
@@ -811,8 +860,31 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 delay(4_000)
                 showControls = false
             }
+            // 电视：全屏后指针没了，遥控器直接控制视频（返回键照常退出全屏）
+            fun tvFullscreenKey(keyCode: Int, e: android.view.KeyEvent): Boolean {
+                val action = when (keyCode) {
+                    android.view.KeyEvent.KEYCODE_DPAD_CENTER, android.view.KeyEvent.KEYCODE_ENTER, android.view.KeyEvent.KEYCODE_NUMPAD_ENTER,
+                    android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> "toggle"
+                    android.view.KeyEvent.KEYCODE_DPAD_LEFT, android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> "back"
+                    android.view.KeyEvent.KEYCODE_DPAD_RIGHT, android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> "forward"
+                    android.view.KeyEvent.KEYCODE_DPAD_UP, android.view.KeyEvent.KEYCODE_DPAD_DOWN -> "show"
+                    else -> return false
+                }
+                if (e.action == android.view.KeyEvent.ACTION_DOWN && (e.repeatCount == 0 || action == "back" || action == "forward")) {
+                    tab.webView?.evaluateJavascript(if (action == "show") TV_ACTIVE_JS else tvMediaJs(action), null)
+                    controlsAt = System.currentTimeMillis()
+                }
+                return true
+            }
+            if (tv) DisposableEffect(view) {
+                fullscreenKey[0] = ::tvFullscreenKey
+                view.post { view.requestFocus() }
+                onDispose { fullscreenKey[0] = null }
+            }
             Box(
-                Modifier.fillMaxSize().background(Color.Black).pointerInput(view) {
+                Modifier.fillMaxSize().background(Color.Black)
+                    .then(if (tv) Modifier.onPreviewKeyEvent { tvFullscreenKey(it.nativeKeyEvent.keyCode, it.nativeKeyEvent) } else Modifier)
+                    .pointerInput(view) {
                     awaitPointerEventScope {
                         while (true) {
                             // 只看不拦：触摸照常交给网页的播放器
@@ -822,7 +894,24 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     }
                 },
             ) {
-                AndroidView(factory = { view }, modifier = Modifier.fillMaxSize())
+                AndroidView(
+                    factory = { ctx ->
+                        if (!tv) view
+                        // 电视：全屏画面里获得焦点的是网页内部的视图，按键先给输入法（有的输入法会吞掉方向键）：
+                        // 在外面包一层，输入法之前先接住遥控器按键
+                        else object : android.widget.FrameLayout(ctx) {
+                            override fun dispatchKeyEventPreIme(event: android.view.KeyEvent): Boolean {
+                                val ime = androidx.core.view.ViewCompat.getRootWindowInsets(this)
+                                    ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
+                                return (!ime && tvFullscreenKey(event.keyCode, event)) || super.dispatchKeyEventPreIme(event)
+                            }
+                        }.apply {
+                            (view.parent as? ViewGroup)?.removeView(view)
+                            addView(view, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
                 val openDirect: (String) -> Unit = {
                     exitFullscreen()
                     playInPlayer(it, tab.webView?.url.orEmpty(), tab.webView?.title.orEmpty())
@@ -959,6 +1048,10 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             vm.saveCustomAdRules(text)
             dialog = null
             tab.webView?.reload()
+        }
+        WebDialog.AD_LISTS -> AdListsDialog(vm, adBlock, adInfo) { changed ->
+            dialog = null
+            if (changed && adBlock) tab.webView?.reload()
         }
         WebDialog.TABS, null -> {}
     }
@@ -1138,6 +1231,112 @@ private fun PickerBar(
     }
 }
 
+/** 广告规则订阅：勾选常用的，加自己的订阅地址，手动更新 */
+@Composable
+private fun AdListsDialog(
+    vm: com.aisub.player.web.WebViewModel,
+    adBlock: Boolean,
+    info: com.aisub.player.web.AdBlockInfo,
+    onDismiss: (changed: Boolean) -> Unit,
+) {
+    LaunchedEffect(Unit) { vm.loadAdLists() }
+    var changed by remember { mutableStateOf(false) }
+    var adding by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    AppDialog(
+        onDismissRequest = { onDismiss(changed) },
+        title = { Text("广告规则订阅") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    (if (adBlock) "" else "「拦截广告」还没打开，勾选的订阅打开后才生效。\n") +
+                        "订阅越多拦得越全，但也更容易误拦、占内存；一般开 AdGuard 的前三个就够了。每 4 天自动更新。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                info.lists.forEach { s ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable { changed = true; vm.setAdListEnabled(s.list.id, !s.enabled) }.padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(checked = s.enabled, onCheckedChange = null)
+                        Spacer(Modifier.size(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(s.list.name, style = MaterialTheme.typography.bodyMedium)
+                            val status = when {
+                                s.error != null -> "下载失败：${s.error}"
+                                s.rules > 0 -> {
+                                    val days = ((System.currentTimeMillis() - s.updatedAt) / (24 * 3600 * 1000L)).toInt()
+                                    "${s.rules} 条 · " + if (days <= 0) "今天更新" else "$days 天前更新"
+                                }
+                                s.enabled && info.updating -> "正在下载…"
+                                else -> null
+                            }
+                            Text(
+                                listOfNotNull(s.list.note.ifBlank { s.list.url.takeIf { s.list.custom } }, status).joinToString("\n"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (s.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 3, overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        if (s.list.custom) IconButton(onClick = { changed = true; vm.removeAdList(s.list.id) }) {
+                            Icon(AppIcons.Close, "删除这个订阅")
+                        }
+                    }
+                }
+                TextButton(onClick = { adding = true }) { Text("添加订阅地址") }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onDismiss(changed) }) { Text("完成") } },
+        dismissButton = {
+            TextButton(onClick = { changed = true; vm.updateAdRules() }, enabled = !info.updating) {
+                Text(if (info.updating) "正在更新…" else "立即更新")
+            }
+        },
+    )
+    if (adding) AddAdListDialog(onDismiss = { adding = false }) { name, url ->
+        if (vm.addAdList(name, url)) {
+            changed = true
+            adding = false
+        } else android.widget.Toast.makeText(context, "这个订阅已经有了", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
+@Composable
+private fun AddAdListDialog(onDismiss: () -> Unit, onAdd: (name: String, url: String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    var url by remember { mutableStateOf("") }
+    val valid = url.trim().let { it.startsWith("https://") || it.startsWith("http://") } && url.trim().length > 10
+    AppDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("添加订阅地址") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "填 Adblock Plus / AdGuard 格式的规则地址（.txt），比如在 filterlists.com 上找到的。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    url, { url = it.trim() }, label = { Text("订阅地址") }, singleLine = true,
+                    placeholder = { Text("https://example.com/filter.txt") },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri),
+                    colors = appFieldColors(), modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    name, { name = it }, label = { Text("名称（可不填）") }, singleLine = true,
+                    colors = appFieldColors(), modifier = Modifier.fillMaxWidth(),
+                )
+                // 电视：长地址用手机粘贴
+                PhoneInputButton(listOf(PhoneField("url", "订阅地址", url), PhoneField("name", "名称", name)), title = "广告规则订阅") { v ->
+                    url = v["url"]?.trim() ?: url
+                    name = v["name"] ?: name
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onAdd(name.trim(), url.trim()) }, enabled = valid) { Text("添加") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
 /** 自定义广告规则：一行一条，写法见说明 */
 @Composable
 private fun AdRulesDialog(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
@@ -1170,7 +1369,7 @@ private fun AdRulesDialog(initial: String, onDismiss: () -> Unit, onSave: (Strin
     )
 }
 
-private enum class WebDialog { LANGUAGE, ZOOM, TABS, ADDRESS, GENERATE, TRANSLATE_MODEL, AD_RULES }
+private enum class WebDialog { LANGUAGE, ZOOM, TABS, ADDRESS, GENERATE, TRANSLATE_MODEL, AD_RULES, AD_LISTS }
 
 /** 电视上输入网址：手机扫码输入（主要），也可以用遥控器打字 */
 @Composable
