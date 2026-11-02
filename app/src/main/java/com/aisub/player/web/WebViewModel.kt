@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -103,6 +104,36 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putBoolean("cleanPages", on).apply()
     }
 
+    // ---- 拦截广告：AdGuard 的过滤规则，见 [AdBlock] ----
+
+    private val _adBlock = MutableStateFlow(prefs.getBoolean("adBlock", false))
+    val adBlock: StateFlow<Boolean> = _adBlock.asStateFlow()
+    val adBlockInfo: StateFlow<AdBlockInfo> = AdBlock.info
+
+    /** 这个网页拦了几个请求（网页开始加载时清零） */
+    private val blocked = java.util.concurrent.atomic.AtomicInteger()
+    val blockedOnPage: Int get() = blocked.get()
+
+    init {
+        if (_adBlock.value) AdBlock.ensure(app, viewModelScope)
+    }
+
+    fun setAdBlock(on: Boolean) {
+        _adBlock.value = on
+        prefs.edit().putBoolean("adBlock", on).apply()
+        if (on) AdBlock.ensure(getApplication(), viewModelScope)
+    }
+
+    fun updateAdRules() {
+        viewModelScope.launch { AdBlock.update(getApplication()) }
+    }
+
+    /** 在 WebView 的后台线程上调：要拦的广告请求返回空响应 */
+    fun interceptAd(request: android.webkit.WebResourceRequest, pageUrl: String?): android.webkit.WebResourceResponse? {
+        if (!_adBlock.value) return null
+        return AdBlock.intercept(request, pageUrl)?.also { blocked.incrementAndGet() }
+    }
+
     // ---- 桌面版网页：按网站记住（手机网页功能不全的，例如 B 站手机网页没有进度条、不能换清晰度） ----
 
     private var desktopSites: Set<String> = prefs.getStringSet("desktopSites", DEFAULT_DESKTOP).orEmpty().toSet()
@@ -132,6 +163,7 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 页面在加载新网址、换了标签页：之前找到的视频地址、视频位置作废 */
     fun onPageStarted() {
+        blocked.set(0)
         _sniffed.value = emptyList()
         _videoRect.value = null
         _videoAspect.value = null
@@ -234,6 +266,10 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
 
         @JavascriptInterface
         fun cleanPage(): Boolean = _cleanPages.value
+
+        /** 这个网站要藏起来的广告元素（CSS）；没开拦截是空串 */
+        @JavascriptInterface
+        fun adCss(host: String): String = if (_adBlock.value) AdBlock.css(host) else ""
 
         /** 顶层网页的缩放（百分比） */
         @JavascriptInterface

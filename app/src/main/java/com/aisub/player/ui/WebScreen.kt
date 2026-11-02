@@ -155,6 +155,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     val script = remember { context.assets.open("web_captions.js").bufferedReader().use { it.readText() } }
     val cleanScript = remember { context.assets.open("web_cleanup.js").bufferedReader().use { it.readText() } }
     val cleanPages by vm.cleanPages.collectAsStateWithLifecycle()
+    val adBlock by vm.adBlock.collectAsStateWithLifecycle()
+    val adInfo by vm.adBlockInfo.collectAsStateWithLifecycle()
 
     // ---- 标签页 ----
     var nextTabId by remember { mutableLongStateOf(1L) }
@@ -478,6 +480,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 }
 
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                    vm.interceptAd(request, request.requestHeaders["Referer"] ?: t.pageUrl)?.let { return it }
                     if (!request.isForMainFrame && t.active) {
                         val page = request.requestHeaders["Referer"] ?: t.pageUrl.orEmpty()
                         vm.onRequest(request.url.toString(), page, "")
@@ -652,6 +655,25 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                                 text = { Text("屏蔽「打开 App」推广") },
                                 trailingIcon = { Checkbox(checked = cleanPages, onCheckedChange = null) },
                                 onClick = { menu = false; vm.setCleanPages(!cleanPages); tab.webView?.reload() },
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text("拦截广告")
+                                        if (adBlock) Text(
+                                            adBlockSummary(adInfo, vm.blockedOnPage),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (adInfo.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                },
+                                trailingIcon = { Checkbox(checked = adBlock, onCheckedChange = null) },
+                                onClick = { menu = false; vm.setAdBlock(!adBlock); tab.webView?.reload() },
+                            )
+                            if (adBlock) DropdownMenuItem(
+                                text = { Text(if (adInfo.updating) "正在更新广告规则…" else "更新广告规则") },
+                                enabled = !adInfo.updating,
+                                onClick = { menu = false; vm.updateAdRules() },
                             )
                             DropdownMenuItem(text = { Text("字幕语言") }, onClick = { menu = false; dialog = WebDialog.LANGUAGE })
                             DropdownMenuItem(text = { Text("页面缩放（$zoom%）") }, onClick = { menu = false; dialog = WebDialog.ZOOM })
@@ -990,6 +1012,17 @@ private fun cueNear(cues: List<Cue>, positionMs: Long): Cue? {
     // 识别有时会出时间重叠的句子：从最近开始的往前找，还没结束的优先
     for (k in i downTo maxOf(0, i - 3)) if (positionMs <= cues[k].endMs) return cues[k]
     return cues[i].takeIf { positionMs <= it.endMs + LINGER_MS }
+}
+
+/** 菜单里「拦截广告」下面那行：本页拦了几个、规则多少条、什么时候更新的 */
+private fun adBlockSummary(info: com.aisub.player.web.AdBlockInfo, blocked: Int): String = when {
+    info.rules == 0 && info.updating -> "正在下载广告规则…"
+    info.rules == 0 -> info.error ?: "广告规则还没下载"
+    else -> {
+        val days = ((System.currentTimeMillis() - info.updatedAt) / (24 * 3600 * 1000L)).toInt()
+        val age = if (days <= 0) "今天更新" else "$days 天前更新"
+        info.error ?: "本页已拦截 $blocked 个 · ${info.rules} 条规则 · $age"
+    }
 }
 
 /** 用系统分享发一段文字（网址、直播源地址） */
