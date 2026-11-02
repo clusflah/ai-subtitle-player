@@ -12,6 +12,10 @@ sealed interface Screen {
     data object Live : Screen
     /** 网页：内置浏览器里看视频，边播边生成 AI 字幕 */
     data object Web : Screen
+    /** Telegram：登录、加入的频道和群 */
+    data object Telegram : Screen
+    /** Telegram 一个频道 / 群里的视频 */
+    data class TelegramChat(val chatId: Long, val title: String) : Screen
     /** 下载版：分享链接后的下载进度页 */
     data object Link : Screen
     data class LocalFolder(val path: String, val title: String) : Screen

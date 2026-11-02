@@ -352,6 +352,7 @@ fun HomeScreen(
                     },
                     openLive = { nav.push(Screen.Live) },
                     openWeb = { nav.push(Screen.Web) },
+                    openTelegram = { nav.push(Screen.Telegram) },
                     openStream = { dialog = HomeDialog.Stream },
                 )
                 Tab.ME -> MeTab(
@@ -537,6 +538,7 @@ private fun BrowseTab(
     serverMenu: (Server) -> List<MenuAction>,
     openLive: () -> Unit,
     openWeb: () -> Unit,
+    openTelegram: () -> Unit,
     openStream: () -> Unit,
 ) {
     val all = remember(state.videos, state.audios) { state.videos + state.audios }
@@ -597,6 +599,8 @@ private fun BrowseTab(
                 ListRow("新建串流", "播放网络地址（http、rtsp、m3u8 等）", AppIcons.Link, onClick = openStream)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 ListRow("网页", "在网页里看视频，边播边生成 AI 字幕", AppIcons.Web, onClick = openWeb)
+                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow("Telegram", "看频道和群里的视频，边下边播", AppIcons.Telegram, onClick = openTelegram)
             }
         }
     }
