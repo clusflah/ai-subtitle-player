@@ -36,7 +36,12 @@ class LiveSources(private val context: Context) {
     fun add(name: String, url: String): LiveSource =
         LiveSource(UUID.randomUUID().toString(), name, url).also { save(list() + it) }
 
-    fun rename(id: String, name: String) = save(list().map { if (it.id == id) it.copy(name = name) else it })
+    /** 改名称、地址；地址变了旧的频道缓存不要了 */
+    fun update(id: String, name: String, url: String) {
+        val old = list().firstOrNull { it.id == id } ?: return
+        save(list().map { if (it.id == id) it.copy(name = name, url = url) else it })
+        if (old.url != url) File(dir, "$id.txt").delete()
+    }
 
     fun remove(id: String) {
         save(list().filter { it.id != id })

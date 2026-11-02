@@ -251,6 +251,8 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
             // 上一段送进引擎的声音是哪一路、到视频的哪儿结束
             var fedSource: String? = null
             var fedEnd = 0L
+            // 刚因为跟不上播放丢掉过时的声音：接下来那段和上一段之间的空档是自己丢的，不算拖动
+            var droppedStale = false
             var current: Session? = null
             while (isActive) {
                     val s = session
@@ -271,7 +273,7 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
                     // 识别跟不上、或者拖动过进度：已经播过去的声音不用识别了
                     val playing = videoTimeNow()
                     val chunkEnd = chunk.videoMs + chunk.samples.size * 1000.0 / Transcriber.SAMPLE_RATE * chunk.rate
-                    if (playing != null && chunk.source == clock?.source && chunkEnd < playing - STALE_MS) { log("跳过过时的声音 ${chunk.videoMs.toLong()}（播放到 $playing）"); continue }
+                    if (playing != null && chunk.source == clock?.source && chunkEnd < playing - STALE_MS) { log("跳过过时的声音 ${chunk.videoMs.toLong()}（播放到 $playing）"); droppedStale = true; continue }
                     if (!heard) {
                         heard = true
                         _state.update { it.copy(status = if (it.cues.isEmpty()) "正在识别…（第一句要等几秒）" else null) }
@@ -291,7 +293,11 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
                     if (skip) { log("跳过已识别 $start-$end"); continue }
                     // 声音接不上（拖了进度、换了一路）：先把引擎里还没出结果的那段识别完，再从新位置开始，
                     // 不然拖动前后的声音会被当成一句话，出来一条横跨几分钟的字幕
-                    if (engine != null && (chunk.source != fedSource || kotlin.math.abs(start - fedEnd) > GAP_MS)) {
+                    // 自己丢掉过时声音留下的往后的空档不重建引擎：本地模型重建要好几秒，
+                    // 重建期间排队的声音又过时被丢，再接不上又重建，慢一点的手机就一句也出不来
+                    val selfGap = droppedStale && chunk.source == fedSource && start > fedEnd
+                    droppedStale = false
+                    if (engine != null && !selfGap && (chunk.source != fedSource || kotlin.math.abs(start - fedEnd) > GAP_MS)) {
                         log("声音接不上（$fedSource $fedEnd → ${chunk.source} $start），重新开始识别")
                         val base = engineBase
                         engine?.finish { c -> publish(c.copy(startMs = c.startMs + base, endMs = c.endMs + base), s) }
@@ -334,14 +340,22 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
         a.source to (a.videoMs + (audioMs - a.audioMs) * a.rate).toLong()
     }
 
+    private fun rateAt(s: Session, audioMs: Long): Double = synchronized(s.anchors) {
+        (s.anchors.lastOrNull { it.audioMs <= audioMs } ?: s.anchors.firstOrNull())?.rate ?: 1.0
+    }
+
     private fun publish(c: Cue, s: Session) {
         // 已经换过一次识别（换语言、换网页）：旧的结果不要
         if (s !== session) return
         val (source, start) = videoMsAt(s, c.startMs) ?: return
-        var end = maxOf(videoMsAt(s, c.endMs)?.takeIf { it.first == source }?.second ?: start, start + 800)
-        // 字幕出来时这句已经说完了：至少再显示一会儿，不然一闪而过
+        // 中间丢过跟不上的声音时，结尾按丢掉后的位置算会把空档也算进来，一句挂好几个镜头：
+        // 最长按这句声音本身的长短来
+        val spoken = ((c.endMs - c.startMs) * rateAt(s, c.startMs)).toLong()
+        var end = maxOf(minOf(videoMsAt(s, c.endMs)?.takeIf { it.first == source }?.second ?: start, start + spoken + 300), start + 800)
+        // 字幕出来时这句刚说完：至少再显示一会儿，不然一闪而过。
+        // 早就说完了（识别落后好几秒）的就按原来的时间放着，不拉到现在显示，不然画面上出来的是前面的话
         val now = videoTimeNow()?.takeIf { clock?.source == source }
-        if (now != null && end < now + MIN_SHOW_MS) end = now + minOf(maxOf(end - start, MIN_SHOW_MS), 4_000)
+        if (now != null && end < now + MIN_SHOW_MS && end >= now - LATE_MS) end = now + minOf(maxOf(end - start, MIN_SHOW_MS), 4_000)
         val cue = Cue(nextId++, start, end, c.text)
         log("字幕 $start-$end（播放到 $now）：${c.text}")
         _state.update { s ->
@@ -409,6 +423,7 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
             if (pageKey != null) reset()
             pageKey = href
         }
+        if (c != null && c.frame == frame && !c.paused && SystemClock.elapsedRealtime() - c.at > 800) log("播放位置隔了 ${SystemClock.elapsedRealtime() - c.at}ms 才报告")
         clock = Clock(frame, videoMs, paused, rate, SystemClock.elapsedRealtime(), source)
         if (_state.value.source != source) _state.update { it.copy(source = source) }
     }
@@ -612,6 +627,9 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
 
     companion object {
         private const val MIN_SHOW_MS = 1_800L
+
+        /** 识别出来时这句已经结束超过这么久：太晚了，不再拉到当前显示 */
+        private const val LATE_MS = 3_000L
         private const val BATCH = 4
         private const val CONTEXT = 6
 

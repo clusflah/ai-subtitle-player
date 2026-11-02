@@ -87,10 +87,13 @@ class LiveViewModel(app: Application) : AndroidViewModel(app) {
         select(source)
     }
 
-    fun rename(source: LiveSource, name: String) {
-        store.rename(source.id, name)
+    /** 编辑名称、地址；地址变了重新取频道 */
+    fun edit(source: LiveSource, name: String, url: String) {
+        val newUrl = url.trim()
+        store.update(source.id, name.ifBlank { source.name }, newUrl)
         val sources = store.list()
         _state.update { s -> s.copy(sources = sources, selected = sources.firstOrNull { it.id == s.selected?.id }) }
+        if (newUrl != source.url) sources.firstOrNull { it.id == source.id }?.let { select(it) }
     }
 
     fun remove(source: LiveSource) {
