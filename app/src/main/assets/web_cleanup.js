@@ -8,9 +8,16 @@
   try {
     const ad = window.VoxBridge && VoxBridge.adCss(location.hostname);
     if (ad) {
-      const style = document.createElement('style');
-      style.textContent = ad;
-      (document.head || document.documentElement).appendChild(style);
+      // 不往网页里加 <style> 节点：React / Next.js 的网页会比对页面结构，多一个节点就整页重新渲染
+      if (document.adoptedStyleSheets !== undefined && window.CSSStyleSheet && CSSStyleSheet.prototype.replaceSync) {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(ad);
+        document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+      } else {
+        const style = document.createElement('style');
+        style.textContent = ad;
+        (document.head || document.documentElement).appendChild(style);
+      }
     }
   } catch (e) {}
 
