@@ -202,15 +202,32 @@ object Telegram {
                 if (e.code == 404) return@repeat else throw e
             }
         }
-        val ids = send(TdApi.GetChats(TdApi.ChatListMain(), 500)).chatIds
-        return ids.toList().mapNotNull { id ->
-            val chat = runCatching { send(TdApi.GetChat(id)) }.getOrNull() ?: return@mapNotNull null
-            when (val t = chat.type) {
-                is TdApi.ChatTypeSupergroup -> TgChat(id, chat.title, t.isChannel)
-                is TdApi.ChatTypeBasicGroup -> TgChat(id, chat.title, false)
-                else -> null
-            }
+        val ids = send(TdApi.GetChats(TdApi.ChatListMain(), 500)).chatIds.toList()
+        // 收藏的公开频道可能没加入，也要列出来
+        val all = ids + favorites().filter { it !in ids }
+        return all.mapNotNull { chatOf(it) }
+    }
+
+    private suspend fun chatOf(id: Long): TgChat? {
+        val chat = runCatching { send(TdApi.GetChat(id)) }.getOrNull() ?: return null
+        return when (val t = chat.type) {
+            is TdApi.ChatTypeSupergroup -> TgChat(id, chat.title, t.isChannel)
+            is TdApi.ChatTypeBasicGroup -> TgChat(id, chat.title, false)
+            else -> null
         }
+    }
+
+    /** 按名字或 @用户名 搜公开的频道和群（包括没加入的） */
+    suspend fun searchPublic(query: String): List<TgChat> =
+        send(TdApi.SearchPublicChats(query, null)).chatIds.toList().mapNotNull { chatOf(it) }
+
+    /** 收藏的频道 / 群（排在列表最前） */
+    fun favorites(): Set<Long> =
+        prefs.getStringSet("favorites", emptySet())!!.mapNotNull { it.toLongOrNull() }.toSet()
+
+    fun setFavorite(chatId: Long, favorite: Boolean) {
+        val set = favorites().let { if (favorite) it + chatId else it - chatId }
+        prefs.edit().putStringSet("favorites", set.map { it.toString() }.toSet()).apply()
     }
 
     /**

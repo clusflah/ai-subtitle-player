@@ -209,35 +209,108 @@ private fun loginError(message: String?): String = when {
     else -> "出错了：$message"
 }
 
-/** 加入的频道和群 */
+/** 加入的频道和群：顶上搜索，收藏的排最前；搜索时下面再列出没加入的公开频道 */
 @Composable
 private fun ChatList(openChat: (TgChat) -> Unit) {
     var reload by remember { mutableStateOf(0) }
     val chats by produceState<Result<List<TgChat>>?>(null, reload) {
         value = runCatching { Telegram.chats() }
     }
+    var favorites by remember { mutableStateOf(Telegram.favorites()) }
+    var query by remember { mutableStateOf("") }
+    val q = query.trim()
+    // 公开频道：停止输入一会儿再搜，免得每个字都请求
+    val public by produceState<Result<List<TgChat>>?>(null, q) {
+        value = null
+        if (q.length < 2) return@produceState
+        kotlinx.coroutines.delay(500)
+        value = runCatching { Telegram.searchPublic(q) }
+    }
+    fun toggle(c: TgChat) {
+        val fav = c.id !in favorites
+        Telegram.setFavorite(c.id, fav)
+        favorites = if (fav) favorites + c.id else favorites - c.id
+    }
+
     val r = chats
     when {
         r == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         r.isFailure -> EmptyState("读取频道失败：${r.exceptionOrNull()?.message}", buttonText = "重试", icon = AppIcons.Live) { reload++ }
-        r.getOrThrow().isEmpty() -> EmptyState("还没有加入频道或群\n在 Telegram App 里加入后回来刷新", buttonText = "刷新", icon = AppIcons.Live) { reload++ }
-        else -> LazyColumn(contentPadding = PaddingValues(vertical = 4.dp)) {
-            itemsIndexed(r.getOrThrow(), key = { _, c -> c.id }) { _, c ->
-                Row(
-                    Modifier.fillMaxWidth().clickable { openChat(c) }.padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        Modifier.size(44.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer),
-                        contentAlignment = Alignment.Center,
-                    ) { Text(c.title.take(1), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onPrimaryContainer) }
-                    Spacer(Modifier.width(14.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(c.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(if (c.isChannel) "频道" else "群", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        else -> Column(Modifier.fillMaxSize()) {
+            val all = r.getOrThrow()
+            OutlinedTextField(
+                query, { query = it }, singleLine = true,
+                placeholder = { Text("搜索频道和群（也能搜没加入的公开频道）") },
+                leadingIcon = { Icon(AppIcons.Search, null) },
+                trailingIcon = { if (query.isNotEmpty()) IconButton(onClick = { query = "" }) { Icon(AppIcons.Close, "清除") } },
+                colors = appFieldColors(),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            )
+            val mine = all.filter { q.isEmpty() || it.title.contains(q, ignoreCase = true) }
+                .sortedByDescending { it.id in favorites } // 稳定排序：收藏的在前，各自保持原来的顺序
+            val others = public?.getOrNull().orEmpty().filter { p -> all.none { it.id == p.id } }
+            if (all.isEmpty() && q.isEmpty()) {
+                EmptyState("还没有加入频道或群\n在 Telegram App 里加入，或者在上面搜公开频道", buttonText = "刷新", icon = AppIcons.Live) { reload++ }
+                return@Column
+            }
+            LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 4.dp)) {
+                itemsIndexed(mine, key = { _, c -> c.id }) { _, c ->
+                    ChatRow(c, c.id in favorites, onFavorite = { toggle(c) }) { openChat(c) }
+                }
+                if (q.length >= 2) {
+                    item(key = "public") {
+                        Text(
+                            "公开频道和群", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 4.dp),
+                        )
                     }
+                    val p = public
+                    when {
+                        p == null -> item(key = "public-loading") {
+                            Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(24.dp)) }
+                        }
+                        p.isFailure -> item(key = "public-error") { NoteText("搜索失败：${p.exceptionOrNull()?.message}") }
+                        others.isEmpty() -> item(key = "public-empty") { NoteText("没有找到其它公开频道") }
+                        else -> itemsIndexed(others, key = { _, c -> "p${c.id}" }) { _, c ->
+                            ChatRow(c, c.id in favorites, onFavorite = { toggle(c) }) { openChat(c) }
+                        }
+                    }
+                } else if (mine.isEmpty()) {
+                    item(key = "none") { NoteText("没有名字里带「$q」的，多输几个字可以搜公开频道") }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun NoteText(text: String) {
+    Text(
+        text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+    )
+}
+
+@Composable
+private fun ChatRow(c: TgChat, favorite: Boolean, onFavorite: () -> Unit, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(44.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer),
+            contentAlignment = Alignment.Center,
+        ) { Text(c.title.take(1), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onPrimaryContainer) }
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(c.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(if (c.isChannel) "频道" else "群", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        IconButton(onClick = onFavorite) {
+            Icon(
+                if (favorite) AppIcons.Star else AppIcons.StarBorder, if (favorite) "取消收藏" else "收藏",
+                tint = if (favorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
