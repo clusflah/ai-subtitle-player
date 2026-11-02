@@ -692,8 +692,12 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     var stableBelow by remember { mutableStateOf<androidx.compose.ui.unit.Dp?>(null) }
                     if (below == null) stableBelow = null
                     else if (stableBelow.let { it == null || kotlin.math.abs((below - it).value) > 12f }) stableBelow = below
+                    // 横屏时视频一般铺满（有的网站把画面转 90° 或拉满冒充全屏，App 还在内嵌模式）：
+                    // 网页报的位置不准、转屏瞬间还会来回跳，这时像全屏画面那样把字幕按固定高度叠在底部
                     if (fullscreen == null) WebSubtitles(
-                        vm, captionState, settings, stableBottom, stableBelow,
+                        vm, captionState, settings,
+                        if (landscape) settings.subtitleOffset.dp else stableBottom,
+                        if (landscape) null else stableBelow,
                         onOpenDirect = { playInPlayer(it, tab.webView?.url.orEmpty(), tab.webView?.title.orEmpty()) },
                         onCapture = ::startCapture,
                     )
@@ -866,7 +870,8 @@ private fun androidx.compose.foundation.layout.BoxScope.WebSubtitles(
     onCapture: () -> Unit,
 ) {
     if (!state.running && state.cues.isEmpty() && state.status == null) return
-    var now by remember { mutableLongStateOf(0L) }
+    // 初值 -1：拿到真实播放时间前不显示，不然刚挂载（进全屏、转屏）时会按"时间 0"闪出最开头那几句字幕
+    var now by remember { mutableLongStateOf(-1L) }
     LaunchedEffect(Unit) {
         while (true) {
             now = vm.captions.displayTime() ?: -1

@@ -194,7 +194,7 @@ object PipState {
 
 /**
  * 全屏黑底播放页（仿 VLC）：顶部标题，底部进度条与五个按钮
- * （字幕/音轨、AI 字幕、播放、旋转、更多），锁定按钮在画面右侧，画面比例在“更多”第一排。AI 字幕功能收在"字幕/音轨"面板里。
+ * （字幕/音轨、AI 字幕、上一集、播放、下一集、旋转/倍速、更多），锁定按钮在画面右侧，画面比例在“更多”第一排。AI 字幕功能收在"字幕/音轨"面板里。
  */
 @androidx.annotation.OptIn(UnstableApi::class)
 @OptIn(ExperimentalMaterial3Api::class)
@@ -814,12 +814,15 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         onDragEnd = { dragging?.let { player.seekTo(it.toLong()) }; dragging = null; vm.extras.clearThumbnail() },
                     )
                 } else Spacer(Modifier.height(12.dp))
-                // 播放键居中：左边字幕、AI 字幕，右边旋转、更多；锁定按钮在画面右侧
+                // 播放键居中，左右各一个上一集/下一集；外侧两组对称：
+                // 手机左=字幕、AI 字幕，右=旋转、更多；电视左=字幕、AI 字幕，右=倍速、更多（电视不能转屏）
+                val canSkip = vm.queueSize > 1 && !vm.usingVlc
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Row(Modifier.weight(1f), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                         BarButton(AppIcons.Subtitles, "字幕与音轨") { tracksAi = false; showTracks = true }
                         BarButton(AppIcons.AutoAwesome, "AI 字幕") { tracksAi = true; showTracks = true }
                     }
+                    BarButton(AppIcons.SkipPrevious, "上一集", enabled = canSkip) { vm.skipInQueue(false, restartFirst = true); interactions++ }
                     IconButton(
                         onClick = { vm.togglePlay(); interactions++ },
                         modifier = Modifier.focusRequester(playFocus).tvFocusRing(CircleShape, color = Color.White).size(64.dp).clip(CircleShape).background(Color.Transparent),
@@ -831,9 +834,12 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             Icon(if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow, if (wantsPlay) "暂停" else "播放", tint = Color.White, modifier = Modifier.size(36.dp))
                         }
                     }
+                    BarButton(AppIcons.SkipNext, "下一集", enabled = canSkip) { vm.skipInQueue(true); interactions++ }
                     Row(Modifier.weight(1f), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                        // 电视不能转屏，不显示
-                        if (!tv) {
+                        if (tv) {
+                            // 电视没有手势调速，放个倍速按钮；也让播放两边对称
+                            BarButton(AppIcons.Speed, "倍速") { dialog = PlayerDialog.SPEED }
+                        } else {
                             BarButton(AppIcons.ScreenRotation, "旋转屏幕") {
                                 activity?.requestedOrientation =
                                     if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -1389,9 +1395,9 @@ private fun SeekBar(
 }
 
 @Composable
-private fun BarButton(icon: ImageVector, label: String, onClick: () -> Unit) {
-    IconButton(onClick = onClick, modifier = Modifier.tvFocusRing(CircleShape, color = Color.White).size(52.dp)) {
-        Icon(icon, label, tint = Color.White, modifier = Modifier.size(30.dp))
+private fun BarButton(icon: ImageVector, label: String, enabled: Boolean = true, onClick: () -> Unit) {
+    IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.tvFocusRing(CircleShape, color = Color.White).size(52.dp)) {
+        Icon(icon, label, tint = if (enabled) Color.White else Color(0x66FFFFFF), modifier = Modifier.size(30.dp))
     }
 }
 
@@ -1674,7 +1680,7 @@ private fun EqualizerDialog(vm: MainViewModel, onDismiss: () -> Unit) {
             } else Column(Modifier.verticalScroll(rememberScrollState())) {
                 if (presets.isNotEmpty()) {
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(selected = preset == -1, onClick = { turnOn(); ctrl.reset(); preset = -1; reloadLevels() }, label = { Text("平直") })
+                        FilterChip(selected = preset == -1 && levels.all { it == 0.toShort() }, onClick = { turnOn(); ctrl.reset(); preset = -1; reloadLevels() }, label = { Text("平直") })
                         presets.forEachIndexed { i, name ->
                             FilterChip(
                                 selected = preset == i,
