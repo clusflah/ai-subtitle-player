@@ -49,6 +49,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -154,6 +155,10 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     val bookmarks by vm.bookmarks.collectAsStateWithLifecycle()
     val script = remember { context.assets.open("web_captions.js").bufferedReader().use { it.readText() } }
     val cleanScript = remember { context.assets.open("web_cleanup.js").bufferedReader().use { it.readText() } }
+    val pickerScript = remember { context.assets.open("web_picker.js").bufferedReader().use { it.readText() } }
+    // 点选屏蔽：开着时点网页只是选元素，底部显示操作栏
+    var picking by remember { mutableStateOf(false) }
+    val picked by vm.picked.collectAsStateWithLifecycle()
     val cleanPages by vm.cleanPages.collectAsStateWithLifecycle()
     val adBlock by vm.adBlock.collectAsStateWithLifecycle()
     val adInfo by vm.adBlockInfo.collectAsStateWithLifecycle()
@@ -351,8 +356,21 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             if (fullscreenLandscape) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
     }
 
+    fun stopPicking() {
+        tab.webView?.evaluateJavascript("window.__voxPicker && __voxPicker.stop()", null)
+        picking = false
+        vm.clearPicked()
+    }
+
+    fun startPicking() {
+        vm.clearPicked()
+        picking = true
+        tab.webView?.evaluateJavascript(pickerScript, null)
+    }
+
     BackHandler {
         when {
+            picking -> stopPicking()
             fullscreen != null -> exitFullscreen()
             editing && tab.url != null -> focusManager.clearFocus()
             tab.canGoBack -> tab.webView?.goBack()
@@ -458,6 +476,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     t.pageUrl = startedUrl
                     if (!t.active) return
                     vm.onPageStarted()
+                    // 换了网页：点选的脚本跟着旧网页没了
+                    if (picking) { picking = false; vm.clearPicked() }
                     if (!editing) showAddress(startedUrl)
                 }
 
@@ -675,6 +695,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                                 enabled = !adInfo.updating,
                                 onClick = { menu = false; vm.updateAdRules() },
                             )
+                            if (tab.url != null) DropdownMenuItem(text = { Text("点选屏蔽广告") }, onClick = { menu = false; startPicking() })
+                            DropdownMenuItem(text = { Text("自定义广告规则") }, onClick = { menu = false; dialog = WebDialog.AD_RULES })
                             DropdownMenuItem(text = { Text("字幕语言") }, onClick = { menu = false; dialog = WebDialog.LANGUAGE })
                             DropdownMenuItem(text = { Text("页面缩放（$zoom%）") }, onClick = { menu = false; dialog = WebDialog.ZOOM })
                         }
@@ -734,6 +756,20 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                         if (landscape) null else stableBelow,
                         onOpenDirect = { playInPlayer(it, tab.webView?.url.orEmpty(), tab.webView?.title.orEmpty()) },
                         onCapture = ::startCapture,
+                    )
+                    if (picking) PickerBar(
+                        picked,
+                        onParent = { tab.webView?.evaluateJavascript("__voxPicker.parent()", null) },
+                        onChild = { tab.webView?.evaluateJavascript("__voxPicker.child()", null) },
+                        onCancel = ::stopPicking,
+                        onBlock = { p ->
+                            tab.webView?.evaluateJavascript("__voxPicker.hide(${org.json.JSONObject.quote(p.selector)})", null)
+                            tab.pageUrl?.let { vm.blockElement(it, p.selector) }
+                            picking = false
+                            vm.clearPicked()
+                            android.widget.Toast.makeText(context, "已屏蔽，规则在「自定义广告规则」里，删掉那一行就恢复", android.widget.Toast.LENGTH_LONG).show()
+                        },
+                        modifier = Modifier.align(Alignment.BottomCenter),
                     )
                 }
             }
@@ -893,6 +929,11 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             confirmButton = { TextButton(onClick = { dialog = null }) { Text("完成") } },
             dismissButton = { TextButton(onClick = { zoom = 100; vm.setPageZoom(100) }) { Text("恢复 100%") } },
         )
+        WebDialog.AD_RULES -> AdRulesDialog(vm.customAdRules(), onDismiss = { dialog = null }) { text ->
+            vm.saveCustomAdRules(text)
+            dialog = null
+            tab.webView?.reload()
+        }
         WebDialog.TABS, null -> {}
     }
 
@@ -1033,7 +1074,77 @@ internal fun shareText(context: android.content.Context, text: String, subject: 
     runCatching { context.startActivity(android.content.Intent.createChooser(send, "分享").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) }
 }
 
-private enum class WebDialog { LANGUAGE, ZOOM, TABS, ADDRESS, GENERATE, TRANSLATE_MODEL }
+/** 点选屏蔽时底部的操作栏 */
+@Composable
+private fun PickerBar(
+    picked: com.aisub.player.web.PickedElement?,
+    onParent: () -> Unit,
+    onChild: () -> Unit,
+    onCancel: () -> Unit,
+    onBlock: (com.aisub.player.web.PickedElement) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    androidx.compose.material3.Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shadowElevation = 8.dp,
+    ) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+            if (picked == null) {
+                Text("点一下网页上要屏蔽的广告", style = MaterialTheme.typography.titleSmall)
+                Text("点选时网页上的链接不会打开；按返回键退出", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                Text("已选中 ${picked.label}（网页上共 ${picked.count} 处）", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    picked.selector, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                )
+                Text("没选全就点「扩大」选外面一层", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onParent, enabled = picked != null) { Text("扩大") }
+                TextButton(onClick = onChild, enabled = picked != null) { Text("缩小") }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onCancel) { Text("取消") }
+                androidx.compose.material3.Button(onClick = { picked?.let(onBlock) }, enabled = picked != null) { Text("屏蔽") }
+            }
+        }
+    }
+}
+
+/** 自定义广告规则：一行一条，写法见说明 */
+@Composable
+private fun AdRulesDialog(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    AppDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("自定义广告规则") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "一行一条，开着「拦截广告」时生效；点选屏蔽加的规则也在这里，删掉那一行就恢复。\n" +
+                        "||ad.example.com^　拦这个域名的请求\n" +
+                        "example.com##.popup-ad　在这个网站上藏起这个元素\n" +
+                        "/api/ad/list\$nolist　接口回「空列表」（\$nodata 回「没有数据」）\n" +
+                        "@@||cdn.example.com/player.js　放行被误拦的\n" +
+                        "! 开头的是注释",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    text, { text = it },
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp).defaultMinSize(minHeight = 160.dp),
+                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                    placeholder = { Text("example.com##.ad-banner") },
+                    colors = appFieldColors(),
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(text) }) { Text("保存") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+private enum class WebDialog { LANGUAGE, ZOOM, TABS, ADDRESS, GENERATE, TRANSLATE_MODEL, AD_RULES }
 
 /** 电视上输入网址：手机扫码输入（主要），也可以用遥控器打字 */
 @Composable

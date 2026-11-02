@@ -94,6 +94,37 @@ class AdRulesTest {
     }
 
     @Test
+    fun customAnywhereRulesAndResponses() {
+        val lines = arrayOf(
+            "/api/mw-movie/anonymous/cc/getPauseCc\$nodata",
+            "/api/mw-movie/anonymous/cc/\$nolist",
+            "/static/ad/*.gif",
+            "@@/static/ad/keep.gif",
+        )
+        val custom = AdRules.parse(lines.asSequence(), custom = true)
+        assertEquals(
+            AdDecision.Block(AdResponse.NODATA),
+            custom.decide("https://m.a.com/api/mw-movie/anonymous/cc/getPauseCc?nid=1", null, null),
+        )
+        assertEquals(
+            AdDecision.Block(AdResponse.NOLIST),
+            custom.decide("https://other.cn/api/mw-movie/anonymous/cc/getVideoCc", null, null),
+        )
+        assertEquals(AdDecision.Block(AdResponse.EMPTY), custom.decide("https://x.cn/static/ad/1.gif", null, null))
+        assertEquals(AdDecision.Allow, custom.decide("https://x.cn/static/ad/keep.gif", null, null))
+        assertEquals(null, custom.decide("https://x.cn/static/img/1.gif", null, null))
+        // 下载的规则里不带域名的不认
+        assertEquals(null, AdRules.parse(lines.asSequence()).decide("https://x.cn/static/ad/1.gif", null, null))
+    }
+
+    @Test
+    fun customExceptionForListRule() {
+        val custom = AdRules.parse(sequenceOf("@@||cdn.ads.com/player.js"), custom = true)
+        assertEquals(AdDecision.Allow, custom.decide("https://cdn.ads.com/player.js", null, null))
+        assertEquals(null, custom.decide("https://cdn.ads.com/other.js", null, null))
+    }
+
+    @Test
     fun hostParsing() {
         assertEquals("a.b.com", AdRules.hostOf("https://user@A.B.com:8080/x?y"))
         assertEquals(null, AdRules.hostOf("data:text/plain,hi"))

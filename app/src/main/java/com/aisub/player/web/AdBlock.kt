@@ -57,6 +57,7 @@ object AdBlock {
     fun ensure(context: Context, scope: CoroutineScope) {
         val app = context.applicationContext
         scope.launch(Dispatchers.IO) {
+            reloadCustom(app)
             if (rules == null) load(app)
             val files = LISTS.map { File(dir(app), "${it.first}.txt") }
             val oldest = files.minOf { if (it.exists()) it.lastModified() else 0L }
@@ -103,17 +104,93 @@ object AdBlock {
         _info.update { it.copy(rules = parsed.size, updatedAt = files.maxOf { f -> f.lastModified() }) }
     }
 
-    /** 要拦就返回一个空的响应（交给 WebView 当作这个请求的结果），不拦返回 null */
-    fun intercept(request: WebResourceRequest, pageUrl: String?): WebResourceResponse? {
-        if (request.isForMainFrame) return null
-        val r = rules ?: return null
-        val url = request.url.toString()
-        if (!r.shouldBlock(url, pageUrl, typeOf(url, request.requestHeaders["Accept"]))) return null
-        return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+    /** 网页里打开了拦截广告（Service Worker 的请求不经过网页，靠这个判断） */
+    @Volatile
+    var enabled = false
+
+    /** 拦下一个请求时调（网页菜单里的「本页已拦截」） */
+    @Volatile
+    var onBlocked: (() -> Unit)? = null
+
+    private var swHooked = false
+
+    /**
+     * 有的网站装了 Service Worker，网页的请求都由它转发，不经过 WebView 的 shouldInterceptRequest：
+     * 给 Service Worker 也装上同样的拦截。整个进程装一次。
+     */
+    fun hookServiceWorkers() {
+        if (swHooked) return
+        swHooked = true
+        runCatching {
+            android.webkit.ServiceWorkerController.getInstance().setServiceWorkerClient(object : android.webkit.ServiceWorkerClient() {
+                override fun shouldInterceptRequest(request: WebResourceRequest): WebResourceResponse? {
+                    if (!enabled) return null
+                    return intercept(request, request.requestHeaders["Referer"])?.also { onBlocked?.invoke() }
+                }
+            })
+        }
     }
 
-    /** 这个网站要藏起来的广告元素（CSS）；规则还没准备好是空串 */
-    fun css(host: String): String = rules?.css(host).orEmpty()
+    /** 要拦就返回一个代替的响应（交给 WebView 当作这个请求的结果），不拦返回 null */
+    fun intercept(request: WebResourceRequest, pageUrl: String?): WebResourceResponse? {
+        if (request.isForMainFrame) return null
+        val url = request.url.toString()
+        val type = typeOf(url, request.requestHeaders["Accept"])
+        // 自己写的规则优先：里面的例外能放行下载的规则误拦的
+        val decision = when (val own = custom.decide(url, pageUrl, type)) {
+            null -> rules?.decide(url, pageUrl, type)
+            else -> own
+        }
+        return (decision as? AdDecision.Block)?.let { response(it.response) }
+    }
+
+    private fun response(r: AdResponse): WebResourceResponse {
+        val body = when (r) {
+            AdResponse.EMPTY -> return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+            AdResponse.NODATA -> """{"code":200,"msg":"操作成功","data":null}"""
+            AdResponse.NOLIST -> """{"code":200,"msg":"操作成功","data":[]}"""
+        }
+        return WebResourceResponse("application/json", "utf-8", ByteArrayInputStream(body.toByteArray()))
+    }
+
+    // ---- 自己的规则：内置的（影视网站模板自己的广告接口等）+ 用户写的、点选屏蔽加的 ----
+
+    /**
+     * 内置规则，写法同自定义规则。影视网站模板自己的广告接口和正片同一个域名、网站还常换域名，
+     * 下载的规则里没有，按接口路径认
+     */
+    private val BUILTIN = """
+        ! 新视讯一类影视网站：暂停时的弹窗（getPauseCc）、片头视频广告（getVideoCc）、各处横幅
+        /api/mw-movie/anonymous/cc/getPauseCc${'$'}nodata
+        /api/mw-movie/anonymous/cc/${'$'}nolist
+    """.trimIndent()
+
+    @Volatile
+    private var custom: AdRules = AdRules.parse(BUILTIN.lineSequence(), custom = true)
+
+    private fun customFile(context: Context) = File(dir(context), "custom.txt")
+
+    /** 用户写的规则（原文） */
+    fun customText(context: Context): String = customFile(context).takeIf { it.exists() }?.readText().orEmpty()
+
+    fun saveCustom(context: Context, text: String) {
+        customFile(context).writeText(text.trimEnd() + if (text.isBlank()) "" else "\n")
+        reloadCustom(context)
+    }
+
+    /** 点选屏蔽：加一条规则（已经有了就不重复加） */
+    fun addCustom(context: Context, rule: String) {
+        val text = customText(context)
+        if (text.lineSequence().any { it.trim() == rule }) return
+        saveCustom(context, text.trimEnd().let { if (it.isEmpty()) rule else "$it\n$rule" })
+    }
+
+    fun reloadCustom(context: Context) {
+        custom = AdRules.parse((BUILTIN + "\n" + customText(context)).lineSequence(), custom = true)
+    }
+
+    /** 这个网站要藏起来的广告元素（CSS）：自己的规则 + 下载的规则 */
+    fun css(host: String): String = custom.css(host) + rules?.css(host).orEmpty()
 
     /** 从地址后缀和 Accept 头猜请求类型 */
     private fun typeOf(url: String, accept: String?): AdType? {

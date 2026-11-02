@@ -22,6 +22,9 @@ data class SniffedMedia(val url: String, val page: String, val pageTitle: String
 
 data class WebPage(val title: String, val url: String)
 
+/** 点选屏蔽选中的元素：CSS 选择器、网页上一共匹配几个、简短说明（标签和大小） */
+data class PickedElement(val selector: String, val count: Int, val label: String)
+
 /** 视频在网页里的位置（CSS 像素，相对网页可见区域）；字幕放在它的下沿 */
 data class VideoRect(val top: Float, val bottom: Float, val viewportWidth: Float)
 
@@ -115,17 +118,43 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
     val blockedOnPage: Int get() = blocked.get()
 
     init {
+        AdBlock.enabled = _adBlock.value
+        AdBlock.onBlocked = { blocked.incrementAndGet() }
+        AdBlock.hookServiceWorkers()
         if (_adBlock.value) AdBlock.ensure(app, viewModelScope)
     }
 
     fun setAdBlock(on: Boolean) {
         _adBlock.value = on
+        AdBlock.enabled = on
         prefs.edit().putBoolean("adBlock", on).apply()
         if (on) AdBlock.ensure(getApplication(), viewModelScope)
     }
 
     fun updateAdRules() {
         viewModelScope.launch { AdBlock.update(getApplication()) }
+    }
+
+    /** 自己写的广告规则（原文） */
+    fun customAdRules(): String = AdBlock.customText(getApplication())
+
+    fun saveCustomAdRules(text: String) = AdBlock.saveCustom(getApplication(), text)
+
+    // ---- 点选屏蔽：网页里点选一个元素（web_picker.js），屏蔽时加一条「网站##选择器」的自定义规则 ----
+
+    private val _picked = MutableStateFlow<PickedElement?>(null)
+    /** 点选中的元素；还没点是 null */
+    val picked: StateFlow<PickedElement?> = _picked.asStateFlow()
+
+    fun clearPicked() {
+        _picked.value = null
+    }
+
+    /** 屏蔽这个网站上的这类元素；拦截广告没开的话顺手打开（自定义规则靠它生效） */
+    fun blockElement(pageUrl: String, selector: String) {
+        val host = AdRules.hostOf(pageUrl)?.removePrefix("www.") ?: return
+        AdBlock.addCustom(getApplication(), "$host##$selector")
+        if (!_adBlock.value) setAdBlock(true)
     }
 
     /** 在 WebView 的后台线程上调：要拦的广告请求返回空响应 */
@@ -266,6 +295,12 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
 
         @JavascriptInterface
         fun cleanPage(): Boolean = _cleanPages.value
+
+        /** 点选屏蔽：选中了一个元素（选择器、网页上一共几个、简短说明） */
+        @JavascriptInterface
+        fun pickerSelect(selector: String, count: Int, label: String) {
+            if (active()) _picked.value = PickedElement(selector, count, label)
+        }
 
         /** 这个网站要藏起来的广告元素（CSS）；没开拦截是空串 */
         @JavascriptInterface
