@@ -172,6 +172,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     var showSniffed by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<WebDialog?>(null) }
+    /** 选好翻译模型后要做的事（换翻译语言后重新翻译） */
+    var afterModel by remember { mutableStateOf<(() -> Unit)?>(null) }
     /** 网页全屏时横屏还是竖屏（竖着拍的视频可以切成竖屏） */
     var fullscreenLandscape by remember { mutableStateOf(true) }
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -589,7 +591,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                         }
                     }
                     IconButton(onClick = {
-                        if (captionState.running) vm.captions.stop() else vm.captions.start(vm.captionSettings(main.state.value.settings))
+                        // 开始前和播放页一样先选识别服务、视频语言（自动翻译时连翻译模型一起选）
+                        if (captionState.running) vm.captions.stop() else dialog = WebDialog.GENERATE
                     }) {
                         Icon(
                             AppIcons.Subtitles, if (captionState.running) "关闭 AI 字幕" else "开启 AI 字幕",
@@ -765,10 +768,39 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             settings = settings,
             onConfirm = { asr, target ->
                 dialog = null
-                vm.setLanguages(main.state.value.settings, asr, target)
+                // 只换翻译语言、要重新翻译时：先选翻译模型
+                if (asr == vm.asrLanguage.value && target != vm.targetLanguage.value && captionState.running && settings.autoTranslate) {
+                    afterModel = { vm.setLanguages(main.state.value.settings, asr, target) }
+                    dialog = WebDialog.TRANSLATE_MODEL
+                } else vm.setLanguages(main.state.value.settings, asr, target)
             },
             onDismiss = { dialog = null },
         )
+        WebDialog.GENERATE -> {
+            val base = vm.captionSettings(settings)
+            AsrLanguageDialog(
+                base.asrLanguage, settings, translate = settings.autoTranslate, onDismiss = { dialog = null },
+                languageHint = "视频语言（网页字幕都用它，菜单「字幕语言」里也能改；不确定选「自动」；点一下就开始识别）",
+            ) { code, engine, pick ->
+                var updated = settings.copy(asrEngine = engine)
+                if (pick != null && pick.valid) updated = pick.applyTo(updated)
+                if (updated != settings) main.updateSettings(updated)
+                // 选的和现在用的一样就不改（保持「同设置」）
+                if (code != base.asrLanguage) vm.setLanguages(updated, code, vm.targetLanguage.value)
+                dialog = null
+                vm.captions.start(vm.captionSettings(updated))
+            }
+        }
+        WebDialog.TRANSLATE_MODEL -> TranslateModelDialog(
+            settings = settings, title = "选择翻译模型",
+            onDismiss = { dialog = null; afterModel = null },
+        ) { updated ->
+            if (updated != settings) main.updateSettings(updated)
+            dialog = null
+            val then = afterModel
+            afterModel = null
+            then?.invoke()
+        }
         WebDialog.ZOOM -> AppDialog(
             onDismissRequest = { dialog = null },
             title = { Text("页面缩放") },
@@ -904,7 +936,7 @@ private fun cueNear(cues: List<Cue>, positionMs: Long): Cue? {
     return cues[i].takeIf { positionMs <= it.endMs + LINGER_MS }
 }
 
-private enum class WebDialog { LANGUAGE, ZOOM, TABS, ADDRESS }
+private enum class WebDialog { LANGUAGE, ZOOM, TABS, ADDRESS, GENERATE, TRANSLATE_MODEL }
 
 /** 电视上输入网址：手机扫码输入（主要），也可以用遥控器打字 */
 @Composable
