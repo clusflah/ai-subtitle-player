@@ -3,6 +3,17 @@
 (() => {
   if (window.__voxClean) return;
   window.__voxClean = true;
+
+  // ---- 拦截广告：AdGuard 规则里要藏起来的元素（没开拦截、规则还没下好时是空的） ----
+  try {
+    const ad = window.VoxBridge && VoxBridge.adCss(location.hostname);
+    if (ad) {
+      const style = document.createElement('style');
+      style.textContent = ad;
+      (document.head || document.documentElement).appendChild(style);
+    }
+  } catch (e) {}
+
   try { if (window.VoxBridge && !VoxBridge.cleanPage()) return; } catch (e) {}
 
   // ---- 已知网站：直接用样式藏起来，不会先闪一下 ----
