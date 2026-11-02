@@ -2549,6 +2549,12 @@ private fun captionLines(cues: List<androidx.media3.common.text.Cue>): List<Stri
 @UnstableApi
 internal fun authDataSourceFactory(app: Application): DataSource.Factory {
     val http = DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true)
+    // Telegram 的视频（tg://）边下边播，其余照常
+    return com.aisub.player.telegram.RoutingDataSource.Factory(resolvingFactory(app, http), com.aisub.player.telegram.TgDataSource.Factory())
+}
+
+@UnstableApi
+private fun resolvingFactory(app: Application, http: DataSource.Factory): DataSource.Factory {
     return ResolvingDataSource.Factory(DefaultDataSource.Factory(app, http)) { spec ->
         val uri = spec.uri.toString()
         if (CloudRegistry.isCloud(uri)) {

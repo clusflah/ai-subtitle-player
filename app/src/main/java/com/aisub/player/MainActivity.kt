@@ -24,6 +24,8 @@ import com.aisub.player.ui.FileDetailScreen
 import com.aisub.player.ui.ImageViewerScreen
 import com.aisub.player.ui.LiveScreen
 import com.aisub.player.ui.WebScreen
+import com.aisub.player.ui.TelegramScreen
+import com.aisub.player.ui.TelegramChatScreen
 import com.aisub.player.ui.LocalOpenDetail
 import com.aisub.player.ui.LocalTv
 import com.aisub.player.ui.ProvideScreenClass
@@ -82,6 +84,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         // 有新版本时提示（一天最多查一次）
         com.aisub.player.update.appUpdater.autoCheck(this)
+        // 续播、播放列表里可能有 Telegram 的视频：先记下 Context，用到时再启动
+        com.aisub.player.telegram.Telegram.init(this)
         // 小组件在后台放着歌：界面接着放（先于 handleIntent，点通知栏进来时能直接打开播放页）
         main.resumeWidgetPlayback()
         if (savedInstanceState == null) handleIntent(intent)
@@ -147,6 +151,8 @@ class MainActivity : ComponentActivity() {
                         is Screen.History -> HistoryScreen(lib, screen.music, back, play)
                         Screen.Live -> LiveScreen(back, play)
                         Screen.Web -> WebScreen(main, back, play)
+                        Screen.Telegram -> TelegramScreen(back) { chat -> nav.push(Screen.TelegramChat(chat.id, chat.title)) }
+                        is Screen.TelegramChat -> TelegramChatScreen(screen.chatId, screen.title, back, play)
                         is Screen.LocalFolder -> LocalFolderScreen(
                             lib, screen.path, screen.title, back,
                             openFolder = { path, title -> nav.push(Screen.LocalFolder(path, title)) },

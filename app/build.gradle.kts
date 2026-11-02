@@ -1,3 +1,6 @@
+import java.net.URI
+import java.security.MessageDigest
+import java.util.zip.ZipFile
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -5,6 +8,54 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+// ---- Telegram：用 Telegram 官方源码编的 TDLib（.github/workflows/tdlib.yml 编好放在 Release 里） ----
+// 第一次编译时下载、校验 SHA-256，解压到 .gradle/tdlib/（clean 不会删）；升级 TDLib 时重跑那个工作流，改这两行
+val tdlibTag = "tdlib-1.8.69-4c6377aa73"
+val tdlibSha256 = "147377ef259c3615e578c894c8c3f74f9519f2ff473c030c41dba602dea1238c"
+
+fun prepareTdlib(dir: File): File {
+    val done = File(dir, ".ok")
+    if (done.exists()) return dir
+    dir.mkdirs()
+    val zip = File(dir, "$tdlibTag.zip")
+    if (!zip.exists()) {
+        val url = "https://github.com/clusflah/ai-subtitle-player/releases/download/$tdlibTag/$tdlibTag.zip"
+        logger.lifecycle("下载 TDLib：$url")
+        URI(url).toURL().openStream().use { input -> zip.outputStream().use { input.copyTo(it) } }
+    }
+    val digest = MessageDigest.getInstance("SHA-256")
+    zip.inputStream().use { input ->
+        val buf = ByteArray(1 shl 16)
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            digest.update(buf, 0, n)
+        }
+    }
+    val sha = digest.digest().joinToString("") { "%02x".format(it) }
+    if (sha != tdlibSha256) {
+        zip.delete()
+        throw GradleException("TDLib 压缩包校验不对：$sha")
+    }
+    ZipFile(zip).use { z ->
+        for (e in z.entries()) {
+            val out = File(dir, e.name)
+            if (!out.canonicalPath.startsWith(dir.canonicalPath)) throw GradleException("TDLib 压缩包里有异常路径：${e.name}")
+            // 文档不要
+            if (e.name.contains("/javadoc/")) continue
+            if (e.isDirectory) out.mkdirs() else {
+                out.parentFile.mkdirs()
+                z.getInputStream(e).use { input -> out.outputStream().use { input.copyTo(it) } }
+            }
+        }
+    }
+    zip.delete()
+    done.writeText(tdlibSha256)
+    return dir
+}
+
+val tdlibDir: File = prepareTdlib(rootProject.file(".gradle/tdlib/$tdlibTag"))
 
 android {
     namespace = "com.aisub.player"
@@ -15,8 +66,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 95
-        versionName = "2.9.34"
+        versionCode = 96
+        versionName = "2.9.35"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用
@@ -101,6 +152,10 @@ android {
             pickFirsts += "lib/*/libc++_shared.so"
         }
     }
+
+    // TDLib：Java 接口源码和各架构的原生库
+    sourceSets["main"].java.srcDir(File(tdlibDir, "tdlib/java"))
+    sourceSets["main"].jniLibs.srcDir(File(tdlibDir, "tdlib/libs"))
 }
 
 kotlin {
