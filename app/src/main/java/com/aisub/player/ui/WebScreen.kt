@@ -19,6 +19,11 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.text.style.TextAlign
 import com.aisub.player.asr.AsrLanguages
 import android.view.View
@@ -626,6 +631,13 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                                 menu = false
                                 tab.pageUrl?.let { clipboard.setText(androidx.compose.ui.text.AnnotatedString(it)) }
                             })
+                            DropdownMenuItem(text = { Text("分享网址") }, onClick = {
+                                menu = false
+                                tab.pageUrl?.let { url ->
+                                    val title = tab.webView?.title?.takeIf { it.isNotBlank() && it != url }
+                                    shareText(context, if (title != null) "$title\n$url" else url, title)
+                                }
+                            })
                             val desktop = vm.isDesktop(tab.pageUrl)
                             DropdownMenuItem(
                                 text = { Text("桌面版网页") },
@@ -727,14 +739,49 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 },
             ) {
                 AndroidView(factory = { view }, modifier = Modifier.fillMaxSize())
+                val openDirect: (String) -> Unit = {
+                    exitFullscreen()
+                    playInPlayer(it, tab.webView?.url.orEmpty(), tab.webView?.title.orEmpty())
+                }
+                // 状态说明（带「用播放器打开」等按钮）照常画在这里，能点
                 WebSubtitles(
                     vm, captionState, settings, settings.subtitleOffset.dp, null,
-                    onOpenDirect = {
-                        exitFullscreen()
-                        playInPlayer(it, tab.webView?.url.orEmpty(), tab.webView?.title.orEmpty())
-                    },
-                    onCapture = ::startCapture,
+                    onOpenDirect = openDirect, onCapture = ::startCapture, showCue = false,
                 )
+                // 字幕画在单独的窗口里：全屏视频在有的手机上走独立的视频图层，盖在应用自己画的东西上面，
+                // 只有网页控件盖在视频上（点一下屏幕）时才露出来。窗口不接触摸，点按照常交给网页播放器
+                // 用铺满整块屏幕的透明窗口（弹出层会按可见区域缩小，扣掉隐藏的系统栏，字幕偏高）；
+                // 不接触摸也不抢焦点：点按交给网页播放器，返回键照常退出全屏
+                Dialog(
+                    onDismissRequest = {},
+                    properties = DialogProperties(
+                        dismissOnBackPress = false, dismissOnClickOutside = false,
+                        usePlatformDefaultWidth = false, decorFitsSystemWindows = false,
+                    ),
+                ) {
+                    val window = (LocalView.current.parent as? DialogWindowProvider)?.window
+                    SideEffect {
+                        window?.run {
+                            addFlags(
+                                android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                                    android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                                    android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                            )
+                            clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+                            setWindowAnimations(0)
+                            setLayout(android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.MATCH_PARENT)
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) attributes = attributes.apply {
+                                layoutInDisplayCutoutMode = android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                            }
+                        }
+                    }
+                    Box(Modifier.fillMaxSize()) {
+                        WebSubtitles(
+                            vm, captionState, settings, settings.subtitleOffset.dp, null,
+                            onOpenDirect = openDirect, onCapture = ::startCapture, showStatus = false,
+                        )
+                    }
+                }
                 if (showControls) Row(Modifier.align(Alignment.TopEnd).padding(12.dp)) {
                     // 横着的视频转成竖屏时 WebView 会直接退出全屏：只有竖视频才给切换横竖屏
                     if (videoAspect?.let { it < 1f } == true) IconButton(
@@ -868,6 +915,9 @@ private fun androidx.compose.foundation.layout.BoxScope.WebSubtitles(
     below: androidx.compose.ui.unit.Dp?,
     onOpenDirect: (String) -> Unit,
     onCapture: () -> Unit,
+    /** 网页全屏时字幕和状态分开画（字幕在单独的窗口里，见调用处），这里选画哪个 */
+    showCue: Boolean = true,
+    showStatus: Boolean = true,
 ) {
     if (!state.running && state.cues.isEmpty() && state.status == null) return
     // 初值 -1：拿到真实播放时间前不显示，不然刚挂载（进全屏、转屏）时会按"时间 0"闪出最开头那几句字幕
@@ -882,6 +932,7 @@ private fun androidx.compose.foundation.layout.BoxScope.WebSubtitles(
     val visible = remember(state.cues, state.source) { state.cues.filter { state.sources[it.id] == state.source } }
     val cue: Cue? = if (now >= 0) cueNear(visible, now) else null
     if (cue != null && settings.showAiSubtitles) {
+        if (!showCue) return
         val lines = if (cue.translation == cue.text) listOf(cue.text to true) else buildList {
             if (settings.showTranslation && cue.translation != null) add(cue.translation to true)
             if (settings.showOriginal || cue.translation == null) add(cue.text to false)
@@ -894,7 +945,7 @@ private fun androidx.compose.foundation.layout.BoxScope.WebSubtitles(
                 StyledSubtitleLines(lines, style, 0.dp)
             }
         } else StyledSubtitleLines(lines, style, bottom)
-    } else if (state.status != null) {
+    } else if (state.status != null && showStatus) {
         Column(
             (if (below != null) Modifier.align(Alignment.TopCenter).padding(top = below + 8.dp, start = 24.dp, end = 24.dp)
             else Modifier.align(Alignment.BottomCenter).padding(bottom = bottom, start = 24.dp, end = 24.dp)).widthIn(max = 520.dp)
@@ -939,6 +990,14 @@ private fun cueNear(cues: List<Cue>, positionMs: Long): Cue? {
     // 识别有时会出时间重叠的句子：从最近开始的往前找，还没结束的优先
     for (k in i downTo maxOf(0, i - 3)) if (positionMs <= cues[k].endMs) return cues[k]
     return cues[i].takeIf { positionMs <= it.endMs + LINGER_MS }
+}
+
+/** 用系统分享发一段文字（网址、直播源地址） */
+internal fun shareText(context: android.content.Context, text: String, subject: String? = null) {
+    val send = android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain")
+        .putExtra(android.content.Intent.EXTRA_TEXT, text)
+    if (subject != null) send.putExtra(android.content.Intent.EXTRA_SUBJECT, subject)
+    runCatching { context.startActivity(android.content.Intent.createChooser(send, "分享").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) }
 }
 
 private enum class WebDialog { LANGUAGE, ZOOM, TABS, ADDRESS, GENERATE, TRANSLATE_MODEL }

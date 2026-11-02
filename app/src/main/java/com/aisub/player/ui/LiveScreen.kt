@@ -57,8 +57,9 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
     val vm: LiveViewModel = viewModel()
     val state by vm.state.collectAsStateWithLifecycle()
     var adding by remember { mutableStateOf(false) }
-    var renaming by remember { mutableStateOf<LiveSource?>(null) }
+    var editing by remember { mutableStateOf<LiveSource?>(null) }
     var menu by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     DetailScaffold(
         "直播", onBack,
@@ -69,7 +70,14 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
                 Box {
                     IconButton(onClick = { menu = true }) { Icon(AppIcons.MoreVert, "更多") }
                     AppMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(text = { Text("重命名「${src.name}」") }, onClick = { menu = false; renaming = src })
+                        DropdownMenuItem(text = { Text("编辑「${src.name}」") }, onClick = { menu = false; editing = src })
+                        // 手机里的文件别人打不开，只分享网址
+                        if (src.url.startsWith("http://") || src.url.startsWith("https://")) {
+                            DropdownMenuItem(text = { Text("分享直播源地址") }, onClick = {
+                                menu = false
+                                shareText(context, "${src.name}\n${src.url}", src.name)
+                            })
+                        }
                         DropdownMenuItem(text = { Text("删除这个直播源") }, onClick = { menu = false; vm.remove(src) })
                     }
                 }
@@ -156,18 +164,19 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
         }
     }
 
-    if (adding) AddLiveSourceDialog(onDismiss = { adding = false }) { name, url -> vm.add(name, url); adding = false }
-    renaming?.let { s ->
-        TextInputDialog("重命名直播源", "名称", initial = s.name, confirm = "保存", onDismiss = { renaming = null }) { vm.rename(s, it); renaming = null }
+    if (adding) LiveSourceDialog(onDismiss = { adding = false }) { name, url -> vm.add(name, url); adding = false }
+    editing?.let { s ->
+        LiveSourceDialog(initial = s, onDismiss = { editing = null }) { name, url -> vm.edit(s, name, url); editing = null }
     }
 }
 
-/** 添加直播源：填网址，或选手机里的 M3U / TXT 文件。 */
+/** 添加 / 编辑直播源：填网址，或选手机里的 M3U / TXT 文件。 */
 @Composable
-private fun AddLiveSourceDialog(onDismiss: () -> Unit, onAdd: (name: String, url: String) -> Unit) {
+private fun LiveSourceDialog(initial: LiveSource? = null, onDismiss: () -> Unit, onSave: (name: String, url: String) -> Unit) {
     val context = LocalContext.current
-    var name by remember { mutableStateOf("") }
-    var url by remember { mutableStateOf("") }
+    var name by remember { mutableStateOf(initial?.name.orEmpty()) }
+    var url by remember { mutableStateOf(initial?.url.orEmpty()) }
+    val title = if (initial == null) "添加直播源" else "编辑直播源"
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             // 记住读权限，之后刷新还能读这个文件
@@ -179,7 +188,7 @@ private fun AddLiveSourceDialog(onDismiss: () -> Unit, onAdd: (name: String, url
     val valid = url.startsWith("http://") || url.startsWith("https://") || url.startsWith("content://")
     AppDialog(
         onDismissRequest = onDismiss,
-        title = { Text("添加直播源") },
+        title = { Text(title) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(url, { url = it.trim() }, label = { Text("播放列表地址") }, placeholder = { Text("https://…/live.m3u") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -188,7 +197,7 @@ private fun AddLiveSourceDialog(onDismiss: () -> Unit, onAdd: (name: String, url
                 // 电视：长地址用手机粘贴
                 PhoneInputButton(
                     listOf(PhoneField("url", "播放列表地址", url), PhoneField("name", "名称（可不填）", name)),
-                    title = "添加直播源",
+                    title = title,
                 ) { v ->
                     url = v["url"]?.trim() ?: url
                     name = v["name"] ?: name
@@ -200,7 +209,7 @@ private fun AddLiveSourceDialog(onDismiss: () -> Unit, onAdd: (name: String, url
                 Spacer(Modifier.height(2.dp))
             }
         },
-        confirmButton = { TextButton(onClick = { onAdd(name, url) }, enabled = valid) { Text("添加") } },
+        confirmButton = { TextButton(onClick = { onSave(name, url) }, enabled = valid) { Text(if (initial == null) "添加" else "保存") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
