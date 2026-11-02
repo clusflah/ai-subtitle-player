@@ -141,7 +141,9 @@ object AdBlock {
             null -> rules?.decide(url, pageUrl, type)
             else -> own
         }
-        return (decision as? AdDecision.Block)?.let { response(it.response) }
+        val block = decision as? AdDecision.Block ?: return null
+        if (com.aisub.player.BuildConfig.DEBUG) android.util.Log.d("VoxAd", "拦截 ${block.response} $url（网页 $pageUrl）")
+        return response(block.response)
     }
 
     private fun response(r: AdResponse): WebResourceResponse {

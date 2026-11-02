@@ -105,11 +105,11 @@ class AppUpdater(
     }
 
     private fun showRelease(activity: Activity, rel: Release, auto: Boolean) {
-        val notes = rel.notes.trim().let { if (it.length > 1500) it.take(1500) + "…" else it }
-        val size = if (rel.size > 0) "安装包 %.1f MB\n\n".format(rel.size / 1048576.0) else ""
+        val notes = latestNotes(rel.notes).let { if (it.length > 1500) it.take(1500) + "…" else it }
+        val size = if (rel.size > 0) " · 安装包 %.1f MB".format(rel.size / 1048576.0) else ""
         AlertDialog.Builder(activity)
             .setTitle("发现新版本 ${rel.tag}")
-            .setMessage("当前版本 ${currentVersion(activity)}\n$size$notes")
+            .setMessage("当前版本 ${currentVersion(activity)}$size\n\n$notes")
             .setPositiveButton("下载并安装") { _, _ -> download(activity, rel) }
             .setNegativeButton("以后再说", null)
             .apply {
@@ -241,6 +241,26 @@ class AppUpdater(
 
         /** 这台手机能用的 ABI，按系统推荐的顺序 */
         val abis: List<String> get() = Build.SUPPORTED_ABIS.toList()
+
+        /**
+         * 发布说明里只留最新这一版的更新：「## 本版更新…」或第一个「## x.y.z 更新」那节
+         * （发布页上还有介绍、下载说明、历史版本，弹窗里不要）；去掉 Markdown 记号，列表项换成「•」。
+         * 找不到这样的小节就用整份说明。
+         */
+        fun latestNotes(notes: String): String {
+            val lines = notes.lines()
+            val start = lines.indexOfFirst { VERSION_HEADING.containsMatchIn(it) }
+            val section = if (start < 0) lines else lines.drop(start + 1).takeWhile { !it.startsWith("## ") }
+            return section.joinToString("\n")
+                .replace(Regex("""\[([^\]]+)]\([^)]*\)"""), "$1")
+                .replace("**", "").replace("__", "").replace("`", "")
+                .replace(Regex("""(?m)^\s*[-*]\s+"""), "• ")
+                .replace(Regex("""(?m)^#+\s*"""), "")
+                .replace(Regex("""\n{3,}"""), "\n\n")
+                .trim()
+        }
+
+        private val VERSION_HEADING = Regex("""^##\s*(本版更新|v?\d+\.\d+\.\d+)""")
     }
 }
 

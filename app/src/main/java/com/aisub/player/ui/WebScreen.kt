@@ -356,6 +356,32 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             if (fullscreenLandscape) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
     }
 
+    // 网页自己判断的联网状态（navigator.onLine）有时会卡在「断网」：切 VPN、换网络或在后台时漏了恢复的通知。
+    // 有的网站（新视讯）这时只显示「当前网络异常」，点刷新重试也没用（它先看 onLine）。
+    // 按系统的网络状态主动告诉每个网页：刚打开、网络变了、回到前台时都同步一次
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle) {
+        val cm = context.getSystemService(android.net.ConnectivityManager::class.java)
+        val main = android.os.Handler(android.os.Looper.getMainLooper())
+        fun sync() {
+            val caps = cm?.activeNetwork?.let { cm.getNetworkCapabilities(it) }
+            val online = cm == null || caps?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            main.post { tabs.forEach { it.webView?.setNetworkAvailable(online) } }
+        }
+        val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) = sync()
+            override fun onLost(network: android.net.Network) = sync()
+            override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) = sync()
+        }
+        val resumed = androidx.lifecycle.LifecycleEventObserver { _, e -> if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) sync() }
+        runCatching { cm?.registerDefaultNetworkCallback(callback) }
+        lifecycle.addObserver(resumed)
+        onDispose {
+            runCatching { cm?.unregisterNetworkCallback(callback) }
+            lifecycle.removeObserver(resumed)
+        }
+    }
+
     fun stopPicking() {
         tab.webView?.evaluateJavascript("window.__voxPicker && __voxPicker.stop()", null)
         picking = false
