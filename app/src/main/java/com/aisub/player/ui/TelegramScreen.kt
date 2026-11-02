@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -231,6 +232,16 @@ private fun ChatList(openChat: (TgChat) -> Unit) {
         Telegram.setFavorite(c.id, fav)
         favorites = if (fav) favorites + c.id else favorites - c.id
     }
+    // 收藏的频道有没有新视频（比上次点进去时看到的新）；第一次查的只记下来，不算新
+    val fresh by produceState(emptySet<Long>(), favorites, chats) {
+        val ids = favorites.toList()
+        value = ids.filter { id ->
+            val latest = runCatching { Telegram.latestVideoId(id) }.getOrDefault(0L)
+            val seen = Telegram.seenVideoId(id)
+            if (seen == 0L && latest > 0) Telegram.setSeenVideoId(id, latest)
+            seen in 1 until latest
+        }.toSet()
+    }
 
     val r = chats
     when {
@@ -255,7 +266,7 @@ private fun ChatList(openChat: (TgChat) -> Unit) {
             }
             LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 4.dp)) {
                 itemsIndexed(mine, key = { _, c -> c.id }) { _, c ->
-                    ChatRow(c, c.id in favorites, onFavorite = { toggle(c) }) { openChat(c) }
+                    ChatRow(c, c.id in favorites, c.id in fresh, onFavorite = { toggle(c) }) { openChat(c) }
                 }
                 if (q.length >= 2) {
                     item(key = "public") {
@@ -272,7 +283,7 @@ private fun ChatList(openChat: (TgChat) -> Unit) {
                         p.isFailure -> item(key = "public-error") { NoteText("搜索失败：${p.exceptionOrNull()?.message}") }
                         others.isEmpty() -> item(key = "public-empty") { NoteText("没有找到其它公开频道") }
                         else -> itemsIndexed(others, key = { _, c -> "p${c.id}" }) { _, c ->
-                            ChatRow(c, c.id in favorites, onFavorite = { toggle(c) }) { openChat(c) }
+                            ChatRow(c, c.id in favorites, c.id in fresh, onFavorite = { toggle(c) }) { openChat(c) }
                         }
                     }
                 } else if (mine.isEmpty()) {
@@ -292,19 +303,32 @@ private fun NoteText(text: String) {
 }
 
 @Composable
-private fun ChatRow(c: TgChat, favorite: Boolean, onFavorite: () -> Unit, onClick: () -> Unit) {
+private fun ChatRow(c: TgChat, favorite: Boolean, fresh: Boolean, onFavorite: () -> Unit, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            Modifier.size(44.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer),
-            contentAlignment = Alignment.Center,
-        ) { Text(c.title.take(1), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onPrimaryContainer) }
+        Box {
+            ChatAvatar(c)
+            // 收藏的频道有新视频
+            if (fresh) Box(
+                Modifier.align(Alignment.TopEnd).size(12.dp).clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surface).padding(2.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error),
+            )
+        }
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(c.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(if (c.isChannel) "频道" else "群", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val info = listOfNotNull(
+                if (c.isChannel) "频道" else "群",
+                c.members.takeIf { it > 0 }?.let { "${countText(it)} ${if (c.isChannel) "订阅" else "成员"}" },
+                c.username?.let { "@$it" },
+                "有新视频".takeIf { fresh },
+            ).joinToString(" · ")
+            Text(
+                info, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                color = if (fresh) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         IconButton(onClick = onFavorite) {
             Icon(
@@ -313,6 +337,43 @@ private fun ChatRow(c: TgChat, favorite: Boolean, onFavorite: () -> Unit, onClic
             )
         }
     }
+}
+
+/** 频道头像：先显示模糊的小图，下好了换清楚的；没有头像显示名字的第一个字（emoji 也完整显示） */
+@Composable
+private fun ChatAvatar(c: TgChat) {
+    val mini = remember(c.id) { c.photoMini?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } }
+    val photo by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, c.id) {
+        val file = c.photo ?: return@produceState
+        value = withContext(Dispatchers.IO) {
+            runCatching { Telegram.thumbnailPath(file)?.let { BitmapFactory.decodeFile(it)?.asImageBitmap() } }.getOrNull()
+        }
+    }
+    Box(
+        Modifier.size(44.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer),
+        contentAlignment = Alignment.Center,
+    ) {
+        val img = photo ?: mini
+        if (img != null) Image(img, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        else Text(firstGrapheme(c.title), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+    }
+}
+
+/** 第一个「字」：emoji、带变体的字符不能只截一个 char（会变成问号） */
+internal fun firstGrapheme(s: String): String {
+    val t = s.trim()
+    if (t.isEmpty()) return "?"
+    val it = java.text.BreakIterator.getCharacterInstance()
+    it.setText(t)
+    val end = it.next()
+    return t.substring(0, if (end == java.text.BreakIterator.DONE) t.length else end)
+}
+
+/** 12345 → 1.2万 */
+private fun countText(n: Int): String = when {
+    n >= 100_000_000 -> "%.1f亿".format(n / 100_000_000f)
+    n >= 10_000 -> "%.1f万".format(n / 10_000f)
+    else -> n.toString()
 }
 
 /** 视频缓存：占用多少、上限、清空 */
@@ -354,15 +415,44 @@ private fun CacheDialog(onDismiss: () -> Unit) {
     )
 }
 
-/** 一个频道 / 群里的视频，从新到旧；滑到底自动加载更多 */
+/**
+ * 一个频道 / 群里的视频，从新到旧；滑到底自动加载更多。顶上可以搜说明里的字，或者点 #标签 只看一部剧；
+ * 看过的显示进度。点一个视频：有剧名标签的按这部剧的集数顺序（从旧到新）连着放
+ */
 @Composable
-fun TelegramChatScreen(chatId: Long, title: String, onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
-    val videos = remember(chatId) { mutableStateListOf<TgVideo>() }
-    var next by remember(chatId) { mutableStateOf(0L) }
-    var done by remember(chatId) { mutableStateOf(false) }
-    var loading by remember(chatId) { mutableStateOf(false) }
-    var error by remember(chatId) { mutableStateOf<String?>(null) }
+fun TelegramChatScreen(
+    chatId: Long,
+    title: String,
+    lib: com.aisub.player.LibraryViewModel,
+    onBack: () -> Unit,
+    play: (List<MediaEntry>, Int) -> Unit,
+) {
+    // 去播放再回来时接着显示（筛选、已经加载的、滚到哪），不用重新加载
+    val page = remember(chatId) { chatPages.getOrPut(chatId) { ChatPage(chatId) }.also { trimChatPages(chatId) } }
+    var query by page::query
+    var applied by page::applied
+    // 停止输入一会儿再搜（点标签马上搜）
+    LaunchedEffect(query) {
+        if (query.trim() != applied) {
+            kotlinx.coroutines.delay(if (query.startsWith("#")) 0 else 600)
+            applied = query.trim()
+        }
+    }
+    val results = remember(applied) { page.resultsFor(applied) }
+    val pager = results.pager
+    val videos = results.videos
+    var done by results::done
+    var loading by results::loading
+    var error by results::error
+    val tagCounts = page.tagCounts
+    var starting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val libState by lib.state.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { lib.reloadStored() }
+    val progress = remember(libState.history) {
+        libState.history.filter { Telegram.isTelegram(it.entry.uri) }.associate { it.entry.uri to (it.positionMs to it.entry.durationMs) }
+    }
 
     fun loadMore() {
         if (loading || done) return
@@ -370,10 +460,14 @@ fun TelegramChatScreen(chatId: Long, title: String, onBack: () -> Unit, play: (L
         error = null
         scope.launch {
             try {
-                val (list, from) = Telegram.videos(chatId, next)
+                val list = pager.next()
                 videos.addAll(list.filter { v -> videos.none { it.messageId == v.messageId } })
-                next = from
-                if (from == 0L) done = true
+                done = pager.done
+                if (applied.isEmpty()) {
+                    list.forEach { v -> v.tags.forEach { t -> tagCounts[t] = (tagCounts[t] ?: 0) + 1 } }
+                    // 点进来看过了：收藏列表上的「有新视频」消掉
+                    list.maxOfOrNull { it.messageId }?.let { Telegram.setSeenVideoId(chatId, it) }
+                }
             } catch (e: Exception) {
                 error = e.message
             } finally {
@@ -381,32 +475,122 @@ fun TelegramChatScreen(chatId: Long, title: String, onBack: () -> Unit, play: (L
             }
         }
     }
-    LaunchedEffect(chatId) { loadMore() }
+    LaunchedEffect(pager) { if (videos.isEmpty()) loadMore() }
+
+    fun entryOf(v: TgVideo): MediaEntry {
+        val name = v.fileName.substringBeforeLast('.')
+        val ep = com.aisub.player.telegram.TgEpisodes.episodeOf(v.fileName)
+        val t = when {
+            // 认出了剧名和集数：「魔女守护者 第07集」（播放列表里一眼分得清）
+            v.seriesTag != null && ep != null -> "${v.seriesTag!!.removePrefix("#")} 第${"%02d".format(ep)}集"
+            // 标题一样的靠文件名分开
+            name.isNotBlank() && name !in v.title -> "${v.title} · $name"
+            else -> v.title
+        }
+        return MediaEntry(uri = v.uri, title = t, durationMs = v.durationSec * 1000L, sizeBytes = v.size)
+    }
+
+    fun start(v: TgVideo) {
+        if (starting) return
+        starting = true
+        // 「继续观看」的封面：播放器截不了 Telegram 的视频，用消息自带的缩略图
+        val thumb = v.thumb
+        if (thumb != null && !HistoryThumbs.file(context, v.uri).exists()) scope.launch(Dispatchers.IO) {
+            runCatching { Telegram.thumbnailPath(thumb)?.let(BitmapFactory::decodeFile)?.let { HistoryThumbs.save(context, v.uri, it) } }
+        }
+        scope.launch {
+            try {
+                // 有剧名标签：这部剧的各集按顺序（从旧到新），「下一集」就是真的下一集
+                val series = v.seriesTag?.let { tag ->
+                    runCatching { Telegram.seriesVideos(chatId, tag) }.getOrNull()
+                        ?.takeIf { s -> s.size > 1 && s.any { it.messageId == v.messageId } }
+                        ?.let { com.aisub.player.telegram.TgEpisodes.playOrder(v, it) }
+                }
+                val list = series ?: videos.sortedBy { it.messageId }
+                play(list.map(::entryOf), list.indexOfFirst { it.messageId == v.messageId }.coerceAtLeast(0))
+            } finally {
+                starting = false
+            }
+        }
+    }
 
     DetailScaffold(title, onBack) {
-        when {
-            videos.isEmpty() && loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-            videos.isEmpty() && error != null -> EmptyState("读取失败：$error", buttonText = "重试", icon = AppIcons.Live) { loadMore() }
-            videos.isEmpty() && done -> EmptyState("这里没有视频", icon = AppIcons.Live)
-            else -> LazyColumn(contentPadding = PaddingValues(vertical = 4.dp)) {
-                itemsIndexed(videos, key = { _, v -> v.messageId }) { i, v ->
-                    if (i >= videos.size - 3) LaunchedEffect(videos.size) { loadMore() }
-                    VideoRow(v) {
-                        val entries = videos.map {
-                            MediaEntry(uri = it.uri, title = it.title, durationMs = it.durationSec * 1000L, sizeBytes = it.size)
+        Column(Modifier.fillMaxSize()) {
+            OutlinedTextField(
+                query, { query = it }, singleLine = true,
+                placeholder = { Text("搜索这里的视频") },
+                leadingIcon = { Icon(AppIcons.Search, null) },
+                trailingIcon = { if (query.isNotEmpty()) IconButton(onClick = { query = "" }) { Icon(AppIcons.Close, "清除") } },
+                colors = appFieldColors(),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            )
+            val tags = tagCounts.entries.filter { it.value >= 2 || tagCounts.size <= 12 }
+                .sortedByDescending { it.value }.take(30).map { it.key }
+            if (tags.isNotEmpty()) androidx.compose.foundation.lazy.LazyRow(
+                contentPadding = PaddingValues(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(tags.size) { i ->
+                    val t = tags[i]
+                    androidx.compose.material3.FilterChip(
+                        selected = applied == t,
+                        onClick = { query = if (applied == t) "" else t },
+                        label = { Text(t.removePrefix("#")) },
+                    )
+                }
+            }
+            if (starting) androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
+            Box(Modifier.weight(1f)) {
+                when {
+                    videos.isEmpty() && (loading || !done && error == null) ->
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                    videos.isEmpty() && error != null -> EmptyState("读取失败：$error", buttonText = "重试", icon = AppIcons.Live) { loadMore() }
+                    videos.isEmpty() -> EmptyState(if (applied.isEmpty()) "这里没有视频" else "没有找到「$applied」", icon = AppIcons.Live)
+                    else -> LazyColumn(state = results.listState, contentPadding = PaddingValues(vertical = 4.dp)) {
+                        itemsIndexed(videos, key = { _, v -> v.messageId }) { i, v ->
+                            if (i >= videos.size - 3) LaunchedEffect(videos.size) { loadMore() }
+                            VideoRow(v, progress[v.uri]) { start(v) }
                         }
-                        play(entries, i)
+                        if (loading) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(24.dp)) } }
+                        error?.let { e -> item { TextButton(onClick = ::loadMore, modifier = Modifier.padding(16.dp)) { Text("加载失败（$e），点这里重试") } } }
                     }
                 }
-                if (loading) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(24.dp)) } }
-                error?.let { e -> item { TextButton(onClick = ::loadMore, modifier = Modifier.padding(16.dp)) { Text("加载失败（$e），点这里重试") } } }
             }
         }
     }
 }
 
+/** 一个频道页面的状态，离开页面（去播放）也留着 */
+private class ChatPage(val chatId: Long) {
+    var query by mutableStateOf("")
+    var applied by mutableStateOf("")
+    /** 标签：从没筛选时看到的视频里收集，常见的排前面 */
+    val tagCounts = androidx.compose.runtime.mutableStateMapOf<String, Int>()
+    private var results: Results? = null
+
+    /** 一次搜索（或不筛选）的结果 */
+    class Results(chatId: Long, val query: String) {
+        val pager = Telegram.VideoPager(chatId, query)
+        val videos = mutableStateListOf<TgVideo>()
+        var done by mutableStateOf(false)
+        var loading by mutableStateOf(false)
+        var error by mutableStateOf<String?>(null)
+        val listState = androidx.compose.foundation.lazy.LazyListState()
+    }
+
+    fun resultsFor(query: String): Results = results?.takeIf { it.query == query } ?: Results(chatId, query).also { results = it }
+}
+
+/** 最近打开的几个频道页面 */
+private val chatPages = LinkedHashMap<Long, ChatPage>()
+
+private fun trimChatPages(keep: Long) {
+    while (chatPages.size > 4) chatPages.keys.firstOrNull { it != keep }?.let { chatPages.remove(it) } ?: break
+}
+
+/** [watched]：看到的位置和总时长（毫秒），没看过是 null */
 @Composable
-private fun VideoRow(v: TgVideo, onClick: () -> Unit) {
+private fun VideoRow(v: TgVideo, watched: Pair<Long, Long>?, onClick: () -> Unit) {
     // 先显示模糊的小图，缩略图下好了换清楚的
     val mini = remember(v.messageId) { v.mini?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } }
     val thumb by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, v.messageId) {
@@ -427,10 +611,29 @@ private fun VideoRow(v: TgVideo, onClick: () -> Unit) {
                 modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp)
                     .background(androidx.compose.ui.graphics.Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp),
             )
+            // 看过的：底下一条进度，看到片尾（最后 30 秒）的标「看完」
+            val duration = watched?.second?.takeIf { it > 0 } ?: (v.durationSec * 1000L)
+            if (watched != null && duration > 0 && watched.first > 0) {
+                val finished = watched.first >= duration - 30_000
+                if (finished) Text(
+                    "看完", style = MaterialTheme.typography.labelSmall, color = androidx.compose.ui.graphics.Color.White,
+                    modifier = Modifier.align(Alignment.TopStart).padding(4.dp)
+                        .background(androidx.compose.ui.graphics.Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp),
+                )
+                Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(androidx.compose.ui.graphics.Color(0x66000000))) {
+                    Box(
+                        Modifier.fillMaxWidth(if (finished) 1f else (watched.first.toFloat() / duration).coerceIn(0f, 1f)).height(3.dp)
+                            .background(MaterialTheme.colorScheme.primary),
+                    )
+                }
+            }
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(v.title, style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            // 文件名一般带集数、画质：标题一样的几条靠它分开
+            val name = v.fileName.substringBeforeLast('.')
+            if (name.isNotBlank() && name !in v.title) Text(name, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             val date = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date(v.date * 1000L))
             Text(
                 listOfNotNull(date, v.size.takeIf { it > 0 }?.let(::formatSize)).joinToString(" · "),

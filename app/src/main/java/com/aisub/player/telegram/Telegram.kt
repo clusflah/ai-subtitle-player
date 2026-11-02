@@ -30,7 +30,18 @@ sealed interface TgAuth {
 }
 
 /** 一个频道或群 */
-data class TgChat(val id: Long, val title: String, val isChannel: Boolean)
+data class TgChat(
+    val id: Long,
+    val title: String,
+    val isChannel: Boolean,
+    /** 头像（小图），要下载 */
+    val photo: TdApi.File? = null,
+    /** 头像的模糊预览图（JPEG），马上能显示 */
+    val photoMini: ByteArray? = null,
+    /** 公开的 @用户名、成员数：搜索结果里显示（会话列表里不取，省时间） */
+    val username: String? = null,
+    val members: Int = 0,
+)
 
 /** 频道 / 群里的一个视频（视频消息，或文件形式发的视频） */
 data class TgVideo(
@@ -38,6 +49,10 @@ data class TgVideo(
     val messageId: Long,
     val title: String,
     val caption: String,
+    /** 文件名（一般带集数、画质） */
+    val fileName: String,
+    /** 说明里的 #标签（按出现顺序） */
+    val tags: List<String>,
     val durationSec: Int,
     val size: Long,
     /** 发送时间（秒） */
@@ -48,6 +63,13 @@ data class TgVideo(
     val thumb: TdApi.File?,
 ) {
     val uri: String get() = Telegram.uriOf(chatId, messageId)
+
+    /** 当作「剧名」的标签：第一行里的优先（「番剧: #片名」），没有就用第一个 */
+    val seriesTag: String?
+        get() {
+            val first = caption.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
+            return tags.firstOrNull { it in first } ?: tags.firstOrNull()
+        }
 }
 
 class TgException(val code: Int, message: String) : Exception(message)
@@ -208,18 +230,37 @@ object Telegram {
         return all.mapNotNull { chatOf(it) }
     }
 
-    private suspend fun chatOf(id: Long): TgChat? {
+    private suspend fun chatOf(id: Long, details: Boolean = false): TgChat? {
         val chat = runCatching { send(TdApi.GetChat(id)) }.getOrNull() ?: return null
-        return when (val t = chat.type) {
-            is TdApi.ChatTypeSupergroup -> TgChat(id, chat.title, t.isChannel)
+        val c = when (val t = chat.type) {
+            is TdApi.ChatTypeSupergroup -> {
+                val sg = if (details) runCatching { send(TdApi.GetSupergroup(t.supergroupId)) }.getOrNull() else null
+                TgChat(id, chat.title, t.isChannel, username = sg?.usernames?.activeUsernames?.firstOrNull(), members = sg?.memberCount ?: 0)
+            }
             is TdApi.ChatTypeBasicGroup -> TgChat(id, chat.title, false)
-            else -> null
+            else -> return null
         }
+        return c.copy(photo = chat.photo?.small, photoMini = chat.photo?.minithumbnail?.data)
     }
 
-    /** 按名字或 @用户名 搜公开的频道和群（包括没加入的） */
+    /** 按名字或 @用户名 搜公开的频道和群（包括没加入的），带成员数和 @用户名 */
     suspend fun searchPublic(query: String): List<TgChat> =
-        send(TdApi.SearchPublicChats(query, null)).chatIds.toList().mapNotNull { chatOf(it) }
+        send(TdApi.SearchPublicChats(query, null)).chatIds.toList().mapNotNull { chatOf(it, details = true) }
+
+    // ---- 收藏的频道有新视频：记下每个会话看到过的最新视频 ----
+
+    /** 最新一个视频的消息 ID（0 是没有） */
+    suspend fun latestVideoId(chatId: Long): Long = listOf(TdApi.SearchMessagesFilterVideo(), TdApi.SearchMessagesFilterDocument())
+        .maxOf { f ->
+            runCatching { send(TdApi.SearchChatMessages(chatId, null, "", null, 0, 0, 5, f)).messages }.getOrNull().orEmpty()
+                .firstOrNull { videoOf(it) != null }?.id ?: 0L
+        }
+
+    fun seenVideoId(chatId: Long): Long = prefs.getLong("seen_$chatId", 0L)
+
+    fun setSeenVideoId(chatId: Long, messageId: Long) {
+        if (messageId > seenVideoId(chatId)) prefs.edit().putLong("seen_$chatId", messageId).apply()
+    }
 
     /** 收藏的频道 / 群（排在列表最前） */
     fun favorites(): Set<Long> =
@@ -231,29 +272,61 @@ object Telegram {
     }
 
     /**
-     * 往前翻聊天记录找视频：从 [fromMessageId]（0 是最新）开始，凑够 [want] 个或者翻到头为止。
-     * 返回找到的视频和下次接着翻的位置（0 表示到头了）。
+     * 一个频道 / 群里的视频，从新到旧一页页取。让服务器按类型筛（视频消息、文件），
+     * 文字消息再多也不用自己翻；[query] 不空时只要说明里有这些字的（例如「#片名」）。
      */
-    suspend fun videos(chatId: Long, fromMessageId: Long, want: Int = 20): Pair<List<TgVideo>, Long> {
-        val out = ArrayList<TgVideo>()
-        var from = fromMessageId
-        var emptyPages = 0
-        // 每次最多翻 15 页，免得一个全是文字的频道翻半天
-        repeat(15) {
-            val page = send(TdApi.GetChatHistory(chatId, from, 0, 100, false)).messages
-                .filter { it.id != from || from == 0L }
-            if (page.isEmpty()) {
-                // TDLib 第一次请求有时只给本地有的几条：再试一次，还是空就是到头了
-                if (++emptyPages >= 2) return out to 0L
-                return@repeat
+    class VideoPager(private val chatId: Long, private val query: String = "") {
+        private inner class Stream(val filter: TdApi.SearchMessagesFilter) {
+            var from = 0L
+            var done = false
+            val buffer = ArrayDeque<TgVideo>()
+
+            suspend fun fetch() {
+                val r = send(TdApi.SearchChatMessages(chatId, null, query, null, from, 0, 50, filter))
+                r.messages.mapNotNullTo(buffer) { videoOf(it) }
+                from = r.nextFromMessageId
+                if (from == 0L || r.messages.isEmpty()) done = true
             }
-            emptyPages = 0
-            page.mapNotNullTo(out) { videoOf(it) }
-            from = page.last().id
-            if (out.size >= want) return out to from
         }
-        return out to from
+
+        private val streams = listOf(Stream(TdApi.SearchMessagesFilterVideo()), Stream(TdApi.SearchMessagesFilterDocument()))
+
+        /** 全部取完了 */
+        val done: Boolean get() = streams.all { it.done && it.buffer.isEmpty() }
+
+        /** 再取（最多）[want] 个；两种消息按时间合在一起 */
+        suspend fun next(want: Int = 30): List<TgVideo> {
+            val out = ArrayList<TgVideo>()
+            // 文件多、视频少的群（发的都是文档）也别一直翻：每次最多请求 8 次
+            var requests = 0
+            while (out.size < want) {
+                // 还有没取的、缓冲又空了：先取，不然不知道它的下一个是不是更新
+                val empty = streams.firstOrNull { !it.done && it.buffer.isEmpty() }
+                if (empty != null) {
+                    if (requests++ >= 8) break
+                    empty.fetch()
+                    continue
+                }
+                val s = streams.filter { it.buffer.isNotEmpty() }.maxByOrNull { it.buffer.first().messageId } ?: break
+                out += s.buffer.removeFirst()
+            }
+            return out
+        }
     }
+
+    /** 说明里带这个标签的视频（同一部剧的各集），最多 [max] 个，从旧到新 */
+    suspend fun seriesVideos(chatId: Long, tag: String, max: Int = 300): List<TgVideo> {
+        val pager = VideoPager(chatId, tag)
+        val out = ArrayList<TgVideo>()
+        while (!pager.done && out.size < max) {
+            val page = pager.next(50)
+            if (page.isEmpty()) break
+            out += page.filter { tag in it.tags }
+        }
+        return out.distinctBy { it.messageId }.sortedBy { it.messageId }
+    }
+
+    private val HASHTAG = Regex("""#[\p{L}\p{N}_]+""")
 
     private fun videoOf(m: TdApi.Message): TgVideo? {
         val (file, name, caption, duration, mini, thumb) = when (val c = m.content) {
@@ -269,7 +342,8 @@ object Telegram {
         val firstLine = caption.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
         val title = firstLine?.take(80) ?: name.ifBlank { "视频 ${m.id shr 20}" }
         return TgVideo(
-            m.chatId, m.id, title, caption, duration, file.size.takeIf { it > 0 } ?: file.expectedSize,
+            m.chatId, m.id, title, caption, name, HASHTAG.findAll(caption).map { it.value }.distinct().toList(),
+            duration, file.size.takeIf { it > 0 } ?: file.expectedSize,
             m.date, mini?.data, thumb?.file,
         )
     }
