@@ -2149,11 +2149,12 @@ private fun parseCueTime(s: String): Long? {
  */
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun AsrLanguageDialog(
+internal fun AsrLanguageDialog(
     current: String,
     settings: AppSettings,
     translate: Boolean,
     onDismiss: () -> Unit,
+    languageHint: String = "视频语言（只对这个视频生效，不确定选「自动」；点一下就开始识别）",
     onPick: (code: String, engine: AsrEngine, pick: TranslatePick?) -> Unit,
 ) {
     val pick = if (translate) rememberTranslatePick(settings) else null
@@ -2182,7 +2183,7 @@ private fun AsrLanguageDialog(
                     TranslateModelPicker(pick, settings)
                     Spacer(Modifier.height(12.dp))
                 }
-                Text("视频语言（只对这个视频生效，不确定选「自动」；点一下就开始识别）", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(languageHint, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 AsrLanguages.COMMON.forEach { (code, label) ->
                     Row(
                         Modifier.fillMaxWidth().clickable { onPick(code, engine, pick) }.padding(vertical = 10.dp),
