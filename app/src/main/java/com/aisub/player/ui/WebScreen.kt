@@ -1100,7 +1100,8 @@ private fun androidx.compose.foundation.layout.BoxScope.WebSubtitles(
     showCue: Boolean = true,
     showStatus: Boolean = true,
 ) {
-    if (!state.running && state.cues.isEmpty() && state.status == null) return
+    // 关了 AI 字幕就不再显示（已识别的字幕常比播放提前几十秒，留着会像没关掉一样接着出字）
+    if (!state.running && state.status == null) return
     // 初值 -1：拿到真实播放时间前不显示，不然刚挂载（进全屏、转屏）时会按"时间 0"闪出最开头那几句字幕
     var now by remember { mutableLongStateOf(-1L) }
     LaunchedEffect(Unit) {

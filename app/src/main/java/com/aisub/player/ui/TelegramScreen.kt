@@ -790,7 +790,7 @@ fun TelegramChatScreen(
         Column(Modifier.fillMaxSize()) {
             OutlinedTextField(
                 query, { query = it }, singleLine = true,
-                placeholder = { Text("搜索这里的视频") },
+                placeholder = { Text(if (mode == com.aisub.player.telegram.TgMode.ALL) "搜索这里的消息" else "搜索这里的视频") },
                 leadingIcon = { Icon(AppIcons.Search, null) },
                 trailingIcon = { if (query.isNotEmpty()) IconButton(onClick = { query = "" }) { Icon(AppIcons.Close, "清除") } },
                 colors = appFieldColors(),
@@ -840,6 +840,7 @@ fun TelegramChatScreen(
                         shown, results.listState, loading, error, ::loadMore, progress, saved,
                         onClick = ::start,
                         onLongClick = { v -> if (v.isVideo) toggleSaved(v) else start(v) },
+                        onTag = { query = it },
                     )
                     else -> LazyColumn(state = results.listState, contentPadding = PaddingValues(vertical = 4.dp)) {
                         itemsIndexed(shown, key = { _, v -> v.messageId }) { i, v ->

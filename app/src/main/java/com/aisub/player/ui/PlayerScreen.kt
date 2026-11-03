@@ -2220,7 +2220,11 @@ internal fun AsrLanguageDialog(
                 )
             }
         },
-        confirmButton = { TextButton(onClick = { parsed?.let { onPick(it, engine, pick) } }, enabled = parsed != null) { Text("用这个代码识别") } },
+        // 没填代码时直接按现在的语言开始：语言列表在下面，不用翻下去点
+        confirmButton = {
+            if (custom.isBlank()) TextButton(onClick = { onPick(current, engine, pick) }) { Text("开始识别（${AsrLanguages.label(current)}）") }
+            else TextButton(onClick = { parsed?.let { onPick(it, engine, pick) } }, enabled = parsed != null) { Text("用这个代码识别") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
