@@ -38,7 +38,7 @@ import java.util.zip.GZIPInputStream
  */
 abstract class StreamingCloudEngine : SpeechEngine {
 
-    protected val http: OkHttpClient = OkHttpClient.Builder()
+    protected val http: OkHttpClient = com.aisub.player.net.AppProxy.builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .pingInterval(15, TimeUnit.SECONDS)

@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit
 /** 最小 WebDAV 客户端：PROPFIND Depth:1 列目录。 */
 class WebDavClient(private val server: Server) : RemoteClient {
 
-    private val http = OkHttpClient.Builder()
+    private val http = com.aisub.player.net.AppProxy.builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()

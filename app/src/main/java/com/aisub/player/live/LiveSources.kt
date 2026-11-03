@@ -97,7 +97,7 @@ class LiveSources(private val context: Context) {
     }
 
     companion object {
-        private val client = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
+        private val client = com.aisub.player.net.AppProxy.builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
     }
 }
 

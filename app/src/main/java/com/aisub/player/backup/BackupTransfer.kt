@@ -216,7 +216,7 @@ class ReceiverFinder(context: Context) {
     }
 
     companion object {
-        private val client = OkHttpClient.Builder().connectTimeout(8, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
+        private val client = com.aisub.player.net.AppProxy.builder().connectTimeout(8, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
 
         /** 把备份发给接收端（address 是 IP:端口，也可以是接收端显示的整个网址）。返回对方的回复。 */
         suspend fun send(address: String, backup: String): String = withContext(Dispatchers.IO) {

@@ -149,7 +149,7 @@ object AdBlock {
     val info: StateFlow<AdBlockInfo> = _info.asStateFlow()
 
     private val http by lazy {
-        OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).build()
+        com.aisub.player.net.AppProxy.builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).build()
     }
 
     private fun dir(context: Context) = File(context.filesDir, "adblock").apply { mkdirs() }

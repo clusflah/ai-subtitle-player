@@ -24,7 +24,7 @@ class ModelManager(context: Context) {
     val vadFile = File(root, "silero_vad.onnx")
     val punctuationDir = File(root, "punct")
 
-    private val http = OkHttpClient.Builder()
+    private val http = com.aisub.player.net.AppProxy.builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()

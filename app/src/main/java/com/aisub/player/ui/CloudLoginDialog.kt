@@ -158,7 +158,7 @@ private fun RemoteImage(url: String) {
     val image by produceState<ImageBitmap?>(null, url) {
         value = withContext(Dispatchers.IO) {
             runCatching {
-                OkHttpClient().newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                com.aisub.player.net.AppProxy.builder().build().newCall(Request.Builder().url(url).build()).execute().use { resp ->
                     resp.body?.bytes()?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
                 }
             }.getOrNull()

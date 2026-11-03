@@ -13,7 +13,7 @@ class VoxtitleApp : Application() {
         super.onCreate()
         instance = this
         // 应用内代理：在任何网络客户端创建之前装好
-        AppProxy.install()
+        AppProxy.install(this)
         SettingsRepository(this).load().let { AppProxy.apply(this, it.proxyType, it.proxyHost, it.proxyPort) }
         // 网盘客户端刷新 token 后写回存储；播放器按 ID 找账号
         val store = AppStore(this)

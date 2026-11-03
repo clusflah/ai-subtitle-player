@@ -40,7 +40,7 @@ class OnlineSubtitles(
     private val osPassword: String,
     private val assrtToken: String,
 ) {
-    private val http = OkHttpClient.Builder()
+    private val http = com.aisub.player.net.AppProxy.builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()

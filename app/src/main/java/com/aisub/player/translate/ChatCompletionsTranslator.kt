@@ -35,7 +35,7 @@ class ChatCompletionsTranslator(
 
     private val endpoint = baseUrl.trimEnd('/') + "/chat/completions"
 
-    private val http = OkHttpClient.Builder()
+    private val http = com.aisub.player.net.AppProxy.builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(180, TimeUnit.SECONDS)
         .build()

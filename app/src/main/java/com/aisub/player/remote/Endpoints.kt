@@ -15,7 +15,7 @@ object Endpoints {
     private val chosen = ConcurrentHashMap<String, String>()
 
     /** 探测超时要短：在外面时内网地址连不上，不能让用户等太久 */
-    private val probeHttp = OkHttpClient.Builder()
+    private val probeHttp = com.aisub.player.net.AppProxy.builder()
         .connectTimeout(2, TimeUnit.SECONDS)
         .readTimeout(3, TimeUnit.SECONDS)
         .followRedirects(false)

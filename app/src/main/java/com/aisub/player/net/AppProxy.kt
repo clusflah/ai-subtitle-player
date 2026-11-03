@@ -1,9 +1,19 @@
 package com.aisub.player.net
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.os.Handler
+import android.os.Looper
+import androidx.core.content.ContextCompat
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
 import androidx.webkit.WebViewFeature
+import okhttp3.OkHttpClient
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Proxy
@@ -23,19 +33,41 @@ object AppProxy {
     @Volatile private var proxy: Proxy = Proxy.NO_PROXY
     private val system: ProxySelector? = ProxySelector.getDefault()
 
-    fun install() {
-        ProxySelector.setDefault(object : ProxySelector() {
-            override fun select(uri: URI?): List<Proxy> {
-                val p = proxy
-                // 代理连不上（电脑关了、代理软件没开局域网连接）时接着直连，免得什么都打不开
-                if (p != Proxy.NO_PROXY && !isLocal(uri?.host)) return listOf(p, Proxy.NO_PROXY)
-                return system?.select(uri) ?: listOf(Proxy.NO_PROXY)
-            }
+    val selector: ProxySelector = object : ProxySelector() {
+        override fun select(uri: URI?): List<Proxy> {
+            val p = proxy
+            // 代理连不上（电脑关了、代理软件没开局域网连接）时接着直连，免得什么都打不开
+            if (p != Proxy.NO_PROXY && !isLocal(uri?.host)) return listOf(p, Proxy.NO_PROXY)
+            return system?.select(uri) ?: listOf(Proxy.NO_PROXY)
+        }
 
-            override fun connectFailed(uri: URI?, sa: SocketAddress?, ioe: IOException?) {
-                system?.connectFailed(uri, sa, ioe)
-            }
+        override fun connectFailed(uri: URI?, sa: SocketAddress?, ioe: IOException?) {
+            system?.connectFailed(uri, sa, ioe)
+        }
+    }
+
+    /** 应用里的 OkHttp 都从这里建：直接用 [selector]，不受系统改默认 ProxySelector 的影响 */
+    fun builder(): OkHttpClient.Builder = OkHttpClient.Builder().proxySelector(selector)
+
+    fun install(context: Context) {
+        ProxySelector.setDefault(selector)
+        // 网络切换（WiFi ↔ 移动数据）、系统代理变化时，系统会把每个进程的默认 ProxySelector 换回它自己的
+        // （android.net.Proxy.setHttpProxyConfiguration），之后新建的连接就不走这里的代理了。收到变化后装回来；
+        // 系统那边也是在主线程上换，先后不定，所以稍后再补两次
+        val main = Handler(Looper.getMainLooper())
+        val reinstall = Runnable { if (ProxySelector.getDefault() !== selector) ProxySelector.setDefault(selector) }
+        fun later() {
+            main.post(reinstall)
+            main.postDelayed(reinstall, 1000)
+            main.postDelayed(reinstall, 5000)
+        }
+        context.getSystemService(ConnectivityManager::class.java)?.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = later()
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) = later()
         })
+        ContextCompat.registerReceiver(context, object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) = later()
+        }, IntentFilter(android.net.Proxy.PROXY_CHANGE_ACTION), ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     fun apply(context: Context, type: ProxyType, host: String, port: Int) {
