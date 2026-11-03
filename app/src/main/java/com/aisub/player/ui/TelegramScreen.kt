@@ -315,13 +315,19 @@ private fun ChatList(openChat: (TgChat) -> Unit) {
             ) {
                 item { MenuChip(CHAT_FILTERS, filter, highlighted = filter > 0) { filter = it; Telegram.chatFilter = it } }
                 item { MenuChip(CHAT_SORTS, sort, highlighted = sort > 0) { sort = it; Telegram.chatSort = it } }
+                // 竖线隔开：前面是显示方式和排序，后面是分组（免得「所有分组」和「全部频道」看着像一回事）
+                item {
+                    Box(Modifier.height(32.dp), contentAlignment = Alignment.Center) {
+                        Box(Modifier.width(1.dp).height(20.dp).background(MaterialTheme.colorScheme.outlineVariant))
+                    }
+                }
                 val tabs = listOf<String?>(null, FAVORITES) + groups
                 items(tabs.size) { i ->
                     val g = tabs[i]
                     androidx.compose.material3.FilterChip(
                         selected = group == g,
                         onClick = { group = g },
-                        label = { Text(g ?: "全部") },
+                        label = { Text(g ?: "所有分组") },
                     )
                 }
                 item {
@@ -678,10 +684,14 @@ fun TelegramChatScreen(
     // 按时长、大小筛选：在已经加载的视频里挑，符合的太少就接着往下加载
     var durationFilter by page::durationFilter
     var sizeFilter by page::sizeFilter
+    var customMinSec by page::customMinSec
+    var customDialog by remember { mutableStateOf(false) }
+    val custom = durationFilter == DURATION_FILTERS.size
     val filtering = durationFilter > 0 || sizeFilter > 0
     // 筛选只看视频：图片、文字、文件不显示
     val shown = if (!filtering) videos else videos.filter {
-        it.isVideo && DURATION_FILTERS[durationFilter].second(it.durationSec) && SIZE_FILTERS[sizeFilter].second(it.size)
+        val durationOk = if (custom) it.durationSec >= customMinSec else DURATION_FILTERS[durationFilter].second(it.durationSec)
+        it.isVideo && durationOk && SIZE_FILTERS[sizeFilter].second(it.size)
     }
     var starting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -800,7 +810,13 @@ fun TelegramChatScreen(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 item { ModeChip(mode) { mode = it; Telegram.mode = it } }
-                item { FilterMenuChip("时长", DURATION_FILTERS.map { it.first }, durationFilter) { durationFilter = it } }
+                item {
+                    // 最后一项是自定义：选了已经设过的直接用，点「自定义…」再填
+                    val options = DURATION_FILTERS.map { it.first } + (if (custom) customDurationLabel(customMinSec) else "自定义…")
+                    FilterMenuChip("时长", options, durationFilter) { i ->
+                        if (i == DURATION_FILTERS.size) customDialog = true else durationFilter = i
+                    }
+                }
                 item { FilterMenuChip("大小", SIZE_FILTERS.map { it.first }, sizeFilter) { sizeFilter = it } }
                 items(tags.size) { i ->
                     val t = tags[i]
@@ -840,6 +856,12 @@ fun TelegramChatScreen(
                 }
             }
         }
+    }
+    if (customDialog) CustomDurationDialog(customMinSec, onDismiss = { customDialog = false }) { sec ->
+        customMinSec = sec
+        lastCustomMinSec = sec
+        durationFilter = DURATION_FILTERS.size
+        customDialog = false
     }
     reading?.let { v ->
         AppDialog(
@@ -928,6 +950,8 @@ private class ChatPage(val chatId: Long) {
     /** [DURATION_FILTERS] / [SIZE_FILTERS] 里选的第几项，0 是不限 */
     var durationFilter by mutableStateOf(0)
     var sizeFilter by mutableStateOf(0)
+    /** 自定义的「X 分钟 / 秒以上」（秒）；[durationFilter] 是 [DURATION_FILTERS].size 时用它 */
+    var customMinSec by mutableStateOf(lastCustomMinSec)
     var mode by mutableStateOf(Telegram.mode)
     private var results: Results? = null
 
@@ -954,6 +978,44 @@ private val DURATION_FILTERS: List<Pair<String, (Int) -> Boolean>> = listOf(
     "20–60 分钟" to { s -> s in 1200 until 3600 },
     "1 小时以上" to { s -> s >= 3600 },
 )
+
+/** 上次自定义的时长（秒），换个频道接着用 */
+private var lastCustomMinSec = 0
+
+/** 600 → 「10 分钟以上」，90 → 「90 秒以上」 */
+private fun customDurationLabel(sec: Int) =
+    if (sec >= 60 && sec % 60 == 0) "${sec / 60} 分钟以上" else "$sec 秒以上"
+
+/** 自定义时长：填数字，选分钟或秒 */
+@Composable
+private fun CustomDurationDialog(initialSec: Int, onDismiss: () -> Unit, onConfirm: (Int) -> Unit) {
+    var minutes by remember { mutableStateOf(initialSec == 0 || initialSec % 60 == 0) }
+    var text by remember { mutableStateOf(if (initialSec == 0) "" else (if (minutes) initialSec / 60 else initialSec).toString()) }
+    val n = text.toIntOrNull()?.takeIf { it > 0 }
+    AppDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("自定义时长") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("只看时长不少于这个的视频")
+                OutlinedTextField(
+                    text, { v -> text = v.filter(Char::isDigit).take(5) }, singleLine = true,
+                    label = { Text(if (minutes) "分钟" else "秒") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    colors = appFieldColors(), modifier = Modifier.fillMaxWidth(), phoneLabel = "时长（数字）",
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    androidx.compose.material3.FilterChip(selected = minutes, onClick = { minutes = true }, label = { Text("分钟") })
+                    androidx.compose.material3.FilterChip(selected = !minutes, onClick = { minutes = false }, label = { Text("秒") })
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { n?.let { onConfirm(if (minutes) it * 60 else it) } }, enabled = n != null) { Text("确定") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
 
 private val SIZE_FILTERS: List<Pair<String, (Long) -> Boolean>> = listOf(
     "不限" to { _ -> true },
