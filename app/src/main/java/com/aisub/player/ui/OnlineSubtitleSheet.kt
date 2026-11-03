@@ -48,15 +48,25 @@ import com.aisub.player.subtitle.OnlineSubtitle
 import com.aisub.player.subtitle.OnlineSubtitleSource
 import kotlinx.coroutines.launch
 
-/** 在线搜索并下载字幕（射手网 / OpenSubtitles），下载后直接替换当前字幕。 */
+/**
+ * 在线搜索并下载字幕（射手网 / OpenSubtitles），下载后直接替换当前字幕。
+ * 详情页里用时传 [video]（还没播放的视频）和 [initialQuery]（识别出的片名）：下载的字幕存起来，播放时自动载入。
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun OnlineSubtitleSheet(vm: MainViewModel, onDismiss: () -> Unit, onOpenSettings: () -> Unit) {
+fun OnlineSubtitleSheet(
+    vm: MainViewModel,
+    onDismiss: () -> Unit,
+    onOpenSettings: () -> Unit,
+    video: android.net.Uri? = null,
+    initialQuery: String? = null,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val sources = remember { vm.onlineSubtitles().sources }
     var source by remember { mutableStateOf(sources.firstOrNull()) }
-    var query by remember { mutableStateOf(vm.defaultSubtitleQuery()) }
+    var query by remember { mutableStateOf(initialQuery?.ifBlank { null } ?: vm.defaultSubtitleQuery(video ?: vm.state.value.videoUri)) }
+    val target = video ?: vm.state.value.videoUri
     var results by remember { mutableStateOf<List<OnlineSubtitle>?>(null) }
     var searching by remember { mutableStateOf(false) }
     var downloading by remember { mutableStateOf<OnlineSubtitle?>(null) }
@@ -68,7 +78,7 @@ fun OnlineSubtitleSheet(vm: MainViewModel, onDismiss: () -> Unit, onOpenSettings
         error = null
         scope.launch {
             try {
-                results = vm.searchOnlineSubtitles(src, query)
+                results = vm.searchOnlineSubtitles(src, query, target)
             } catch (e: Exception) {
                 results = null
                 error = e.message ?: e.toString()
@@ -83,8 +93,9 @@ fun OnlineSubtitleSheet(vm: MainViewModel, onDismiss: () -> Unit, onOpenSettings
         error = null
         scope.launch {
             try {
-                val n = vm.downloadOnlineSubtitle(sub)
-                Toast.makeText(context, "已载入 $n 句字幕", Toast.LENGTH_SHORT).show()
+                val playing = target == vm.state.value.videoUri
+                val n = vm.downloadOnlineSubtitle(sub, target)
+                Toast.makeText(context, if (playing) "已载入 $n 句字幕" else "已下载 $n 句字幕，播放时自动载入", Toast.LENGTH_SHORT).show()
                 onDismiss()
             } catch (e: Exception) {
                 error = "下载失败：${e.message ?: e}"

@@ -182,6 +182,18 @@ fun FileDetailScreen(
         meta?.posterUrl != null && meta.posterRatio < 1f -> meta.posterUrl
         else -> local?.posterUrl ?: info?.posterUrl ?: meta?.posterUrl
     }
+    // 搜字幕用的片名：识别出的原名（字幕站多按英文名收录），剧集带上季集
+    val subtitleQuery = remember(info, parsed) {
+        val t = info?.originalTitle?.ifBlank { null } ?: info?.title?.ifBlank { null } ?: parsed.title
+        val season = meta?.season ?: parsed.season
+        val episode = meta?.episode ?: parsed.episode
+        if (episode != null) "$t S%02dE%02d".format(season ?: 1, episode) else t
+    }
+    LaunchedEffect(subtitleQuery, info) {
+        if (isVideo && info != null) item.playUrl?.let { main.rememberSubtitleQuery(it, subtitleQuery) }
+    }
+    var subtitles by remember { mutableStateOf(false) }
+    val isTelegram = item.playUrl?.let(com.aisub.player.telegram.Telegram::isTelegram) == true
     // 首页「继续观看」用这张做封面
     LaunchedEffect(backdrop, poster) {
         if (isVideo && item.playUrl != null) com.aisub.player.meta.VideoCovers.remember(context, item.playUrl, backdrop ?: poster)
@@ -291,6 +303,9 @@ fun FileDetailScreen(
                 if (server != null && !item.isDir && item.playUrl != null) {
                     OutlinedButton(onClick = ::download) { Icon(AppIcons.Download, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("下载") }
                 }
+                if (isVideo && item.playUrl != null) OutlinedButton(onClick = { subtitles = true }) {
+                    Icon(AppIcons.Subtitles, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("下载字幕")
+                }
                 if (isVideo) FilledTonalButton(onClick = { rematching = true }) { Text("重新匹配") }
             }
 
@@ -350,8 +365,8 @@ fun FileDetailScreen(
                     LabeledText("名称", name)
                     LabeledText("类型", kindLabel(item))
                     if (item.size > 0) LabeledText("大小", "${formatSize(item.size)}（${"%,d".format(item.size)} 字节）")
-                    LabeledText("来源", server?.let { "${it.name}（${it.type.label}）" } ?: "本机")
-                    if (server == null || !server.type.isCloud) LabeledText("位置", Uri.decode(item.path))
+                    LabeledText("来源", server?.let { "${it.name}（${it.type.label}）" } ?: if (isTelegram) "Telegram" else "本机")
+                    if ((server == null || !server.type.isCloud) && !isTelegram) LabeledText("位置", Uri.decode(item.path))
                 }
             }
 
@@ -375,6 +390,12 @@ fun FileDetailScreen(
         }
     }
 
+    if (subtitles) item.playUrl?.let { url ->
+        OnlineSubtitleSheet(
+            main, onDismiss = { subtitles = false }, onOpenSettings = { subtitles = false; openSettings() },
+            video = Uri.parse(url), initialQuery = subtitleQuery,
+        )
+    }
     if (rematching) {
         val current = MetaRepository.override(context, fileKey)
         RematchDialog(

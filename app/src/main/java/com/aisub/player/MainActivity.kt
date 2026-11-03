@@ -131,7 +131,10 @@ class MainActivity : ComponentActivity() {
 
             val openDetail: (MediaEntry) -> Unit = { e -> nav.push(Screen.FileDetail(null, e.toRemoteItem(), listOf(e), 0)) }
             AppTheme {
-                CompositionLocalProvider(LocalOpenDetail provides openDetail) {
+                CompositionLocalProvider(
+                    LocalOpenDetail provides openDetail,
+                    com.aisub.player.ui.LocalOpenItemDetail provides { item, queue, i -> nav.push(Screen.FileDetail(null, item, queue, i)) },
+                ) {
                   // 全面屏下 adjustResize 不会自动给键盘让位：最外层统一留出键盘高度，输入框（搜索、链接、设置里的 Key 等）不会被键盘盖住
                   Column(Modifier.fillMaxSize().background(androidx.compose.material3.MaterialTheme.colorScheme.background).imePadding()) {
                    // 电视：播放页以外留出安全边距（部分电视有过扫描，贴边的内容会被切掉）

@@ -2,4 +2,6 @@
 <paths>
     <!-- 应用内更新下载的安装包（AppUpdater） -->
     <cache-path name="updates" path="updates/" />
+    <!-- Telegram 频道里的文件（压缩包、文档等）交给别的 App 打开 -->
+    <cache-path name="tgfiles" path="tgfiles/" />
 </paths>

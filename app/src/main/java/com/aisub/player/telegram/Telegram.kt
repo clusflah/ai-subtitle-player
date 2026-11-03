@@ -42,7 +42,12 @@ data class TgChat(
     /** 公开的 @用户名、成员数：搜索结果里显示（会话列表里不取，省时间） */
     val username: String? = null,
     val members: Int = 0,
+    /** 最后一条消息的时间（秒），0 是不知道 */
+    val lastDate: Int = 0,
 )
+
+/** 一个会话里有多少视频、媒体文件，最新视频的时间（秒）；[checked] 是查的时间（毫秒） */
+data class TgChatStats(val videos: Int, val media: Int, val latestVideo: Int, val checked: Long)
 
 /** 频道 / 群里的一个视频（视频消息，或文件形式发的视频） */
 data class TgVideo(
@@ -62,8 +67,13 @@ data class TgVideo(
     val mini: ByteArray?,
     /** 缩略图文件，要下载 */
     val thumb: TdApi.File?,
+    /** 视频以外的消息（不是「仅视频」模式时列出来）：文字的正文在 [caption]，图片和文件的原文件在 [file] */
+    val kind: TgKind = TgKind.VIDEO,
+    val file: TdApi.File? = null,
 ) {
     val uri: String get() = Telegram.uriOf(chatId, messageId)
+    val isText: Boolean get() = kind == TgKind.TEXT
+    val isVideo: Boolean get() = kind == TgKind.VIDEO
 
     /** 当作「剧名」的标签：第一行里的优先（「番剧: #片名」），没有就用第一个 */
     val seriesTag: String?
@@ -71,6 +81,13 @@ data class TgVideo(
             val first = caption.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
             return tags.firstOrNull { it in first } ?: tags.firstOrNull()
         }
+}
+
+enum class TgKind { VIDEO, TEXT, PHOTO, FILE }
+
+/** 频道页列出哪些消息（频道里常有大量文字、图片、广告，默认只看视频） */
+enum class TgMode(val label: String) {
+    ALL("全部消息"), VIDEO("仅视频"), VIDEO_PHOTO("视频+图片"), FILES("文件"),
 }
 
 class TgException(val code: Int, message: String) : Exception(message)
@@ -241,8 +258,71 @@ object Telegram {
             is TdApi.ChatTypeBasicGroup -> TgChat(id, chat.title, false)
             else -> return null
         }
-        return c.copy(photo = chat.photo?.small, photoMini = chat.photo?.minithumbnail?.data)
+        return c.copy(photo = chat.photo?.small, photoMini = chat.photo?.minithumbnail?.data, lastDate = chat.lastMessage?.date ?: 0)
     }
+
+    // ---- 频道列表：视频数、媒体数（筛选、排序用），置顶、分组 ----
+
+    /** 上次查到的（存着，打开列表马上能用） */
+    fun cachedStats(chatId: Long): TgChatStats? = prefs.getString("stats_$chatId", null)?.split(',')
+        ?.mapNotNull { it.toLongOrNull() }?.takeIf { it.size == 4 }
+        ?.let { (v, m, d, t) -> TgChatStats(v.toInt(), m.toInt(), d.toInt(), t) }
+
+    /**
+     * 查一个会话的视频数、媒体数。服务器按类型数（不用自己翻消息）；文件形式发的不一定是视频，
+     * 按最近 20 个文件里视频占的比例估算。
+     */
+    suspend fun chatStats(chatId: Long): TgChatStats {
+        suspend fun count(f: TdApi.SearchMessagesFilter) =
+            runCatching { send(TdApi.GetChatMessageCount(chatId, null, f, false)).count }.getOrDefault(0)
+        suspend fun recent(f: TdApi.SearchMessagesFilter, n: Int) =
+            runCatching { send(TdApi.SearchChatMessages(chatId, null, "", null, 0, 0, n, f)).messages.toList() }.getOrDefault(emptyList())
+        val videos = count(TdApi.SearchMessagesFilterVideo())
+        val docs = count(TdApi.SearchMessagesFilterDocument())
+        val others = count(TdApi.SearchMessagesFilterPhoto()) + count(TdApi.SearchMessagesFilterAudio()) + count(TdApi.SearchMessagesFilterAnimation())
+        val recentDocs = recent(TdApi.SearchMessagesFilterDocument(), 20)
+        val docVideos = recentDocs.filter { videoOf(it) != null }
+        val docVideoCount = if (recentDocs.isEmpty()) 0 else (docs.toLong() * docVideos.size / recentDocs.size).toInt()
+        val latest = maxOf(recent(TdApi.SearchMessagesFilterVideo(), 1).firstOrNull()?.date ?: 0, docVideos.firstOrNull()?.date ?: 0)
+        val s = TgChatStats(videos + docVideoCount, videos + docs + others, latest, System.currentTimeMillis())
+        prefs.edit().putString("stats_$chatId", "${s.videos},${s.media},${s.latestVideo},${s.checked}").apply()
+        return s
+    }
+
+    /** 置顶的会话，按置顶的先后（后置顶的在前） */
+    fun pinned(): List<Long> = prefs.getString("pinned", "")!!.split(',').mapNotNull { it.toLongOrNull() }
+
+    fun setPinned(chatId: Long, pinned: Boolean) {
+        val list = pinned().filter { it != chatId }.let { if (pinned) listOf(chatId) + it else it }
+        prefs.edit().putString("pinned", list.joinToString(",")).apply()
+    }
+
+    /** 自己建的分组（按建的顺序） */
+    fun groups(): List<String> = runCatching {
+        val a = org.json.JSONArray(prefs.getString("groups", "[]"))
+        List(a.length()) { a.getString(it) }
+    }.getOrDefault(emptyList())
+
+    /** 会话 → 所在分组 */
+    fun chatGroups(): Map<Long, String> = runCatching {
+        val o = org.json.JSONObject(prefs.getString("chatGroups", "{}")!!)
+        o.keys().asSequence().mapNotNull { k -> k.toLongOrNull()?.let { it to o.getString(k) } }.toMap()
+    }.getOrDefault(emptyMap())
+
+    fun saveGroups(groups: List<String>, chatGroups: Map<Long, String>) {
+        val o = org.json.JSONObject()
+        chatGroups.filterValues { it in groups }.forEach { (k, v) -> o.put(k.toString(), v) }
+        prefs.edit().putString("groups", org.json.JSONArray(groups).toString()).putString("chatGroups", o.toString()).apply()
+    }
+
+    /** 频道列表的显示和排序（记住上次选的） */
+    var chatFilter: Int
+        get() = prefs.getInt("chatFilter", 0)
+        set(v) = prefs.edit().putInt("chatFilter", v).apply()
+
+    var chatSort: Int
+        get() = prefs.getInt("chatSort", 0)
+        set(v) = prefs.edit().putInt("chatSort", v).apply()
 
     /** 按名字或 @用户名 搜公开的频道和群（包括没加入的），带成员数和 @用户名 */
     suspend fun searchPublic(query: String): List<TgChat> {
@@ -282,8 +362,9 @@ object Telegram {
     /**
      * 一个频道 / 群里的视频，从新到旧一页页取。让服务器按类型筛（视频消息、文件），
      * 文字消息再多也不用自己翻；[query] 不空时只要说明里有这些字的（例如「#片名」）。
+     * [mode]：除了视频还列出哪些消息（和视频按时间排在一起）。
      */
-    class VideoPager(private val chatId: Long, private val query: String = "") {
+    class VideoPager(private val chatId: Long, private val query: String = "", private val mode: TgMode = TgMode.VIDEO) {
         private inner class Stream(val filter: TdApi.SearchMessagesFilter) {
             var from = 0L
             var done = false
@@ -294,10 +375,18 @@ object Telegram {
                 val page = r.messages.toList()
                 val found = ArrayList<TgVideo>()
                 for (m in page) {
+                    // 「文件」模式只要文件形式发的（视频文件也算）
+                    if (mode == TgMode.FILES && m.content !is TdApi.MessageDocument) continue
                     val v = videoOf(m, groupCaption(m, page))
-                    if (v != null) found += v
+                    if (v != null) { found += v; continue }
+                    when (mode) {
+                        TgMode.ALL -> (textOf(m) ?: photoOf(m) ?: fileOf(m))?.let { found += it }
+                        TgMode.VIDEO_PHOTO -> photoOf(m)?.let { found += it }
+                        TgMode.FILES -> fileOf(m)?.let { found += it }
+                        TgMode.VIDEO -> Unit
+                    }
                     // 搜到的是相册封面图或文字帖：把同一组的视频带出来
-                    else if (filter is TdApi.SearchMessagesFilterEmpty) found += groupVideos(m)
+                    if (filter is TdApi.SearchMessagesFilterEmpty && query.isNotBlank()) found += groupVideos(m)
                 }
                 found.distinctBy { it.messageId }.sortedByDescending { it.messageId }.toCollection(buffer)
                 from = r.nextFromMessageId
@@ -306,10 +395,16 @@ object Telegram {
         }
 
         // 搜索时多一路不限类型：标签常写在相册的封面图或单独的文字帖里，视频本身没有说明
-        private val streams = listOfNotNull(
-            Stream(TdApi.SearchMessagesFilterVideo()), Stream(TdApi.SearchMessagesFilterDocument()),
-            if (query.isNotBlank()) Stream(TdApi.SearchMessagesFilterEmpty()) else null,
-        )
+        // 「全部消息」一路不限类型就够了；文件模式只要文件
+        private val streams = when (mode) {
+            TgMode.ALL -> listOf(Stream(TdApi.SearchMessagesFilterEmpty()))
+            TgMode.FILES -> listOf(Stream(TdApi.SearchMessagesFilterDocument()))
+            else -> listOfNotNull(
+                Stream(TdApi.SearchMessagesFilterVideo()), Stream(TdApi.SearchMessagesFilterDocument()),
+                if (mode == TgMode.VIDEO_PHOTO) Stream(TdApi.SearchMessagesFilterPhoto()) else null,
+                if (query.isNotBlank()) Stream(TdApi.SearchMessagesFilterEmpty()) else null,
+            )
+        }
         private val returned = HashSet<Long>()
 
         /** 取到过的前后消息，按 ID 排好；[covered] 是其中连续取到的区间 */
@@ -443,6 +538,54 @@ object Telegram {
             duration, file.size.takeIf { it > 0 } ?: file.expectedSize,
             m.date, mini?.data, thumb?.file,
         )
+    }
+
+    private fun tagsOf(text: String) = HASHTAG.findAll(text).map { "#" + it.value.drop(1) }.distinct().toList()
+
+    private fun firstLine(text: String) = text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }?.take(80)
+
+    /** 文字消息 → 列表里的一条 */
+    private fun textOf(m: TdApi.Message): TgVideo? {
+        val text = (m.content as? TdApi.MessageText)?.text?.text?.trim()?.ifBlank { null } ?: return null
+        return TgVideo(m.chatId, m.id, firstLine(text)!!, text, "", tagsOf(text), 0, 0, m.date, null, null, TgKind.TEXT)
+    }
+
+    /** 图片消息：缩略图用中等大小的，[TgVideo.file] 是最大的那张 */
+    private fun photoOf(m: TdApi.Message): TgVideo? {
+        val c = m.content as? TdApi.MessagePhoto ?: return null
+        val sizes = c.photo.sizes.sortedBy { it.width * it.height }
+        val full = sizes.lastOrNull() ?: return null
+        val thumb = sizes.firstOrNull { it.width >= 320 } ?: full
+        val caption = c.caption?.text.orEmpty()
+        return TgVideo(
+            m.chatId, m.id, firstLine(caption) ?: "图片", caption, "", tagsOf(caption), 0,
+            full.photo.size.takeIf { it > 0 } ?: full.photo.expectedSize, m.date, c.photo.minithumbnail?.data, thumb.photo,
+            TgKind.PHOTO, full.photo,
+        )
+    }
+
+    /** 不是视频的文件（压缩包、字幕、文档…） */
+    private fun fileOf(m: TdApi.Message): TgVideo? {
+        val d = (m.content as? TdApi.MessageDocument) ?: return null
+        val caption = d.caption?.text.orEmpty()
+        val f = d.document.document
+        return TgVideo(
+            m.chatId, m.id, d.document.fileName.ifBlank { firstLine(caption) ?: "文件" }, caption, d.document.fileName, tagsOf(caption), 0,
+            f.size.takeIf { it > 0 } ?: f.expectedSize, m.date, d.document.minithumbnail?.data, d.document.thumbnail?.file,
+            TgKind.FILE, f,
+        )
+    }
+
+    /** 频道页列出哪些消息（默认仅视频） */
+    var mode: TgMode
+        get() = runCatching { TgMode.valueOf(prefs.getString("mode", null)!!) }.getOrDefault(TgMode.VIDEO)
+        set(v) = prefs.edit().putString("mode", v.name).apply()
+
+    /** 下载整个文件（图片、文档），返回本地路径；下好前一直等 */
+    suspend fun downloadPath(file: TdApi.File): String? {
+        if (file.local.isDownloadingCompleted) return file.local.path
+        val f = send(TdApi.DownloadFile(file.id, 16, 0, 0, true))
+        return f.local.path.takeIf { f.local.isDownloadingCompleted }
     }
 
     private data class VideoParts(
