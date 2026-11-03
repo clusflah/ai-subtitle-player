@@ -72,7 +72,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -1319,11 +1318,11 @@ private fun AddAdListDialog(onDismiss: () -> Unit, onAdd: (name: String, url: St
                     url, { url = it.trim() }, label = { Text("订阅地址") }, singleLine = true,
                     placeholder = { Text("https://example.com/filter.txt") },
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri),
-                    colors = appFieldColors(), modifier = Modifier.fillMaxWidth(),
+                    colors = appFieldColors(), modifier = Modifier.fillMaxWidth(), phoneInput = false,
                 )
                 OutlinedTextField(
                     name, { name = it }, label = { Text("名称（可不填）") }, singleLine = true,
-                    colors = appFieldColors(), modifier = Modifier.fillMaxWidth(),
+                    colors = appFieldColors(), modifier = Modifier.fillMaxWidth(), phoneInput = false,
                 )
                 // 电视：长地址用手机粘贴
                 PhoneInputButton(listOf(PhoneField("url", "订阅地址", url), PhoneField("name", "名称", name)), title = "广告规则订阅") { v ->
@@ -1392,7 +1391,7 @@ private fun TvAddressDialog(initial: String, onGo: (String) -> Unit, onDismiss: 
                     label = { Text("或用遥控器输入") }, singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
                     keyboardActions = KeyboardActions(onGo = { if (text.isNotBlank()) onGo(text) }),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth(), phoneInput = false,
                 )
             }
         },

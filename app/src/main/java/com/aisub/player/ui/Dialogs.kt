@@ -10,7 +10,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -110,14 +109,14 @@ fun ServerDialog(initial: Server, hint: String? = null, onDismiss: () -> Unit, o
                         FilterChip(selected = s.type == t, onClick = { s = s.copy(type = t) }, label = { Text(t.label) })
                     }
                 }
-                OutlinedTextField(s.name, { s = s.copy(name = it) }, label = { Text("名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(s.name, { s = s.copy(name = it) }, label = { Text("名称") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
                 OutlinedTextField(
                     s.baseUrl, { s = s.copy(baseUrl = it) },
                     label = { Text("地址") },
                     placeholder = {
                         Text(if (s.type == ServerType.OPENLIST) "http://192.168.1.2:5244" else "https://nas.local:5006/dav")
                     },
-                    singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false,
                 )
                 OutlinedTextField(
                     s.lanUrl, { s = s.copy(lanUrl = it) },
@@ -126,16 +125,16 @@ fun ServerDialog(initial: Server, hint: String? = null, onDismiss: () -> Unit, o
                         Text(if (s.type == ServerType.OPENLIST) "http://192.168.1.2:5244" else "http://192.168.1.2:5005/dav")
                     },
                     supportingText = { Text("上面填外网域名时，在家能连上内网地址就自动走内网") },
-                    singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false,
                 )
-                OutlinedTextField(s.username, { s = s.copy(username = it) }, label = { Text("用户名（可不填）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(s.username, { s = s.copy(username = it) }, label = { Text("用户名（可不填）") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
                 OutlinedTextField(
                     s.password, { s = s.copy(password = it) }, label = { Text("密码") }, singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), phoneInput = false,
                 )
                 OutlinedTextField(
                     s.rootPath, { s = s.copy(rootPath = it) }, label = { Text("起始目录") },
-                    placeholder = { Text("/") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("/") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false,
                 )
                 // 电视：地址、密码用手机输入
                 PhoneInputButton(

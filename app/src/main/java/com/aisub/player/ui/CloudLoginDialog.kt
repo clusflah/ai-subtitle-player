@@ -16,7 +16,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -192,10 +191,10 @@ private fun BaiduLogin(onSuccess: (String) -> Unit) {
             PhoneInputButton(listOf(PhoneField("app_key", "AppKey", appKey), PhoneField("secret_key", "SecretKey", secretKey, secret = true)), title = "登录百度网盘") { v ->
                 appKey = v["app_key"].orEmpty(); secretKey = v["secret_key"].orEmpty()
             }
-            OutlinedTextField(appKey, { appKey = it }, label = { Text("AppKey") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(appKey, { appKey = it }, label = { Text("AppKey") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
             OutlinedTextField(
                 secretKey, { secretKey = it }, label = { Text("SecretKey") }, singleLine = true,
-                visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(),
+                visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), phoneInput = false,
             )
             OutlinedButton(onClick = { started = true }, enabled = appKey.isNotBlank() && secretKey.isNotBlank()) { Text("获取二维码") }
         } else {
@@ -213,8 +212,8 @@ private fun BaiduLogin(onSuccess: (String) -> Unit) {
         PhoneInputButton(listOf(PhoneField("token", "refresh_token", refreshToken), PhoneField("api", "续期接口", renewApi)), title = "登录百度网盘") { v ->
             refreshToken = v["token"].orEmpty(); renewApi = v["api"].orEmpty().ifBlank { renewApi }
         }
-        OutlinedTextField(refreshToken, { refreshToken = it }, label = { Text("refresh_token") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(renewApi, { renewApi = it }, label = { Text("续期接口") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(refreshToken, { refreshToken = it }, label = { Text("refresh_token") }, modifier = Modifier.fillMaxWidth(), phoneInput = false)
+        OutlinedTextField(renewApi, { renewApi = it }, label = { Text("续期接口") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
         OutlinedButton(
             onClick = { onSuccess(BaiduClient.credsFromRefreshToken(refreshToken, renewApi)) },
             enabled = refreshToken.isNotBlank(),
@@ -236,10 +235,10 @@ private fun PikPakLogin(onSuccess: (String) -> Unit) {
     PhoneInputButton(listOf(PhoneField("user", "邮箱 / 手机号", username), PhoneField("pass", "密码", secret = true)), title = "登录 PikPak") { v ->
         username = v["user"].orEmpty(); password = v["pass"].orEmpty()
     }
-    OutlinedTextField(username, { username = it }, label = { Text("邮箱 / 手机号") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+    OutlinedTextField(username, { username = it }, label = { Text("邮箱 / 手机号") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
     OutlinedTextField(
         password, { password = it }, label = { Text("密码") }, singleLine = true,
-        visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(),
+        visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), phoneInput = false,
     )
     message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
     verifyUrl?.let { url ->
@@ -252,7 +251,7 @@ private fun PikPakLogin(onSuccess: (String) -> Unit) {
         OutlinedTextField(
             captcha, { captcha = it },
             label = { Text("验证后的跳转地址或 captcha_token（可选）") },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth(), phoneInput = false,
         )
     }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
