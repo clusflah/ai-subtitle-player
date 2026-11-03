@@ -31,13 +31,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -46,10 +49,13 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.aisub.player.media.formatDuration
@@ -59,6 +65,7 @@ import com.aisub.player.telegram.TgKind
 import com.aisub.player.telegram.TgSender
 import com.aisub.player.telegram.TgVideo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 // 「全部消息」像官方客户端那样显示：新消息在下面，气泡、发送人名字和头像、回复引用、表情回应、日期分隔
@@ -82,6 +89,8 @@ internal fun TgChatMessages(
     saved: Set<String>,
     onClick: (TgVideo) -> Unit,
     onLongClick: (TgVideo) -> Unit,
+    /** 点了正文里的 #标签：按它筛选 */
+    onTag: (String) -> Unit,
 ) {
     val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
     val names = if (dark) NAME_COLORS_DARK else NAME_COLORS
@@ -92,6 +101,10 @@ internal fun TgChatMessages(
         val a = older.meta?.sender?.id ?: return false
         return a == newer.meta?.sender?.id && newer.date - older.date < RUN_GAP_SEC && day(older) == day(newer)
     }
+    val scope = rememberCoroutineScope()
+    // 往上翻远了：右下角出现「回到最新」
+    val awayFromLatest by remember(state) { derivedStateOf { state.firstVisibleItemIndex > 2 } }
+    Box(Modifier.fillMaxSize()) {
     LazyColumn(
         state = state, reverseLayout = true,
         contentPadding = PaddingValues(vertical = 6.dp),
@@ -110,13 +123,39 @@ internal fun TgChatMessages(
                     last = newer == null || !sameRun(v, newer),
                     watched = progress[v.uri],
                     saved = v.isVideo && "${v.chatId}/${v.messageId}" in saved,
-                    onClick = { onClick(v) }, onLongClick = { onLongClick(v) },
+                    onClick = { onClick(v) }, onLongClick = { onLongClick(v) }, onTag = onTag,
                 )
             }
         }
         if (loading) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(24.dp)) } }
         error?.let { e -> item { TextButton(onClick = loadMore, modifier = Modifier.padding(16.dp)) { Text("加载失败（$e），点这里重试") } } }
     }
+    if (awayFromLatest) SmallFloatingActionButton(
+        onClick = { scope.launch { state.animateScrollToItem(0) } },
+        modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+    ) { Icon(AppIcons.ExpandMore, "回到最新") }
+    }
+}
+
+private val LINK = Regex("""https?://[^\s<>"'，。、；！？）】」]+|[#＃][\p{L}\p{N}_]+""")
+
+/** 正文里的网址能点开（交给系统，t.me 的会用 Telegram 打开），#标签点一下按它筛选 */
+@Composable
+private fun linkified(text: String, footer: String, onTag: (String) -> Unit) = buildAnnotatedString {
+    val style = TextLinkStyles(SpanStyle(color = MaterialTheme.colorScheme.primary))
+    var at = 0
+    LINK.findAll(text).forEach { m ->
+        append(text.substring(at, m.range.first))
+        val link = if (m.value[0] == '#' || m.value[0] == '＃') {
+            val tag = "#" + m.value.drop(1)
+            LinkAnnotation.Clickable(tag, style) { onTag(tag) }
+        } else LinkAnnotation.Url(m.value, style)
+        withLink(link) { append(m.value) }
+        at = m.range.last + 1
+    }
+    append(text.substring(at))
+    // 时间放在最后一行的右边：正文后面垫一段同样宽的透明字，放得下就不另起一行
+    withStyle(SpanStyle(color = Color.Transparent, fontSize = MaterialTheme.typography.labelSmall.fontSize)) { append("　 $footer") }
 }
 
 /** 一天的第一条消息上面：「11月4日」，不是今年的带年份 */
@@ -146,6 +185,7 @@ private fun Bubble(
     saved: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onTag: (String) -> Unit,
 ) {
     val meta = v.meta
     // 群里显示发送人；频道帖都是频道发的，不用
@@ -216,15 +256,8 @@ private fun Bubble(
                 }
             }
             if (text.isNotEmpty()) {
-                // 时间放在最后一行的右边：正文后面垫一段同样宽的透明字，放得下就不另起一行
                 Box(Modifier.padding(start = 10.dp, end = 10.dp, top = if (hasHeader || media || v.kind == TgKind.FILE) 4.dp else 6.dp, bottom = 6.dp)) {
-                    Text(
-                        buildAnnotatedString {
-                            append(text)
-                            withStyle(SpanStyle(color = Color.Transparent, fontSize = MaterialTheme.typography.labelSmall.fontSize)) { append("　 $footer") }
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    Text(linkified(text, footer, onTag), style = MaterialTheme.typography.bodyMedium)
                     Footer(footer, MaterialTheme.colorScheme.onSurfaceVariant, Modifier.align(Alignment.BottomEnd))
                 }
             } else if (!media) Footer(footer, MaterialTheme.colorScheme.onSurfaceVariant, Modifier.align(Alignment.End).padding(end = 10.dp, bottom = 6.dp))
