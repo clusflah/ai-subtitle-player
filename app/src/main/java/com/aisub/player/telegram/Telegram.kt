@@ -73,6 +73,8 @@ data class TgVideo(
     /** 视频以外的消息（不是「仅视频」模式时列出来）：文字的正文在 [caption]，图片和文件的原文件在 [file] */
     val kind: TgKind = TgKind.VIDEO,
     val file: TdApi.File? = null,
+    /** 「全部消息」模式才有：像官方客户端那样按聊天气泡显示要用的 */
+    val meta: TgMsgMeta? = null,
 ) {
     val uri: String get() = Telegram.uriOf(chatId, messageId)
     val isText: Boolean get() = kind == TgKind.TEXT
@@ -87,6 +89,28 @@ data class TgVideo(
 }
 
 enum class TgKind { VIDEO, TEXT, PHOTO, FILE }
+
+/** 发消息的人（或频道、群），名字颜色按官方的 7 种 */
+data class TgSender(val id: Long, val name: String, val colorIndex: Int, val photo: TdApi.File?, val photoMini: ByteArray?)
+
+/**
+ * 聊天气泡要显示的：谁发的、转发自谁、回复的哪条、表情回应、频道帖的阅读数；
+ * [mediaWidth] / [mediaHeight] 是图片、视频的原始宽高（气泡里按比例显示）
+ */
+data class TgMsgMeta(
+    val sender: TgSender?,
+    val isChannelPost: Boolean,
+    val authorSignature: String,
+    val forwardFrom: String?,
+    val replyName: String?,
+    val replyColorIndex: Int,
+    val replyText: String?,
+    val reactions: List<Pair<String, Int>>,
+    val views: Int,
+    val edited: Boolean,
+    val mediaWidth: Int,
+    val mediaHeight: Int,
+)
 
 /** 频道页列出哪些消息（频道里常有大量文字、图片、广告，默认只看视频） */
 enum class TgMode(val label: String) {
@@ -383,7 +407,7 @@ object Telegram {
                     val v = videoOf(m, groupCaption(m, page))
                     if (v != null) { found += v; continue }
                     when (mode) {
-                        TgMode.ALL -> (textOf(m) ?: photoOf(m) ?: fileOf(m))?.let { found += it }
+                        TgMode.ALL -> (textOf(m) ?: photoOf(m) ?: fileOf(m) ?: otherOf(m))?.let { found += it }
                         TgMode.VIDEO_PHOTO -> photoOf(m)?.let { found += it }
                         TgMode.FILES -> fileOf(m)?.let { found += it }
                         TgMode.VIDEO -> Unit
@@ -391,7 +415,14 @@ object Telegram {
                     // 搜到的是相册封面图或文字帖：把同一组的视频带出来
                     if (filter is TdApi.SearchMessagesFilterEmpty && query.isNotBlank()) found += groupVideos(m)
                 }
-                found.distinctBy { it.messageId }.sortedByDescending { it.messageId }.toCollection(buffer)
+                val list = found.distinctBy { it.messageId }.sortedByDescending { it.messageId }
+                // 「全部消息」按聊天气泡显示：补上发送人、回复、表情回应（同时查，TDLib 本地有的不联网）
+                if (mode == TgMode.ALL) kotlinx.coroutines.coroutineScope {
+                    list.map { v ->
+                        async { (page.firstOrNull { it.id == v.messageId } ?: known[v.messageId])?.let { v.copy(meta = metaOf(it)) } ?: v }
+                    }.awaitAll()
+                }.toCollection(buffer)
+                else list.toCollection(buffer)
                 from = r.nextFromMessageId
                 if (from == 0L || r.messages.isEmpty()) done = true
             }
@@ -618,6 +649,110 @@ object Telegram {
             f.size.takeIf { it > 0 } ?: f.expectedSize, m.date, d.document.minithumbnail?.data, d.document.thumbnail?.file,
             TgKind.FILE, f,
         )
+    }
+
+    /** 「全部消息」里其他能写成一句话的消息（贴纸、语音、投票…）；入群、置顶这些系统消息不列 */
+    private fun otherOf(m: TdApi.Message): TgVideo? {
+        fun sec(s: Int) = "%d:%02d".format(s / 60, s % 60)
+        val text = when (val c = m.content) {
+            is TdApi.MessageSticker -> c.sticker.emoji.ifBlank { "[贴纸]" }
+            is TdApi.MessageAnimation -> "[GIF] ${c.caption?.text.orEmpty()}"
+            is TdApi.MessageVoiceNote -> "[语音 ${sec(c.voiceNote.duration)}] ${c.caption?.text.orEmpty()}"
+            is TdApi.MessageVideoNote -> "[视频消息 ${sec(c.videoNote.duration)}]"
+            is TdApi.MessageAudio -> "[音乐] ${listOf(c.audio.performer, c.audio.title).filter { it.isNotBlank() }.joinToString(" - ").ifBlank { c.audio.fileName }}\n${c.caption?.text.orEmpty()}"
+            is TdApi.MessagePoll -> "[投票] ${c.poll.question.text}\n" + c.poll.options.joinToString("\n") { "○ " + it.text.text }
+            is TdApi.MessageDice -> c.emoji
+            else -> null
+        }?.trim()?.ifBlank { null } ?: return null
+        return TgVideo(m.chatId, m.id, firstLine(text)!!, text, "", tagsOf(text), 0, 0, m.date, null, null, TgKind.TEXT)
+    }
+
+    private val senders = java.util.concurrent.ConcurrentHashMap<Long, TgSender>()
+
+    /** 用户或会话（频道、匿名管理员）→ 名字和头像；查过的记着（TDLib 本地一般就有） */
+    private suspend fun senderOf(s: TdApi.MessageSender?): TgSender? {
+        val id = when (s) {
+            is TdApi.MessageSenderUser -> s.userId
+            is TdApi.MessageSenderChat -> s.chatId
+            else -> return null
+        }
+        senders[id]?.let { return it }
+        val sender = runCatching {
+            if (s is TdApi.MessageSenderUser) send(TdApi.GetUser(id)).let { u ->
+                TgSender(id, "${u.firstName} ${u.lastName}".trim().ifBlank { "已注销账号" }, colorIndexOf(u.accentColorId, id), u.profilePhoto?.small, u.profilePhoto?.minithumbnail?.data)
+            } else send(TdApi.GetChat(id)).let { c ->
+                TgSender(id, c.title, colorIndexOf(c.accentColorId, id), c.photo?.small, c.photo?.minithumbnail?.data)
+            }
+        }.getOrNull() ?: return null
+        senders[id] = sender
+        return sender
+    }
+
+    /** 官方的名字颜色：前 7 种是固定的，其他（会员自选的）按 ID 落在这 7 种里 */
+    private fun colorIndexOf(accent: Int, id: Long) = if (accent in 0..6) accent else (abs(id) % 7).toInt()
+
+    /** 气泡上显示的：发送人、转发来源、回复的哪条、表情回应、阅读数 */
+    private suspend fun metaOf(m: TdApi.Message): TgMsgMeta {
+        val forward = m.forwardInfo?.origin?.let { o ->
+            when (o) {
+                is TdApi.MessageOriginUser -> senderOf(TdApi.MessageSenderUser(o.senderUserId))?.name
+                is TdApi.MessageOriginChat -> senderOf(TdApi.MessageSenderChat(o.senderChatId))?.name
+                is TdApi.MessageOriginChannel -> senderOf(TdApi.MessageSenderChat(o.chatId))?.name
+                is TdApi.MessageOriginHiddenUser -> o.senderName
+                else -> null
+            }
+        }
+        // 回复的那条：取不到（删了、在别的会话）就用回复里带的引用
+        val replyTo = m.replyTo as? TdApi.MessageReplyToMessage
+        val replied = replyTo?.let { runCatching { send(TdApi.GetRepliedMessage(m.chatId, m.id)) }.getOrNull() }
+        val replySender = replied?.let { senderOf(it.senderId) }
+        val replyText = replyTo?.quote?.text?.text?.ifBlank { null }
+            ?: replied?.content?.let(::summaryOf)
+            ?: replyTo?.content?.let(::summaryOf)
+        val (w, h) = when (val c = m.content) {
+            is TdApi.MessagePhoto -> c.photo.sizes.maxByOrNull { it.width * it.height }?.let { it.width to it.height } ?: (0 to 0)
+            is TdApi.MessageVideo -> c.video.width to c.video.height
+            else -> 0 to 0
+        }
+        return TgMsgMeta(
+            sender = senderOf(m.senderId),
+            isChannelPost = m.isChannelPost,
+            authorSignature = m.authorSignature.orEmpty(),
+            forwardFrom = forward,
+            replyName = if (replyTo == null) null else replySender?.name ?: "消息",
+            replyColorIndex = replySender?.colorIndex ?: 5,
+            replyText = replyText,
+            reactions = m.interactionInfo?.reactions?.reactions.orEmpty().mapNotNull { r ->
+                (r.type as? TdApi.ReactionTypeEmoji)?.emoji?.let { it to r.totalCount }
+            },
+            views = m.interactionInfo?.viewCount ?: 0,
+            edited = m.editDate > 0,
+            mediaWidth = w, mediaHeight = h,
+        )
+    }
+
+    /** 被回复的消息在引用框里显示的一行 */
+    private fun summaryOf(c: TdApi.MessageContent): String {
+        val caption = when (c) {
+            is TdApi.MessageText -> c.text?.text
+            is TdApi.MessageVideo -> c.caption?.text
+            is TdApi.MessageDocument -> c.caption?.text
+            is TdApi.MessagePhoto -> c.caption?.text
+            is TdApi.MessageAnimation -> c.caption?.text
+            else -> null
+        }.orEmpty().lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
+        val kind = when (c) {
+            is TdApi.MessageVideo -> "视频"
+            is TdApi.MessagePhoto -> "图片"
+            is TdApi.MessageDocument -> c.document.fileName.ifBlank { "文件" }
+            is TdApi.MessageSticker -> c.sticker.emoji + " 贴纸"
+            is TdApi.MessageAnimation -> "GIF"
+            is TdApi.MessageVoiceNote -> "语音"
+            is TdApi.MessageAudio -> "音乐"
+            is TdApi.MessagePoll -> "投票"
+            else -> null
+        }
+        return caption ?: kind ?: "消息"
     }
 
     /** 频道页列出哪些消息（默认仅视频） */
