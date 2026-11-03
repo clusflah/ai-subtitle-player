@@ -102,7 +102,7 @@ object CloudRegistry {
     }
 }
 
-internal val cloudHttp: OkHttpClient = OkHttpClient.Builder()
+internal val cloudHttp: OkHttpClient = com.aisub.player.net.AppProxy.builder()
     .connectTimeout(20, TimeUnit.SECONDS)
     .readTimeout(60, TimeUnit.SECONDS)
     .build()

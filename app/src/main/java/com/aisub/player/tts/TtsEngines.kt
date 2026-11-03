@@ -65,7 +65,7 @@ class AzureTts(private val key: String, region: String, endpoint: String) : TtsE
     private val base = endpoint.trim().trimEnd('/').ifEmpty { "https://${region.trim()}.tts.speech.microsoft.com" }
         .removeSuffix("/cognitiveservices/v1")
 
-    private val http = OkHttpClient.Builder()
+    private val http = com.aisub.player.net.AppProxy.builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()

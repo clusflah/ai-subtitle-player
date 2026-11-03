@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
  */
 class OpenListClient(private val server: Server) : RemoteClient {
 
-    private val http = OkHttpClient.Builder()
+    private val http = com.aisub.player.net.AppProxy.builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()

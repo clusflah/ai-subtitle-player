@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
  */
 object ModelList {
 
-    private val http = OkHttpClient.Builder()
+    private val http = com.aisub.player.net.AppProxy.builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()

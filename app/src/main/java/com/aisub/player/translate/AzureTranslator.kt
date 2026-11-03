@@ -26,7 +26,7 @@ class AzureTranslator(
 
     private val base = endpoint.trimEnd('/')
 
-    private val http = OkHttpClient.Builder()
+    private val http = com.aisub.player.net.AppProxy.builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()

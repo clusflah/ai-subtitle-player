@@ -47,7 +47,7 @@ abstract class ChunkedCloudEngine(
     private var parallel: Int = 3,
 ) : SpeechEngine {
 
-    protected val http: OkHttpClient = OkHttpClient.Builder()
+    protected val http: OkHttpClient = com.aisub.player.net.AppProxy.builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(5, TimeUnit.MINUTES)
         .readTimeout(10, TimeUnit.MINUTES)
