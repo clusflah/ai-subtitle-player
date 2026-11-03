@@ -2,11 +2,14 @@ package com.aisub.player.telegram
 
 import android.content.Context
 import android.os.Build
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
@@ -491,6 +494,47 @@ object Telegram {
             }
             return out
         }
+    }
+
+    // ---- 视频收藏夹：只存会话、消息编号和当时的标题说明，打开收藏夹时重新取消息（文件 ID 每次登录会变） ----
+
+    /** 收藏的一个视频；[caption] 是收藏时看到的说明（视频自己没说明、用的是相册或同组的说明时靠它） */
+    data class SavedVideo(val chatId: Long, val messageId: Long, val chatTitle: String, val title: String, val caption: String, val added: Long) {
+        val key get() = "$chatId/$messageId"
+    }
+
+    /** 收藏的视频，最近收藏的在前 */
+    fun savedVideos(): List<SavedVideo> = runCatching {
+        val a = org.json.JSONArray(prefs.getString("savedVideos", "[]"))
+        (0 until a.length()).map { i ->
+            val o = a.getJSONObject(i)
+            SavedVideo(o.getLong("c"), o.getLong("m"), o.optString("ct"), o.optString("t"), o.optString("cap"), o.optLong("a"))
+        }
+    }.getOrDefault(emptyList())
+
+    fun savedKeys(): Set<String> = savedVideos().map { it.key }.toSet()
+
+    fun setSaved(v: TgVideo, chatTitle: String, saved: Boolean) {
+        val rest = savedVideos().filter { it.chatId != v.chatId || it.messageId != v.messageId }
+        val list = if (saved) listOf(SavedVideo(v.chatId, v.messageId, chatTitle, v.title, v.caption.take(1000), System.currentTimeMillis())) + rest else rest
+        val a = org.json.JSONArray()
+        list.forEach { s ->
+            a.put(org.json.JSONObject().put("c", s.chatId).put("m", s.messageId).put("ct", s.chatTitle).put("t", s.title).put("cap", s.caption).put("a", s.added))
+        }
+        prefs.edit().putString("savedVideos", a.toString()).apply()
+    }
+
+    /** 取回收藏的视频（同时最多取 6 个）；消息被删了、看不到了的是 null */
+    suspend fun loadSaved(list: List<SavedVideo>): List<Pair<SavedVideo, TgVideo?>> = kotlinx.coroutines.coroutineScope {
+        val gate = kotlinx.coroutines.sync.Semaphore(6)
+        list.map { s ->
+            async {
+                gate.withPermit {
+                    s to runCatching { videoOf(send(TdApi.GetMessage(s.chatId, s.messageId)), s.caption) }.getOrNull()
+                        ?.let { v -> if (v.caption.isBlank() && s.title.isNotBlank()) v.copy(title = s.title) else v }
+                }
+            }
+        }.awaitAll()
     }
 
     /** 说明里带这个标签的视频（同一部剧的各集），最多 [max] 个，从旧到新 */

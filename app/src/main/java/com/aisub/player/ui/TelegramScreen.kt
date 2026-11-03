@@ -66,7 +66,7 @@ import kotlinx.coroutines.withContext
  * Telegram：填 api_id / api_hash、登录，然后列出加入的频道和群，点进去看里面的视频（[TelegramChatScreen]）。
  */
 @Composable
-fun TelegramScreen(onBack: () -> Unit, openChat: (TgChat) -> Unit) {
+fun TelegramScreen(onBack: () -> Unit, openSaved: () -> Unit, openChat: (TgChat) -> Unit) {
     val context = LocalContext.current
     LaunchedEffect(Unit) {
         Telegram.init(context)
@@ -81,6 +81,7 @@ fun TelegramScreen(onBack: () -> Unit, openChat: (TgChat) -> Unit) {
     DetailScaffold(
         "Telegram", onBack,
         actions = {
+            if (auth == TgAuth.Ready) IconButton(onClick = openSaved) { Icon(AppIcons.Favorite, "收藏夹") }
             if (auth != TgAuth.NoCredentials) Box {
                 IconButton(onClick = { menu = true }) { Icon(AppIcons.MoreVert, "更多") }
                 AppMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -728,17 +729,13 @@ fun TelegramChatScreen(
         if (filtering && shown.size < 20 && !loading && !done && error == null) loadMore()
     }
 
-    fun entryOf(v: TgVideo): MediaEntry {
-        val name = v.fileName.substringBeforeLast('.')
-        val ep = com.aisub.player.telegram.TgEpisodes.episodeOf(v.fileName)
-        val t = when {
-            // 认出了剧名和集数：「魔女守护者 第07集」（播放列表里一眼分得清）
-            v.seriesTag != null && ep != null -> "${v.seriesTag!!.removePrefix("#")} 第${"%02d".format(ep)}集"
-            // 标题一样的靠文件名分开
-            name.isNotBlank() && name !in v.title -> "${v.title} · $name"
-            else -> v.title
-        }
-        return MediaEntry(uri = v.uri, title = t, durationMs = v.durationSec * 1000L, sizeBytes = v.size)
+    fun entryOf(v: TgVideo) = v.entry()
+    var saved by remember { mutableStateOf(Telegram.savedKeys()) }
+    fun toggleSaved(v: TgVideo) {
+        val on = "${v.chatId}/${v.messageId}" !in saved
+        Telegram.setSaved(v, title, on)
+        saved = Telegram.savedKeys()
+        android.widget.Toast.makeText(context, if (on) "已加入收藏夹" else "已取消收藏", android.widget.Toast.LENGTH_SHORT).show()
     }
 
     var reading by remember { mutableStateOf<TgVideo?>(null) }
@@ -772,11 +769,7 @@ fun TelegramChatScreen(
         if (!v.isVideo) return openFile(v)
         if (starting) return
         starting = true
-        // 「继续观看」的封面：播放器截不了 Telegram 的视频，用消息自带的缩略图
-        val thumb = v.thumb
-        if (thumb != null && !HistoryThumbs.file(context, v.uri).exists()) scope.launch(Dispatchers.IO) {
-            runCatching { Telegram.thumbnailPath(thumb)?.let(BitmapFactory::decodeFile)?.let { HistoryThumbs.save(context, v.uri, it) } }
-        }
+        saveHistoryThumb(context, scope, v)
         scope.launch {
             try {
                 // 有剧名标签：这部剧的各集按顺序（从旧到新），「下一集」就是真的下一集
@@ -845,10 +838,15 @@ fun TelegramChatScreen(
                     else -> LazyColumn(state = results.listState, contentPadding = PaddingValues(vertical = 4.dp)) {
                         itemsIndexed(shown, key = { _, v -> v.messageId }) { i, v ->
                             if (i >= shown.size - 3) LaunchedEffect(shown.size) { loadMore() }
-                            if (v.isText) TextRow(v) { start(v) } else VideoRow(v, progress[v.uri], onInfo = if (!v.isVideo) null else ({
-                                val list = shown.filter { it.isVideo }.sortedBy { it.messageId }
-                                openDetail(v.detailItem(), list.map(::entryOf), list.indexOfFirst { it.messageId == v.messageId }.coerceAtLeast(0))
-                            })) { start(v) }
+                            if (v.isText) TextRow(v) { start(v) } else VideoRow(
+                                v, progress[v.uri],
+                                onInfo = if (!v.isVideo) null else ({
+                                    val list = shown.filter { it.isVideo }.sortedBy { it.messageId }
+                                    openDetail(v.detailItem(), list.map(::entryOf), list.indexOfFirst { it.messageId == v.messageId }.coerceAtLeast(0))
+                                }),
+                                saved = if (v.isVideo) "${v.chatId}/${v.messageId}" in saved else null,
+                                onSave = { toggleSaved(v) },
+                            ) { start(v) }
                         }
                         if (loading) item { Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(24.dp)) } }
                         error?.let { e -> item { TextButton(onClick = ::loadMore, modifier = Modifier.padding(16.dp)) { Text("加载失败（$e），点这里重试") } } }
@@ -1055,9 +1053,127 @@ private fun trimChatPages(keep: Long) {
     while (chatPages.size > 4) chatPages.keys.firstOrNull { it != keep }?.let { chatPages.remove(it) } ?: break
 }
 
-/** [watched]：看到的位置和总时长（毫秒），没看过是 null */
+/** 播放列表里的一项：认出了剧名和集数用「魔女守护者 第07集」（一眼分得清），标题一样的靠文件名分开 */
+private fun TgVideo.entry(): MediaEntry {
+    val name = fileName.substringBeforeLast('.')
+    val ep = com.aisub.player.telegram.TgEpisodes.episodeOf(fileName)
+    val t = when {
+        seriesTag != null && ep != null -> "${seriesTag!!.removePrefix("#")} 第${"%02d".format(ep)}集"
+        name.isNotBlank() && name !in title -> "$title · $name"
+        else -> title
+    }
+    return MediaEntry(uri = uri, title = t, durationMs = durationSec * 1000L, sizeBytes = size)
+}
+
+/** 「继续观看」的封面：播放器截不了 Telegram 的视频，用消息自带的缩略图 */
+private fun saveHistoryThumb(context: android.content.Context, scope: kotlinx.coroutines.CoroutineScope, v: TgVideo) {
+    val thumb = v.thumb ?: return
+    if (HistoryThumbs.file(context, v.uri).exists()) return
+    scope.launch(Dispatchers.IO) {
+        runCatching { Telegram.thumbnailPath(thumb)?.let(BitmapFactory::decodeFile)?.let { HistoryThumbs.save(context, v.uri, it) } }
+    }
+}
+
+/**
+ * Telegram 视频收藏夹：在频道里点视频右边的「♡」收藏，这里按收藏先后列出（可按频道筛选）。
+ * 每次打开重新取消息；频道里删掉了的显示「已失效」，可以移除。点一个从它开始连着放列表里的视频。
+ */
 @Composable
-private fun VideoRow(v: TgVideo, watched: Pair<Long, Long>?, onInfo: (() -> Unit)?, onClick: () -> Unit) {
+fun TelegramSavedScreen(lib: com.aisub.player.LibraryViewModel, onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var refs by remember { mutableStateOf(Telegram.savedVideos()) }
+    var loaded by remember { mutableStateOf<Map<String, TgVideo?>?>(null) }
+    LaunchedEffect(Unit) {
+        Telegram.init(context)
+        Telegram.start()
+        if (!Telegram.awaitReady()) { loaded = emptyMap(); return@LaunchedEffect }
+        loaded = Telegram.loadSaved(refs).associate { (s, v) -> s.key to v }
+    }
+    val libState by lib.state.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { lib.reloadStored() }
+    val progress = remember(libState.history) {
+        libState.history.filter { Telegram.isTelegram(it.entry.uri) }.associate { it.entry.uri to (it.positionMs to it.entry.durationMs) }
+    }
+    var channel by remember { mutableStateOf<Long?>(null) }
+    val channels = refs.distinctBy { it.chatId }
+    val shown = refs.filter { channel == null || it.chatId == channel }
+    val openDetail = LocalOpenItemDetail.current
+
+    fun remove(s: Telegram.SavedVideo) {
+        val v = loaded?.get(s.key) ?: TgVideo(s.chatId, s.messageId, s.title, "", "", emptyList(), 0, 0, 0, null, null)
+        Telegram.setSaved(v, s.chatTitle, false)
+        refs = Telegram.savedVideos()
+        if (channel != null && refs.none { it.chatId == channel }) channel = null
+    }
+    fun playable() = shown.mapNotNull { loaded?.get(it.key) }
+
+    DetailScaffold("收藏夹", onBack) {
+        Column(Modifier.fillMaxSize()) {
+            if (channels.size > 1) androidx.compose.foundation.lazy.LazyRow(
+                contentPadding = PaddingValues(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                item { androidx.compose.material3.FilterChip(selected = channel == null, onClick = { channel = null }, label = { Text("全部 ${refs.size}") }) }
+                items(channels.size) { i ->
+                    val c = channels[i]
+                    androidx.compose.material3.FilterChip(
+                        selected = channel == c.chatId, onClick = { channel = c.chatId },
+                        label = { Text("${c.chatTitle.ifBlank { "频道" }} ${refs.count { it.chatId == c.chatId }}", maxLines = 1) },
+                    )
+                }
+            }
+            when {
+                refs.isEmpty() -> EmptyState("还没有收藏视频\n在频道里点视频右边的「♡」收藏", icon = AppIcons.Favorite)
+                loaded == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                else -> LazyColumn(contentPadding = PaddingValues(vertical = 4.dp)) {
+                    itemsIndexed(shown, key = { _, s -> s.key }) { _, s ->
+                        val v = loaded!![s.key]
+                        if (v == null) Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(s.title.ifBlank { "视频" }, style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    "${s.chatTitle} · 已失效（消息被删除或没有权限）",
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                            TextButton(onClick = { remove(s) }) { Text("移除") }
+                        } else VideoRow(
+                            v, progress[v.uri],
+                            onInfo = {
+                                val list = playable()
+                                openDetail(v.detailItem(), list.map { it.entry() }, list.indexOfFirst { it.uri == v.uri }.coerceAtLeast(0))
+                            },
+                            saved = true, onSave = { remove(s) }, source = s.chatTitle.takeIf { channel == null },
+                        ) {
+                            saveHistoryThumb(context, scope, v)
+                            val list = playable()
+                            play(list.map { it.entry() }, list.indexOfFirst { it.uri == v.uri }.coerceAtLeast(0))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * [watched]：看到的位置和总时长（毫秒），没看过是 null；[saved] 不是 null 时显示收藏按钮（♡）；
+ * [source]：收藏夹里显示是哪个频道的
+ */
+@Composable
+private fun VideoRow(
+    v: TgVideo,
+    watched: Pair<Long, Long>?,
+    onInfo: (() -> Unit)?,
+    saved: Boolean? = null,
+    onSave: () -> Unit = {},
+    source: String? = null,
+    onClick: () -> Unit,
+) {
     // 先显示模糊的小图，缩略图下好了换清楚的
     val mini = remember(v.messageId) { v.mini?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } }
     val thumb by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, v.messageId) {
@@ -1106,8 +1222,14 @@ private fun VideoRow(v: TgVideo, watched: Pair<Long, Long>?, onInfo: (() -> Unit
             if (name.isNotBlank() && name !in v.title) Text(name, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             val date = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date(v.date * 1000L))
             Text(
-                listOfNotNull(date, v.size.takeIf { it > 0 }?.let(::formatSize)).joinToString(" · "),
+                listOfNotNull(source?.takeIf { it.isNotBlank() }, date, v.size.takeIf { it > 0 }?.let(::formatSize)).joinToString(" · "),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (saved != null) IconButton(onClick = onSave) {
+            Icon(
+                if (saved) AppIcons.Favorite else AppIcons.FavoriteBorder, if (saved) "取消收藏" else "收藏",
+                tint = if (saved) MaterialTheme.colorScheme.primary else androidx.compose.material3.LocalContentColor.current,
             )
         }
         if (onInfo != null) IconButton(onClick = onInfo) { Icon(AppIcons.Info, "影视信息") }
