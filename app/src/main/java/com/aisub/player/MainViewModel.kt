@@ -2300,11 +2300,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return OnlineSubtitles(s.osApiKey, s.osUsername, s.osPassword, s.assrtToken).also { online = s to it }
     }
 
-    /** 搜索框的默认内容：去掉扩展名的文件名。 */
-    fun defaultSubtitleQuery(): String = _state.value.current?.title?.substringBeforeLast('.').orEmpty()
+    /** 详情页识别出的影片名（按视频地址）：播放时搜字幕默认用它，比文件名好搜 */
+    private val subtitleQueries = HashMap<String, String>()
 
-    suspend fun searchOnlineSubtitles(source: OnlineSubtitleSource, query: String): List<OnlineSubtitle> = withContext(Dispatchers.IO) {
-        val video = _state.value.videoUri
+    fun rememberSubtitleQuery(video: String, query: String) {
+        if (query.isNotBlank()) subtitleQueries[video] = query
+    }
+
+    /** 搜索框的默认内容：识别出的影片名，没有就是去掉扩展名的文件名。 */
+    fun defaultSubtitleQuery(video: Uri? = _state.value.videoUri): String =
+        video?.let { subtitleQueries[it.toString()] } ?: _state.value.current?.title?.substringBeforeLast('.').orEmpty()
+
+    /** [video]：给哪个视频找字幕，默认是正在放的 */
+    suspend fun searchOnlineSubtitles(source: OnlineSubtitleSource, query: String, video: Uri? = _state.value.videoUri): List<OnlineSubtitle> = withContext(Dispatchers.IO) {
         // 本地文件附带哈希，能精确匹配到同一版本的字幕
         val hash = if (source == OnlineSubtitleSource.OPENSUBTITLES && video != null) {
             OnlineSubtitles.movieHash(getApplication(), video)
@@ -2314,11 +2322,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         onlineSubtitles().search(source, query, _state.value.settings.subtitleLanguages, hash)
     }
 
-    /** 下载并替换当前字幕，返回句数。 */
-    suspend fun downloadOnlineSubtitle(sub: OnlineSubtitle): Int {
-        val video = _state.value.videoUri ?: throw IllegalStateException("没有正在播放的视频")
+    /** 下载字幕，返回句数。是正在放的视频就直接替换当前字幕；不是的话存起来，播放时自动载入。 */
+    suspend fun downloadOnlineSubtitle(sub: OnlineSubtitle, video: Uri? = _state.value.videoUri): Int {
+        video ?: throw IllegalStateException("没有正在播放的视频")
         val text = withContext(Dispatchers.IO) { onlineSubtitles().download(sub) }
-        return applySubtitleText(video, text)
+        if (video == _state.value.videoUri) return applySubtitleText(video, text)
+        val cues = SubtitleParser.parse(text)
+        if (cues.isEmpty()) throw IllegalArgumentException("文件里没有识别到字幕")
+        withContext(Dispatchers.IO) {
+            // 换成了下载的字幕，不再按识别范围续识别（正在放的是别的视频，只清它存着的）
+            store.clearCoverage(video)
+            store.save(video, cues)
+        }
+        return cues.size
     }
 
     /** 当前播放队列存为播放列表。 */

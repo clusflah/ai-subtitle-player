@@ -62,3 +62,8 @@ class Navigator {
 
 /** 本地文件的「影视信息」菜单打开详情页；由 MainActivity 提供。 */
 val LocalOpenDetail = androidx.compose.runtime.staticCompositionLocalOf<(com.aisub.player.media.MediaEntry) -> Unit> { {} }
+
+/** 打开一个条目的详情页（影视识别、下载字幕），带上点「播放」时的播放队列；由 MainActivity 提供。 */
+val LocalOpenItemDetail = androidx.compose.runtime.staticCompositionLocalOf<
+    (com.aisub.player.remote.RemoteItem, List<com.aisub.player.media.MediaEntry>, Int) -> Unit,
+> { { _, _, _ -> } }
