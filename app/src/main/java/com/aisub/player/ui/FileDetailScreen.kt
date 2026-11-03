@@ -182,15 +182,19 @@ fun FileDetailScreen(
         meta?.posterUrl != null && meta.posterRatio < 1f -> meta.posterUrl
         else -> local?.posterUrl ?: info?.posterUrl ?: meta?.posterUrl
     }
-    // 搜字幕用的片名：识别出的原名（字幕站多按英文名收录），剧集带上季集
-    val subtitleQuery = remember(info, parsed) {
-        val t = info?.originalTitle?.ifBlank { null } ?: info?.title?.ifBlank { null } ?: parsed.title
+    // 搜字幕用的片名：射手网用中文名；OpenSubtitles 用英文名（原名不是拉丁字母的，比如日文，就用文件名里的）。剧集带上季集
+    val subtitleQueries = remember(info, parsed) {
         val season = meta?.season ?: parsed.season
         val episode = meta?.episode ?: parsed.episode
-        if (episode != null) "$t S%02dE%02d".format(season ?: 1, episode) else t
+        val ep = if (episode != null) " S%02dE%02d".format(season ?: 1, episode) else ""
+        fun latin(s: String?) = !s.isNullOrBlank() && s.count { it in 'A'..'Z' || it in 'a'..'z' } * 2 >= s.count { it.isLetter() }
+        val zh = info?.title?.ifBlank { null } ?: parsed.title
+        val en = listOf(info?.originalTitle, parsed.title, info?.title).firstOrNull(::latin) ?: zh
+        mapOf(com.aisub.player.subtitle.OnlineSubtitleSource.ASSRT to zh + ep, com.aisub.player.subtitle.OnlineSubtitleSource.OPENSUBTITLES to en + ep)
     }
-    LaunchedEffect(subtitleQuery, info) {
-        if (isVideo && info != null) item.playUrl?.let { main.rememberSubtitleQuery(it, subtitleQuery) }
+    // 播放时打开「在线下载字幕」也用这些（没识别出来的也比原始标题好搜）
+    LaunchedEffect(subtitleQueries) {
+        if (isVideo) item.playUrl?.let { main.rememberSubtitleQueries(it, subtitleQueries) }
     }
     var subtitles by remember { mutableStateOf(false) }
     val isTelegram = item.playUrl?.let(com.aisub.player.telegram.Telegram::isTelegram) == true
@@ -393,7 +397,7 @@ fun FileDetailScreen(
     if (subtitles) item.playUrl?.let { url ->
         OnlineSubtitleSheet(
             main, onDismiss = { subtitles = false }, onOpenSettings = { subtitles = false; openSettings() },
-            video = Uri.parse(url), initialQuery = subtitleQuery,
+            video = Uri.parse(url),
         )
     }
     if (rematching) {

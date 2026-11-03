@@ -53,15 +53,51 @@ class OnlineSubtitles(
         )
 
     fun search(source: OnlineSubtitleSource, query: String, languages: String, movieHash: String?): List<OnlineSubtitle> =
-        when (source) {
-            OnlineSubtitleSource.OPENSUBTITLES -> searchOpenSubtitles(query, languages, movieHash)
-            OnlineSubtitleSource.ASSRT -> searchAssrt(query)
+        network(source) {
+            when (source) {
+                OnlineSubtitleSource.OPENSUBTITLES -> searchOpenSubtitles(query, languages, movieHash)
+                OnlineSubtitleSource.ASSRT -> searchAssrt(query)
+            }
         }
 
     /** 下载并返回字幕文件文本（SRT / VTT / ASS）。 */
-    fun download(sub: OnlineSubtitle): String = when (sub.source) {
-        OnlineSubtitleSource.OPENSUBTITLES -> downloadOpenSubtitles(sub.id)
-        OnlineSubtitleSource.ASSRT -> downloadAssrt(sub.id)
+    fun download(sub: OnlineSubtitle): String = network(sub.source) {
+        when (sub.source) {
+            OnlineSubtitleSource.OPENSUBTITLES -> downloadOpenSubtitles(sub.id)
+            OnlineSubtitleSource.ASSRT -> downloadAssrt(sub.id)
+        }
+    }
+
+    /** 设置页的「测试连接」：只验证 Token / Key（填了账号也验证登录），不搜字幕。阻塞调用 */
+    fun test(source: OnlineSubtitleSource): String = network(source) {
+        when (source) {
+            OnlineSubtitleSource.ASSRT -> {
+                if (assrtToken.isBlank()) return@network "请先填写 API Token"
+                val user = assrt("$ASSRT_BASE/user/info").optJSONObject("user")
+                "连接成功" + (user?.optString("nick")?.takeIf { it.isNotEmpty() }?.let { "：$it" } ?: "")
+            }
+            OnlineSubtitleSource.OPENSUBTITLES -> {
+                if (osApiKey.isBlank()) return@network "请先填写 API Key"
+                if (osUsername.isNotBlank() && osPassword.isNotBlank()) {
+                    osToken = null
+                    login()
+                    val data = call(osRequest("/infos/user").get().build()).optJSONObject("data")
+                    "连接成功，已登录" + (data?.optInt("remaining_downloads", -1)?.takeIf { it >= 0 }?.let { "，今天还能下载 $it 次" } ?: "")
+                } else {
+                    // /infos/* 不检查 Key，用一次热门列表来验证
+                    call(osRequest("/discover/popular").get().build())
+                    "连接成功（未登录，每天限 5 次下载）"
+                }
+            }
+        }
+    }
+
+    /** 连不上（服务器关了、被断开、超时）时说人话，别只显示「connection closed」 */
+    private fun <T> network(source: OnlineSubtitleSource, block: () -> T): T = try {
+        block()
+    } catch (e: java.io.IOException) {
+        val other = if (source == OnlineSubtitleSource.ASSRT) "OpenSubtitles" else "射手网"
+        throw IllegalStateException("连不上${source.label}（${e.message ?: e.javaClass.simpleName}），服务器可能暂时关闭了，可以过会儿再试或换$other", e)
     }
 
     // ---------------- OpenSubtitles.com ----------------

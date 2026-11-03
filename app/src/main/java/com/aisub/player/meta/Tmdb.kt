@@ -105,6 +105,13 @@ class Tmdb(key: String, baseUrl: String, imageBase: String, private val language
         }
     }
 
+    /** 设置页的「测试连接」：取一次配置，Key 无效会抛出异常。阻塞调用。 */
+    fun test(): String {
+        if (key.isEmpty()) return "请先填写 API Key"
+        if (!get("/configuration").has("images")) throw IOException("接口地址返回的不是 TMDB 数据")
+        return "连接成功"
+    }
+
     /** 查找并返回详情；找不到返回 null。阻塞调用。 */
     fun lookup(q: MetaQuery): MediaInfo? {
         val (kind, id) = locate(q) ?: return null

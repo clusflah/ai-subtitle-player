@@ -50,7 +50,8 @@ import kotlinx.coroutines.launch
 
 /**
  * 在线搜索并下载字幕（射手网 / OpenSubtitles），下载后直接替换当前字幕。
- * 详情页里用时传 [video]（还没播放的视频）和 [initialQuery]（识别出的片名）：下载的字幕存起来，播放时自动载入。
+ * 详情页里用时传 [video]（还没播放的视频）：下载的字幕存起来，播放时自动载入。
+ * 搜索框默认填识别出的片名，每个来源一个（射手网用中文名，OpenSubtitles 用英文名）；自己改过就不再换。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -59,14 +60,14 @@ fun OnlineSubtitleSheet(
     onDismiss: () -> Unit,
     onOpenSettings: () -> Unit,
     video: android.net.Uri? = null,
-    initialQuery: String? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val sources = remember { vm.onlineSubtitles().sources }
     var source by remember { mutableStateOf(sources.firstOrNull()) }
-    var query by remember { mutableStateOf(initialQuery?.ifBlank { null } ?: vm.defaultSubtitleQuery(video ?: vm.state.value.videoUri)) }
     val target = video ?: vm.state.value.videoUri
+    var query by remember { mutableStateOf(vm.defaultSubtitleQuery(target, source)) }
+    var edited by remember { mutableStateOf(false) }
     var results by remember { mutableStateOf<List<OnlineSubtitle>?>(null) }
     var searching by remember { mutableStateOf(false) }
     var downloading by remember { mutableStateOf<OnlineSubtitle?>(null) }
@@ -104,7 +105,10 @@ fun OnlineSubtitleSheet(
         }
     }
 
-    LaunchedEffect(source) { if (source != null && query.isNotBlank()) search() }
+    LaunchedEffect(source) {
+        if (!edited) query = vm.defaultSubtitleQuery(target, source)
+        if (source != null && query.isNotBlank()) search()
+    }
 
     AppSheet(
         onDismissRequest = onDismiss,
@@ -126,7 +130,7 @@ fun OnlineSubtitleSheet(
                 }
             }
             OutlinedTextField(
-                value = query, onValueChange = { query = it },
+                value = query, onValueChange = { query = it; edited = true },
                 label = { Text("片名或文件名") },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),

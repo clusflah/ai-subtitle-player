@@ -69,6 +69,8 @@ import com.aisub.player.ProviderConfig
 import com.aisub.player.asr.AsrLanguages
 import com.aisub.player.asr.ModelCatalog
 import com.aisub.player.asrLanguageWarning
+import com.aisub.player.subtitle.OnlineSubtitleSource
+import com.aisub.player.subtitle.OnlineSubtitles
 import com.aisub.player.subtitle.Pinyin
 import com.aisub.player.translate.ModelList
 import com.aisub.player.translate.OfflineTranslator
@@ -421,6 +423,9 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     ConfigField(s.assrtToken, { s = s.copy(assrtToken = it) }, "API Token", "", secret = true)
+                    TestRow(testing["sub:assrt"] == true, testResults["sub:assrt"]) {
+                        runTest("sub:assrt") { vm.testService { OnlineSubtitles("", "", "", s.assrtToken).test(OnlineSubtitleSource.ASSRT) } }
+                    }
                     Spacer(Modifier.height(8.dp))
                     Text("OpenSubtitles（外语片多）", style = MaterialTheme.typography.bodyLarge)
                     Text(
@@ -430,6 +435,11 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     ConfigField(s.osApiKey, { s = s.copy(osApiKey = it) }, "API Key", "", secret = true)
                     ConfigField(s.osUsername, { s = s.copy(osUsername = it) }, "用户名（可选）", "")
                     ConfigField(s.osPassword, { s = s.copy(osPassword = it) }, "密码（可选）", "", secret = true)
+                    TestRow(testing["sub:os"] == true, testResults["sub:os"]) {
+                        runTest("sub:os") {
+                            vm.testService { OnlineSubtitles(s.osApiKey, s.osUsername, s.osPassword, "").test(OnlineSubtitleSource.OPENSUBTITLES) }
+                        }
+                    }
                     ConfigField(s.subtitleLanguages, { s = s.copy(subtitleLanguages = it) }, "搜索语言", "zh-cn,en")
                     PhoneInputButton(
                         listOf(
@@ -496,6 +506,9 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         ),
                         title = "TMDB",
                     ) { v -> s = s.copy(tmdbKey = v["key"] ?: s.tmdbKey, tmdbBaseUrl = v["base"] ?: s.tmdbBaseUrl, tmdbImageBase = v["image"] ?: s.tmdbImageBase) }
+                    TestRow(testing["meta:tmdb"] == true, testResults["meta:tmdb"]) {
+                        runTest("meta:tmdb") { vm.testService { com.aisub.player.meta.Tmdb(s.tmdbKey, s.tmdbBaseUrl, s.tmdbImageBase).test() } }
+                    }
                 }
                 CardDivider()
                 ListRow(
@@ -520,6 +533,9 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     )
                     ConfigField(s.tvdbKey, { s = s.copy(tvdbKey = it) }, "API Key", "", secret = true)
                     ConfigField(s.tvdbPin, { s = s.copy(tvdbPin = it) }, "PIN（可选）", "", secret = true)
+                    TestRow(testing["meta:tvdb"] == true, testResults["meta:tvdb"]) {
+                        runTest("meta:tvdb") { vm.testService { com.aisub.player.meta.Tvdb(s.tvdbKey, s.tvdbPin).test() } }
+                    }
                     Spacer(Modifier.height(8.dp))
                     Text("Fanart.tv（标题图、高清背景图）", style = MaterialTheme.typography.bodyLarge)
                     Text(
@@ -527,6 +543,9 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     ConfigField(s.fanartKey, { s = s.copy(fanartKey = it) }, "API Key", "", secret = true)
+                    TestRow(testing["meta:fanart"] == true, testResults["meta:fanart"]) {
+                        runTest("meta:fanart") { vm.testService { com.aisub.player.meta.FanartTv.test(s.fanartKey) } }
+                    }
                     PhoneInputButton(
                         listOf(
                             PhoneField("tvdbKey", "TheTVDB API Key", s.tvdbKey, secret = true),
@@ -718,6 +737,9 @@ private fun ProxySettings(s: AppSettings, onChange: (AppSettings) -> Unit) {
 @Composable
 private fun TtsSettings(s: AppSettings, vm: MainViewModel, onChange: (AppSettings) -> Unit) {
     var picking by remember { mutableStateOf(false) }
+    var testing by remember { mutableStateOf(false) }
+    var testResult by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
     Column {
         ListRow(
             title = "播放时朗读译文",
@@ -756,6 +778,13 @@ private fun TtsSettings(s: AppSettings, vm: MainViewModel, onChange: (AppSetting
                         title = "Azure 朗读",
                     ) { v ->
                         onChange(s.copy(ttsAzureKey = v["key"] ?: s.ttsAzureKey, ttsAzureRegion = v["region"] ?: s.ttsAzureRegion, ttsAzureEndpoint = v["endpoint"] ?: s.ttsAzureEndpoint))
+                    }
+                    TestRow(testing, testResult) {
+                        testing = true
+                        scope.launch {
+                            testResult = vm.testTts(s)
+                            testing = false
+                        }
                     }
                 }
             }

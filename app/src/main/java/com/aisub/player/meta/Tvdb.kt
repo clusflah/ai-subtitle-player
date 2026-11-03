@@ -38,6 +38,14 @@ class Tvdb(private val apiKey: String, private val pin: String) {
         }
     }
 
+    /** 设置页的「测试连接」：重新登录一次，Key 或 PIN 不对会抛出异常。阻塞调用。 */
+    fun test(): String {
+        if (apiKey.isBlank()) return "请先填写 API Key"
+        tokens.remove(apiKey)
+        auth()
+        return "连接成功"
+    }
+
     /** 阻塞调用。tvdbId 已知（TMDB / NFO 给的）时直接取，否则按片名搜索。 */
     fun lookup(q: MetaQuery, tvdbId: Int?, imdbId: String?): MediaInfo? {
         val tv = q.kind == "tv" || q.season != null || q.episode != null
