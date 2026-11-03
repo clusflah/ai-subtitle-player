@@ -27,7 +27,8 @@ object AppProxy {
         ProxySelector.setDefault(object : ProxySelector() {
             override fun select(uri: URI?): List<Proxy> {
                 val p = proxy
-                if (p != Proxy.NO_PROXY && !isLocal(uri?.host)) return listOf(p)
+                // 代理连不上（电脑关了、代理软件没开局域网连接）时接着直连，免得什么都打不开
+                if (p != Proxy.NO_PROXY && !isLocal(uri?.host)) return listOf(p, Proxy.NO_PROXY)
                 return system?.select(uri) ?: listOf(Proxy.NO_PROXY)
             }
 
@@ -61,9 +62,42 @@ object AppProxy {
         }
     }
 
+    /**
+     * 设置页的「测试连接」：先看代理端口连不连得上，再通过代理访问一次 Google 和 GitHub。阻塞调用。
+     * 返回「连接成功…」或说明哪一步不通。
+     */
+    fun test(type: ProxyType, host: String, port: Int): String {
+        val h = host.trim()
+        if (type == ProxyType.OFF) return "没有使用代理"
+        if (h.isEmpty() || port !in 1..65535) return "请先填写代理地址和端口"
+        try {
+            java.net.Socket().use { it.connect(InetSocketAddress(h, port), 5000) }
+        } catch (e: IOException) {
+            return "连接失败：连不上代理 $h:$port（${e.message ?: e.javaClass.simpleName}）。" +
+                "请确认代理设备开着、和这台设备在同一个网络、地址和端口没变（手机或电脑的局域网地址可能会变），" +
+                "并在代理软件里打开「允许局域网连接」"
+        }
+        val p = Proxy(if (type == ProxyType.SOCKS) Proxy.Type.SOCKS else Proxy.Type.HTTP, InetSocketAddress.createUnresolved(h, port))
+        val http = okhttp3.OkHttpClient.Builder().proxy(p)
+            .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS).readTimeout(8, java.util.concurrent.TimeUnit.SECONDS).build()
+        val results = listOf("Google" to "https://www.google.com/generate_204", "GitHub" to "https://api.github.com/zen").map { (name, url) ->
+            val start = System.currentTimeMillis()
+            name to runCatching {
+                http.newCall(okhttp3.Request.Builder().url(url).build()).execute().use { it.code }
+                System.currentTimeMillis() - start
+            }
+        }
+        val failed = results.filter { it.second.isFailure }
+        return if (failed.isEmpty()) "连接成功：" + results.joinToString("，") { (n, r) -> "$n ${r.getOrNull()} 毫秒" }
+        else "连接失败：代理端口能连上，但通过它访问 ${failed.joinToString("、") { it.first }} 失败" +
+            "（${failed.first().second.exceptionOrNull()?.message ?: "未知错误"}）。检查代理类型（HTTP / SOCKS5）是否选对、代理软件里的节点是否可用"
+    }
+
     private fun isLocal(host: String?): Boolean {
         val h = host?.lowercase()?.trim('[', ']') ?: return true
         if (h == "localhost" || h.endsWith(".local") || h == "::1" || (!h.contains('.') && !h.contains(':'))) return true
+        // Plex 的「192-168-1-5.<编号>.plex.direct」就是局域网地址
+        if (h.endsWith(".plex.direct")) h.substringBefore('.').takeIf { Regex("""\d+(-\d+){3}""").matches(it) }?.let { return isLocal(it.replace('-', '.')) }
         val p = h.split('.').mapNotNull { it.toIntOrNull() }
         if (p.size != 4) return false
         return p[0] == 127 || p[0] == 10 || (p[0] == 192 && p[1] == 168) || (p[0] == 172 && p[1] in 16..31) || (p[0] == 169 && p[1] == 254)

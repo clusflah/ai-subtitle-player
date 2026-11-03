@@ -82,7 +82,9 @@ import com.aisub.player.supportsStreaming
 import com.aisub.player.withAsrValue
 import com.aisub.player.asrValue
 import com.aisub.player.GEMINI_STREAMING_NOTE
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** 离线翻译：没有要填的，只说明用法；没装时给下载地址。 */
 @Composable
@@ -702,6 +704,9 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
 /** 网络代理：类型、地址、端口。填局域网里电脑或路由器的代理（如 Clash 打开「允许局域网连接」） */
 @Composable
 private fun ProxySettings(s: AppSettings, onChange: (AppSettings) -> Unit) {
+    var testing by remember { mutableStateOf(false) }
+    var testResult by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
     Column {
         ProxyType.entries.forEachIndexed { i, type ->
             if (i > 0) CardDivider(inset = 64.dp)
@@ -725,9 +730,16 @@ private fun ProxySettings(s: AppSettings, onChange: (AppSettings) -> Unit) {
                     "端口", "例如 7890",
                 )
                 Text(
-                    "本机和局域网地址始终直连；离开设置页后生效，内置浏览器也走代理",
+                    "本机和局域网地址始终直连；代理连不上时自动直连。离开设置页后生效，内置浏览器也走代理",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                TestRow(testing, testResult) {
+                    testing = true
+                    scope.launch {
+                        testResult = withContext(Dispatchers.IO) { com.aisub.player.net.AppProxy.test(s.proxyType, s.proxyHost, s.proxyPort) }
+                        testing = false
+                    }
+                }
             }
         }
     }

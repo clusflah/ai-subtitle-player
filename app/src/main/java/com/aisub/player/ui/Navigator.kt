@@ -16,6 +16,8 @@ sealed interface Screen {
     data object Telegram : Screen
     /** Telegram 一个频道 / 群里的视频 */
     data class TelegramChat(val chatId: Long, val title: String) : Screen
+    /** Telegram 视频收藏夹 */
+    data object TelegramSaved : Screen
     /** 下载版：分享链接后的下载进度页 */
     data object Link : Screen
     data class LocalFolder(val path: String, val title: String) : Screen

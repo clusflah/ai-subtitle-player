@@ -26,6 +26,7 @@ import com.aisub.player.ui.LiveScreen
 import com.aisub.player.ui.WebScreen
 import com.aisub.player.ui.TelegramScreen
 import com.aisub.player.ui.TelegramChatScreen
+import com.aisub.player.ui.TelegramSavedScreen
 import com.aisub.player.ui.LocalOpenDetail
 import com.aisub.player.ui.LocalTv
 import com.aisub.player.ui.ProvideScreenClass
@@ -154,7 +155,8 @@ class MainActivity : ComponentActivity() {
                         is Screen.History -> HistoryScreen(lib, screen.music, back, play)
                         Screen.Live -> LiveScreen(back, play)
                         Screen.Web -> WebScreen(main, back, play)
-                        Screen.Telegram -> TelegramScreen(back) { chat -> nav.push(Screen.TelegramChat(chat.id, chat.title)) }
+                        Screen.Telegram -> TelegramScreen(back, openSaved = { nav.push(Screen.TelegramSaved) }) { chat -> nav.push(Screen.TelegramChat(chat.id, chat.title)) }
+                        Screen.TelegramSaved -> TelegramSavedScreen(lib, back, play)
                         is Screen.TelegramChat -> TelegramChatScreen(screen.chatId, screen.title, lib, back, play)
                         is Screen.LocalFolder -> LocalFolderScreen(
                             lib, screen.path, screen.title, back,
