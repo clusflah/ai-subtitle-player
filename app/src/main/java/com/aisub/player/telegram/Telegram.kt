@@ -14,6 +14,7 @@ import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.abs
 
 /** Telegram 的登录状态 */
 sealed interface TgAuth {
@@ -244,8 +245,15 @@ object Telegram {
     }
 
     /** 按名字或 @用户名 搜公开的频道和群（包括没加入的），带成员数和 @用户名 */
-    suspend fun searchPublic(query: String): List<TgChat> =
-        send(TdApi.SearchPublicChats(query, null)).chatIds.toList().mapNotNull { chatOf(it, details = true) }
+    suspend fun searchPublic(query: String): List<TgChat> {
+        // 按名字搜不到用户名完全一样的频道：用户名或 t.me 链接再精确找一次，放最前
+        val username = USERNAME.matchEntire(query.trim())?.groupValues?.get(1)
+        val exact = username?.let { runCatching { send(TdApi.SearchPublicChat(it)).id }.getOrNull() }
+        val ids = listOfNotNull(exact) + send(TdApi.SearchPublicChats(query, null)).chatIds.toList()
+        return ids.distinct().mapNotNull { chatOf(it, details = true) }
+    }
+
+    private val USERNAME = Regex("""(?:https?://)?(?:t\.me/|@)?([A-Za-z][A-Za-z0-9_]{3,31})/?""")
 
     // ---- 收藏的频道有新视频：记下每个会话看到过的最新视频 ----
 
@@ -283,13 +291,89 @@ object Telegram {
 
             suspend fun fetch() {
                 val r = send(TdApi.SearchChatMessages(chatId, null, query, null, from, 0, 50, filter))
-                r.messages.mapNotNullTo(buffer) { videoOf(it) }
+                val page = r.messages.toList()
+                val found = ArrayList<TgVideo>()
+                for (m in page) {
+                    val v = videoOf(m, groupCaption(m, page))
+                    if (v != null) found += v
+                    // 搜到的是相册封面图或文字帖：把同一组的视频带出来
+                    else if (filter is TdApi.SearchMessagesFilterEmpty) found += groupVideos(m)
+                }
+                found.distinctBy { it.messageId }.sortedByDescending { it.messageId }.toCollection(buffer)
                 from = r.nextFromMessageId
                 if (from == 0L || r.messages.isEmpty()) done = true
             }
         }
 
-        private val streams = listOf(Stream(TdApi.SearchMessagesFilterVideo()), Stream(TdApi.SearchMessagesFilterDocument()))
+        // 搜索时多一路不限类型：标签常写在相册的封面图或单独的文字帖里，视频本身没有说明
+        private val streams = listOfNotNull(
+            Stream(TdApi.SearchMessagesFilterVideo()), Stream(TdApi.SearchMessagesFilterDocument()),
+            if (query.isNotBlank()) Stream(TdApi.SearchMessagesFilterEmpty()) else null,
+        )
+        private val returned = HashSet<Long>()
+
+        /** 取到过的前后消息，按 ID 排好；[covered] 是其中连续取到的区间 */
+        private val known = java.util.TreeMap<Long, TdApi.Message>()
+        private val covered = ArrayList<LongRange>()
+
+        /** [m] 前后紧挨着的消息（TDLib 本地有就不用联网），返回把它们都连续取到了的区间 */
+        private suspend fun window(m: TdApi.Message): LongRange? {
+            covered.firstOrNull { m.id in it && it.first < m.id && it.last > m.id }?.let { return it }
+            // TDLib 第一次可能只返回一部分，不够再要一次
+            var range: LongRange? = null
+            for (attempt in 0 until 2) {
+                val h = runCatching { send(TdApi.GetChatHistory(chatId, m.id, -8, 17, false)).messages }.getOrNull().orEmpty()
+                if (h.isEmpty()) break
+                h.forEach { known[it.id] = it }
+                val r = h.minOf { it.id }..h.maxOf { it.id }
+                range = r
+                if (r.first < m.id) { covered += r; break }
+            }
+            return range
+        }
+
+        private suspend fun before(m: TdApi.Message): TdApi.Message? =
+            window(m)?.let { r -> known.lowerEntry(m.id)?.value?.takeIf { it.id in r } }
+
+        private suspend fun after(m: TdApi.Message): TdApi.Message? =
+            window(m)?.let { r -> known.higherEntry(m.id)?.value?.takeIf { it.id in r } }
+
+        private suspend fun album(m: TdApi.Message): List<TdApi.Message> {
+            val r = window(m) ?: return listOf(m)
+            return known.subMap(r.first, true, r.last, true).values.filter { it.mediaAlbumId == m.mediaAlbumId }
+        }
+
+        /**
+         * 视频自己没说明时用谁的：同一相册里带说明的那条（常是封面图）；不在相册里的话，
+         * 紧挨着的前一条不是视频、带说明、几分钟内发的（频道常先发封面图或文字，再发视频）。
+         */
+        private suspend fun groupCaption(m: TdApi.Message, page: List<TdApi.Message>): String? {
+            if (captionOf(m).isNotBlank() || videoOf(m) == null) return null
+            if (m.mediaAlbumId != 0L) return page.albumCaption(m.mediaAlbumId) ?: album(m).albumCaption(m.mediaAlbumId)
+            val prev = before(m) ?: return null
+            if (prev.mediaAlbumId != 0L || videoOf(prev) != null || abs(m.date - prev.date) > 300) return null
+            return captionOf(prev).ifBlank { null }
+        }
+
+        private fun Collection<TdApi.Message>.albumCaption(album: Long): String? =
+            firstOrNull { it.mediaAlbumId == album && captionOf(it).isNotBlank() }?.let(::captionOf)
+
+        /** [m] 不是视频（搜索命中了封面图或文字帖）：它带着的视频，也就是同一相册里的，或紧挨着的后一条 */
+        private suspend fun groupVideos(m: TdApi.Message): List<TgVideo> {
+            val caption = captionOf(m).ifBlank { return emptyList() }
+            val group = if (m.mediaAlbumId != 0L) album(m)
+            else listOfNotNull(after(m)?.takeIf { it.mediaAlbumId == 0L && captionOf(it).isBlank() && abs(it.date - m.date) <= 300 })
+            return group.mapNotNull { videoOf(it, caption) }
+        }
+
+        /** 不同的路会搜到同一个视频（例如说明里有搜索词的视频），每个只给一次 */
+        private fun Stream.take(): TgVideo? {
+            while (buffer.isNotEmpty()) {
+                val v = buffer.removeFirst()
+                if (returned.add(v.messageId)) return v
+            }
+            return null
+        }
 
         /** 全部取完了 */
         val done: Boolean get() = streams.all { it.done && it.buffer.isEmpty() }
@@ -308,7 +392,7 @@ object Telegram {
                     continue
                 }
                 val s = streams.filter { it.buffer.isNotEmpty() }.maxByOrNull { it.buffer.first().messageId } ?: break
-                out += s.buffer.removeFirst()
+                s.take()?.let { out += it }
             }
             return out
         }
@@ -326,23 +410,36 @@ object Telegram {
         return out.distinctBy { it.messageId }.sortedBy { it.messageId }
     }
 
-    private val HASHTAG = Regex("""#[\p{L}\p{N}_]+""")
+    // 也认全角的「＃」（有的频道这样写）
+    private val HASHTAG = Regex("""[#＃][\p{L}\p{N}_]+""")
 
-    private fun videoOf(m: TdApi.Message): TgVideo? {
+    /** 消息的说明（文字帖就是正文） */
+    private fun captionOf(m: TdApi.Message): String = when (val c = m.content) {
+        is TdApi.MessageVideo -> c.caption?.text
+        is TdApi.MessageDocument -> c.caption?.text
+        is TdApi.MessagePhoto -> c.caption?.text
+        is TdApi.MessageAnimation -> c.caption?.text
+        is TdApi.MessageText -> c.text?.text
+        else -> null
+    }.orEmpty()
+
+    /** [inherited]：视频自己没说明时用的说明（同一相册或同一组的） */
+    private fun videoOf(m: TdApi.Message, inherited: String? = null): TgVideo? {
+        val own = captionOf(m)
         val (file, name, caption, duration, mini, thumb) = when (val c = m.content) {
-            is TdApi.MessageVideo -> VideoParts(c.video.video, c.video.fileName, c.caption?.text.orEmpty(), c.video.duration, c.video.minithumbnail, c.video.thumbnail)
+            is TdApi.MessageVideo -> VideoParts(c.video.video, c.video.fileName, own.ifBlank { inherited.orEmpty() }, c.video.duration, c.video.minithumbnail, c.video.thumbnail)
             is TdApi.MessageDocument -> {
                 val d = c.document
                 val isVideo = d.mimeType.startsWith("video/") || com.aisub.player.media.MediaEntry.isVideoName(d.fileName)
                 if (!isVideo) return null
-                VideoParts(d.document, d.fileName, c.caption?.text.orEmpty(), 0, d.minithumbnail, d.thumbnail)
+                VideoParts(d.document, d.fileName, own.ifBlank { inherited.orEmpty() }, 0, d.minithumbnail, d.thumbnail)
             }
             else -> return null
         }
         val firstLine = caption.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
         val title = firstLine?.take(80) ?: name.ifBlank { "视频 ${m.id shr 20}" }
         return TgVideo(
-            m.chatId, m.id, title, caption, name, HASHTAG.findAll(caption).map { it.value }.distinct().toList(),
+            m.chatId, m.id, title, caption, name, HASHTAG.findAll(caption).map { "#" + it.value.drop(1) }.distinct().toList(),
             duration, file.size.takeIf { it > 0 } ?: file.expectedSize,
             m.date, mini?.data, thumb?.file,
         )

@@ -33,7 +33,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
@@ -813,6 +812,7 @@ private fun ConfigField(value: String, onChange: (String) -> Unit, label: String
         shape = MaterialTheme.shapes.small,
         colors = appFieldColors(),
         modifier = Modifier.fillMaxWidth(),
+        phoneLabel = label,
     )
 }
 

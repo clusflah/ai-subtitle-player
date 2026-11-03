@@ -29,7 +29,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -141,11 +140,11 @@ private fun CredentialsForm(onSaved: () -> Unit) {
         )
         OutlinedTextField(
             id, { id = it.filter(Char::isDigit) }, label = { Text("api_id") }, singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = appFieldColors(), modifier = Modifier.fillMaxWidth(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = appFieldColors(), modifier = Modifier.fillMaxWidth(), phoneInput = false,
         )
         OutlinedTextField(
             hash, { hash = it.trim() }, label = { Text("api_hash") }, singleLine = true,
-            colors = appFieldColors(), modifier = Modifier.fillMaxWidth(),
+            colors = appFieldColors(), modifier = Modifier.fillMaxWidth(), phoneInput = false,
         )
         // 电视：长串用手机粘贴
         PhoneInputButton(listOf(PhoneField("id", "api_id", id), PhoneField("hash", "api_hash", hash)), title = "Telegram 凭证") { v ->
@@ -257,7 +256,9 @@ private fun ChatList(openChat: (TgChat) -> Unit) {
                 colors = appFieldColors(),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
             )
-            val mine = all.filter { q.isEmpty() || it.title.contains(q, ignoreCase = true) }
+            // 已加入的也按服务器的结果算（输入 @用户名 或 t.me 链接时名字里没有这些字）
+            val publicIds = public?.getOrNull().orEmpty().map { it.id }.toSet()
+            val mine = all.filter { q.isEmpty() || it.title.contains(q, ignoreCase = true) || it.id in publicIds }
                 .sortedByDescending { it.id in favorites } // 稳定排序：收藏的在前，各自保持原来的顺序
             val others = public?.getOrNull().orEmpty().filter { p -> all.none { it.id == p.id } }
             if (all.isEmpty() && q.isEmpty()) {
@@ -430,8 +431,7 @@ fun TelegramChatScreen(
     // 去播放再回来时接着显示（筛选、已经加载的、滚到哪），不用重新加载
     val page = remember(chatId) { chatPages.getOrPut(chatId) { ChatPage(chatId) }.also { trimChatPages(chatId) } }
     var query by page::query
-    var applied by page::applied
-    // 停止输入一会儿再搜（点标签马上搜）
+    var applied by page::applied    // 停止输入一会儿再搜（点标签马上搜）
     LaunchedEffect(query) {
         if (query.trim() != applied) {
             kotlinx.coroutines.delay(if (query.startsWith("#")) 0 else 600)

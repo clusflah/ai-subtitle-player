@@ -13,7 +13,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -99,16 +98,16 @@ internal fun EmbyLogin(initialUrl: String, initialLan: String, onSuccess: (creds
     ) { v ->
         url = v["url"].orEmpty(); lan = v["lan"].orEmpty(); username = v["user"].orEmpty(); password = v["pass"].orEmpty()
     }
-    OutlinedTextField(url, { url = it }, label = { Text("服务器地址") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+    OutlinedTextField(url, { url = it }, label = { Text("服务器地址") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
     OutlinedTextField(
         lan, { lan = it }, label = { Text("内网地址（可不填）") }, placeholder = { Text("http://192.168.1.2:8096") },
         supportingText = { Text("上面填外网域名时，在家能连上内网地址就自动走内网") },
-        singleLine = true, modifier = Modifier.fillMaxWidth(),
+        singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false,
     )
-    OutlinedTextField(username, { username = it }, label = { Text("用户名") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+    OutlinedTextField(username, { username = it }, label = { Text("用户名") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
     OutlinedTextField(
         password, { password = it }, label = { Text("密码") }, singleLine = true,
-        visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(),
+        visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), phoneInput = false,
     )
     ErrorText(state.error)
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -212,8 +211,8 @@ internal fun PlexLogin(onSuccess: (String) -> Unit) {
         PhoneInputButton(listOf(PhoneField("url", "服务器地址", url), PhoneField("token", "X-Plex-Token", token)), title = "连接 Plex 服务器") { v ->
             url = v["url"].orEmpty(); token = v["token"].orEmpty()
         }
-        OutlinedTextField(url, { url = it }, label = { Text("服务器地址") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(token, { token = it }, label = { Text("X-Plex-Token") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(url, { url = it }, label = { Text("服务器地址") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
+        OutlinedTextField(token, { token = it }, label = { Text("X-Plex-Token") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
         OutlinedButton(onClick = { onSuccess(PlexClient.manual(url, token)) }, enabled = url.isNotBlank() && token.isNotBlank()) { Text("保存") }
     }
 }
@@ -231,7 +230,7 @@ internal fun OneDriveLogin(onSuccess: (String) -> Unit) {
             clientId = v["client_id"].orEmpty()
             if (clientId.isNotBlank()) started = true
         }
-        OutlinedTextField(clientId, { clientId = it }, label = { Text("应用程序(客户端) ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(clientId, { clientId = it }, label = { Text("应用程序(客户端) ID") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
         OutlinedButton(onClick = { started = true }, enabled = clientId.isNotBlank()) { Text("下一步") }
     } else {
         BrowserPollLogin(
