@@ -835,6 +835,12 @@ fun TelegramChatScreen(
                         },
                         icon = AppIcons.Live,
                     )
+                    // 「全部消息」像官方客户端那样按聊天气泡显示；长按视频收藏
+                    mode == com.aisub.player.telegram.TgMode.ALL && !filtering -> TgChatMessages(
+                        shown, results.listState, loading, error, ::loadMore, progress, saved,
+                        onClick = ::start,
+                        onLongClick = { v -> if (v.isVideo) toggleSaved(v) else start(v) },
+                    )
                     else -> LazyColumn(state = results.listState, contentPadding = PaddingValues(vertical = 4.dp)) {
                         itemsIndexed(shown, key = { _, v -> v.messageId }) { i, v ->
                             if (i >= shown.size - 3) LaunchedEffect(shown.size) { loadMore() }
