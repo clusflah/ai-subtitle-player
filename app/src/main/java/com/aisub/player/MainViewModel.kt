@@ -2300,16 +2300,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return OnlineSubtitles(s.osApiKey, s.osUsername, s.osPassword, s.assrtToken).also { online = s to it }
     }
 
-    /** 详情页识别出的影片名（按视频地址）：播放时搜字幕默认用它，比文件名好搜 */
-    private val subtitleQueries = HashMap<String, String>()
+    /** 详情页识别出的影片名（按视频地址，每个字幕来源一个）：播放时搜字幕默认用它，比文件名好搜 */
+    private val subtitleQueries = HashMap<String, Map<OnlineSubtitleSource, String>>()
 
-    fun rememberSubtitleQuery(video: String, query: String) {
-        if (query.isNotBlank()) subtitleQueries[video] = query
+    fun rememberSubtitleQueries(video: String, queries: Map<OnlineSubtitleSource, String>) {
+        queries.filterValues { it.isNotBlank() }.takeIf { it.isNotEmpty() }?.let { subtitleQueries[video] = it }
     }
 
+    fun subtitleQueries(video: Uri?): Map<OnlineSubtitleSource, String> = video?.let { subtitleQueries[it.toString()] }.orEmpty()
+
     /** 搜索框的默认内容：识别出的影片名，没有就是去掉扩展名的文件名。 */
-    fun defaultSubtitleQuery(video: Uri? = _state.value.videoUri): String =
-        video?.let { subtitleQueries[it.toString()] } ?: _state.value.current?.title?.substringBeforeLast('.').orEmpty()
+    fun defaultSubtitleQuery(video: Uri? = _state.value.videoUri, source: OnlineSubtitleSource? = null): String =
+        subtitleQueries(video).let { q -> source?.let(q::get) ?: q.values.firstOrNull() }
+            ?: _state.value.current?.title?.substringBeforeLast('.').orEmpty()
 
     /** [video]：给哪个视频找字幕，默认是正在放的 */
     suspend fun searchOnlineSubtitles(source: OnlineSubtitleSource, query: String, video: Uri? = _state.value.videoUri): List<OnlineSubtitle> = withContext(Dispatchers.IO) {
@@ -2432,6 +2435,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         } catch (e: Exception) {
             "连接失败：${e.message}"
         }
+    }
+
+    /** 设置页其他 Key（在线字幕、影视信息、朗读）的「测试连接」：在后台跑，出错统一成「连接失败：…」。 */
+    suspend fun testService(block: suspend () -> String): String = withContext(Dispatchers.IO) {
+        try {
+            block()
+        } catch (e: Exception) {
+            "连接失败：${e.message ?: e.javaClass.simpleName}"
+        }
+    }
+
+    /** 朗读的「测试连接」：拉一次 Azure 语音列表。 */
+    suspend fun testTts(settings: AppSettings): String = testService {
+        val (key, region, endpoint) = settings.ttsAzure()
+        if (key.isBlank()) return@testService "请先填写 Speech 资源 Key"
+        "连接成功：可用 ${AzureTts(key, region, endpoint).voices(null).size} 种语音"
     }
 
     fun clearTranslations() {

@@ -30,6 +30,13 @@ object FanartTv {
         else FanartArt(pick("hdmovielogo", "movielogo"), pick("moviebackground"))
     }
 
+    /** 设置页的「测试连接」：查一部肯定有图的电影（黑客帝国），Key 无效会抛出异常。阻塞调用。 */
+    fun test(apiKey: String): String {
+        if (apiKey.isBlank()) return "请先填写 API Key"
+        lookup(apiKey, "movie", 603, null, null) ?: throw IOException("Fanart.tv 没有返回数据")
+        return "连接成功"
+    }
+
     private fun rank(lang: String) = when (lang) {
         "zh" -> 0
         "en" -> 1

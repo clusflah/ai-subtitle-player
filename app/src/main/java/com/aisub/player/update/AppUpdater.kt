@@ -105,7 +105,7 @@ class AppUpdater(
     }
 
     private fun showRelease(activity: Activity, rel: Release, auto: Boolean) {
-        val notes = latestNotes(rel.notes).let { if (it.length > 1500) it.take(1500) + "…" else it }
+        val notes = notesSince(rel.notes, currentVersion(activity)).let { if (it.length > 6000) it.take(6000) + "…" else it }
         val size = if (rel.size > 0) " · 安装包 %.1f MB".format(rel.size / 1048576.0) else ""
         AlertDialog.Builder(activity)
             .setTitle("发现新版本 ${rel.tag}")
@@ -242,16 +242,37 @@ class AppUpdater(
         /** 这台手机能用的 ABI，按系统推荐的顺序 */
         val abis: List<String> get() = Build.SUPPORTED_ABIS.toList()
 
+        /** 发布说明里只留最新这一版的更新（[notesSince] 不知道当前版本时的样子） */
+        fun latestNotes(notes: String): String = notesSince(notes, null)
+
         /**
-         * 发布说明里只留最新这一版的更新：「## 本版更新…」或第一个「## x.y.z 更新」那节
-         * （发布页上还有介绍、下载说明、历史版本，弹窗里不要）；去掉 Markdown 记号，列表项换成「•」。
-         * 找不到这样的小节就用整份说明。
+         * 发布说明里只留比 [current] 新的各版更新：「## 本版更新（x.y.z）」和「## x.y.z 更新」各节
+         * （发布页上还有介绍、下载说明、更早的版本，弹窗里不要）。跨了几个版本时每节前面标上版本号；
+         * 去掉 Markdown 记号，列表项换成「•」。[current] 为 null 只取第一节，一节都找不到就用整份说明。
          */
-        fun latestNotes(notes: String): String {
-            val lines = notes.lines()
-            val start = lines.indexOfFirst { VERSION_HEADING.containsMatchIn(it) }
-            val section = if (start < 0) lines else lines.drop(start + 1).takeWhile { !it.startsWith("## ") }
-            return section.joinToString("\n")
+        fun notesSince(notes: String, current: String?): String {
+            val sections = ArrayList<Pair<String, List<String>>>()
+            var version: String? = null
+            var body = ArrayList<String>()
+            fun flush() {
+                version?.let { sections += it to body }
+                version = null
+                body = ArrayList()
+            }
+            for (line in notes.lines()) {
+                if (line.startsWith("## ")) {
+                    flush()
+                    version = VERSION_HEADING.find(line)?.groupValues?.get(1)
+                } else if (version != null) body += line
+            }
+            flush()
+            val picked = (if (current == null) emptyList() else sections.filter { isNewer(it.first, current) }).ifEmpty { sections.take(1) }
+            val text = when {
+                picked.isEmpty() -> notes
+                picked.size == 1 -> picked[0].second.joinToString("\n")
+                else -> picked.joinToString("\n\n") { (v, lines) -> "【$v】\n" + lines.joinToString("\n").trim() }
+            }
+            return text
                 .replace(Regex("""\[([^\]]+)]\([^)]*\)"""), "$1")
                 .replace("**", "").replace("__", "").replace("`", "")
                 .replace(Regex("""(?m)^\s*[-*]\s+"""), "• ")
@@ -260,7 +281,8 @@ class AppUpdater(
                 .trim()
         }
 
-        private val VERSION_HEADING = Regex("""^##\s*(本版更新|v?\d+\.\d+\.\d+)""")
+        /** 「## 本版更新（2.9.41）」「## 2.9.40 更新」，取出版本号 */
+        private val VERSION_HEADING = Regex("""^##\s*(?:本版更新\s*[（(]\s*)?v?(\d+\.\d+\.\d+)""")
     }
 }
 
