@@ -264,6 +264,9 @@ fun RemoteFolderScreen(
                     .map { MangaOpen.Archive(it.name.substringBeforeLast('.'), it.playUrl!!) }
                 openManga(MangaOpen.Archive(item.name.substringBeforeLast('.'), item.playUrl, chapters))
             }
+            // TXT 电子书
+            item.playUrl != null && com.aisub.player.book.Ebooks.isTextName(item.name) ->
+                openManga(MangaOpen.Archive(item.name.substringBeforeLast('.'), item.playUrl))
             MediaEntry.isAudioName(item.name) -> {
                 val media = all.filter { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }
                 play(media.map { it.toMediaEntry() }, media.indexOf(item).coerceAtLeast(0))

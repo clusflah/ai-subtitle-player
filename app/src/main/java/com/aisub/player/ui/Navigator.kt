@@ -44,6 +44,8 @@ sealed interface Screen {
     data object Manga : Screen
     /** 读一本本地 / 网盘漫画（网页漫画在网页里直接进阅读模式） */
     data class MangaRead(val open: MangaOpen) : Screen
+    /** 电子书：正在朗读、继续阅读、打开电子书文件（书本身也用 [MangaRead] 打开，认出是文字书就用电子书阅读） */
+    data object Books : Screen
     /** 看图：同一文件夹里的图片左右滑动切换。 */
     data class ImageViewer(val serverId: String?, val images: List<com.aisub.player.remote.RemoteItem>, val index: Int) : Screen
 }

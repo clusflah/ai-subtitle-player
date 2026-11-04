@@ -73,7 +73,7 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:scheme="content" android:mimeType="video/*" />
             </intent-filter>
-            <!-- 漫画：CBZ / ZIP 压缩包、PDF，用漫画阅读打开 -->
+            <!-- 漫画：CBZ / ZIP 压缩包、PDF、EPUB、MOBI / AZW3，用漫画阅读打开 -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -84,6 +84,12 @@
                 <data android:mimeType="application/zip" />
                 <data android:mimeType="application/x-zip-compressed" />
                 <data android:mimeType="application/pdf" />
+                <data android:mimeType="application/epub+zip" />
+                <data android:mimeType="application/x-mobipocket-ebook" />
+                <data android:mimeType="application/vnd.amazon.ebook" />
+                <data android:mimeType="application/vnd.amazon.mobi8-ebook" />
+                <!-- TXT 电子书 -->
+                <data android:mimeType="text/plain" />
             </intent-filter>
             <!-- 光盘镜像（ISO） -->
             <intent-filter>
@@ -96,6 +102,15 @@
         <!-- 后台播放：媒体会话服务，播放时显示通知栏控制，锁屏、耳机按键可控制 -->
         <service
             android:name=".PlaybackService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
+        <!-- 听书：电子书朗读的媒体会话（锁屏、后台接着读，通知栏和耳机按键控制） -->
+        <service
+            android:name=".book.BookReadService"
             android:foregroundServiceType="mediaPlayback"
             android:exported="true">
             <intent-filter>

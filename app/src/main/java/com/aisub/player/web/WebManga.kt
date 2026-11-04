@@ -78,7 +78,11 @@ class WebMangaCollector {
         if (best == null || best.pages.size < 3) { manga = null; return }
         val pageUrl = top?.frame ?: best.frame
         manga = WebManga(
-            pages = best.pages.map { MangaPage(it, referer = best.frame) },
+            // 网页里解密出来的图（web_manga.js 报的是「voxblob:序号」）：要的时候请网页交出来
+            pages = best.pages.map { p ->
+                val blob = if (p.startsWith(WebPageImages.SCHEME)) p.removePrefix(WebPageImages.SCHEME).toIntOrNull() else null
+                MangaPage(if (blob != null) WebPageImages.url(best.frame, blob) else p, referer = best.frame)
+            },
             title = top?.title?.let(::cleanTitle).orEmpty(),
             pageUrl = pageUrl,
             prev = top?.prev ?: best.prev,

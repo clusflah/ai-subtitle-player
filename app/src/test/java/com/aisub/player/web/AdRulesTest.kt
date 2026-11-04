@@ -57,11 +57,53 @@ class AdRulesTest {
 
     @Test
     fun skipsUnsupportedRules() {
-        val r = rules("||a.com^\$redirect=noopjs", "||b.com^\$popup", "/banner/*", "-ad-", "||c*.com^", "example.com#\$#body { color: red }")
+        val r = rules("||a.com^\$redirect=noopjs", "||b.com^\$popup", "-ad-", "/ads?/", "||c*.com^", "example.com#\$#body { color: red }")
         assertFalse(r.shouldBlock("https://a.com/x", null, null))
         assertFalse(r.shouldBlock("https://b.com/x", null, null))
-        assertFalse(r.shouldBlock("https://site.com/banner/1.png", null, null))
+        // 下载的不带域名规则太短的不认；/正则/ 不认
+        assertFalse(r.shouldBlock("https://site.com/x-ad-1.png", null, null))
+        assertFalse(r.shouldBlock("https://site.com/ads/1.png", null, null))
         assertEquals("", r.css("example.com"))
+    }
+
+    @Test
+    fun listAnywhereRules() {
+        // AdGuard 中文过滤里拦「狗狗联盟」一类广告的规则：域名随机，只能按端口和路径认
+        val r = rules(
+            ":800*/sc/*n=\$script,third-party",
+            ".com/sc/*?n=\$script,third-party",
+            "/banner/*",
+            "@@/banner/keep.png",
+            "|https://ad.*/pop.js",
+            "/adposid/*\$domain=news.cn",
+        )
+        val page = "https://www.kalamanhua.com/chapter/31570-1-161.html"
+        assertTrue(r.shouldBlock("https://46977g.smun7ro.com:8005/sc/6977?n=ommiogti", page, null))
+        assertTrue(r.shouldBlock("https://x9.rand0m.com/sc/12?n=ab", page, AdType.SCRIPT))
+        // 同站的、类型不对的不拦
+        assertFalse(r.shouldBlock("https://www.kalamanhua.com:8005/sc/1?n=a", page, null))
+        assertFalse(r.shouldBlock("https://46977g.smun7ro.com:8005/sc/6977?n=ommiogti", page, AdType.IMAGE))
+        // 漫画图片、本站脚本不受影响
+        assertFalse(r.shouldBlock("https://image.kalaimg.top/play/min/509a33.jpg", page, AdType.IMAGE))
+        assertFalse(r.shouldBlock("https://www.kalamanhua.com/static/js/player.js?t=a20261027", page, AdType.SCRIPT))
+        // 例外
+        assertTrue(r.shouldBlock("https://site.com/banner/1.png", null, null))
+        assertFalse(r.shouldBlock("https://site.com/banner/keep.png", null, null))
+        // 开头的 | 只认地址开头
+        assertTrue(r.shouldBlock("https://ad.foo.com/pop.js", null, null))
+        assertFalse(r.shouldBlock("https://cdn.com/r?u=https://ad.foo.com/pop.js", null, null))
+        // domain=
+        assertTrue(r.shouldBlock("https://img.cn/adposid/1", "https://www.news.cn/", null))
+        assertFalse(r.shouldBlock("https://img.cn/adposid/1", "https://other.cn/", null))
+    }
+
+    @Test
+    fun anywhereIndexFindsRulesWithoutUsableWord() {
+        // 挑不出完整的词（两头连着 *）的规则也要比
+        val r = rules("*popunder*", "ab*cd*ef/x")
+        assertTrue(r.shouldBlock("https://a.com/js/popunder.min.js", null, null))
+        assertTrue(r.shouldBlock("https://a.com/zabqcdqef/x", null, null))
+        assertFalse(r.shouldBlock("https://a.com/js/main.js", null, null))
     }
 
     @Test
@@ -113,8 +155,10 @@ class AdRulesTest {
         assertEquals(AdDecision.Block(AdResponse.EMPTY), custom.decide("https://x.cn/static/ad/1.gif", null, null))
         assertEquals(AdDecision.Allow, custom.decide("https://x.cn/static/ad/keep.gif", null, null))
         assertEquals(null, custom.decide("https://x.cn/static/img/1.gif", null, null))
-        // 下载的规则里不带域名的不认
-        assertEquals(null, AdRules.parse(lines.asSequence()).decide("https://x.cn/static/ad/1.gif", null, null))
+        // 下载的规则里不带域名的也认
+        assertEquals(AdDecision.Block(AdResponse.EMPTY), AdRules.parse(lines.asSequence()).decide("https://x.cn/static/ad/1.gif", null, null))
+        // 自己写的短一点也认（4 个字），下载的要 5 个字以上
+        assertEquals(AdDecision.Block(AdResponse.EMPTY), AdRules.parse(sequenceOf("-ad-"), custom = true).decide("https://a.cn/x-ad-1.png", null, null))
     }
 
     @Test

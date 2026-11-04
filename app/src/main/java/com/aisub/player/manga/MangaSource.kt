@@ -55,6 +55,8 @@ object MangaFetcher {
         when {
             page.entry?.startsWith(MangaArchive.PDF) == true -> throw IOException("PDF 页要画出来，不能直接读")
             page.entry != null -> MangaArchive.read(context, page.url, page.entry)
+            // 网页里解密出来的图：请网页交出来
+            com.aisub.player.web.WebPageImages.isPage(page.url) -> com.aisub.player.web.WebPageImages.bytes(page.url)
             page.referer != null && (page.url.startsWith("http://") || page.url.startsWith("https://")) -> web(page)
             else -> RemoteFiles.read(context, page.url, MAX_BYTES)
         }
@@ -88,17 +90,24 @@ object MangaArchive {
     private val lock = Mutex()
     private val open = LinkedHashMap<String, ZipFile>()
 
-    fun isArchiveName(name: String) = name.substringAfterLast('.', "").lowercase() in setOf("cbz", "zip", "pdf")
+    fun isArchiveName(name: String) = name.substringAfterLast('.', "").lowercase() in setOf("cbz", "zip", "pdf", "epub", "mobi", "azw3", "azw")
 
-    /** 系统给的类型是漫画压缩包或 PDF */
-    fun isArchiveType(mime: String?) = mime?.lowercase() in setOf(
+    /** 系统给的类型是漫画压缩包、PDF、EPUB 或 MOBI */
+    fun isArchiveType(mime: String?) = mime?.lowercase() in TYPES
+
+    /** 漫画文件的类型（文件选择器、「用译幕打开」用） */
+    val TYPES = listOf(
         "application/zip", "application/x-zip-compressed", "application/x-cbz", "application/vnd.comicbook+zip", "application/pdf",
+        "application/epub+zip", "application/x-mobipocket-ebook", "application/vnd.amazon.ebook", "application/vnd.amazon.mobi8-ebook",
     )
 
     /** PDF 的页：条目名是这个前缀加页码 */
     const val PDF = "#pdf:"
 
-    private fun isPdf(file: File): Boolean = runCatching {
+    /** MOBI / AZW3 的页：条目名是这个前缀加记录序号 */
+    const val MOBI = "#mobi:"
+
+    fun isPdf(file: File): Boolean = runCatching {
         file.inputStream().use { val b = ByteArray(5); it.read(b) == 5 && String(b, Charsets.US_ASCII) == "%PDF-" }
     }.getOrDefault(false)
 
@@ -138,27 +147,51 @@ object MangaArchive {
     }
 
     /** 准备好压缩包（需要时复制到缓存，progress 是 0..1，不知道大小是 -1），返回漫画的所有页（按文件名自然排序） */
-    suspend fun pages(context: Context, url: String, progress: (Float) -> Unit = {}): List<MangaPage> = withContext(Dispatchers.IO) {
+    /** 把文件准备到本地（content:// 复制、网盘下载到缓存，progress 是 0..1，不知道大小是 -1） */
+    suspend fun prepare(context: Context, url: String, progress: (Float) -> Unit = {}): File = withContext(Dispatchers.IO) {
         val file = localFile(context, url)
         if (!file.exists()) {
             trimCache(file.parentFile)
             RemoteFiles.download(context, url, file) { done, total -> progress(if (total > 0) done.toFloat() / total else -1f) }
         }
         file.setLastModified(System.currentTimeMillis())
+        file
+    }
+
+    suspend fun pages(context: Context, url: String, progress: (Float) -> Unit = {}): List<MangaPage> = withContext(Dispatchers.IO) {
+        val file = prepare(context, url, progress)
         if (isPdf(file)) {
             val count = pdfLock.withLock { pdfFor(url, file).pageCount }
             return@withContext (0 until count).map { MangaPage(url, entry = "$PDF$it") }
         }
+        if (Mobi.isMobi(file)) {
+            val records = java.io.RandomAccessFile(file, "r").use { Mobi.imageRecords(it) }
+            if (records.isEmpty()) throw IOException("这个 MOBI 文件里没有图片（文字书不能当漫画看）")
+            return@withContext records.map { MangaPage(url, entry = "$MOBI$it") }
+        }
         val zip = zipFor(url, file)
-        zip.entries().asSequence()
-            .filter { !it.isDirectory && com.aisub.player.media.MediaEntry.isImageName(it.name) && !it.name.substringAfterLast('/').startsWith(".") }
-            .map { it.name }
+        val names = zip.entries().asSequence().filter { !it.isDirectory }.map { it.name }.toList()
+        // EPUB：按书里的阅读顺序
+        val epub = runCatching {
+            Epub.imageOrder(names) { name ->
+                zip.getEntry(name)?.takeIf { it.size in 0..(8L * 1024 * 1024) }?.let { e -> zip.getInputStream(e).use { String(it.readBytes(), Charsets.UTF_8) } }
+            }
+        }.getOrNull()
+        if (epub != null) return@withContext epub.map { MangaPage(url, entry = it) }
+        val images = names
+            .filter { com.aisub.player.media.MediaEntry.isImageName(it) && !it.substringAfterLast('/').startsWith(".") }
             .sortedWith(NaturalOrder)
-            .map { MangaPage(url, entry = it) }
-            .toList()
+        if (images.isEmpty() && names.any { it == "META-INF/container.xml" }) throw IOException("这个 EPUB 里没有图片（文字书不能当漫画看）")
+        images.map { MangaPage(url, entry = it) }
     }
 
     suspend fun read(context: Context, url: String, entry: String): ByteArray {
+        if (entry.startsWith(MOBI)) {
+            val index = entry.removePrefix(MOBI).toIntOrNull() ?: throw IOException("MOBI 页不对")
+            return withContext(Dispatchers.IO) {
+                java.io.RandomAccessFile(localFile(context, url), "r").use { Mobi.record(it, index) }
+            }
+        }
         val zip = zipFor(url, localFile(context, url))
         // ZipFile 可以多线程读，但同一个条目的流要自己读完；加锁省得低端机同时解压太多
         return lock.withLock {
