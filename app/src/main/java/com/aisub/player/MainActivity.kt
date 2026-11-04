@@ -24,6 +24,9 @@ import com.aisub.player.ui.FileDetailScreen
 import com.aisub.player.ui.ImageViewerScreen
 import com.aisub.player.ui.LiveScreen
 import com.aisub.player.ui.WebScreen
+import com.aisub.player.ui.MangaOpen
+import com.aisub.player.ui.MangaReadScreen
+import com.aisub.player.ui.MangaScreen
 import com.aisub.player.ui.TelegramScreen
 import com.aisub.player.ui.TelegramChatScreen
 import com.aisub.player.ui.TelegramSavedScreen
@@ -155,6 +158,12 @@ class MainActivity : ComponentActivity() {
                         is Screen.History -> HistoryScreen(lib, screen.music, back, play)
                         Screen.Live -> LiveScreen(back, play)
                         Screen.Web -> WebScreen(main, back, play)
+                        Screen.Manga -> MangaScreen(
+                            back,
+                            openWeb = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
+                            open = { nav.push(Screen.MangaRead(it)) },
+                        )
+                        is Screen.MangaRead -> MangaReadScreen(screen.open, back)
                         Screen.Telegram -> TelegramScreen(back, openSaved = { nav.push(Screen.TelegramSaved) }) { chat -> nav.push(Screen.TelegramChat(chat.id, chat.title)) }
                         Screen.TelegramSaved -> TelegramSavedScreen(lib, back, play)
                         is Screen.TelegramChat -> TelegramChatScreen(screen.chatId, screen.title, lib, back, play)
@@ -175,6 +184,7 @@ class MainActivity : ComponentActivity() {
                                 nav.push(Screen.FileDetail(screen.serverId, item, queue, i, folder))
                             },
                             openImages = { images, i -> nav.push(Screen.ImageViewer(screen.serverId, images, i)) },
+                            openArchive = { item -> item.playUrl?.let { nav.push(Screen.MangaRead(MangaOpen.Archive(item.name.substringBeforeLast('.'), it))) } },
                             settings = ui.settings,
                         )
                         is Screen.PlaylistDetail -> PlaylistDetailScreen(lib, screen.id, back, play)
@@ -210,12 +220,17 @@ class MainActivity : ComponentActivity() {
                         is Screen.ImageViewer -> ImageViewerScreen(
                             screen.serverId, screen.images, screen.index, back,
                             openDetail = { item -> nav.push(Screen.FileDetail(screen.serverId, item)) },
+                            openManga = { images, i ->
+                                val pages = images.mapNotNull { it.playUrl }.map { com.aisub.player.manga.MangaPage(it) }
+                                val folder = images.firstOrNull()?.path?.substringBeforeLast('/').orEmpty()
+                                nav.push(Screen.MangaRead(MangaOpen.Images(folder.substringAfterLast('/').ifEmpty { "图片" }, "images:${screen.serverId ?: "local"}:$folder", pages, i)))
+                            },
                         )
                     }
                    }
                     // 音乐在播放页外继续放时，页面底部的「正在播放」小条（占自己的位置，不盖住列表），点它回到播放页。
                     // 首页的小条放在底部标签栏上面，由 HomeScreen 自己显示
-                    if (nav.current != Screen.Player && nav.current != Screen.Home) NowPlayingBar(
+                    if (nav.current != Screen.Player && nav.current != Screen.Home && nav.current !is Screen.MangaRead) NowPlayingBar(
                         main, bottomPadding = 8.dp, onOpen = { nav.push(Screen.Player) },
                     )
                   }

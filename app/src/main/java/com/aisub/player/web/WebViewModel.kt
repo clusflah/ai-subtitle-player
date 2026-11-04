@@ -292,7 +292,13 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
      * 注入网页的接口（在 WebView 的后台线程上被调用）。每个标签页一个；
      * 只有正在看的那个标签页的网页能送声音、报告播放位置（切走的标签页里网页的脚本还在跑）
      */
-    inner class Bridge(private val active: () -> Boolean) {
+    inner class Bridge(private val active: () -> Boolean, private val manga: WebMangaCollector? = null) {
+        /** web_manga.js：这个框架里识别出的漫画图片和上一话、下一话链接（JSON） */
+        @JavascriptInterface
+        fun mangaFound(json: String) {
+            manga?.report(json)
+        }
+
         @JavascriptInterface
         fun enabled(): Boolean = captions.enabled && active()
 

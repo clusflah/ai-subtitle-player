@@ -351,6 +351,7 @@ fun HomeScreen(
                     },
                     openLive = { nav.push(Screen.Live) },
                     openWeb = { nav.push(Screen.Web) },
+                    openManga = { nav.push(Screen.Manga) },
                     openTelegram = { nav.push(Screen.Telegram) },
                     openStream = { dialog = HomeDialog.Stream },
                 )
@@ -538,6 +539,7 @@ private fun BrowseTab(
     openLive: () -> Unit,
     openWeb: () -> Unit,
     openTelegram: () -> Unit,
+    openManga: () -> Unit,
     openStream: () -> Unit,
 ) {
     val all = remember(state.videos, state.audios) { state.videos + state.audios }
@@ -600,6 +602,8 @@ private fun BrowseTab(
                 ListRow("网页", "在网页里看视频，边播边生成 AI 字幕", AppIcons.Web, onClick = openWeb)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 ListRow("Telegram", "看频道和群里的视频，边下边播", AppIcons.Telegram, onClick = openTelegram)
+                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow("漫画", "网页漫画阅读模式、本地 CBZ 和图片文件夹，遥控器翻页", AppIcons.MenuBook, onClick = openManga)
             }
         }
     }

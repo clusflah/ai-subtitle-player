@@ -164,6 +164,8 @@ fun RemoteFolderScreen(
     /** 参数：文件、播放队列、在队列里的位置、同目录的全部条目 */
     openDetail: (RemoteItem, List<MediaEntry>, Int, List<RemoteItem>) -> Unit,
     openImages: (List<RemoteItem>, Int) -> Unit,
+    /** 漫画压缩包（CBZ / ZIP）：用漫画阅读打开 */
+    openArchive: (RemoteItem) -> Unit,
     /** 海报墙缺海报时到网上找要用（TMDB Key、是否用豆瓣） */
     settings: com.aisub.player.AppSettings,
 ) {
@@ -253,6 +255,7 @@ fun RemoteFolderScreen(
                 val images = all.filter { !it.isDir && it.playUrl != null && MediaEntry.isImageName(it.name) }
                 openImages(images, images.indexOf(item).coerceAtLeast(0))
             }
+            item.playUrl != null && com.aisub.player.manga.MangaArchive.isArchiveName(item.name) -> openArchive(item)
             MediaEntry.isAudioName(item.name) -> {
                 val media = all.filter { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }
                 play(media.map { it.toMediaEntry() }, media.indexOf(item).coerceAtLeast(0))
