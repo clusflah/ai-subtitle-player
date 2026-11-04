@@ -163,7 +163,7 @@ class MainActivity : ComponentActivity() {
                             openWeb = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
                             open = { nav.push(Screen.MangaRead(it)) },
                         )
-                        is Screen.MangaRead -> MangaReadScreen(screen.open, back)
+                        is Screen.MangaRead -> MangaReadScreen(screen.open, lib, back)
                         Screen.Telegram -> TelegramScreen(back, openSaved = { nav.push(Screen.TelegramSaved) }) { chat -> nav.push(Screen.TelegramChat(chat.id, chat.title)) }
                         Screen.TelegramSaved -> TelegramSavedScreen(lib, back, play)
                         is Screen.TelegramChat -> TelegramChatScreen(screen.chatId, screen.title, lib, back, play)
@@ -184,7 +184,8 @@ class MainActivity : ComponentActivity() {
                                 nav.push(Screen.FileDetail(screen.serverId, item, queue, i, folder))
                             },
                             openImages = { images, i -> nav.push(Screen.ImageViewer(screen.serverId, images, i)) },
-                            openArchive = { item -> item.playUrl?.let { nav.push(Screen.MangaRead(MangaOpen.Archive(item.name.substringBeforeLast('.'), it))) } },
+                            openManga = { nav.push(Screen.MangaRead(it)) },
+                            parentPath = nav.stack.filterIsInstance<Screen.Remote>().dropLast(1).lastOrNull()?.takeIf { it.serverId == screen.serverId }?.path,
                             settings = ui.settings,
                         )
                         is Screen.PlaylistDetail -> PlaylistDetailScreen(lib, screen.id, back, play)

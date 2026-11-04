@@ -213,10 +213,10 @@ fun MangaReader(
         launch(Dispatchers.IO) { MangaImages.preload(context, order.filter { it in pages.indices }.map { pages[it] }) }
     }
 
-    val pager = key(mode, units.size, hasEnd) {
+    val pager = key(mode, units.size, hasEnd, book.key) {
         rememberPagerState(unitOf(page)) { units.size + if (hasEnd) 1 else 0 }
     }
-    val strip = key(mode) { rememberLazyListState(if (mode == MangaMode.STRIP) page else 0) }
+    val strip = key(mode, book.key) { rememberLazyListState(if (mode == MangaMode.STRIP) page else 0) }
     val widthScrolls = remember(book.key) { HashMap<Int, ScrollState>() }
     var landAtBottom by remember { mutableIntStateOf(-1) }
 

@@ -52,16 +52,53 @@ import com.aisub.player.media.MediaEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** 打开一本漫画：一组图片（看图时切到漫画模式），一个压缩包，或手机里的一个图片文件夹 */
+/** 打开一本漫画：一组图片（看图时切到漫画模式），一个压缩包 / PDF，手机里的一个图片文件夹，或网盘里的一个图片文件夹 */
 sealed interface MangaOpen {
     val title: String
 
-    data class Images(override val title: String, val key: String, val pages: List<MangaPage>, val start: Int) : MangaOpen
-    /** url：content://、file://、网盘 cloud://、WebDAV 地址 */
-    data class Archive(override val title: String, val url: String) : MangaOpen
+    /** 记进度、找上一话下一话用 */
+    val key: String
+
+    data class Images(override val title: String, override val key: String, val pages: List<MangaPage>, val start: Int) : MangaOpen
+
+    /**
+     * url：content://、file://、网盘 cloud://、WebDAV 地址。
+     * chapters：同一个文件夹里的其他压缩包（按文件名排好），用来翻上一话、下一话
+     */
+    data class Archive(override val title: String, val url: String, val chapters: List<Archive> = emptyList()) : MangaOpen {
+        override val key get() = url
+    }
+
     /** 系统文件选择器选的文件夹（content://…/tree/…） */
-    data class Folder(override val title: String, val tree: String) : MangaOpen
+    data class Folder(override val title: String, val tree: String) : MangaOpen {
+        override val key get() = TREE + tree
+    }
+
+    /**
+     * 网盘、WebDAV、OpenList 里的一个图片文件夹（一话）。parent：上一级文件夹，
+     * 里面的其他文件夹当上一话、下一话（WebDAV 这类路径式的不给也能自己算）
+     */
+    data class RemoteFolder(val serverId: String, val path: String, override val title: String, val parent: String? = null) : MangaOpen {
+        override val key get() = "$REMOTE$serverId:$path"
+    }
 }
+
+/** 网盘文件夹漫画的进度键前缀：remote:服务器:路径 */
+internal const val REMOTE = "remote:"
+
+/** 从进度键还原网盘文件夹（「继续阅读」用） */
+internal fun remoteFolderOf(key: String, title: String): MangaOpen.RemoteFolder? {
+    if (!key.startsWith(REMOTE)) return null
+    val rest = key.removePrefix(REMOTE)
+    val i = rest.indexOf(':').takeIf { it > 0 } ?: return null
+    return MangaOpen.RemoteFolder(rest.substring(0, i), rest.substring(i + 1), title)
+}
+
+/** 网盘文件夹里的图片当一话（按文件名自然排序） */
+internal fun remoteImagePages(items: List<com.aisub.player.remote.RemoteItem>): List<MangaPage> =
+    items.filter { !it.isDir && it.playUrl != null && MediaEntry.isImageName(it.name) }
+        .sortedWith { a, b -> NaturalOrder.compare(a.name, b.name) }
+        .map { MangaPage(it.playUrl!!) }
 
 /** 漫画首页：继续阅读、打开本地漫画、网页漫画的说明 */
 @Composable
@@ -121,6 +158,7 @@ fun MangaScreen(onBack: () -> Unit, openWeb: (String?) -> Unit, open: (MangaOpen
                                 when {
                                     r.web -> openWeb(r.location)
                                     r.location.startsWith(TREE) -> open(MangaOpen.Folder(r.title, r.location.removePrefix(TREE)))
+                                    r.location.startsWith(REMOTE) -> remoteFolderOf(r.location, r.title)?.let(open)
                                     else -> open(MangaOpen.Archive(r.title, r.location))
                                 }
                             },
@@ -175,27 +213,51 @@ private fun folderPages(context: Context, tree: Uri): List<MangaPage> {
         .map { MangaPage(DocumentsContract.buildDocumentUriUsingTree(tree, it.second).toString()) }
 }
 
-/** 打开本地 / 网盘漫画：压缩包先准备好（网盘的要先下载），再进入阅读 */
+/**
+ * 打开本地 / 网盘漫画：压缩包先准备好（网盘的要先下载），网盘文件夹先列出图片，再进入阅读。
+ * 同一个文件夹里有别的压缩包、别的章节文件夹时，可以翻上一话、下一话。
+ */
 @Composable
-fun MangaReadScreen(open: MangaOpen, onBack: () -> Unit) {
+fun MangaReadScreen(start: MangaOpen, lib: com.aisub.player.LibraryViewModel, onBack: () -> Unit) {
     val context = LocalContext.current
+    var open by remember(start) { mutableStateOf(start) }
+    /** 同一部漫画的各话（按名字排好）；没有是空的 */
+    var chapters by remember(start) { mutableStateOf<List<MangaOpen>>((start as? MangaOpen.Archive)?.chapters.orEmpty()) }
     var book by remember(open) { mutableStateOf<MangaBook?>(null) }
     var error by remember(open) { mutableStateOf<String?>(null) }
     var progress by remember(open) { mutableFloatStateOf(-1f) }
     var attempt by remember(open) { mutableStateOf(0) }
 
+    // 网盘文件夹：上一级里的其他文件夹当各话
+    LaunchedEffect(start) {
+        val f = start as? MangaOpen.RemoteFolder ?: return@LaunchedEffect
+        val parent = f.parent ?: f.path.trimEnd('/').substringBeforeLast('/', "").takeIf { f.path.startsWith("/") && it.isNotEmpty() }
+            ?: return@LaunchedEffect
+        val server = lib.server(f.serverId) ?: return@LaunchedEffect
+        runCatching { lib.client(server).list(parent) }.onSuccess { items ->
+            val dirs = items.filter { it.isDir }.sortedWith { a, b -> NaturalOrder.compare(a.name, b.name) }
+            if (dirs.size > 1) chapters = dirs.map { MangaOpen.RemoteFolder(f.serverId, it.path, it.name, parent) }
+        }
+    }
+
     LaunchedEffect(open, attempt) {
         error = null
+        val o = open
         runCatching {
-            when (open) {
-                is MangaOpen.Images -> MangaBook(open.key, open.title, open.pages, "local", recent = false)
+            when (o) {
+                is MangaOpen.Images -> MangaBook(o.key, o.title, o.pages, "local", recent = false)
                 is MangaOpen.Archive -> {
-                    val pages = MangaArchive.pages(context, open.url) { progress = it }
-                    MangaBook(open.url, open.title, pages, "local")
+                    val pages = MangaArchive.pages(context, o.url) { progress = it }
+                    MangaBook(o.key, o.title, pages, "local")
                 }
                 is MangaOpen.Folder -> {
-                    val pages = withContext(Dispatchers.IO) { folderPages(context, Uri.parse(open.tree)) }
-                    MangaBook(TREE + open.tree, open.title, pages, "local")
+                    val pages = withContext(Dispatchers.IO) { folderPages(context, Uri.parse(o.tree)) }
+                    MangaBook(o.key, o.title, pages, "local")
+                }
+                is MangaOpen.RemoteFolder -> {
+                    val server = lib.server(o.serverId) ?: throw java.io.IOException("找不到这个网盘（可能已经删除）")
+                    val pages = remoteImagePages(lib.client(server).list(o.path))
+                    MangaBook(o.key, o.title, pages, "local")
                 }
             }
         }.onSuccess {
@@ -205,7 +267,13 @@ fun MangaReadScreen(open: MangaOpen, onBack: () -> Unit) {
 
     val b = book
     if (b != null) {
-        MangaReader(b, onExit = onBack, startPage = (open as? MangaOpen.Images)?.start)
+        val i = chapters.indexOfFirst { it.key == b.key }
+        val withChapters = if (i < 0) b else b.copy(prev = chapters.getOrNull(i - 1)?.key, next = chapters.getOrNull(i + 1)?.key)
+        MangaReader(
+            withChapters, onExit = onBack,
+            startPage = (open as? MangaOpen.Images)?.start,
+            onOpenUrl = if (i < 0) null else { key, _ -> chapters.firstOrNull { it.key == key }?.let { open = it } },
+        )
         return
     }
     Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {

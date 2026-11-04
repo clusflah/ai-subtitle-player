@@ -164,8 +164,10 @@ fun RemoteFolderScreen(
     /** 参数：文件、播放队列、在队列里的位置、同目录的全部条目 */
     openDetail: (RemoteItem, List<MediaEntry>, Int, List<RemoteItem>) -> Unit,
     openImages: (List<RemoteItem>, Int) -> Unit,
-    /** 漫画压缩包（CBZ / ZIP）：用漫画阅读打开 */
-    openArchive: (RemoteItem) -> Unit,
+    /** 用漫画阅读打开（压缩包 / PDF、图片文件夹） */
+    openManga: (MangaOpen) -> Unit,
+    /** 上一级文件夹的路径（页面栈里的前一个同服务器目录）；用漫画模式看这个文件夹时，同级的文件夹当上一话、下一话 */
+    parentPath: String? = null,
     /** 海报墙缺海报时到网上找要用（TMDB Key、是否用豆瓣） */
     settings: com.aisub.player.AppSettings,
 ) {
@@ -255,7 +257,13 @@ fun RemoteFolderScreen(
                 val images = all.filter { !it.isDir && it.playUrl != null && MediaEntry.isImageName(it.name) }
                 openImages(images, images.indexOf(item).coerceAtLeast(0))
             }
-            item.playUrl != null && com.aisub.player.manga.MangaArchive.isArchiveName(item.name) -> openArchive(item)
+            item.playUrl != null && com.aisub.player.manga.MangaArchive.isArchiveName(item.name) -> {
+                // 同一个文件夹里的其他漫画文件当上一话、下一话
+                val chapters = all.filter { !it.isDir && it.playUrl != null && com.aisub.player.manga.MangaArchive.isArchiveName(it.name) }
+                    .sortedWith { a, b -> com.aisub.player.manga.NaturalOrder.compare(a.name, b.name) }
+                    .map { MangaOpen.Archive(it.name.substringBeforeLast('.'), it.playUrl!!) }
+                openManga(MangaOpen.Archive(item.name.substringBeforeLast('.'), item.playUrl, chapters))
+            }
             MediaEntry.isAudioName(item.name) -> {
                 val media = all.filter { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }
                 play(media.map { it.toMediaEntry() }, media.indexOf(item).coerceAtLeast(0))
@@ -265,6 +273,7 @@ fun RemoteFolderScreen(
     }
 
     fun itemMenu(item: RemoteItem): List<MenuAction> = listOfNotNull(
+        item.takeIf { it.isDir }?.let { dir -> MenuAction("用漫画模式看") { openManga(MangaOpen.RemoteFolder(serverId, dir.path, dir.name, path)) } },
         item.takeIf { it.isDir }?.let { dir ->
             val fav = state.favoriteFolders.any { it.serverId == serverId && it.path == dir.path }
             MenuAction(if (fav) "取消收藏" else "收藏到首页") { lib.toggleFavoriteFolder(serverId, dir.path, dir.name) }
@@ -286,6 +295,10 @@ fun RemoteFolderScreen(
                 IconButton(onClick = { posterWall = !posterWall; viewPrefs.setGrid("remote", posterWall) }) {
                     Icon(if (posterWall) AppIcons.ListIcon else AppIcons.GridView, if (posterWall) "列表" else "海报墙")
                 }
+            }
+            // 文件夹里是一张张漫画图：直接用漫画模式看
+            if (items.orEmpty().count { !it.isDir && MediaEntry.isImageName(it.name) } >= 2) {
+                IconButton(onClick = { openManga(MangaOpen.RemoteFolder(serverId, path, title, parentPath)) }) { Icon(AppIcons.MenuBook, "漫画模式") }
             }
             if (server != null) FavoriteFolderButton(lib, serverId, path, title)
             IconButton(onClick = { reload++ }) { Icon(AppIcons.Refresh, "刷新") }
