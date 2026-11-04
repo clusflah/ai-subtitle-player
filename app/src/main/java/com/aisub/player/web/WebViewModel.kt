@@ -23,7 +23,7 @@ data class SniffedMedia(val url: String, val page: String, val pageTitle: String
 data class WebPage(val title: String, val url: String)
 
 /** 点选屏蔽选中的元素：CSS 选择器、网页上一共匹配几个、简短说明（标签和大小） */
-data class PickedElement(val selector: String, val count: Int, val label: String)
+data class PickedElement(val selector: String, val count: Int, val label: String, val floating: Boolean = false)
 
 /** 视频在网页里的位置（CSS 像素，相对网页可见区域）；字幕放在它的下沿 */
 data class VideoRect(val top: Float, val bottom: Float, val viewportWidth: Float)
@@ -157,6 +157,9 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 屏蔽这个网站上的这类元素；拦截广告没开的话顺手打开（自定义规则靠它生效） */
+    /** 屏蔽这个网站所有贴边的浮动广告（拆成小块、名字随机的广告用选择器屏蔽不住） */
+    fun blockFloating(pageUrl: String) = blockElement(pageUrl, AdBlock.FLOAT)
+
     fun blockElement(pageUrl: String, selector: String) {
         val host = AdRules.hostOf(pageUrl)?.removePrefix("www.") ?: return
         AdBlock.addCustom(getApplication(), "$host##$selector")
@@ -292,7 +295,25 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
      * 注入网页的接口（在 WebView 的后台线程上被调用）。每个标签页一个；
      * 只有正在看的那个标签页的网页能送声音、报告播放位置（切走的标签页里网页的脚本还在跑）
      */
-    inner class Bridge(private val active: () -> Boolean, private val manga: WebMangaCollector? = null) {
+    inner class Bridge(
+        private val active: () -> Boolean,
+        private val manga: WebMangaCollector? = null,
+        /** web_guard.js 拦下了一个浮动广告里的链接（网址）：App 提示，可以「仍然打开」 */
+        private val onAdLink: (String) -> Unit = {},
+    ) {
+        /** 拦截广告开着：web_guard.js 才拦浮动广告的链接 */
+        @JavascriptInterface
+        fun adGuard(): Boolean = _adBlock.value
+
+        /** 这个网站要不要藏起所有贴边浮动广告（点选屏蔽里选过「屏蔽本站浮动广告」） */
+        @JavascriptInterface
+        fun floatAds(host: String): Boolean = _adBlock.value && AdBlock.floating(host)
+
+        @JavascriptInterface
+        fun adLinkBlocked(url: String) {
+            if (active() && (url.startsWith("http://") || url.startsWith("https://"))) onAdLink(url)
+        }
+
         /** web_manga.js：这个框架里识别出的漫画图片和上一话、下一话链接（JSON） */
         @JavascriptInterface
         fun mangaFound(json: String) {
@@ -310,8 +331,8 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
 
         /** 点选屏蔽：选中了一个元素（选择器、网页上一共几个、简短说明） */
         @JavascriptInterface
-        fun pickerSelect(selector: String, count: Int, label: String) {
-            if (active()) _picked.value = PickedElement(selector, count, label)
+        fun pickerSelect(selector: String, count: Int, label: String, floating: Boolean) {
+            if (active()) _picked.value = PickedElement(selector, count, label, floating)
         }
 
         /** 这个网站要藏起来的广告元素（CSS）；没开拦截是空串 */

@@ -9,7 +9,38 @@
   let box = null;
 
   // 像随机生成的名字（带一长串数字、哈希）换一次网页就变了，不拿来当选择器
-  const stableName = (s) => /^[A-Za-z_-][\w-]{0,40}$/.test(s) && !/\d{3,}/.test(s) && !/[0-9a-f]{6,}/i.test(s);
+  const stableName = (s) => /^[A-Za-z_-][\w-]{0,40}$/.test(s) && !/\d{3,}/.test(s) && !/[0-9a-f]{6,}/i.test(s) &&
+    // 拆成格子的广告块（xxx_0_7）、大小写乱跳的随机名字（PsbCMkyi）
+    !/_\d+_\d+$/.test(s) && !(/^[A-Za-z]{4,12}$/.test(s) && (s.match(/[A-Z]/g) || []).length >= 3 && /[a-z]/.test(s));
+
+  function isFloating(e) {
+    const p = getComputedStyle(e).position;
+    return p === 'fixed' || p === 'sticky';
+  }
+
+  /** 点到的元素所在的最外层浮动层（贴边广告条） */
+  function floatingAncestor(el) {
+    let found = null;
+    for (let e = el; e && e.nodeType === 1 && e !== document.body && e !== document.documentElement; e = e.parentElement) {
+      if (isFloating(e)) found = e;
+    }
+    return found;
+  }
+
+  /** 点到的是很小的一块（广告拆成的小格子、图标）：往外扩到像样大小的那层 */
+  function grow(el) {
+    const path = [];
+    let e = el;
+    for (let i = 0; i < 6; i++) {
+      const r = e.getBoundingClientRect();
+      if (r.width >= 120 && r.height >= 60) break;
+      const p = e.parentElement;
+      if (!p || p === document.body || p === document.documentElement) break;
+      path.push(e);
+      e = p;
+    }
+    return { el: e, path };
+  }
 
   function selectorOf(el) {
     if (el.id && stableName(el.id)) return '#' + CSS.escape(el.id);
@@ -28,6 +59,8 @@
       const s = parts.join(' > ');
       if (cls.length && document.querySelectorAll(s).length <= 3) return s;
       if (parts.length >= 6) break;
+      // 走到了 body 下面一层：从 body 开始写，免得 div:nth-of-type(3) 这种短选择器把网页别处的元素也藏了
+      if (parent === document.body) { parts.unshift('body'); break; }
     }
     return parts.join(' > ');
   }
@@ -54,7 +87,7 @@
     const sel = selectorOf(current);
     let count = 0;
     try { count = document.querySelectorAll(sel).length; } catch (e) {}
-    try { VoxBridge.pickerSelect(sel, count, describe(current)); } catch (e) {}
+    try { VoxBridge.pickerSelect(sel, count, describe(current), !!floatingAncestor(current) || isFloating(current)); } catch (e) {}
   }
 
   // 点选时网页自己的点击、跳转都不要：在最前面截住
@@ -72,8 +105,17 @@
     let el = document.elementFromPoint(x, y);
     if (!el || el === box) return;
     if (el === document.body || el === document.documentElement) return;
-    current = el;
+    // 在浮动广告条里：直接选整条；否则太小的块往外扩一点。「缩小」可以退回点到的那块
+    const fl = floatingAncestor(el);
     history = [];
+    if (fl && fl !== el) {
+      for (let e = el; e && e !== fl; e = e.parentElement) history.push(e);
+      current = fl;
+    } else {
+      const g = grow(el);
+      history = g.path;
+      current = g.el;
+    }
     report();
   }
 
@@ -83,6 +125,7 @@
     start() {
       if (active) return;
       active = true;
+      window.__voxPicking = true;
       current = null;
       history = [];
       window.addEventListener('click', onClick, true);
@@ -91,6 +134,7 @@
     },
     stop() {
       active = false;
+      window.__voxPicking = false;
       current = null;
       window.removeEventListener('click', onClick, true);
       for (const t of EVENTS) window.removeEventListener(t, swallow, true);
@@ -111,6 +155,12 @@
       if (!history.length) return;
       current = history.pop();
       report();
+    },
+    /** 屏蔽本站所有贴边浮动广告（web_guard.js 负责） */
+    hideFloating() {
+      if (current) current.style.setProperty('display', 'none', 'important');
+      try { window.__voxFloat && window.__voxFloat.enable(); } catch (e) {}
+      api.stop();
     },
     /** 屏蔽：马上藏起来（以后靠规则），结束点选 */
     hide(sel) {
