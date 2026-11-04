@@ -53,6 +53,7 @@ object MangaFetcher {
 
     suspend fun bytes(context: Context, page: MangaPage): ByteArray = withContext(Dispatchers.IO) {
         when {
+            page.entry?.startsWith(MangaArchive.PDF) == true -> throw IOException("PDF 页要画出来，不能直接读")
             page.entry != null -> MangaArchive.read(context, page.url, page.entry)
             page.referer != null && (page.url.startsWith("http://") || page.url.startsWith("https://")) -> web(page)
             else -> RemoteFiles.read(context, page.url, MAX_BYTES)
@@ -87,7 +88,46 @@ object MangaArchive {
     private val lock = Mutex()
     private val open = LinkedHashMap<String, ZipFile>()
 
-    fun isArchiveName(name: String) = name.substringAfterLast('.', "").lowercase() in setOf("cbz", "zip")
+    fun isArchiveName(name: String) = name.substringAfterLast('.', "").lowercase() in setOf("cbz", "zip", "pdf")
+
+    /** 系统给的类型是漫画压缩包或 PDF */
+    fun isArchiveType(mime: String?) = mime?.lowercase() in setOf(
+        "application/zip", "application/x-zip-compressed", "application/x-cbz", "application/vnd.comicbook+zip", "application/pdf",
+    )
+
+    /** PDF 的页：条目名是这个前缀加页码 */
+    const val PDF = "#pdf:"
+
+    private fun isPdf(file: File): Boolean = runCatching {
+        file.inputStream().use { val b = ByteArray(5); it.read(b) == 5 && String(b, Charsets.US_ASCII) == "%PDF-" }
+    }.getOrDefault(false)
+
+    private val pdfLock = Mutex()
+    private var pdfOpen: Pair<String, android.graphics.pdf.PdfRenderer>? = null
+
+    private fun pdfFor(url: String, file: File): android.graphics.pdf.PdfRenderer {
+        pdfOpen?.takeIf { it.first == url }?.let { return it.second }
+        pdfOpen?.second?.let { runCatching { it.close() } }
+        if (!file.exists()) throw IOException("文件不见了，请重新打开")
+        val r = android.graphics.pdf.PdfRenderer(android.os.ParcelFileDescriptor.open(file, android.os.ParcelFileDescriptor.MODE_READ_ONLY))
+        pdfOpen = url to r
+        return r
+    }
+
+    /** 把 PDF 的一页画成图片，宽度 width 像素（白底） */
+    suspend fun renderPdf(context: Context, url: String, index: Int, width: Int): android.graphics.Bitmap = withContext(Dispatchers.IO) {
+        pdfLock.withLock {
+            val r = pdfFor(url, localFile(context, url))
+            r.openPage(index).use { p ->
+                val w = width.coerceAtLeast(1)
+                val h = (p.height.toLong() * w / p.width.coerceAtLeast(1)).toInt().coerceIn(1, 12_000)
+                val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+                bmp.eraseColor(android.graphics.Color.WHITE)
+                p.render(bmp, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                bmp
+            }
+        }
+    }
 
     /** 缓存里有没有这个压缩包（没有的话打开前要先下载 / 复制） */
     fun localFile(context: Context, url: String): File {
@@ -105,6 +145,10 @@ object MangaArchive {
             RemoteFiles.download(context, url, file) { done, total -> progress(if (total > 0) done.toFloat() / total else -1f) }
         }
         file.setLastModified(System.currentTimeMillis())
+        if (isPdf(file)) {
+            val count = pdfLock.withLock { pdfFor(url, file).pageCount }
+            return@withContext (0 until count).map { MangaPage(url, entry = "$PDF$it") }
+        }
         val zip = zipFor(url, file)
         zip.entries().asSequence()
             .filter { !it.isDirectory && com.aisub.player.media.MediaEntry.isImageName(it.name) && !it.name.substringAfterLast('/').startsWith(".") }

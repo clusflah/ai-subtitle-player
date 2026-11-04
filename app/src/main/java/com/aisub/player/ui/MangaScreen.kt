@@ -94,8 +94,8 @@ fun MangaScreen(onBack: () -> Unit, openWeb: (String?) -> Unit, open: (MangaOpen
                 SurfaceCard(Modifier.padding(horizontal = 16.dp)) {
                     ListRow("网页漫画", "在网页里打开漫画网站，看到某一话时会出现「阅读模式」（电视：工具栏的书本按钮或菜单键）", AppIcons.Web, subtitleMaxLines = 3) { openWeb(null) }
                     HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                    ListRow("CBZ / ZIP 漫画文件", "手机里的漫画压缩包；网盘、WebDAV 里的直接在文件列表里点开", AppIcons.File) {
-                        launch { pickArchive.launch(arrayOf("application/zip", "application/x-cbz", "application/vnd.comicbook+zip", "application/octet-stream")) }
+                    ListRow("CBZ / ZIP / PDF 漫画文件", "手机里的漫画文件；网盘、WebDAV 里的直接在文件列表里点开，文件管理器里也可以「用译幕打开」", AppIcons.File, subtitleMaxLines = 3) {
+                        launch { pickArchive.launch(arrayOf("application/zip", "application/x-cbz", "application/vnd.comicbook+zip", "application/pdf", "application/octet-stream")) }
                     }
                     HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                     ListRow("图片文件夹", "一个文件夹里的图片按文件名排序当一话看", AppIcons.Folder) { launch { pickFolder.launch(null) } }

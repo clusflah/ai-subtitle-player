@@ -35,7 +35,9 @@ object MangaImages {
     suspend fun load(context: Context, page: MangaPage): ImageBitmap {
         cache.get(page.cacheKey)?.let { return it }
         return gate.withPermit {
-            cache.get(page.cacheKey) ?: run {
+            cache.get(page.cacheKey) ?: pdfPage(page)?.let { i ->
+                MangaArchive.renderPdf(context, page.url, i, targetWidth).asImageBitmap().also { cache.put(page.cacheKey, it) }
+            } ?: run {
                 val bytes = MangaFetcher.bytes(context, page)
                 val bmp = withContext(Dispatchers.Default) { decode(bytes) } ?: throw java.io.IOException("不是图片")
                 bmp.asImageBitmap().also { cache.put(page.cacheKey, it) }
@@ -61,7 +63,10 @@ object MangaImages {
         val big = cache.get(page.cacheKey)
         return gate.withPermit {
             runCatching {
-                val bmp = if (big != null) {
+                val pdf = pdfPage(page)
+                val bmp = if (pdf != null && big == null) {
+                    MangaArchive.renderPdf(context, page.url, pdf, 240)
+                } else if (big != null) {
                     val b = big.asAndroidBitmap()
                     val w = 240
                     Bitmap.createScaledBitmap(b, w, (b.height.toLong() * w / b.width).toInt().coerceIn(1, 2400), true)
@@ -73,6 +78,8 @@ object MangaImages {
             }.getOrNull()
         }
     }
+
+    private fun pdfPage(page: MangaPage): Int? = page.entry?.takeIf { it.startsWith(MangaArchive.PDF) }?.removePrefix(MangaArchive.PDF)?.toIntOrNull()
 
     /**
      * 解码：宽度不超过 maxWidth（2 的倍数缩小，再精确缩到不超过），高度不超过 maxHeight

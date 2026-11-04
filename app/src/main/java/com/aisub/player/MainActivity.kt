@@ -271,9 +271,25 @@ class MainActivity : ComponentActivity() {
         }
         if (intent?.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
+        // 漫画压缩包、PDF：用漫画阅读打开
+        val name = mangaFileName(uri)
+        if (com.aisub.player.manga.MangaArchive.isArchiveType(intent.type ?: contentResolver.getType(uri)) ||
+            com.aisub.player.manga.MangaArchive.isArchiveName(name.orEmpty())
+        ) {
+            nav.push(Screen.MangaRead(MangaOpen.Archive(name?.substringBeforeLast('.') ?: "漫画", uri.toString())))
+            return
+        }
         main.play(listOf(MediaLibrary.entryFor(this, uri)), 0)
         nav.push(Screen.Player)
     }
+
+    /** 打开的文件名（content:// 要问系统） */
+    private fun mangaFileName(uri: android.net.Uri): String? = runCatching {
+        if (uri.scheme == "file") return@runCatching uri.lastPathSegment
+        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        }
+    }.getOrNull()
 
     /** 按 Home 或切到别的应用：播放视频且设置为悬浮窗时，缩成画中画继续播放。 */
     override fun onUserLeaveHint() {
