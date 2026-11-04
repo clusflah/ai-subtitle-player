@@ -496,6 +496,12 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
         return true
     }
 
+    /** 拦下了跳去别的网站的广告：提示一下 */
+    fun blockedPopup(url: String) {
+        val host = Uri.parse(url).host?.removePrefix("www.") ?: url
+        android.widget.Toast.makeText(context, "已拦截跳转广告：$host", android.widget.Toast.LENGTH_SHORT).show()
+    }
+
     /** 建一个标签页的网页 */
     @SuppressLint("SetJavaScriptEnabled")
     fun createWebView(ctx: android.content.Context, t: WebTab): WebView {
@@ -525,6 +531,17 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 loadWithOverviewMode = true
                 builtInZoomControls = true
                 displayZoomControls = false
+                // 网页开新窗口（window.open、target=_blank）交给 onCreateWindow 判断：广告弹窗拦下，正常链接在当前标签页打开
+                setSupportMultipleWindows(true)
+            }
+            // 记下点中的链接：点了「第 2 话」却被脚本带去别的网站，就是广告
+            setOnTouchListener { v, e ->
+                if (e.actionMasked == android.view.MotionEvent.ACTION_UP) {
+                    val hit = (v as WebView).hitTestResult
+                    t.tappedLink = hit.extra.takeIf { hit.type == WebView.HitTestResult.SRC_ANCHOR_TYPE }
+                    t.tappedAt = android.os.SystemClock.uptimeMillis()
+                }
+                false
             }
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             addJavascriptInterface(vm.Bridge { t.active }, "VoxBridge")
@@ -538,6 +555,17 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     // 「打开 App」之类的跳转（bilibili://、intent://）不处理，留在网页里
                     val scheme = request.url.scheme?.lowercase()
                     if (scheme != "http" && scheme != "https") return true
+                    // 点的是本站链接，网页脚本却把整页带去另一个网站（点一下就跳广告）：拦下，照常打开点的那个链接
+                    if (request.isForMainFrame && request.hasGesture() && !request.isRedirect) {
+                        val link = t.recentLink()
+                        val target = request.url.toString()
+                        if (link != null && isHijack(target, link, t.pageUrl)) {
+                            t.tappedLink = null
+                            blockedPopup(target)
+                            if (link.startsWith("http://") || link.startsWith("https://")) view.loadUrl(link)
+                            return true
+                        }
+                    }
                     // 去的网站要换手机版、桌面版：换好再打开
                     if (request.isForMainFrame && view.agentFor(request.url.toString())) {
                         view.loadUrl(request.url.toString())
@@ -598,6 +626,40 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
 
                 override fun onHideCustomView() {
                     if (t.active) fullscreen = null
+                }
+
+                // 网页要开新窗口：先用一个临时网页接住，看它要去哪，再决定在当前标签页打开还是当广告拦下
+                override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message): Boolean {
+                    val link = t.recentLink()
+                    val temp = WebView(view.context)
+                    var decided = false
+                    fun decide(url: String): Boolean {
+                        if (decided || url.isEmpty() || url.startsWith("about:")) return decided
+                        decided = true
+                        view.post { temp.destroy() }
+                        val scheme = Uri.parse(url).scheme?.lowercase()
+                        if (scheme != "http" && scheme != "https") return true
+                        // 点中的链接本身就要开新窗口（target=_blank），或者是本站自己开的：在当前标签页打开（和以前一样）
+                        val own = if (link != null) sameSite(url, link) else sameSite(url, t.pageUrl)
+                        if (own) {
+                            view.agentFor(url)
+                            view.loadUrl(url)
+                        } else blockedPopup(url)
+                        return true
+                    }
+                    temp.webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(v: WebView, request: WebResourceRequest): Boolean =
+                            decide(request.url.toString())
+
+                        override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) {
+                            if (decide(url)) v.stopLoading()
+                        }
+                    }
+                    // 一直没去任何地方（空白窗口）：过一会儿收掉
+                    view.postDelayed({ if (!decided) { decided = true; temp.destroy() } }, 10_000)
+                    (resultMsg.obj as? WebView.WebViewTransport)?.webView = temp
+                    resultMsg.sendToTarget()
+                    return true
                 }
             }
             vm.captions.userAgent = getSettings().userAgentString
@@ -831,7 +893,9 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                         onOpenDirect = { playInPlayer(it, tab.webView?.url.orEmpty(), tab.webView?.title.orEmpty()) },
                         onCapture = ::startCapture,
                     )
-                    if (picking) PickerBar(
+                }
+                // 点选屏蔽的操作栏放在网页下面、不盖住网页：贴在底部的广告也能点到
+                if (picking) PickerBar(
                         picked,
                         onParent = { tab.webView?.evaluateJavascript("__voxPicker.parent()", null) },
                         onChild = { tab.webView?.evaluateJavascript("__voxPicker.child()", null) },
@@ -843,9 +907,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                             vm.clearPicked()
                             android.widget.Toast.makeText(context, "已屏蔽，规则在「自定义广告规则」里，删掉那一行就恢复", android.widget.Toast.LENGTH_LONG).show()
                         },
-                        modifier = Modifier.align(Alignment.BottomCenter),
                     )
-                }
             }
         }
 
@@ -1185,6 +1247,17 @@ private fun adBlockSummary(info: com.aisub.player.web.AdBlockInfo, blocked: Int)
     }
 }
 
+/** 两个网址是不是同一个网站（a.example.com 和 b.example.com 算同一个） */
+private fun sameSite(a: String?, b: String?): Boolean {
+    val ha = a?.let { Uri.parse(it).host?.lowercase() } ?: return false
+    val hb = b?.let { Uri.parse(it).host?.lowercase() } ?: return false
+    return com.aisub.player.web.AdRules.siteOf(ha) == com.aisub.player.web.AdRules.siteOf(hb)
+}
+
+/** 点的是一个链接，整页却要去既不是那个链接、也不是当前网站的地方：网页脚本截了点击去跳广告 */
+private fun isHijack(target: String, link: String, page: String?): Boolean =
+    !sameSite(target, link) && !sameSite(target, page)
+
 /** 用系统分享发一段文字（网址、直播源地址） */
 internal fun shareText(context: android.content.Context, text: String, subject: String? = null) {
     val send = android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain")
@@ -1427,6 +1500,13 @@ private class WebTab(val id: Long, startUrl: String?) {
     var progress by mutableIntStateOf(100)
     var canGoBack by mutableStateOf(false)
     var webView: WebView? = null
+
+    /** 最近一次点网页时点中的链接（没点中链接是 null）和时间：用来认出点链接后被脚本拐到别的网站的广告 */
+    var tappedLink: String? = null
+    var tappedAt = 0L
+
+    /** 刚才点中的链接（3 秒内）；没点中链接返回 null */
+    fun recentLink(): String? = tappedLink?.takeIf { android.os.SystemClock.uptimeMillis() - tappedAt < 3_000 }
 
     /** 正在看的标签页；网页脚本（另一个线程）按它决定要不要送声音 */
     @Volatile
