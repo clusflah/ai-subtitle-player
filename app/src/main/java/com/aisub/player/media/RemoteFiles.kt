@@ -38,6 +38,57 @@ object RemoteFiles {
         }
     }
 
+    /**
+     * 把整个文件下载到本地（漫画压缩包要随机读取，只能先存下来）。阻塞调用；progress 收到已下载、总字节数（不知道是 -1）。
+     */
+    fun download(context: Context, url: String, dest: java.io.File, progress: (Long, Long) -> Unit = { _, _ -> }) {
+        val tmp = java.io.File(dest.path + ".part")
+        val input: InputStream
+        var total = -1L
+        var call: okhttp3.Response? = null
+        if (url.startsWith("content://") || url.startsWith("file://")) {
+            input = context.contentResolver.openInputStream(Uri.parse(url)) ?: throw IOException("无法打开文件")
+            total = runCatching {
+                context.contentResolver.openAssetFileDescriptor(Uri.parse(url), "r")?.use { it.length }
+            }.getOrNull() ?: -1L
+        } else {
+            val (realUrl, headers) = if (CloudRegistry.isCloud(url)) {
+                CloudRegistry.resolve(url).let { it.url to it.headers }
+            } else {
+                Endpoints.rewrite(url).let { it to AuthRegistry.headersFor(it) }
+            }
+            val req = Request.Builder().url(realUrl).apply { headers.forEach { (k, v) -> header(k, v) } }.build()
+            val resp = cloudHttp.newCall(req).execute()
+            if (!resp.isSuccessful) { resp.close(); throw IOException("HTTP ${resp.code}") }
+            call = resp
+            val body = resp.body ?: run { resp.close(); throw IOException("没有内容") }
+            total = body.contentLength()
+            input = body.byteStream()
+        }
+        try {
+            input.use { inp ->
+                tmp.outputStream().use { out ->
+                    val buf = ByteArray(1 shl 16)
+                    var done = 0L
+                    var last = 0L
+                    while (true) {
+                        if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException()
+                        val n = inp.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        done += n
+                        if (done - last > 256 * 1024) { last = done; progress(done, total) }
+                    }
+                    progress(done, total)
+                }
+            }
+            if (!tmp.renameTo(dest)) throw IOException("保存失败")
+        } finally {
+            call?.close()
+            tmp.delete()
+        }
+    }
+
     private fun readLimited(input: InputStream, maxBytes: Int, truncate: Boolean): ByteArray {
         val out = ByteArrayOutputStream()
         val buf = ByteArray(1 shl 16)

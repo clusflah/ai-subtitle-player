@@ -328,7 +328,26 @@ object AdBlock {
     }
 
     fun reloadCustom(context: Context) {
-        custom = AdRules.parse((BUILTIN + "\n" + customText(context)).lineSequence(), custom = true)
+        val text = customText(context)
+        custom = AdRules.parse((BUILTIN + "\n" + text).lineSequence(), custom = true)
+        floatHosts = text.lineSequence().map { it.trim() }.filter { it.endsWith("##$FLOAT") }
+            .map { it.removeSuffix("##$FLOAT").lowercase() }.filter { it.isNotEmpty() }.toSet()
+    }
+
+    /** 自定义规则「网站##:vox-float」：这个网站上贴边的浮动广告（随机名字、拆成小块的）都藏起来 */
+    const val FLOAT = ":vox-float"
+
+    @Volatile
+    private var floatHosts: Set<String> = emptySet()
+
+    fun floating(host: String): Boolean {
+        var h = host.lowercase().removePrefix("www.")
+        while (true) {
+            if (h in floatHosts) return true
+            val dot = h.indexOf('.')
+            if (dot < 0) return false
+            h = h.substring(dot + 1)
+        }
     }
 
     /** 这个网站要藏起来的广告元素（CSS）：自己的规则 + 下载的规则 */

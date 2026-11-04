@@ -73,6 +73,18 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:scheme="content" android:mimeType="video/*" />
             </intent-filter>
+            <!-- 漫画：CBZ / ZIP 压缩包、PDF，用漫画阅读打开 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/vnd.comicbook+zip" />
+                <data android:mimeType="application/x-cbz" />
+                <data android:mimeType="application/zip" />
+                <data android:mimeType="application/x-zip-compressed" />
+                <data android:mimeType="application/pdf" />
+            </intent-filter>
             <!-- 光盘镜像（ISO） -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />

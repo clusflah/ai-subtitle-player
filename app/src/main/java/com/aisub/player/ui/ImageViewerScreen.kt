@@ -54,6 +54,8 @@ fun ImageViewerScreen(
     start: Int,
     onBack: () -> Unit,
     openDetail: (RemoteItem) -> Unit,
+    /** 用漫画阅读模式看这些图片（遥控器翻页、双页、长条） */
+    openManga: (List<RemoteItem>, Int) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -73,6 +75,9 @@ fun ImageViewerScreen(
                 Column(Modifier.weight(1f)) {
                     Text(current?.name.orEmpty(), color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
                     if (images.size > 1) Text("${pager.currentPage + 1} / ${images.size}", color = Color(0xCCFFFFFF), style = MaterialTheme.typography.bodySmall)
+                }
+                if (images.size > 1) IconButton(onClick = { openManga(images, pager.currentPage) }) {
+                    Icon(AppIcons.MenuBook, "漫画模式", tint = Color.White)
                 }
                 if (current != null) {
                     IconButton(onClick = { openDetail(current) }) { Icon(AppIcons.Info, "详情", tint = Color.White) }

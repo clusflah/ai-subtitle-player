@@ -150,7 +150,13 @@ fun HomeScreen(
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-            play(listOf(MediaLibrary.entryFor(context, uri)), 0)
+            // 漫画压缩包、PDF：用漫画阅读打开
+            val name = runCatching {
+                context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+            }.getOrNull().orEmpty()
+            if (com.aisub.player.manga.MangaArchive.isArchiveType(context.contentResolver.getType(uri)) || com.aisub.player.manga.MangaArchive.isArchiveName(name)) {
+                nav.push(Screen.MangaRead(MangaOpen.Archive(name.substringBeforeLast('.').ifEmpty { "漫画" }, uri.toString())))
+            } else play(listOf(MediaLibrary.entryFor(context, uri)), 0)
         }
     }
     val files = rememberFileManager(lib) { dialog = HomeDialog.AddToPlaylist(it) }
@@ -337,7 +343,12 @@ fun HomeScreen(
                     onRequestPermission = onRequestPermission,
                     openLocal = { path, title -> nav.push(Screen.LocalFolder(path, title)) },
                     openRemote = openServer,
-                    pickFile = { pickFile.launch(arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream")) },
+                    pickFile = {
+                        pickFile.launch(arrayOf(
+                            "video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream",
+                            "application/zip", "application/x-cbz", "application/vnd.comicbook+zip", "application/pdf",
+                        ))
+                    },
                     addSource = { dialog = HomeDialog.AddSource },
                     serverMenu = { s ->
                         if (s.type.isCloud) listOf(
@@ -351,6 +362,7 @@ fun HomeScreen(
                     },
                     openLive = { nav.push(Screen.Live) },
                     openWeb = { nav.push(Screen.Web) },
+                    openManga = { nav.push(Screen.Manga) },
                     openTelegram = { nav.push(Screen.Telegram) },
                     openStream = { dialog = HomeDialog.Stream },
                 )
@@ -538,6 +550,7 @@ private fun BrowseTab(
     openLive: () -> Unit,
     openWeb: () -> Unit,
     openTelegram: () -> Unit,
+    openManga: () -> Unit,
     openStream: () -> Unit,
 ) {
     val all = remember(state.videos, state.audios) { state.videos + state.audios }
@@ -600,6 +613,8 @@ private fun BrowseTab(
                 ListRow("网页", "在网页里看视频，边播边生成 AI 字幕", AppIcons.Web, onClick = openWeb)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 ListRow("Telegram", "看频道和群里的视频，边下边播", AppIcons.Telegram, onClick = openTelegram)
+                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow("漫画", "网页漫画阅读模式、本地 CBZ 和图片文件夹，遥控器翻页", AppIcons.MenuBook, onClick = openManga)
             }
         }
     }

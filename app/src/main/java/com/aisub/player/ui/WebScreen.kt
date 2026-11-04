@@ -179,6 +179,14 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     val script = remember { context.assets.open("web_captions.js").bufferedReader().use { it.readText() } }
     val cleanScript = remember { context.assets.open("web_cleanup.js").bufferedReader().use { it.readText() } }
     val pickerScript = remember { context.assets.open("web_picker.js").bufferedReader().use { it.readText() } }
+    val mangaScript = remember { context.assets.open("web_manga.js").bufferedReader().use { it.readText() } }
+    val guardScript = remember { context.assets.open("web_guard.js").bufferedReader().use { it.readText() } }
+    /** 刚拦下的跳转（网址）：底部提示，可以「仍然打开」 */
+    var blockedNav by remember { mutableStateOf<String?>(null) }
+    /** 漫画阅读模式开着 */
+    var reading by remember { mutableStateOf(false) }
+    /** 从阅读模式里点了上一话 / 下一话（记下原来那一话的网址）：新网页识别出漫画后自动接着用阅读模式看 */
+    var reopenAfter by remember { mutableStateOf<String?>(null) }
     // 点选屏蔽：开着时点网页只是选元素，底部显示操作栏
     var picking by remember { mutableStateOf(false) }
     val picked by vm.picked.collectAsStateWithLifecycle()
@@ -496,10 +504,18 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
         return true
     }
 
-    /** 拦下了跳去别的网站的广告：提示一下 */
+    /** 进入漫画阅读模式（网页上识别出了漫画） */
+    fun openReader() {
+        if (tab.manga.manga == null) return
+        if (picking) stopPicking()
+        exitFullscreen()
+        com.aisub.player.manga.MangaFetcher.userAgent = tab.webView?.settings?.userAgentString
+        reading = true
+    }
+
+    /** 拦下了跳去别的网站的广告：底部提示一下，误拦了可以「仍然打开」 */
     fun blockedPopup(url: String) {
-        val host = Uri.parse(url).host?.removePrefix("www.") ?: url
-        android.widget.Toast.makeText(context, "已拦截跳转广告：$host", android.widget.Toast.LENGTH_SHORT).show()
+        blockedNav = url
     }
 
     /** 建一个标签页的网页 */
@@ -513,6 +529,11 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             override fun dispatchKeyEventPreIme(event: android.view.KeyEvent): Boolean {
                 val ime = androidx.core.view.ViewCompat.getRootWindowInsets(this)
                     ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
+                // 遥控器菜单键：网页上有漫画时进入阅读模式
+                if (t.active && event.keyCode == android.view.KeyEvent.KEYCODE_MENU && t.manga.manga != null && fullscreen == null) {
+                    if (event.action == android.view.KeyEvent.ACTION_UP) openReader()
+                    return true
+                }
                 if (tv && t.active && !ime) {
                     val handled = if (fullscreen == null) tvCursorKey(this, event.keyCode, event)
                     else fullscreenKey[0]?.invoke(event.keyCode, event) == true
@@ -544,26 +565,38 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 false
             }
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-            addJavascriptInterface(vm.Bridge { t.active }, "VoxBridge")
+            addJavascriptInterface(vm.Bridge({ t.active }, t.manga) { url -> post { blockedPopup(url) } }, "VoxBridge")
             val startScript = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
             if (startScript) {
                 WebViewCompat.addDocumentStartJavaScript(this, script, setOf("*"))
                 WebViewCompat.addDocumentStartJavaScript(this, cleanScript, setOf("*"))
+                WebViewCompat.addDocumentStartJavaScript(this, mangaScript, setOf("*"))
+                WebViewCompat.addDocumentStartJavaScript(this, guardScript, setOf("*"))
             }
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     // 「打开 App」之类的跳转（bilibili://、intent://）不处理，留在网页里
                     val scheme = request.url.scheme?.lowercase()
                     if (scheme != "http" && scheme != "https") return true
-                    // 点的是本站链接，网页脚本却把整页带去另一个网站（点一下就跳广告）：拦下，照常打开点的那个链接
-                    if (request.isForMainFrame && request.hasGesture() && !request.isRedirect) {
-                        val link = t.recentLink()
+                    // 网页脚本把整页带去另一个网站（点一下就跳广告、看着看着自己跳走）：拦下，底部提示可以「仍然打开」。
+                    // 点的就是指向那个网站的链接、刚打开网页时的跳转（「正在跳转」页）、服务器重定向照常
+                    if (request.isForMainFrame && !request.isRedirect && t.webView === view) {
                         val target = request.url.toString()
-                        if (link != null && isHijack(target, link, t.pageUrl)) {
-                            t.tappedLink = null
-                            blockedPopup(target)
-                            if (link.startsWith("http://") || link.startsWith("https://")) view.loadUrl(link)
-                            return true
+                        val page = t.pageUrl
+                        if (page != null && page.startsWith("http") && !sameSite(target, page)) {
+                            val now = android.os.SystemClock.uptimeMillis()
+                            val tapped = now - t.tappedAt < 3_000
+                            val link = t.recentLink()
+                            // 网页刚打开两秒内的跳转（「正在跳转」页、搜索结果的中转页）照常
+                            val age = now - t.startedAt
+                            val hijack = age > 2_000 && if (tapped) link == null || !sameSite(target, link) else age > 5_000
+                            if (hijack) {
+                                t.tappedLink = null
+                                blockedPopup(target)
+                                // 点的是本站链接却被带走：照常打开点的那个
+                                if (link != null && sameSite(link, page) && (link.startsWith("http://") || link.startsWith("https://"))) view.loadUrl(link)
+                                return true
+                            }
                         }
                     }
                     // 去的网站要换手机版、桌面版：换好再打开
@@ -574,8 +607,23 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     return false
                 }
 
+                // 网页进程崩了（有的广告页会把它搞崩）：不处理的话整个 App 会被系统杀掉。换一个新网页重新打开
+                override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+                    (view.parent as? ViewGroup)?.removeView(view)
+                    if (t.webView === view) {
+                        t.webView = null
+                        t.url = t.pageUrl ?: t.url
+                        t.generation++
+                        if (t.active) android.widget.Toast.makeText(context, "网页出错了，已重新打开", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                    view.destroy()
+                    return true
+                }
+
                 override fun onPageStarted(view: WebView, startedUrl: String, favicon: Bitmap?) {
                     t.pageUrl = startedUrl
+                    t.startedAt = android.os.SystemClock.uptimeMillis()
+                    t.manga.reset()
                     if (!t.active) return
                     vm.onPageStarted()
                     // 换了网页：点选的脚本跟着旧网页没了
@@ -588,6 +636,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     if (!startScript) {
                         view.evaluateJavascript(script, null)
                         view.evaluateJavascript(cleanScript, null)
+                        view.evaluateJavascript(mangaScript, null)
+                        view.evaluateJavascript(guardScript, null)
                     }
                     vm.onPageFinished(view.title, finishedUrl)
                     t.canGoBack = view.canGoBack()
@@ -653,6 +703,12 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
 
                         override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) {
                             if (decide(url)) v.stopLoading()
+                        }
+
+                        override fun onRenderProcessGone(v: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+                            decided = true
+                            v.destroy()
+                            return true
                         }
                     }
                     // 一直没去任何地方（空白窗口）：过一会儿收掉
@@ -753,6 +809,9 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     },
                 )
                 if (tab.url != null) {
+                    if (tab.manga.manga != null) {
+                        IconButton(onClick = ::openReader) { Icon(AppIcons.MenuBook, "漫画阅读模式", tint = MaterialTheme.colorScheme.primary) }
+                    }
                     if (sniffed.isNotEmpty()) {
                         IconButton(onClick = { showSniffed = true }) {
                             BadgedBox(badge = { Badge { Text("${sniffed.size}") } }) { Icon(AppIcons.Movie, "网页里的视频地址") }
@@ -832,6 +891,10 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                             )
                             DropdownMenuItem(text = { Text("广告规则订阅") }, onClick = { menu = false; dialog = WebDialog.AD_LISTS })
                             if (tab.url != null) DropdownMenuItem(text = { Text("点选屏蔽广告") }, onClick = { menu = false; startPicking() })
+                            if (tab.manga.manga != null) DropdownMenuItem(
+                                text = { Text("漫画阅读模式（${tab.manga.manga?.pages?.size ?: 0} 页）") },
+                                onClick = { menu = false; openReader() },
+                            )
                             DropdownMenuItem(text = { Text("自定义广告规则") }, onClick = { menu = false; dialog = WebDialog.AD_RULES })
                             DropdownMenuItem(text = { Text("字幕语言") }, onClick = { menu = false; dialog = WebDialog.LANGUAGE })
                             DropdownMenuItem(text = { Text("页面缩放（$zoom%）") }, onClick = { menu = false; dialog = WebDialog.ZOOM })
@@ -851,7 +914,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     val viewHeight = maxHeight
                     val viewWidth = maxWidth
                     // 每个标签页一个网页；切走时从这里拿下来（不销毁），切回来再放上
-                    key(tab.id) {
+                    key(tab.id, tab.generation) {
                         AndroidView(
                             // 电视：按键先到这里（Compose 管焦点），方向键、确认键交给指针
                             modifier = Modifier.fillMaxSize().then(
@@ -893,6 +956,49 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                         onOpenDirect = { playInPlayer(it, tab.webView?.url.orEmpty(), tab.webView?.title.orEmpty()) },
                         onCapture = ::startCapture,
                     )
+                    // 拦下的跳转：底部提示，误拦了可以仍然打开
+                    blockedNav?.let { url ->
+                        LaunchedEffect(url) { delay(6_000); if (blockedNav == url) blockedNav = null }
+                        androidx.compose.material3.Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.inverseSurface,
+                            contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+                            shadowElevation = 6.dp,
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).fillMaxWidth(),
+                        ) {
+                            Row(Modifier.padding(start = 14.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    "已拦截跳转广告：" + (Uri.parse(url).host?.removePrefix("www.") ?: url),
+                                    style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(onClick = {
+                                    blockedNav = null
+                                    tab.webView?.let { it.agentFor(url); it.loadUrl(url) }
+                                }) { Text("仍然打开", color = MaterialTheme.colorScheme.inversePrimary) }
+                                IconButton(onClick = { blockedNav = null }, modifier = Modifier.size(36.dp)) { Icon(AppIcons.Close, "关闭", Modifier.size(16.dp)) }
+                            }
+                        }
+                    }
+                    // 识别出漫画：右下角提示一下，点了进入阅读模式（电视上用工具栏的书本按钮或菜单键）
+                    val found = tab.manga.manga
+                    var chipClosed by remember(tab.id, found?.pageUrl) { mutableStateOf(false) }
+                    if (found != null && !picking && !chipClosed && fullscreen == null && !tv) {
+                        LaunchedEffect(found.pageUrl) { delay(12_000); chipClosed = true }
+                        androidx.compose.material3.Surface(
+                            onClick = ::openReader,
+                            shape = RoundedCornerShape(24.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            shadowElevation = 6.dp,
+                            modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
+                        ) {
+                            Row(Modifier.padding(start = 14.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(AppIcons.MenuBook, null, Modifier.size(18.dp))
+                                Text("发现漫画 ${found.pages.size} 页 · 阅读模式", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(start = 6.dp))
+                                IconButton(onClick = { chipClosed = true }, modifier = Modifier.size(36.dp)) { Icon(AppIcons.Close, "不用", Modifier.size(16.dp)) }
+                            }
+                        }
+                    }
                 }
                 // 点选屏蔽的操作栏放在网页下面、不盖住网页：贴在底部的广告也能点到
                 if (picking) PickerBar(
@@ -906,6 +1012,15 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                             picking = false
                             vm.clearPicked()
                             android.widget.Toast.makeText(context, "已屏蔽，规则在「自定义广告规则」里，删掉那一行就恢复", android.widget.Toast.LENGTH_LONG).show()
+                        },
+                        onBlockFloating = {
+                            tab.webView?.evaluateJavascript("__voxPicker.hideFloating()", null)
+                            tab.pageUrl?.let { vm.blockFloating(it) }
+                            picking = false
+                            vm.clearPicked()
+                            android.widget.Toast.makeText(
+                                context, "已屏蔽这个网站的浮动广告，规则是「自定义广告规则」里的「:vox-float」那一行，删掉就恢复", android.widget.Toast.LENGTH_LONG,
+                            ).show()
                         },
                     )
             }
@@ -1030,7 +1145,46 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 }
             }
         }
+
+        // 漫画阅读模式：盖在网页上面（网页留着，退出后还在原处）
+        val readingManga = tab.manga.manga
+        if (reading && readingManga != null) {
+            MangaReader(
+                readingManga.toBook(),
+                onExit = { reading = false },
+                onOpenUrl = { url, reader ->
+                    reading = false
+                    reopenAfter = if (reader) readingManga.pageUrl else null
+                    go(url)
+                },
+            )
+        } else if (reading && readingManga == null) {
+            // 网页换了、漫画没了
+            LaunchedEffect(Unit) { reading = false }
+        }
     }
+    }
+
+    // 漫画首页点了「继续阅读」：在新标签页（当前是空白页就在当前页）打开，识别出漫画后直接进阅读模式
+    LaunchedEffect(Unit) {
+        val url = com.aisub.player.web.WebLaunch.pending ?: return@LaunchedEffect
+        com.aisub.player.web.WebLaunch.pending = null
+        if (tab.url == null) go(url) else newTab(url)
+        reopenAfter = ""
+    }
+
+    // 上一话 / 下一话打开后：新网页识别出漫画（图片数稳定一会儿）就接着用阅读模式看；太久没识别出来就算了
+    val foundManga = tab.manga.manga
+    LaunchedEffect(reopenAfter, foundManga?.pageUrl, foundManga?.pages?.size) {
+        val from = reopenAfter ?: return@LaunchedEffect
+        if (foundManga != null && foundManga.pageUrl != from) {
+            delay(1_200)
+            reopenAfter = null
+            openReader()
+        }
+    }
+    LaunchedEffect(reopenAfter) {
+        if (reopenAfter != null) { delay(20_000); reopenAfter = null }
     }
 
     if (dialog == WebDialog.TABS) WebTabsDialog(
@@ -1254,9 +1408,6 @@ private fun sameSite(a: String?, b: String?): Boolean {
     return com.aisub.player.web.AdRules.siteOf(ha) == com.aisub.player.web.AdRules.siteOf(hb)
 }
 
-/** 点的是一个链接，整页却要去既不是那个链接、也不是当前网站的地方：网页脚本截了点击去跳广告 */
-private fun isHijack(target: String, link: String, page: String?): Boolean =
-    !sameSite(target, link) && !sameSite(target, page)
 
 /** 用系统分享发一段文字（网址、直播源地址） */
 internal fun shareText(context: android.content.Context, text: String, subject: String? = null) {
@@ -1274,6 +1425,7 @@ private fun PickerBar(
     onChild: () -> Unit,
     onCancel: () -> Unit,
     onBlock: (com.aisub.player.web.PickedElement) -> Unit,
+    onBlockFloating: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     androidx.compose.material3.Surface(
@@ -1291,7 +1443,14 @@ private fun PickerBar(
                     picked.selector, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2, overflow = TextOverflow.Ellipsis, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                 )
-                Text("没选全就点「扩大」选外面一层", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    if (picked.floating) "这是贴边的浮动广告。拆成小块、名字随机的广告选「屏蔽本站浮动广告」，以后打开这个网站都自动藏起来"
+                    else "没选全就点「扩大」选外面一层",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (picked.floating) androidx.compose.material3.OutlinedButton(
+                    onClick = onBlockFloating, modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                ) { Text("屏蔽本站所有浮动广告") }
             }
             Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onParent, enabled = picked != null) { Text("扩大") }
@@ -1423,6 +1582,7 @@ private fun AdRulesDialog(initial: String, onDismiss: () -> Unit, onSave: (Strin
                     "一行一条，开着「拦截广告」时生效；点选屏蔽加的规则也在这里，删掉那一行就恢复。\n" +
                         "||ad.example.com^　拦这个域名的请求\n" +
                         "example.com##.popup-ad　在这个网站上藏起这个元素\n" +
+                        "example.com##:vox-float　藏起这个网站所有贴边的浮动广告\n" +
                         "/api/ad/list\$nolist　接口回「空列表」（\$nodata 回「没有数据」）\n" +
                         "@@||cdn.example.com/player.js　放行被误拦的\n" +
                         "! 开头的是注释",
@@ -1505,8 +1665,17 @@ private class WebTab(val id: Long, startUrl: String?) {
     var tappedLink: String? = null
     var tappedAt = 0L
 
+    /** 网页开始打开的时间：打开一会儿以后自己跳去别的网站，多半是广告 */
+    var startedAt = 0L
+
+    /** 网页进程崩了重建一次加 1（换一个新的网页控件） */
+    var generation by mutableIntStateOf(0)
+
     /** 刚才点中的链接（3 秒内）；没点中链接返回 null */
     fun recentLink(): String? = tappedLink?.takeIf { android.os.SystemClock.uptimeMillis() - tappedAt < 3_000 }
+
+    /** 网页上识别出的漫画（各个框架报告的汇总） */
+    val manga = com.aisub.player.web.WebMangaCollector()
 
     /** 正在看的标签页；网页脚本（另一个线程）按它决定要不要送声音 */
     @Volatile

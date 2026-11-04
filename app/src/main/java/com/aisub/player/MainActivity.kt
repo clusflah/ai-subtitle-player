@@ -24,6 +24,9 @@ import com.aisub.player.ui.FileDetailScreen
 import com.aisub.player.ui.ImageViewerScreen
 import com.aisub.player.ui.LiveScreen
 import com.aisub.player.ui.WebScreen
+import com.aisub.player.ui.MangaOpen
+import com.aisub.player.ui.MangaReadScreen
+import com.aisub.player.ui.MangaScreen
 import com.aisub.player.ui.TelegramScreen
 import com.aisub.player.ui.TelegramChatScreen
 import com.aisub.player.ui.TelegramSavedScreen
@@ -155,6 +158,12 @@ class MainActivity : ComponentActivity() {
                         is Screen.History -> HistoryScreen(lib, screen.music, back, play)
                         Screen.Live -> LiveScreen(back, play)
                         Screen.Web -> WebScreen(main, back, play)
+                        Screen.Manga -> MangaScreen(
+                            back,
+                            openWeb = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
+                            open = { nav.push(Screen.MangaRead(it)) },
+                        )
+                        is Screen.MangaRead -> MangaReadScreen(screen.open, lib, back)
                         Screen.Telegram -> TelegramScreen(back, openSaved = { nav.push(Screen.TelegramSaved) }) { chat -> nav.push(Screen.TelegramChat(chat.id, chat.title)) }
                         Screen.TelegramSaved -> TelegramSavedScreen(lib, back, play)
                         is Screen.TelegramChat -> TelegramChatScreen(screen.chatId, screen.title, lib, back, play)
@@ -175,6 +184,8 @@ class MainActivity : ComponentActivity() {
                                 nav.push(Screen.FileDetail(screen.serverId, item, queue, i, folder))
                             },
                             openImages = { images, i -> nav.push(Screen.ImageViewer(screen.serverId, images, i)) },
+                            openManga = { nav.push(Screen.MangaRead(it)) },
+                            parentPath = nav.stack.filterIsInstance<Screen.Remote>().dropLast(1).lastOrNull()?.takeIf { it.serverId == screen.serverId }?.path,
                             settings = ui.settings,
                         )
                         is Screen.PlaylistDetail -> PlaylistDetailScreen(lib, screen.id, back, play)
@@ -210,12 +221,17 @@ class MainActivity : ComponentActivity() {
                         is Screen.ImageViewer -> ImageViewerScreen(
                             screen.serverId, screen.images, screen.index, back,
                             openDetail = { item -> nav.push(Screen.FileDetail(screen.serverId, item)) },
+                            openManga = { images, i ->
+                                val pages = images.mapNotNull { it.playUrl }.map { com.aisub.player.manga.MangaPage(it) }
+                                val folder = images.firstOrNull()?.path?.substringBeforeLast('/').orEmpty()
+                                nav.push(Screen.MangaRead(MangaOpen.Images(folder.substringAfterLast('/').ifEmpty { "图片" }, "images:${screen.serverId ?: "local"}:$folder", pages, i)))
+                            },
                         )
                     }
                    }
                     // 音乐在播放页外继续放时，页面底部的「正在播放」小条（占自己的位置，不盖住列表），点它回到播放页。
                     // 首页的小条放在底部标签栏上面，由 HomeScreen 自己显示
-                    if (nav.current != Screen.Player && nav.current != Screen.Home) NowPlayingBar(
+                    if (nav.current != Screen.Player && nav.current != Screen.Home && nav.current !is Screen.MangaRead) NowPlayingBar(
                         main, bottomPadding = 8.dp, onOpen = { nav.push(Screen.Player) },
                     )
                   }
@@ -256,9 +272,25 @@ class MainActivity : ComponentActivity() {
         }
         if (intent?.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
+        // 漫画压缩包、PDF：用漫画阅读打开
+        val name = mangaFileName(uri)
+        if (com.aisub.player.manga.MangaArchive.isArchiveType(intent.type ?: contentResolver.getType(uri)) ||
+            com.aisub.player.manga.MangaArchive.isArchiveName(name.orEmpty())
+        ) {
+            nav.push(Screen.MangaRead(MangaOpen.Archive(name?.substringBeforeLast('.') ?: "漫画", uri.toString())))
+            return
+        }
         main.play(listOf(MediaLibrary.entryFor(this, uri)), 0)
         nav.push(Screen.Player)
     }
+
+    /** 打开的文件名（content:// 要问系统） */
+    private fun mangaFileName(uri: android.net.Uri): String? = runCatching {
+        if (uri.scheme == "file") return@runCatching uri.lastPathSegment
+        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        }
+    }.getOrNull()
 
     /** 按 Home 或切到别的应用：播放视频且设置为悬浮窗时，缩成画中画继续播放。 */
     override fun onUserLeaveHint() {

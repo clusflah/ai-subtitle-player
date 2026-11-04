@@ -252,7 +252,7 @@ class AdRules private constructor(
 
         /** 浏览器不认的 AdGuard 伪类：这种选择器放进样式表也没用 */
         private fun usableSelector(s: String): Boolean =
-            s.isNotBlank() && s.length < 2000 && EXTENDED.none { s.contains(it, ignoreCase = true) }
+            s.isNotBlank() && s.length < 2000 && !s.startsWith(":vox-") && EXTENDED.none { s.contains(it, ignoreCase = true) }
 
         fun hostOf(url: String): String? {
             val start = url.indexOf("://").takeIf { it > 0 }?.plus(3) ?: return null
