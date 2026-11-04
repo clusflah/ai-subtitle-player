@@ -320,6 +320,12 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
             manga?.report(json)
         }
 
+        /** web_manga.js：交出一张网页里解密出来的漫画图片（base64，失败是空串），见 [WebPageImages] */
+        @JavascriptInterface
+        fun mangaImage(id: String, base64: String) {
+            WebPageImages.complete(id, base64)
+        }
+
         @JavascriptInterface
         fun enabled(): Boolean = captions.enabled && active()
 

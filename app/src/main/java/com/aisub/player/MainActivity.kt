@@ -164,6 +164,7 @@ class MainActivity : ComponentActivity() {
                             open = { nav.push(Screen.MangaRead(it)) },
                         )
                         is Screen.MangaRead -> MangaReadScreen(screen.open, lib, back)
+                        Screen.Books -> com.aisub.player.ui.BooksScreen(back) { t, u -> nav.push(Screen.MangaRead(MangaOpen.Archive(t, u))) }
                         Screen.Telegram -> TelegramScreen(back, openSaved = { nav.push(Screen.TelegramSaved) }) { chat -> nav.push(Screen.TelegramChat(chat.id, chat.title)) }
                         Screen.TelegramSaved -> TelegramSavedScreen(lib, back, play)
                         is Screen.TelegramChat -> TelegramChatScreen(screen.chatId, screen.title, lib, back, play)
@@ -272,10 +273,12 @@ class MainActivity : ComponentActivity() {
         }
         if (intent?.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
-        // 漫画压缩包、PDF：用漫画阅读打开
+        // 漫画压缩包、PDF、电子书（TXT、EPUB、MOBI）：打开后看是漫画还是文字书
         val name = mangaFileName(uri)
-        if (com.aisub.player.manga.MangaArchive.isArchiveType(intent.type ?: contentResolver.getType(uri)) ||
-            com.aisub.player.manga.MangaArchive.isArchiveName(name.orEmpty())
+        val type = intent.type ?: contentResolver.getType(uri)
+        if (com.aisub.player.manga.MangaArchive.isArchiveType(type) ||
+            com.aisub.player.manga.MangaArchive.isArchiveName(name.orEmpty()) ||
+            type == "text/plain" || com.aisub.player.book.Ebooks.isBookName(name.orEmpty())
         ) {
             nav.push(Screen.MangaRead(MangaOpen.Archive(name?.substringBeforeLast('.') ?: "漫画", uri.toString())))
             return

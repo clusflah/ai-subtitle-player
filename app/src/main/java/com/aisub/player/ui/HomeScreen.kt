@@ -154,7 +154,10 @@ fun HomeScreen(
             val name = runCatching {
                 context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
             }.getOrNull().orEmpty()
-            if (com.aisub.player.manga.MangaArchive.isArchiveType(context.contentResolver.getType(uri)) || com.aisub.player.manga.MangaArchive.isArchiveName(name)) {
+            val type = context.contentResolver.getType(uri)
+            if (com.aisub.player.manga.MangaArchive.isArchiveType(type) || com.aisub.player.manga.MangaArchive.isArchiveName(name) ||
+                type == "text/plain" || com.aisub.player.book.Ebooks.isBookName(name)
+            ) {
                 nav.push(Screen.MangaRead(MangaOpen.Archive(name.substringBeforeLast('.').ifEmpty { "漫画" }, uri.toString())))
             } else play(listOf(MediaLibrary.entryFor(context, uri)), 0)
         }
@@ -346,8 +349,7 @@ fun HomeScreen(
                     pickFile = {
                         pickFile.launch(arrayOf(
                             "video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream",
-                            "application/zip", "application/x-cbz", "application/vnd.comicbook+zip", "application/pdf",
-                        ))
+                        ) + com.aisub.player.manga.MangaArchive.TYPES + "text/plain")
                     },
                     addSource = { dialog = HomeDialog.AddSource },
                     serverMenu = { s ->
@@ -363,6 +365,7 @@ fun HomeScreen(
                     openLive = { nav.push(Screen.Live) },
                     openWeb = { nav.push(Screen.Web) },
                     openManga = { nav.push(Screen.Manga) },
+                    openBooks = { nav.push(Screen.Books) },
                     openTelegram = { nav.push(Screen.Telegram) },
                     openStream = { dialog = HomeDialog.Stream },
                 )
@@ -551,6 +554,7 @@ private fun BrowseTab(
     openWeb: () -> Unit,
     openTelegram: () -> Unit,
     openManga: () -> Unit,
+    openBooks: () -> Unit,
     openStream: () -> Unit,
 ) {
     val all = remember(state.videos, state.audios) { state.videos + state.audios }
@@ -614,7 +618,9 @@ private fun BrowseTab(
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 ListRow("Telegram", "看频道和群里的视频，边下边播", AppIcons.Telegram, onClick = openTelegram)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                ListRow("漫画", "网页漫画阅读模式、本地 CBZ 和图片文件夹，遥控器翻页", AppIcons.MenuBook, onClick = openManga)
+                ListRow("漫画", "网页漫画阅读模式、本地 CBZ / PDF / EPUB / MOBI 和图片文件夹，遥控器翻页", AppIcons.MenuBook, onClick = openManga)
+                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow("电子书", "TXT / EPUB / MOBI / AZW3，可以朗读听书（锁屏也能听）", AppIcons.Description, onClick = openBooks)
             }
         }
     }

@@ -131,8 +131,8 @@ fun MangaScreen(onBack: () -> Unit, openWeb: (String?) -> Unit, open: (MangaOpen
                 SurfaceCard(Modifier.padding(horizontal = 16.dp)) {
                     ListRow("网页漫画", "在网页里打开漫画网站，看到某一话时会出现「阅读模式」（电视：工具栏的书本按钮或菜单键）", AppIcons.Web, subtitleMaxLines = 3) { openWeb(null) }
                     HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                    ListRow("CBZ / ZIP / PDF 漫画文件", "手机里的漫画文件；网盘、WebDAV 里的直接在文件列表里点开，文件管理器里也可以「用译幕打开」", AppIcons.File, subtitleMaxLines = 3) {
-                        launch { pickArchive.launch(arrayOf("application/zip", "application/x-cbz", "application/vnd.comicbook+zip", "application/pdf", "application/octet-stream")) }
+                    ListRow("CBZ / ZIP / PDF / EPUB / MOBI 漫画文件", "手机里的漫画文件（EPUB、MOBI、AZW3 要是图片做的漫画书）；网盘、WebDAV 里的直接在文件列表里点开，文件管理器里也可以「用译幕打开」", AppIcons.File, subtitleMaxLines = 3) {
+                        launch { pickArchive.launch((com.aisub.player.manga.MangaArchive.TYPES + "application/octet-stream").toTypedArray()) }
                     }
                     HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                     ListRow("图片文件夹", "一个文件夹里的图片按文件名排序当一话看", AppIcons.Folder) { launch { pickFolder.launch(null) } }
@@ -224,6 +224,8 @@ fun MangaReadScreen(start: MangaOpen, lib: com.aisub.player.LibraryViewModel, on
     /** 同一部漫画的各话（按名字排好）；没有是空的 */
     var chapters by remember(start) { mutableStateOf<List<MangaOpen>>((start as? MangaOpen.Archive)?.chapters.orEmpty()) }
     var book by remember(open) { mutableStateOf<MangaBook?>(null) }
+    /** 打开的是文字书（TXT、EPUB、MOBI）：用电子书阅读 */
+    var ebook by remember(open) { mutableStateOf<com.aisub.player.book.Ebook?>(null) }
     var error by remember(open) { mutableStateOf<String?>(null) }
     var progress by remember(open) { mutableFloatStateOf(-1f) }
     var attempt by remember(open) { mutableStateOf(0) }
@@ -247,8 +249,21 @@ fun MangaReadScreen(start: MangaOpen, lib: com.aisub.player.LibraryViewModel, on
             when (o) {
                 is MangaOpen.Images -> MangaBook(o.key, o.title, o.pages, "local", recent = false)
                 is MangaOpen.Archive -> {
-                    val pages = MangaArchive.pages(context, o.url) { progress = it }
-                    MangaBook(o.key, o.title, pages, "local")
+                    val file = MangaArchive.prepare(context, o.url) { progress = it }
+                    // TXT、EPUB、MOBI 先当书读：几乎全是图片的才当漫画
+                    val kind = withContext(Dispatchers.IO) { com.aisub.player.book.Ebooks.kindOf(file) }
+                    val text = if (kind == com.aisub.player.book.BookKind.OTHER) null
+                    else withContext(Dispatchers.IO) { runCatching { com.aisub.player.book.Ebooks.load(file) } }
+                    val eb = text?.getOrNull()
+                    if (eb != null && (kind == com.aisub.player.book.BookKind.TEXT || !eb.looksLikeManga)) {
+                        ebook = eb
+                        null
+                    } else {
+                        val pages = runCatching { MangaArchive.pages(context, o.url) }
+                        // 文字书打不开（DRM 等）、也不是漫画：报书的错
+                        if (pages.getOrNull().isNullOrEmpty()) text?.exceptionOrNull()?.let { throw it }
+                        MangaBook(o.key, o.title, pages.getOrThrow(), "local")
+                    }
                 }
                 is MangaOpen.Folder -> {
                     val pages = withContext(Dispatchers.IO) { folderPages(context, Uri.parse(o.tree)) }
@@ -261,8 +276,15 @@ fun MangaReadScreen(start: MangaOpen, lib: com.aisub.player.LibraryViewModel, on
                 }
             }
         }.onSuccess {
+            if (it == null) return@onSuccess
             if (it.pages.isEmpty()) error = "里面没有图片" else book = it
         }.onFailure { error = it.message ?: it.toString() }
+    }
+
+    val eb = ebook
+    if (eb != null && open is MangaOpen.Archive) {
+        BookReaderScreen(open.title, (open as MangaOpen.Archive).url, eb, onBack)
+        return
     }
 
     val b = book

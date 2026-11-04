@@ -58,17 +58,33 @@
     return src;
   }
 
-  function scanImages() {
-    const imgs = [...document.images];
-    const cands = [];
-    for (const img of imgs) {
-      const src = candidate(img);
-      if (src) cands.push({ img, src });
+  // 网页自己解密出来的图（blob: 地址，App 下载不了）和还没加载出来的占位图：位置像漫画页（够宽）就算一个位置。
+  // 只在顶层网页认（App 只能请顶层网页交出图片）
+  function blobSlot(img) {
+    if (window !== window.top) return '';
+    const cur = img.currentSrc || img.getAttribute('src') || '';
+    const blob = /^blob:/.test(cur);
+    if (!blob && cur && !/^data:/.test(cur)) return '';
+    if (srcOf(img)) return '';
+    const r = img.getBoundingClientRect();
+    const vw = Math.max(document.documentElement.clientWidth || 0, innerWidth || 0) || 1;
+    if (r.width < Math.min(vw * 0.45, 320)) return '';
+    if (getComputedStyle(img).display === 'none') return '';
+    const a = img.closest('a[href]');
+    if (a) {
+      const h = (a.hostname || '').split('.').slice(-2).join('.');
+      if (h && h !== host) return '';
     }
-    if (cands.length < 3) return [];
-    // 按共同的容器分组（往上找 4 层），取图最多的那组：头像、封面推荐、广告图分散在别处
+    return blob ? 'blob' : 'empty';
+  }
+
+  /** 解密图那种网页上的漫画图片位置（按网页上的顺序）；exportImage 按序号找 */
+  let slots = [];
+
+  /** 按共同的容器分组（往上找 4 层），返回图最多的那个容器和图数 */
+  function bestContainer(list) {
     const counts = new Map();
-    for (const c of cands) {
+    for (const c of list) {
       let e = c.img.parentElement;
       for (let d = 0; e && d < 4; d++, e = e.parentElement) {
         counts.set(e, (counts.get(e) || 0) + 1);
@@ -80,6 +96,34 @@
       // 一样多时取更深（更小）的容器
       if (k > n || (k === n && best && best.contains(e))) { best = e; n = k; }
     }
+    return [best, n];
+  }
+
+  function scanImages() {
+    const imgs = [...document.images];
+    const cands = [];
+    const blobs = [];
+    for (const img of imgs) {
+      const src = candidate(img);
+      if (src) { cands.push({ img, src }); continue; }
+      const kind = blobSlot(img);
+      if (kind) blobs.push({ img, src: '', kind });
+    }
+    // 有解密出来的图：连同普通图、占位图一起看
+    if (blobs.some(b => b.kind === 'blob')) {
+      const all = cands.concat(blobs);
+      const [best, n] = bestContainer(all);
+      if (best && n >= 3 && blobs.some(b => b.kind === 'blob' && best.contains(b.img))) {
+        const inBest = new Set(all.filter(c => best.contains(c.img)).map(c => c.img));
+        slots = imgs.filter(img => inBest.has(img));
+        const bySrc = new Map(cands.map(c => [c.img, c.src]));
+        return slots.map((img, i) => bySrc.get(img) || 'voxblob:' + i);
+      }
+    }
+    slots = [];
+    if (cands.length < 3) return [];
+    // 取图最多的那组：头像、封面推荐、广告图分散在别处
+    const [best, n] = bestContainer(cands);
     if (!best || n < 3) return [];
     const seen = new Set();
     const pages = [];
@@ -89,6 +133,51 @@
       pages.push(c.src);
     }
     return pages;
+  }
+
+  // ---- 已知网站：整话的图片地址在网页数据里，网页上一次只显示一张（翻页式），上面按图片认不出来 ----
+  let siteData;   // undefined 还没看过；null 不是这类网站
+  let siteResult = null;
+
+  // 看漫画（manhuagui）：打包压缩过的脚本里调 SMH.reader({images, sl, nextId, prevId})。
+  // 把这段脚本再跑一遍，SMH.reader 临时换成只记下参数的（返回什么都不做的对象，网页不会重新初始化）
+  function manhuaguiData() {
+    if (!(window.SMH && typeof SMH.reader === 'function')) return null;
+    const s = [...document.scripts].map((x) => x.textContent || '').find((t) => t.length < 300000 && /p,a,c,k,e,d/.test(t));
+    if (!s) return null;
+    let d = null;
+    const orig = SMH.reader;
+    const noop = new Proxy(function () {}, { get: () => noop, apply: () => noop });
+    SMH.reader = (x) => { d = x; return noop; };
+    try { (0, eval)(s); } catch (e) {} finally { SMH.reader = orig; }
+    return d && Array.isArray(d.images) && d.images.length ? d : null;
+  }
+
+  function siteManga() {
+    if (window !== window.top) return null;
+    if (siteResult) return siteResult;
+    if (siteData === undefined) {
+      try { siteData = manhuaguiData(); } catch (e) { siteData = null; }
+    }
+    const d = siteData;
+    if (!d) return null;
+    // 图片服务器（有好几个）按网页上正在显示的那张定
+    const set = new Set(d.images);
+    const shown = [...document.images].find((i) => {
+      try { return set.has(decodeURIComponent(new URL(i.currentSrc || i.src).pathname)); } catch (e) { return false; }
+    });
+    if (!shown) return null;
+    const origin = new URL(shown.currentSrc || shown.src).origin;
+    const q = d.sl ? '?e=' + d.sl.e + '&m=' + d.sl.m : '';
+    const dir = location.pathname.replace(/[^/]*$/, '');
+    const chapter = (id) => (id ? new URL(dir + id + '.html', location.href).href : '');
+    siteResult = {
+      pages: d.images.map((p) => origin + encodeURI(p) + q),
+      next: chapter(d.nextId),
+      prev: chapter(d.prevId),
+      toc: new URL(dir, location.href).href,
+    };
+    return siteResult;
   }
 
   const NEXT = /^\s*(下一[话話章回节節集卷页頁]|下[一]?章|下一篇|next\s*(chapter|episode|›|»|>)?|›|»)\s*[>›»]?\s*$/i;
@@ -113,14 +202,17 @@
     let pages = [];
     try { pages = scanImages(); } catch (e) {}
     const top = window === window.top;
+    let site = null;
+    try { site = siteManga(); } catch (e) {}
+    if (site && site.pages.length > pages.length) pages = site.pages;
     const info = {
       frame: location.href,
       top,
       title: top ? document.title : '',
       pages,
-      next: top || pages.length ? link(NEXT) : '',
-      prev: top || pages.length ? link(PREV) : '',
-      toc: top ? link(TOC) : '',
+      next: (site && site.next) || (top || pages.length ? link(NEXT) : ''),
+      prev: (site && site.prev) || (top || pages.length ? link(PREV) : ''),
+      toc: (site && site.toc) || (top ? link(TOC) : ''),
     };
     const s = JSON.stringify(info);
     if (s === last) return;
@@ -143,5 +235,62 @@
   else start();
   addEventListener('load', () => later(300));
 
-  window.__voxManga = { scan };
+  // ---- 交出网页里解密出来的图（App 的阅读模式要的时候调） ----
+  // 一张一张来：还没加载的要滚过去等网页加载、解密，几张同时滚会互相抢
+  const queue = [];
+  let busy = false;
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  async function grab(index, frame) {
+    if (frame && frame !== location.href) return '';
+    const img = slots[index];
+    if (!img || !img.isConnected) return '';
+    const ready = () => {
+      const s = img.currentSrc || img.src || '';
+      return /^blob:/.test(s) && img.complete && img.naturalWidth > 2 ? s : '';
+    };
+    let src = ready();
+    if (!src) {
+      // 滚过去，网页看到它才加载；最多等 20 秒
+      try { img.scrollIntoView({ block: 'center' }); } catch (e) {}
+      for (let k = 0; k < 100 && !(src = ready()); k++) await sleep(200);
+    }
+    if (!src) return '';
+    try {
+      const blob = await (await fetch(src)).blob();
+      return await new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result).replace(/^data:[^,]*,/, ''));
+        fr.onerror = () => reject(fr.error);
+        fr.readAsDataURL(blob);
+      });
+    } catch (e) {
+      // 网页显示完就把 blob 地址作废了（revokeObjectURL）：图还在页面上，按原尺寸画下来
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0);
+      return c.toDataURL('image/jpeg', 0.95).replace(/^data:[^,]*,/, '');
+    }
+  }
+
+  async function pump() {
+    if (busy) return;
+    busy = true;
+    while (queue.length) {
+      const job = queue.shift();
+      let data = '';
+      try { data = await grab(job.index, job.frame); } catch (e) {}
+      try { VoxBridge.mangaImage(job.id, data); } catch (e) {}
+    }
+    busy = false;
+  }
+
+  function exportImage(index, id, frame) {
+    queue.push({ index, id, frame });
+    pump();
+  }
+
+  window.__voxManga = { scan, exportImage };
 })();

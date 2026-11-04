@@ -287,6 +287,22 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
         } else micLauncher.launch(Manifest.permission.RECORD_AUDIO)
     }
 
+    // 网页里解密出来的漫画图片：阅读模式要的时候请当前标签页的网页交出来（web_manga.js 的 exportImage）
+    val currentTab = androidx.compose.runtime.rememberUpdatedState(tab)
+    DisposableEffect(Unit) {
+        com.aisub.player.web.WebPageImages.exporter = { frame, index, id ->
+            val w = currentTab.value.webView
+            w?.post {
+                w.evaluateJavascript(
+                    "window.__voxManga&&__voxManga.exportImage($index,${org.json.JSONObject.quote(id)},${org.json.JSONObject.quote(frame)})",
+                    null,
+                )
+            }
+            w != null
+        }
+        onDispose { com.aisub.player.web.WebPageImages.exporter = null }
+    }
+
     // 网页视频开始放了：音乐、播放页的视频先停下
     LaunchedEffect(Unit) { main.player.pause() }
     DisposableEffect(Unit) {
