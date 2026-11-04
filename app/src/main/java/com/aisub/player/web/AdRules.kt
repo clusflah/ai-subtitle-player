@@ -281,7 +281,7 @@ class AdRules private constructor(
             host == domain || host.endsWith(".$domain")
 
         /** 粗略的「同一个网站」：最后两段，像 com.cn、co.uk 这种取最后三段 */
-        private fun siteOf(host: String): String {
+        internal fun siteOf(host: String): String {
             val parts = host.split('.')
             if (parts.size <= 2) return host
             val last2 = parts.takeLast(2).joinToString(".")
