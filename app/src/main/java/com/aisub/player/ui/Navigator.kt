@@ -8,6 +8,8 @@ sealed interface Screen {
     /** 最近播放：音乐和视频分开 */
     data class History(val music: Boolean = false) : Screen
     data object Settings : Screen
+    /** 隐藏的文件夹：列表、暂时显示、密码 */
+    data object HiddenFolders : Screen
     /** 直播：M3U / TXT 直播源的频道列表 */
     data object Live : Screen
     /** 网页：内置浏览器里看视频，边播边生成 AI 字幕 */

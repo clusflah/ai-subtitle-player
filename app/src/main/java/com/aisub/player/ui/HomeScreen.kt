@@ -257,6 +257,7 @@ fun HomeScreen(
                             }
                             DropdownMenuItem(text = { Text("刷新媒体库") }, onClick = { menu = false; lib.refreshMedia() })
                             DropdownMenuItem(text = { Text("打开文件…") }, onClick = { menu = false; pickFile.launch(arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream")) })
+                            DropdownMenuItem(text = { Text("隐藏的文件夹") }, onClick = { menu = false; nav.push(Screen.HiddenFolders) })
                             DropdownMenuItem(text = { Text("设置") }, onClick = { menu = false; openSettings() })
                         }
                     }

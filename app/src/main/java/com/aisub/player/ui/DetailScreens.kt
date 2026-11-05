@@ -100,18 +100,33 @@ fun LocalFolderScreen(
         if (state.favoriteFolders.any { it.serverId == null && it.path == p }) MenuAction("取消收藏") { lib.toggleFavoriteFolder(null, p, name) }
         else MenuAction("收藏到首页") { lib.toggleFavoriteFolder(null, p, name) }
     }
+    val context = LocalContext.current
+    var hiding by remember { mutableStateOf<Pair<String, String>?>(null) }
+    hiding?.let { (p, name) ->
+        HideFolderDialog(lib, name, onDismiss = { hiding = null }) {
+            lib.hideFolder(null, p, name)
+            hiding = null
+            Toast.makeText(context, "已隐藏「$name」", Toast.LENGTH_SHORT).show()
+            if (p == path) onBack()
+        }
+    }
+    val hideMenu: (String, String) -> MenuAction = { p, name ->
+        if (lib.isHiddenFolder(null, p)) MenuAction("取消隐藏") { lib.unhideFolder(null, p) }
+        else MenuAction("隐藏文件夹") { hiding = p to name }
+    }
 
     Box(Modifier.fillMaxSize()) {
         DetailScaffold(
             title, onBack,
             actions = {
                 if (path.isNotEmpty()) FavoriteFolderButton(lib, null, path, title)
-                if (files.isNotEmpty()) {
+                if (files.isNotEmpty() || path.isNotEmpty()) {
                     OverflowMenu(
-                        listOf(
+                        (if (files.isNotEmpty()) listOf(
                             MenuAction("全部播放") { play(files, 0) },
                             MenuAction("选择…") { selected = setOf(files.first().uri) },
-                        ) + if (path.isNotEmpty()) fm.folderMenu(path, inFolder(path)) { play(inFolder(path), 0) }.drop(1) else emptyList(),
+                        ) else emptyList()) +
+                            (if (path.isNotEmpty()) fm.folderMenu(path, inFolder(path)) { play(inFolder(path), 0) }.drop(1) + hideMenu(path, title) else emptyList()),
                     )
                 }
             },
@@ -126,7 +141,7 @@ fun LocalFolderScreen(
                     val entries = inFolder(f.path)
                     FolderRow(
                         f.name, subtitle = countText(f.folderCount, f.fileCount),
-                        menu = if (selecting) emptyList() else listOf(favoriteMenu(f.path, f.name)) + fm.folderMenu(f.path, entries) { play(entries, 0) },
+                        menu = if (selecting) emptyList() else listOf(favoriteMenu(f.path, f.name)) + fm.folderMenu(f.path, entries) { play(entries, 0) } + hideMenu(f.path, f.name),
                     ) { openFolder(f.path, f.name) }
                 }
                 itemsIndexed(files, key = { _, e -> e.uri }) { i, e ->
@@ -178,7 +193,9 @@ fun RemoteFolderScreen(
     val state by lib.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var items by remember { mutableStateOf<List<RemoteItem>?>(null) }
+    var loaded by remember { mutableStateOf<List<RemoteItem>?>(null) }
+    // 隐藏的子文件夹不列出来
+    val items = remember(loaded, state.hiddenFolders, state.showHidden) { loaded?.filterNot { it.isDir && lib.isHidden(serverId, it.path) } }
     var error by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
     var busy by remember { mutableStateOf(false) }
@@ -190,10 +207,10 @@ fun RemoteFolderScreen(
 
     LaunchedEffect(serverId, path, reload) {
         if (server == null) return@LaunchedEffect
-        items = null
+        loaded = null
         error = null
         try {
-            items = lib.client(server).list(path)
+            loaded = lib.client(server).list(path)
         } catch (e: Exception) {
             error = e.message ?: e.toString()
         }
@@ -275,11 +292,24 @@ fun RemoteFolderScreen(
         }
     }
 
+    var hiding by remember { mutableStateOf<RemoteItem?>(null) }
+    hiding?.let { dir ->
+        HideFolderDialog(lib, dir.name, onDismiss = { hiding = null }) {
+            lib.hideFolder(serverId, dir.path, dir.name)
+            hiding = null
+            Toast.makeText(context, "已隐藏「${dir.name}」", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     fun itemMenu(item: RemoteItem): List<MenuAction> = listOfNotNull(
         item.takeIf { it.isDir }?.let { dir -> MenuAction("用漫画模式看") { openManga(MangaOpen.RemoteFolder(serverId, dir.path, dir.name, path)) } },
         item.takeIf { it.isDir }?.let { dir ->
             val fav = state.favoriteFolders.any { it.serverId == serverId && it.path == dir.path }
             MenuAction(if (fav) "取消收藏" else "收藏到首页") { lib.toggleFavoriteFolder(serverId, dir.path, dir.name) }
+        },
+        item.takeIf { it.isDir }?.let { dir ->
+            if (lib.isHiddenFolder(serverId, dir.path)) MenuAction("取消隐藏") { lib.unhideFolder(serverId, dir.path) }
+            else MenuAction("隐藏文件夹") { hiding = dir }
         },
         MenuAction("详情") { showDetail(item) }.takeIf { !item.isDir || item.meta != null },
         item.takeIf { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }?.toMediaEntry()
