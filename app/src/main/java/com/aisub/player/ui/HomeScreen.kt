@@ -9,6 +9,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -68,6 +69,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -422,7 +425,6 @@ fun HomeScreen(
                     onLink = if (main.linkDownloader != null) ({ dialog = HomeDialog.Link }) else null,
                     onHistory = { music -> nav.push(Screen.History(music)) },
                     onPlayHistory = { item -> play(listOf(item.entry), 0) },
-                    onPlayEntry = { entry -> play(listOf(entry), 0) },
                     onPlayMusic = play,
                     onOpenPlaylist = { nav.push(Screen.PlaylistDetail(it.id)) },
                     onPlayPlaylist = { p -> if (p.items.isNotEmpty()) play(p.items, 0) },
@@ -436,7 +438,8 @@ fun HomeScreen(
                         else nav.push(Screen.Remote(f.serverId, f.path, f.title))
                     },
                     removeFavorite = { f -> lib.toggleFavoriteFolder(f.serverId, f.path, f.title) },
-                    openWebPage = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
+                    openWebBookmarks = { com.aisub.player.web.WebLaunch.pending = null; nav.push(Screen.Web) },
+                    openLiveFavorites = { nav.push(Screen.Live) },
                     openManga = { nav.push(Screen.Manga) },
                     openBooks = { nav.push(Screen.Books) },
                 )
@@ -844,10 +847,19 @@ private fun HomeTab(
         (mangaRecent.map { r ->
             ReadingItem(
                 r.key, r.title, if (r.total > 0) "第 ${r.page + 1} / ${r.total} 页" else "漫画", r.time, book = false,
-            ) { if (r.web) openWebManga(r.location) else mangaOpenOf(r)?.let(openReading) }
+                thumbnail = r.coverUrl?.let { com.aisub.player.manga.MangaPage(it, r.coverReferer, r.coverEntry) },
+                // 网页漫画没有记下首图的旧记录不能从章节网址直接取文件，避免误下载网页源码。
+                sourceUrl = r.location.takeUnless { r.web },
+                open = { if (r.web) openWebManga(r.location) else mangaOpenOf(r)?.let(openReading) },
+            )
         } + bookRecent.map { r ->
             val pct = if (r.total > 0) (r.item + 1) * 100 / r.total else 0
-            ReadingItem(r.key, r.title, "读到 $pct%", r.time, book = true) { openReading(MangaOpen.Archive(r.title, r.location)) }
+            ReadingItem(
+                r.key, r.title, "读到 $pct%", r.time, book = true,
+                thumbnail = r.coverEntry?.let { com.aisub.player.manga.MangaPage(r.location, entry = it) },
+                sourceUrl = r.location,
+                open = { openReading(MangaOpen.Archive(r.title, r.location)) },
+            )
         }).sortedByDescending { it.time }.take(12)
     }
     val recentVideos = remember(state.videos) { state.videos.sortedBy(SortOrder.RECENT).take(12) }
@@ -1000,10 +1012,11 @@ private fun SongTile(entry: MediaEntry, positionMs: Long = 0, onClick: () -> Uni
 
 /** 首页「继续阅读」的一项（漫画或电子书） */
 private data class ReadingItem(
-    val key: String, val title: String, val progress: String, val time: Long, val book: Boolean, val open: () -> Unit,
+    val key: String, val title: String, val progress: String, val time: Long, val book: Boolean,
+    val thumbnail: com.aisub.player.manga.MangaPage? = null, val sourceUrl: String? = null, val open: () -> Unit,
 )
 
-/** 「继续阅读」卡片：竖版书本样式（没有封面，用图标）+ 名字 + 进度 */
+/** 「继续阅读」卡片：优先用漫画首页或电子书插图；还没有读过的旧记录才显示类型图标。 */
 @Composable
 private fun ReadingTile(r: ReadingItem) {
     Column(Modifier.width(110.dp).tvFocusRing(MaterialTheme.shapes.medium, scale = true).clip(MaterialTheme.shapes.medium).clickable(onClick = r.open)) {
@@ -1011,10 +1024,7 @@ private fun ReadingTile(r: ReadingItem) {
             Modifier.fillMaxWidth().aspectRatio(3f / 4f).clip(MaterialTheme.shapes.medium).background(MaterialTheme.colorScheme.surfaceContainerHigh),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                if (r.book) AppIcons.Description else AppIcons.MenuBook, contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(36.dp),
-            )
+            ReadingThumbnail(r.thumbnail, r.sourceUrl, r.book, Modifier.fillMaxSize())
         }
         Text(
             r.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall,
@@ -1025,6 +1035,23 @@ private fun ReadingTile(r: ReadingItem) {
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 4.dp),
         )
+    }
+}
+
+@Composable
+private fun ReadingThumbnail(page: com.aisub.player.manga.MangaPage?, sourceUrl: String?, book: Boolean, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val image by produceState<ImageBitmap?>(page?.let { com.aisub.player.manga.MangaImages.cachedThumb(it) }, page, sourceUrl, book) {
+        val cover = page ?: sourceUrl?.let { url ->
+            if (book) com.aisub.player.book.Ebooks.coverPage(context, url)
+            else runCatching { com.aisub.player.manga.MangaArchive.pages(context, url).firstOrNull() }.getOrNull()
+        }
+        if (cover != null && value == null) value = com.aisub.player.manga.MangaImages.thumb(context, cover)
+    }
+    Box(modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) {
+        val thumb = image
+        if (thumb != null) Image(thumb, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        else Icon(if (book) AppIcons.Description else AppIcons.MenuBook, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(36.dp))
     }
 }
 
@@ -1096,7 +1123,6 @@ private fun MeTab(
     /** 参数：true 打开音乐的最近播放，false 打开视频的 */
     onHistory: (Boolean) -> Unit,
     onPlayHistory: (HistoryItem) -> Unit,
-    onPlayEntry: (MediaEntry) -> Unit,
     onPlayMusic: (List<MediaEntry>, Int) -> Unit,
     onOpenPlaylist: (Playlist) -> Unit,
     onPlayPlaylist: (Playlist) -> Unit,
@@ -1107,7 +1133,8 @@ private fun MeTab(
     onRefreshStats: () -> Unit,
     openFavorite: (FavoriteFolder) -> Unit,
     removeFavorite: (FavoriteFolder) -> Unit,
-    openWebPage: (String) -> Unit,
+    openWebBookmarks: () -> Unit,
+    openLiveFavorites: () -> Unit,
     openManga: () -> Unit,
     openBooks: () -> Unit,
 ) {
@@ -1181,18 +1208,15 @@ private fun MeTab(
                 AppIcons.MusicNote, mutedIcon = likedMusic?.items.isNullOrEmpty(), onClick = likedMusic?.let { { onOpenPlaylist(it) } },
             )
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-            if (bookmarks.isEmpty()) ListRow("网页收藏", "网页里「⋮ → 收藏本页」", AppIcons.Web, mutedIcon = true)
-            else bookmarks.take(4).forEachIndexed { index, page ->
-                if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                ListRow(page.title, android.net.Uri.parse(page.url).host, AppIcons.Web, onClick = { openWebPage(page.url) })
-            }
+            ListRow(
+                "网页收藏", if (bookmarks.isEmpty()) "网页里「⋮ → 收藏本页」" else "${bookmarks.size} 个网页",
+                AppIcons.Web, mutedIcon = bookmarks.isEmpty(), onClick = if (bookmarks.isEmpty()) null else openWebBookmarks,
+            )
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-            if (channels.isEmpty()) ListRow("收藏的频道", "直播频道右边的星标", AppIcons.Live, mutedIcon = true)
-            else channels.take(4).forEachIndexed { index, channel ->
-                if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                ListRow(channel.name, channel.group.ifBlank { "直播收藏" }, AppIcons.Live,
-                    onClick = { onPlayEntry(MediaEntry(channel.url, channel.name, isLive = true, logo = channel.logo, folder = channel.group)) })
-            }
+            ListRow(
+                "收藏的频道", if (channels.isEmpty()) "直播频道右边的星标" else "${channels.size} 个频道",
+                AppIcons.Live, mutedIcon = channels.isEmpty(), onClick = if (channels.isEmpty()) null else openLiveFavorites,
+            )
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             ListRow("收藏的漫画", if (favoriteManga.isEmpty()) "在漫画阅读列表里点星标" else "${favoriteManga.size} 部", AppIcons.MenuBook, onClick = openManga)
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
