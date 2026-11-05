@@ -79,6 +79,7 @@ object BookTts {
     private var blocks: List<BookBlock> = emptyList()
     private var chapterOfBlock: IntArray = IntArray(0)
     private var chapterTitles: List<String> = emptyList()
+    private var skippedBlocks = BooleanArray(0)
     private val sentenceCache = HashMap<Int, List<IntRange>>()
     private var cursor: Cursor? = null
     private var engine: TtsEngine? = null
@@ -126,12 +127,16 @@ object BookTts {
             var i = 0
             chapters.forEachIndexed { ci, ch -> repeat(ch.blocks.size) { arr[i++] = ci } }
         }
+        val prefs = BookStore.settings.value
+        skippedBlocks = BooleanArray(blocks.size)
+        if (prefs.skipFrontMatter) chapters.forEachIndexed { ci, chapter ->
+            if (BookNavigation.isFrontMatter(chapter)) chapterOfBlock.forEachIndexed { i, owner -> if (owner == ci) skippedBlocks[i] = true }
+        }
         sentenceCache.clear()
         cursor = null
         val sample = blocks.asSequence().filter { it.text.isNotEmpty() }.take(80).joinToString("") { it.text }.take(4000)
         locale = Sentences.localeOf(sample)
         setupEngine()
-        val prefs = BookStore.settings.value
         _status.value = Status(key = key, title = title, speed = prefs.ttsSpeed)
     }
 
@@ -144,7 +149,8 @@ object BookTts {
         engine = if (engineType == TtsEngineType.AZURE) AzureTts(key, region, endpoint) else SystemTts(app)
         // 设置里选的语音是这本书的语言才用（例如中文书不用英文语音），否则用这个语言的默认语音
         val lang = locale.substringBefore('-').lowercase()
-        voice = s.ttsVoices[engineType]?.takeIf { v -> v.lowercase().startsWith("$lang-") || v.lowercase().startsWith("${lang}_") }
+        voice = (BookStore.settings.value.ttsVoice ?: s.ttsVoices[engineType])
+            ?.takeIf { v -> v.lowercase().startsWith("$lang-") || v.lowercase().startsWith("${lang}_") }
     }
 
     private fun sentences(block: Int): List<IntRange> = sentenceCache.getOrPut(block) {
@@ -154,7 +160,7 @@ object BookTts {
     private fun firstFrom(block: Int): Cursor? {
         var b = block.coerceAtLeast(0)
         while (b < blocks.size) {
-            if (sentences(b).isNotEmpty()) return Cursor(b, 0)
+            if (!skippedBlocks.getOrElse(b) { false } && sentences(b).isNotEmpty()) return Cursor(b, 0)
             b++
         }
         return null

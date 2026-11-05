@@ -32,6 +32,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -71,6 +72,8 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aisub.player.MainViewModel
 import androidx.media3.common.util.UnstableApi
 import com.aisub.player.book.BookChapter
 import com.aisub.player.book.BookRecent
@@ -235,6 +238,8 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
     val scope = rememberCoroutineScope()
     var controls by remember { mutableStateOf(false) }
     var showToc by remember { mutableStateOf(false) }
+    var showReadSettings by remember { mutableStateOf(false) }
+    var showVoicePicker by remember { mutableStateOf(false) }
     var sleepMenu by remember { mutableStateOf(false) }
     val reading = tts.key == url
 
@@ -276,8 +281,13 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
         }
     }
 
-    BackHandler(enabled = showToc || controls) {
-        if (showToc) showToc = false else controls = false
+    BackHandler(enabled = showToc || controls || showReadSettings || showVoicePicker) {
+        when {
+            showVoicePicker -> showVoicePicker = false
+            showReadSettings -> showReadSettings = false
+            showToc -> showToc = false
+            else -> controls = false
+        }
     }
 
     fun speakFrom(index: Int) {
@@ -368,6 +378,7 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
                         TextButton(onClick = { BookStore.update { it.copy(fontSize = (it.fontSize + 1).coerceAtMost(36)) } }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Text("A+") }
                         TextButton(onClick = { BookStore.update { it.copy(lineSpacing = if (it.lineSpacing >= 2.1f) 1.4f else it.lineSpacing + 0.35f) } }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Text("行距") }
                         TextButton(onClick = { BookStore.update { it.copy(theme = (it.theme + 1) % THEMES.size) } }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Text(THEME_NAMES[prefs.theme.coerceIn(0, 2)]) }
+                        TextButton(onClick = { showReadSettings = true }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Text("朗读设置") }
                         TextButton(
                             onClick = { controls = false; speakFrom(list.firstVisibleItemIndex) },
                             modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
@@ -418,16 +429,53 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
             }
         }
 
-        if (showToc) TocDialog(book.chapters, current, onDismiss = { showToc = false }) { ci ->
+        if (showToc) TocDialog(book.chapters, book.volumes, current, onDismiss = { showToc = false }) { ci ->
             showToc = false
             controls = false
             scope.launch { list.scrollToItem(chapterStart.getOrElse(ci) { 0 }) }
+        }
+        if (showReadSettings) {
+            AlertDialog(
+                onDismissRequest = { showReadSettings = false },
+                title = { Text("朗读设置") },
+                text = {
+                    Column {
+                        Row(Modifier.fillMaxWidth().clickable { BookStore.update { it.copy(skipFrontMatter = !it.skipFrontMatter) } }, verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(prefs.skipFrontMatter, onCheckedChange = { BookStore.update { s -> s.copy(skipFrontMatter = it) } })
+                            Column(Modifier.padding(start = 8.dp)) {
+                                Text("跳过目录与版权信息")
+                                Text("下次开始朗读时生效", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(true, onCheckedChange = null)
+                            Column(Modifier.padding(start = 8.dp)) {
+                                Text("统一旁白")
+                                Text("电子书不进行角色识别，使用一个选定语音朗读", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        TextButton(onClick = { showReadSettings = false; showVoicePicker = true }) { Text("选择朗读语音") }
+                    }
+                },
+                confirmButton = { TextButton(onClick = { showReadSettings = false }) { Text("完成") } },
+            )
+        }
+        if (showVoicePicker) {
+            val main: MainViewModel = viewModel()
+            val settings by main.state.collectAsStateWithLifecycle()
+            VoicePickerDialog(
+                main, settings.settings, "朗读语音", prefs.ttsVoice ?: settings.settings.ttsVoices[settings.settings.ttsEngine],
+                allowAuto = true, onDismiss = { showVoicePicker = false },
+            ) { voice ->
+                BookStore.update { it.copy(ttsVoice = voice) }
+                showVoicePicker = false
+            }
         }
     }
 }
 
 @Composable
-private fun TocDialog(chapters: List<BookChapter>, current: Int, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
+private fun TocDialog(chapters: List<BookChapter>, volumes: List<com.aisub.player.book.BookVolume>, current: Int, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
     val state = rememberLazyListState((current - 3).coerceAtLeast(0))
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -435,6 +483,14 @@ private fun TocDialog(chapters: List<BookChapter>, current: Int, onDismiss: () -
         title = { Text("目录（${chapters.size}）") },
         text = {
             LazyColumn(state = state, modifier = Modifier.heightIn(max = 480.dp)) {
+                if (volumes.isNotEmpty()) {
+                    item { Text("识别到 ${volumes.size} 册", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(vertical = 8.dp)) }
+                    items(volumes) { volume ->
+                        Text(volume.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.fillMaxWidth().clickable { onPick(volume.firstChapter) }.tvFocusRing().padding(vertical = 8.dp, horizontal = 4.dp))
+                    }
+                    item { HorizontalDivider(Modifier.padding(vertical = 6.dp)) }
+                }
                 itemsIndexed(chapters) { i, ch ->
                     Text(
                         ch.title,

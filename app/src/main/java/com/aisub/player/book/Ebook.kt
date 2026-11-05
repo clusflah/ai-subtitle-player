@@ -21,6 +21,20 @@ data class BookBlock(val text: String = "", val heading: Boolean = false, val im
 
 data class BookChapter(val title: String, val blocks: List<BookBlock>)
 
+data class BookVolume(val title: String, val firstChapter: Int)
+
+/** 文字书开头常见但不该朗读的导航内容。 */
+object BookNavigation {
+    private val NAME = Regex("""^(?:目录|contents?|cover|版权(?:信息)?|出版(?:信息)?|作者简介|扉页|前言|序言)$""", RegexOption.IGNORE_CASE)
+    private val CHAPTER_LINE = Regex("""^(?:第\s*[0-9０-９零〇一二两三四五六七八九十百千万]+\s*[章节節回卷集部篇话話]|(?:卷|chapter)\s*\d+)""", RegexOption.IGNORE_CASE)
+
+    fun isFrontMatter(chapter: BookChapter): Boolean {
+        if (NAME.matches(chapter.title.trim())) return true
+        val text = chapter.blocks.map { it.text.trim() }.filter { it.isNotEmpty() }
+        return text.size >= 4 && text.all { it.length <= 70 && CHAPTER_LINE.containsMatchIn(it) }
+    }
+}
+
 data class Ebook(val chapters: List<BookChapter>) {
     /** 正文字数（不算空白） */
     val textLength: Int by lazy { chapters.sumOf { c -> c.blocks.sumOf { b -> b.text.count { !it.isWhitespace() } } } }
@@ -28,6 +42,13 @@ data class Ebook(val chapters: List<BookChapter>) {
 
     /** 几乎全是图片的（图片做的漫画书）：交给漫画阅读 */
     val looksLikeManga: Boolean get() = imageCount >= 3 && textLength < imageCount * 40
+    /** 一个 TXT / EPUB 合集里的分册入口，目录中可直接跳到相应书册。 */
+    val volumes: List<BookVolume> by lazy {
+        val marker = Regex("""^(?:第\s*[0-9０-９零〇一二两三四五六七八九十百千万]+\s*[卷册部集]|(?:卷|册|part|book)\s*[0-9]+)""", RegexOption.IGNORE_CASE)
+        chapters.mapIndexedNotNull { i, chapter ->
+            chapter.title.takeIf { marker.containsMatchIn(it.trim()) }?.let { BookVolume(it, i) }
+        }.takeIf { it.size >= 2 }.orEmpty()
+    }
 }
 
 /** 文件是什么书 */
