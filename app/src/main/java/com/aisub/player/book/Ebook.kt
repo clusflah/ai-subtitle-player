@@ -1,7 +1,9 @@
 package com.aisub.player.book
 
+import android.content.Context
 import com.aisub.player.manga.Epub
 import com.aisub.player.manga.MangaArchive
+import com.aisub.player.manga.MangaPage
 import com.aisub.player.manga.Mobi
 import java.io.File
 import java.io.IOException
@@ -11,6 +13,8 @@ import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
 import java.util.zip.ZipFile
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /** 书里的一块：一段文字（标题也是一段），或者一张插图（[image] 是图片在文件里的位置，交给漫画的取图） */
 data class BookBlock(val text: String = "", val heading: Boolean = false, val image: String? = null)
@@ -57,6 +61,18 @@ object Ebooks {
         BookKind.EPUB -> ZipFile(file).use { EpubText.parse(it) }
         BookKind.MOBI -> RandomAccessFile(file, "r").use { MobiText.parse(it) }
         BookKind.OTHER -> null
+    }
+
+    /**
+     * 为旧的阅读记录补一张缩略图。优先取 EPUB / MOBI 的第一张插图；纯文字书没有可用封面时返回 null。
+     * 文件会沿用漫画阅读器已有的本地缓存，避免反复从网盘下载。
+     */
+    suspend fun coverPage(context: Context, url: String): MangaPage? = withContext(Dispatchers.IO) {
+        val file = runCatching { MangaArchive.prepare(context, url) }.getOrNull() ?: return@withContext null
+        val entry = runCatching {
+            load(file)?.chapters?.asSequence()?.flatMap { it.blocks.asSequence() }?.mapNotNull { it.image }?.firstOrNull()
+        }.getOrNull() ?: return@withContext null
+        MangaPage(url, entry = entry)
     }
 
     /** TXT 的编码：BOM、UTF-8（严格）、GB18030（包含 GBK） */

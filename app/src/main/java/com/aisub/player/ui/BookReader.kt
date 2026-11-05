@@ -221,6 +221,9 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
         book.chapters.forEachIndexed { ci, ch -> ch.blocks.forEach { b -> out.add(BookRow(out.size, ci, b)) } }
         out
     }
+    val coverEntry = remember(book) {
+        book.chapters.asSequence().flatMap { it.blocks.asSequence() }.mapNotNull { it.image }.firstOrNull()
+    }
     val chapterStart = remember(book) {
         var i = 0
         book.chapters.map { ch -> i.also { i += ch.blocks.size } }
@@ -240,7 +243,11 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
     fun save() {
         val i = list.firstVisibleItemIndex
         BookStore.save(
-            BookRecent(url, title, url, i, list.firstVisibleItemScrollOffset, rows.size, book.chapters.getOrNull(chapterAt(i))?.title.orEmpty(), System.currentTimeMillis()),
+            BookRecent(
+                key = url, title = title, location = url, item = i, offset = list.firstVisibleItemScrollOffset,
+                total = rows.size, chapter = book.chapters.getOrNull(chapterAt(i))?.title.orEmpty(), time = System.currentTimeMillis(),
+                coverEntry = coverEntry,
+            ),
         )
     }
 

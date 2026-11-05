@@ -19,6 +19,8 @@ data class BookRecent(
     val chapter: String,
     val time: Long,
     val favorite: Boolean = false,
+    /** EPUB/MOBI 里第一张可用插图，用作继续阅读的封面。 */
+    val coverEntry: String? = null,
 )
 
 /** 阅读设置：字号（sp）、行距倍数、主题（0 白底 1 护眼 2 夜间）、朗读速度 */
@@ -45,7 +47,7 @@ object BookStore {
             (0 until a.length()).map { a.getJSONObject(it) }.map {
                 BookRecent(
                     it.getString("key"), it.optString("title"), it.optString("location"), it.optInt("item"), it.optInt("offset"),
-                    it.optInt("total"), it.optString("chapter"), it.optLong("time"), it.optBoolean("favorite"),
+                    it.optInt("total"), it.optString("chapter"), it.optLong("time"), it.optBoolean("favorite"), it.optString("coverEntry").ifBlank { null },
                 )
             }
         }.getOrDefault(emptyList())
@@ -86,7 +88,8 @@ object BookStore {
         val a = JSONArray()
         for (r in _recent.value) a.put(
             JSONObject().put("key", r.key).put("title", r.title).put("location", r.location).put("item", r.item)
-                .put("offset", r.offset).put("total", r.total).put("chapter", r.chapter).put("time", r.time).put("favorite", r.favorite),
+                .put("offset", r.offset).put("total", r.total).put("chapter", r.chapter).put("time", r.time).put("favorite", r.favorite)
+                .put("coverEntry", r.coverEntry),
         )
         prefs?.edit()?.putString("recent", a.toString())?.apply()
     }

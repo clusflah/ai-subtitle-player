@@ -37,6 +37,10 @@ data class MangaRecent(
     val time: Long,
     val web: Boolean,
     val favorite: Boolean = false,
+    /** 首页缩略图：把漫画打开过一次后保留，首页不必再猜文件内容。 */
+    val coverUrl: String? = null,
+    val coverReferer: String? = null,
+    val coverEntry: String? = null,
 )
 
 /** 阅读进度、阅读设置、最近阅读，存在 SharedPreferences 里 */
@@ -84,8 +88,12 @@ object MangaStore {
         if (!book.recent) return
 
         val location = book.webUrl ?: book.key
-        val item = MangaRecent(book.key, book.title, location, page, book.pages.size, System.currentTimeMillis(), book.webUrl != null,
-            favorite = _recent.value.firstOrNull { it.key == book.key }?.favorite ?: false)
+        val cover = book.pages.firstOrNull()
+        val item = MangaRecent(
+            book.key, book.title, location, page, book.pages.size, System.currentTimeMillis(), book.webUrl != null,
+            favorite = _recent.value.firstOrNull { it.key == book.key }?.favorite ?: false,
+            coverUrl = cover?.url, coverReferer = cover?.referer, coverEntry = cover?.entry,
+        )
         // 网页漫画：同一部漫画（同一网站、标题前半段一样）的不同话只留最新的一条
         val list = listOf(item) + _recent.value.filter { it.key != book.key && !(it.web && item.web && sameSeries(it, item)) }
         _recent.value = list.take(MAX_RECENT)
@@ -134,6 +142,7 @@ object MangaStore {
             MangaRecent(
                 o.optString("key"), o.optString("title"), o.optString("location"),
                 o.optInt("page"), o.optInt("total"), o.optLong("time"), o.optBoolean("web"), o.optBoolean("favorite"),
+                o.optString("coverUrl").ifBlank { null }, o.optString("coverReferer").ifBlank { null }, o.optString("coverEntry").ifBlank { null },
             )
         }
     }
@@ -143,7 +152,8 @@ object MangaStore {
         _recent.value.forEach {
             arr.put(
                 JSONObject().put("key", it.key).put("title", it.title).put("location", it.location)
-                    .put("page", it.page).put("total", it.total).put("time", it.time).put("web", it.web).put("favorite", it.favorite),
+                    .put("page", it.page).put("total", it.total).put("time", it.time).put("web", it.web).put("favorite", it.favorite)
+                    .put("coverUrl", it.coverUrl).put("coverReferer", it.coverReferer).put("coverEntry", it.coverEntry),
             )
         }
         prefs?.edit()?.putString("recent", arr.toString())?.apply()
