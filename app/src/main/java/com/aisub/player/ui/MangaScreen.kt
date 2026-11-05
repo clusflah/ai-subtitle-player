@@ -155,12 +155,7 @@ fun MangaScreen(onBack: () -> Unit, openWeb: (String?) -> Unit, open: (MangaOpen
                             icon = if (r.web) AppIcons.Web else AppIcons.MenuBook,
                             trailing = { IconButton(onClick = { MangaStore.removeRecent(r.key) }) { Icon(AppIcons.Close, "从列表移除") } },
                             onClick = {
-                                when {
-                                    r.web -> openWeb(r.location)
-                                    r.location.startsWith(TREE) -> open(MangaOpen.Folder(r.title, r.location.removePrefix(TREE)))
-                                    r.location.startsWith(REMOTE) -> remoteFolderOf(r.location, r.title)?.let(open)
-                                    else -> open(MangaOpen.Archive(r.title, r.location))
-                                }
+                                if (r.web) openWeb(r.location) else mangaOpenOf(r)?.let(open)
                             },
                         )
                     }
@@ -178,6 +173,14 @@ fun MangaScreen(onBack: () -> Unit, openWeb: (String?) -> Unit, open: (MangaOpen
 }
 
 private const val TREE = "tree:"
+
+/** 最近读过的本地 / 网盘漫画怎么打开（网页漫画要回网页里打开，返回 null） */
+internal fun mangaOpenOf(r: MangaRecent): MangaOpen? = when {
+    r.web -> null
+    r.location.startsWith(TREE) -> MangaOpen.Folder(r.title, r.location.removePrefix(TREE))
+    r.location.startsWith(REMOTE) -> remoteFolderOf(r.location, r.title)
+    else -> MangaOpen.Archive(r.title, r.location)
+}
 
 private fun recentSubtitle(r: MangaRecent): String {
     val where = if (r.web) Uri.parse(r.location).host?.removePrefix("www.").orEmpty() else "本地"

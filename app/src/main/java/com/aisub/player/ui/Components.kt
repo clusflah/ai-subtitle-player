@@ -102,6 +102,8 @@ fun CollapsibleSection(
     title: String,
     actionLabel: String? = null,
     onAction: (() -> Unit)? = null,
+    /** 标题后面显示的数量（收起时也知道里面有几项）；null 不显示 */
+    count: Int? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -119,6 +121,9 @@ fun CollapsibleSection(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        if (count != null) Text(
+            " $count", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Icon(
             AppIcons.ExpandMore, contentDescription = if (expanded) "收起" else "展开",
             tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 4.dp).size(20.dp).rotate(arrow),
