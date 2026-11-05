@@ -510,7 +510,12 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     "var win=dy?(dy>0?innerHeight+scrollY<se.scrollHeight-1:scrollY>0):(dx>0?innerWidth+scrollX<se.scrollWidth-1:scrollX>0);" +
                     "if(!win){var area=0;document.querySelectorAll('body *').forEach(function(e){if(e.clientHeight<40||!can(e))return;" +
                     "var r=e.getBoundingClientRect(),a=Math.max(0,Math.min(r.right,innerWidth)-Math.max(r.left,0))*Math.max(0,Math.min(r.bottom,innerHeight)-Math.max(r.top,0));" +
-                    "if(a>area){area=a;t=e}})}}" +
+                    "if(a>area){area=a;t=e}})}" +
+                    // 什么都滚不动、但有元素超出画面（比如比电视屏幕还高的固定弹窗，下面的按钮点不到）：把它整个挪上来 / 挪下去
+                    "if(!t&&!win&&dy){var best=null;[[fx,fy],[0.5,0.5]].some(function(p){var e=document.elementFromPoint(p[0]*innerWidth,p[1]*innerHeight);" +
+                    "while(e&&e!==document.body&&e!==document.documentElement){var r=e.getBoundingClientRect();if(dy>0?r.bottom>innerHeight+1:r.top<-1)best=e;e=e.parentElement}return best});" +
+                    "if(best){var r=best.getBoundingClientRect(),d=dy>0?-Math.min(dy,r.bottom-innerHeight+16):Math.min(-dy,16-r.top);" +
+                    "var cur=parseFloat(best.dataset.aisubShift||'0')+d;best.dataset.aisubShift=cur;best.style.transition='translate .2s';best.style.translate='0 '+cur+'px';return}}}" +
                     "(t||window).scrollBy({left:dx,top:dy,behavior:'smooth'})})" +
                     "(${c.x / w.width},${c.y / w.height},${if (overX) dx else 0},${if (overY) dy else 0})",
                 null,

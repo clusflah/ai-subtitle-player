@@ -72,6 +72,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -305,7 +309,21 @@ fun HomeScreen(
                 Spacer(Modifier.weight(1f))
             }
         }
-        Box(Modifier.weight(1f).fillMaxSize().nestedScroll(scrollWatcher)) {
+        Box(
+            Modifier.weight(1f).fillMaxSize().nestedScroll(scrollWatcher)
+                // 内容不够长、没法滚动时（比如分组都折叠了），往下拉也能叫回底部导航
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) break
+                            if (change.position.y - down.position.y > 24.dp.toPx()) { barVisible = true; break }
+                        }
+                    }
+                }
+        ) {
             val openServer: (Server) -> Unit = { s ->
                 // Plex、Emby / Jellyfin 用官方客户端那样的首页；首页菜单里还能切回按文件夹浏览
                 if (s.type == ServerType.PLEX || s.type == ServerType.EMBY) nav.push(Screen.ServerHome(s.id, s.name))
@@ -364,10 +382,9 @@ fun HomeScreen(
                     },
                     openLive = { nav.push(Screen.Live) },
                     openWeb = { nav.push(Screen.Web) },
-                    openManga = { nav.push(Screen.Manga) },
-                    openBooks = { nav.push(Screen.Books) },
                     openTelegram = { nav.push(Screen.Telegram) },
                     openStream = { dialog = HomeDialog.Stream },
+                    onNotScrollable = { barVisible = true },
                 )
                 Tab.ME -> MeTab(
                     state = state,
@@ -553,12 +570,14 @@ private fun BrowseTab(
     openLive: () -> Unit,
     openWeb: () -> Unit,
     openTelegram: () -> Unit,
-    openManga: () -> Unit,
-    openBooks: () -> Unit,
     openStream: () -> Unit,
+    onNotScrollable: () -> Unit,
 ) {
     val all = remember(state.videos, state.audios) { state.videos + state.audios }
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
+    val scroll = rememberScrollState()
+    // 分组折叠后页面短到滚不动时，底部导航不能一直藏着
+    LaunchedEffect(scroll.maxValue) { if (scroll.maxValue == 0) onNotScrollable() }
+    Column(Modifier.verticalScroll(scroll).padding(bottom = 24.dp)) {
         CollapsibleSection("browse.local", "本机") {
             val local = listOf(
                 Triple("内部存储", AppIcons.Phone, ""),
@@ -617,10 +636,6 @@ private fun BrowseTab(
                 ListRow("网页", "在网页里看视频，边播边生成 AI 字幕", AppIcons.Web, onClick = openWeb)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 ListRow("Telegram", "看频道和群里的视频，边下边播", AppIcons.Telegram, onClick = openTelegram)
-                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                ListRow("漫画", "网页漫画阅读模式、本地 CBZ / PDF / EPUB / MOBI 和图片文件夹，遥控器翻页", AppIcons.MenuBook, onClick = openManga)
-                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                ListRow("电子书", "TXT / EPUB / MOBI / AZW3，可以朗读听书（锁屏也能听）", AppIcons.Description, onClick = openBooks)
             }
         }
     }
