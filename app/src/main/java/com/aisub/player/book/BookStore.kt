@@ -24,7 +24,15 @@ data class BookRecent(
 )
 
 /** 阅读设置：字号（sp）、行距倍数、主题（0 白底 1 护眼 2 夜间）、朗读速度 */
-data class BookPrefs(val fontSize: Int = 19, val lineSpacing: Float = 1.7f, val theme: Int = 0, val ttsSpeed: Float = 1f)
+data class BookPrefs(
+    val fontSize: Int = 19, val lineSpacing: Float = 1.7f, val theme: Int = 0, val ttsSpeed: Float = 1f,
+    /** 目录、版权、封面等导航内容不进入朗读队列。 */
+    val skipFrontMatter: Boolean = true,
+    /** 听书默认统一使用一个旁白语音，不做角色推断。 */
+    val unifiedNarrator: Boolean = true,
+    /** 本书阅读器的旁白语音；空则沿用应用的默认语音。 */
+    val ttsVoice: String? = null,
+)
 
 /** 电子书的阅读进度、最近读过、阅读设置（存在 SharedPreferences） */
 object BookStore {
@@ -53,6 +61,7 @@ object BookStore {
         }.getOrDefault(emptyList())
         _prefs.value = BookPrefs(
             p.getInt("fontSize", 19), p.getFloat("lineSpacing", 1.7f), p.getInt("theme", 0), p.getFloat("ttsSpeed", 1f),
+            p.getBoolean("skipFrontMatter", true), p.getBoolean("unifiedNarrator", true), p.getString("ttsVoice", null),
         )
     }
 
@@ -81,7 +90,8 @@ object BookStore {
         val s = change(_prefs.value)
         _prefs.value = s
         prefs?.edit()?.putInt("fontSize", s.fontSize)?.putFloat("lineSpacing", s.lineSpacing)?.putInt("theme", s.theme)
-            ?.putFloat("ttsSpeed", s.ttsSpeed)?.apply()
+            ?.putFloat("ttsSpeed", s.ttsSpeed)?.putBoolean("skipFrontMatter", s.skipFrontMatter)
+            ?.putBoolean("unifiedNarrator", s.unifiedNarrator)?.putString("ttsVoice", s.ttsVoice)?.apply()
     }
 
     private fun persist() {
