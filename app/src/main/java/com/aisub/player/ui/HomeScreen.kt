@@ -422,6 +422,7 @@ fun HomeScreen(
                     onLink = if (main.linkDownloader != null) ({ dialog = HomeDialog.Link }) else null,
                     onHistory = { music -> nav.push(Screen.History(music)) },
                     onPlayHistory = { item -> play(listOf(item.entry), 0) },
+                    onPlayEntry = { entry -> play(listOf(entry), 0) },
                     onPlayMusic = play,
                     onOpenPlaylist = { nav.push(Screen.PlaylistDetail(it.id)) },
                     onPlayPlaylist = { p -> if (p.items.isNotEmpty()) play(p.items, 0) },
@@ -1095,6 +1096,7 @@ private fun MeTab(
     /** 参数：true 打开音乐的最近播放，false 打开视频的 */
     onHistory: (Boolean) -> Unit,
     onPlayHistory: (HistoryItem) -> Unit,
+    onPlayEntry: (MediaEntry) -> Unit,
     onPlayMusic: (List<MediaEntry>, Int) -> Unit,
     onOpenPlaylist: (Playlist) -> Unit,
     onPlayPlaylist: (Playlist) -> Unit,
@@ -1189,7 +1191,7 @@ private fun MeTab(
             else channels.take(4).forEachIndexed { index, channel ->
                 if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 ListRow(channel.name, channel.group.ifBlank { "直播收藏" }, AppIcons.Live,
-                    onClick = { onPlayHistory(MediaEntry(channel.url, channel.name, isLive = true, logo = channel.logo, folder = channel.group)) })
+                    onClick = { onPlayEntry(MediaEntry(channel.url, channel.name, isLive = true, logo = channel.logo, folder = channel.group)) })
             }
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             ListRow("收藏的漫画", if (favoriteManga.isEmpty()) "在漫画阅读列表里点星标" else "${favoriteManga.size} 部", AppIcons.MenuBook, onClick = openManga)
