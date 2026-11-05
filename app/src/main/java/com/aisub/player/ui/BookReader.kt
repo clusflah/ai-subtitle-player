@@ -373,15 +373,15 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 8.dp),
                     )
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth(),) {
                         TextButton(onClick = { BookStore.update { it.copy(fontSize = (it.fontSize - 1).coerceAtLeast(12)) } }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Text("A-") }
                         TextButton(onClick = { BookStore.update { it.copy(fontSize = (it.fontSize + 1).coerceAtMost(36)) } }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Text("A+") }
                         TextButton(onClick = { BookStore.update { it.copy(lineSpacing = if (it.lineSpacing >= 2.1f) 1.4f else it.lineSpacing + 0.35f) } }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Text("行距") }
                         TextButton(onClick = { BookStore.update { it.copy(theme = (it.theme + 1) % THEMES.size) } }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Text(THEME_NAMES[prefs.theme.coerceIn(0, 2)]) }
-                        TextButton(onClick = { showReadSettings = true }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Text("朗读设置") }
+                        TextButton(onClick = { showReadSettings = true }, modifier = Modifier.weight(1f).tvFocusRing(RoundedCornerShape(50))) { Text("朗读设置", maxLines = 1, softWrap = false) }
                         TextButton(
                             onClick = { controls = false; speakFrom(list.firstVisibleItemIndex) },
-                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
+                            modifier = Modifier.weight(1f).tvFocusRing(RoundedCornerShape(50)),
                         ) { Icon(AppIcons.Volume, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("朗读") }
                     }
                 }
