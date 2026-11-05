@@ -18,6 +18,7 @@ data class BookRecent(
     val total: Int,
     val chapter: String,
     val time: Long,
+    val favorite: Boolean = false,
 )
 
 /** 阅读设置：字号（sp）、行距倍数、主题（0 白底 1 护眼 2 夜间）、朗读速度 */
@@ -44,7 +45,7 @@ object BookStore {
             (0 until a.length()).map { a.getJSONObject(it) }.map {
                 BookRecent(
                     it.getString("key"), it.optString("title"), it.optString("location"), it.optInt("item"), it.optInt("offset"),
-                    it.optInt("total"), it.optString("chapter"), it.optLong("time"),
+                    it.optInt("total"), it.optString("chapter"), it.optLong("time"), it.optBoolean("favorite"),
                 )
             }
         }.getOrDefault(emptyList())
@@ -56,9 +57,17 @@ object BookStore {
     fun progress(key: String): BookRecent? = _recent.value.firstOrNull { it.key == key }
 
     fun save(r: BookRecent) {
-        val list = listOf(r) + _recent.value.filter { it.key != r.key }
+        val favorite = _recent.value.firstOrNull { it.key == r.key }?.favorite ?: r.favorite
+        val list = listOf(r.copy(favorite = favorite)) + _recent.value.filter { it.key != r.key }
         _recent.value = list.take(MAX_RECENT)
         persist()
+    }
+
+    fun toggleFavorite(key: String): Boolean {
+        val now = _recent.value.firstOrNull { it.key == key }?.favorite != true
+        _recent.value = _recent.value.map { if (it.key == key) it.copy(favorite = now) else it }
+        persist()
+        return now
     }
 
     fun remove(key: String) {
@@ -77,7 +86,7 @@ object BookStore {
         val a = JSONArray()
         for (r in _recent.value) a.put(
             JSONObject().put("key", r.key).put("title", r.title).put("location", r.location).put("item", r.item)
-                .put("offset", r.offset).put("total", r.total).put("chapter", r.chapter).put("time", r.time),
+                .put("offset", r.offset).put("total", r.total).put("chapter", r.chapter).put("time", r.time).put("favorite", r.favorite),
         )
         prefs?.edit()?.putString("recent", a.toString())?.apply()
     }

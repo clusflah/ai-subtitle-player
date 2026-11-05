@@ -378,6 +378,12 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
+        /** 不开网页也能读：网页收藏（"bookmarks"）、浏览记录（"history"），「我的」「首页」用 */
+        fun savedPages(context: Context, key: String): List<WebPage> = runCatching {
+            val arr = JSONArray(context.getSharedPreferences("web", Context.MODE_PRIVATE).getString(key, "[]"))
+            (0 until arr.length()).map { arr.getJSONObject(it).let { o -> WebPage(o.optString("t"), o.optString("u")) } }
+        }.getOrDefault(emptyList())
+
         private const val MAX_HISTORY = 30
         const val ZOOM_MIN = 40
         const val ZOOM_MAX = 150

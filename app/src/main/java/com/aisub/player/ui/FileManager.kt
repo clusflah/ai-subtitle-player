@@ -193,6 +193,7 @@ class FileManager internal constructor(
             MenuAction("影视信息") { openDetail(entry) }.takeIf { entry.isVideo },
             MenuAction("加入播放列表") { onAddToPlaylist(listOf(entry)) },
             watchLaterAction(context, lib, entry).takeIf { entry.isVideo },
+            favoriteVideoAction(context, lib, entry).takeIf { entry.isVideo },
             MenuAction("分享") { share(listOf(entry)) }.takeIf { local },
             MenuAction("重命名") { rename(entry) }.takeIf { local },
             MenuAction("移动到…") { move(listOf(entry)) }.takeIf { local },
@@ -320,5 +321,13 @@ internal fun watchLaterAction(context: android.content.Context, lib: LibraryView
     return MenuAction(if (inList) "移出稍后观看" else "稍后观看") {
         val now = lib.toggleWatchLater(entry)
         android.widget.Toast.makeText(context, if (now) "已加入「稍后观看」" else "已移出「稍后观看」", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
+internal fun favoriteVideoAction(context: android.content.Context, lib: LibraryViewModel, entry: MediaEntry): MenuAction {
+    val saved = lib.isFavoriteVideo(entry.uri)
+    return MenuAction(if (saved) "取消收藏视频" else "收藏视频") {
+        val now = lib.toggleFavoriteVideo(entry)
+        android.widget.Toast.makeText(context, if (now) "已收藏视频" else "已取消收藏", android.widget.Toast.LENGTH_SHORT).show()
     }
 }

@@ -129,6 +129,21 @@ fun BooksScreen(onBack: () -> Unit, open: (title: String, url: String) -> Unit) 
                     }
                 }
             }
+            val favorites = recent.filter { it.favorite }
+            if (favorites.isNotEmpty()) {
+                item { SectionHeader("我的收藏") }
+                items(favorites, key = { "favorite:" + it.key }) { r ->
+                    Box(Modifier.padding(horizontal = 16.dp, vertical = 3.dp)) {
+                        SurfaceCard {
+                            ListRow(
+                                r.title, recentText(r), AppIcons.MenuBook,
+                                trailing = { IconButton(onClick = { BookStore.toggleFavorite(r.key) }) { Icon(AppIcons.Star, "取消收藏") } },
+                                onClick = { open(r.title, r.location) },
+                            )
+                        }
+                    }
+                }
+            }
             item { SectionHeader("继续阅读") }
             if (recent.isEmpty()) item {
                 Text(
@@ -144,7 +159,14 @@ fun BooksScreen(onBack: () -> Unit, open: (title: String, url: String) -> Unit) 
                             title = r.title,
                             subtitle = recentText(r),
                             icon = AppIcons.MenuBook,
-                            trailing = { IconButton(onClick = { BookStore.remove(r.key) }) { Icon(AppIcons.Close, "从列表移除") } },
+                            trailing = {
+                                Row {
+                                    IconButton(onClick = { BookStore.toggleFavorite(r.key) }) {
+                                        Icon(if (r.favorite) AppIcons.Star else AppIcons.StarBorder, if (r.favorite) "取消收藏" else "收藏电子书")
+                                    }
+                                    IconButton(onClick = { BookStore.remove(r.key) }) { Icon(AppIcons.Close, "从列表移除") }
+                                }
+                            },
                             onClick = { open(r.title, r.location) },
                         )
                     }

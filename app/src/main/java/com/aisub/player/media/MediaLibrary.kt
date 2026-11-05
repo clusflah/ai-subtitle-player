@@ -17,6 +17,33 @@ object MediaLibrary {
     fun audios(context: Context): List<MediaEntry> =
         query(context, MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, isVideo = false)
 
+    fun images(context: Context): List<MediaEntry> = runCatching<List<MediaEntry>> {
+        val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        val relative = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        val pathColumn = if (relative) MediaStore.MediaColumns.RELATIVE_PATH else MediaStore.MediaColumns.DATA
+        val root = Environment.getExternalStorageDirectory().absolutePath.trimEnd('/') + "/"
+        val result = ArrayList<MediaEntry>()
+        context.contentResolver.query(
+            collection,
+            arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.SIZE, pathColumn),
+            null, null, "${MediaStore.MediaColumns.DATE_ADDED} DESC",
+        )?.use { c ->
+            val id = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+            val name = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+            val size = c.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+            val path = c.getColumnIndexOrThrow(pathColumn)
+            while (c.moveToNext()) {
+                val raw = c.getString(path).orEmpty()
+                result += MediaEntry(
+                    ContentUris.withAppendedId(collection, c.getLong(id)).toString(), c.getString(name) ?: "图片",
+                    folder = if (relative) raw.trim('/') else raw.removePrefix(root).substringBeforeLast('/', ""),
+                    sizeBytes = c.getLong(size),
+                )
+            }
+        }
+        result
+    }.getOrDefault(emptyList())
+
     @Suppress("DEPRECATION")
     private fun query(context: Context, collection: Uri, isVideo: Boolean): List<MediaEntry> {
         val useRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q

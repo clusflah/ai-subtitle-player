@@ -99,12 +99,18 @@ class MainActivity : ComponentActivity() {
             val permissionLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestMultiplePermissions()
             ) { result -> lib.onPermission(result.values.any { it }) }
+            val imagePermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                Manifest.permission.READ_MEDIA_IMAGES else Manifest.permission.READ_EXTERNAL_STORAGE
+            val imagePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+                lib.onImagePermission(it)
+            }
 
             // 第一次打开先看说明，再申请权限；已经授权过的老用户直接进
             val appPrefs = remember { getSharedPreferences("app", MODE_PRIVATE) }
             var onboarding by remember { mutableStateOf(!appPrefs.getBoolean("onboarded", false) && !hasMediaPermission()) }
             LaunchedEffect(Unit) {
                 if (hasMediaPermission()) lib.onPermission(true) else if (!onboarding) permissionLauncher.launch(mediaPermissions)
+                if (ContextCompat.checkSelfPermission(this@MainActivity, imagePermission) == PackageManager.PERMISSION_GRANTED) lib.onImagePermission(true)
             }
             if (onboarding) {
                 AppTheme {
@@ -145,7 +151,8 @@ class MainActivity : ComponentActivity() {
                    val tvSafe = if (LocalTv.current && nav.current != Screen.Player) Modifier.padding(horizontal = 40.dp, vertical = 20.dp) else Modifier
                    Box(Modifier.weight(1f).then(tvSafe)) {
                     when (val screen = nav.current) {
-                        Screen.Home -> HomeScreen(lib, main, nav) { permissionLauncher.launch(mediaPermissions) }
+                        Screen.Home -> HomeScreen(lib, main, nav, onRequestPermission = { permissionLauncher.launch(mediaPermissions) },
+                            onRequestImagePermission = { imagePermissionLauncher.launch(imagePermission) })
                         Screen.Player -> PlayerScreen(main, onBack = back, onOpenSettings = { nav.push(Screen.Settings) })
                         Screen.Settings -> SettingsScreen(main, onBack = { nav.pop() })
                         Screen.HiddenFolders -> com.aisub.player.ui.HiddenFoldersScreen(lib, back)
