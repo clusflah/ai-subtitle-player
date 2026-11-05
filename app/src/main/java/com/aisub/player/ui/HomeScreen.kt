@@ -407,6 +407,7 @@ fun HomeScreen(
                     onNewPlaylist = { dialog = HomeDialog.NewPlaylist },
                     onPlaylistFromHistory = lib::playlistFromHistory,
                     onDeletePlaylist = { lib.deletePlaylist(it.id) },
+                    onHiddenFolders = { nav.push(Screen.HiddenFolders) },
                 )
             }
         }
@@ -624,15 +625,27 @@ private fun BrowseTab(
         val mediaServers = state.servers.filter { it.type.isMediaServer }
         val serverRow: @Composable (Int, Server) -> Unit = { i, s ->
             if (i > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            // 状态：上次打开的时间；上次连接失败时右边标出来
+            val visit = state.serverVisits[s.id]
+            val seen = when {
+                visit == null -> "还没打开过"
+                else -> DateUtils.getRelativeTimeSpanString(kotlin.math.abs(visit), System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString() +
+                    if (visit > 0) "打开" else "连接失败"
+            }
             ListRow(
                 title = s.name,
-                subtitle = s.type.label + if (s.type.isCloud) " · 已登录" else " · ${s.baseUrl}",
+                subtitle = s.type.label + " · " + seen,
                 icon = when {
                     s.type.isMediaServer -> AppIcons.Movie
                     s.type.isCloud || s.type == ServerType.OPENLIST -> AppIcons.Cloud
                     else -> AppIcons.Dns
                 },
-                trailing = { OverflowMenu(serverMenu(s)) },
+                trailing = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (visit != null && visit < 0) StatusChip("连接失败", StatusKind.ERROR)
+                        OverflowMenu(serverMenu(s))
+                    }
+                },
                 onClick = { openRemote(s) },
             )
         }
@@ -1025,17 +1038,40 @@ private fun MeTab(
     onNewPlaylist: () -> Unit,
     onPlaylistFromHistory: () -> Unit,
     onDeletePlaylist: (Playlist) -> Unit,
+    onHiddenFolders: () -> Unit,
 ) {
+    val context = LocalContext.current
+    // 「稍后观看」单独放最上面，不和普通播放列表混在一起
+    val watchLater = state.playlists.firstOrNull { it.name == com.aisub.player.media.WATCH_LATER_PLAYLIST }
+    val playlists = state.playlists.filter { it.name != com.aisub.player.media.WATCH_LATER_PLAYLIST }
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
+        val later = watchLater?.items.orEmpty()
+        SectionHeader(
+            "稍后观看" + if (later.isNotEmpty()) " ${later.size}" else "",
+            actionLabel = if (later.isNotEmpty()) "全部" else null, onAction = { watchLater?.let(onOpenPlaylist) },
+        )
+        if (later.isEmpty()) {
+            Text(
+                "在本机或网盘视频的「⋮」菜单里选「稍后观看」，想看的先存在这里", color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 20.dp),
+            )
+        } else {
+            LazyRow(contentPadding = PaddingValues(horizontal = 10.dp)) {
+                itemsIndexed(later.take(10), key = { _, e -> e.uri }) { i, e ->
+                    Box(Modifier.width(170.dp)) { VideoCard(e, emptyList()) { onPlayMusic(later, i) } }
+                }
+            }
+        }
+
         SectionHeader("播放列表", actionLabel = "新建", onAction = onNewPlaylist)
         SurfaceCard {
-            if (state.playlists.isEmpty()) {
+            if (playlists.isEmpty()) {
                 ListRow(
                     "还没有播放列表", "在视频或音频的「⋮」菜单里加入；或者用最近播放生成一个", AppIcons.QueueMusic, mutedIcon = true,
                     onClick = if (state.history.isNotEmpty()) onPlaylistFromHistory else onNewPlaylist,
                 )
             }
-            state.playlists.forEachIndexed { i, p ->
+            playlists.forEachIndexed { i, p ->
                 if (i > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 val updated = if (p.updatedAt > 0) " · " + DateUtils.getRelativeTimeSpanString(p.updatedAt) + "更新" else ""
                 ListRow(
@@ -1083,14 +1119,27 @@ private fun MeTab(
             }
         }
 
-        SectionHeader("工具")
+        SectionHeader("管理")
         SurfaceCard {
-            if (onLink != null) {
-                ListRow("从链接下载", "下载视频网站的视频，自动准备字幕后播放（也可以在其他 App 里分享给译幕）", AppIcons.Download, onClick = onLink)
-                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-            }
-            ListRow("设置", "语音识别、字幕翻译、播放、朗读", AppIcons.Settings, onClick = onSettings)
+            ListRow("下载管理", "网盘、WebDAV 下载的文件和进度（系统下载列表）", AppIcons.Download, onClick = {
+                runCatching { context.startActivity(android.content.Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS)) }
+                    .onFailure { android.widget.Toast.makeText(context, "这台设备没有系统下载列表；文件在 Download 文件夹里", android.widget.Toast.LENGTH_LONG).show() }
+            })
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            ListRow(
+                "隐藏的文件夹",
+                if (state.hiddenFolders.isEmpty()) "不想让孩子看到的文件夹可以藏起来" else "${state.hiddenFolders.size} 个" + if (state.hasHiddenPin) " · 有密码" else "",
+                AppIcons.Lock, onClick = onHiddenFolders,
+            )
+            if (onLink != null) {
+                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow("从链接下载", "下载视频网站的视频，自动准备字幕后播放（也可以在其他 App 里分享给译幕）", AppIcons.Download, onClick = onLink)
+            }
+        }
+
+        SectionHeader("设置与帮助")
+        SurfaceCard {
+            ListRow("设置", "语音识别、字幕翻译、播放、朗读", AppIcons.Settings, onClick = onSettings)
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
             ListRow("检查更新", "当前版本 ${com.aisub.player.BuildConfig.VERSION_NAME}", AppIcons.SystemUpdate,

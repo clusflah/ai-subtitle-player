@@ -47,6 +47,8 @@ data class LibraryState(
     /** 输过密码后暂时显示隐藏的文件夹（重开 App 恢复隐藏） */
     val showHidden: Boolean = false,
     val hasHiddenPin: Boolean = false,
+    /** 网络服务上次打开的时间（负数 = 那次连接失败），浏览页显示状态用 */
+    val serverVisits: Map<String, Long> = emptyMap(),
 )
 
 /** 首页的数据：本地媒体库、历史、播放列表、网络服务器。 */
@@ -143,7 +145,10 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         allPlaylists = store.playlists()
         allFavorites = store.favoriteFolders()
         _state.update {
-            it.copy(servers = store.servers(), hiddenFolders = store.hiddenFolders(), hasHiddenPin = store.hiddenPinHash.isNotEmpty())
+            it.copy(
+                servers = store.servers(), hiddenFolders = store.hiddenFolders(), hasHiddenPin = store.hiddenPinHash.isNotEmpty(),
+                serverVisits = store.serverVisits(),
+            )
         }
         applyHidden()
     }
@@ -220,6 +225,24 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         )
         reloadStored()
         return !exists
+    }
+
+    // ---- 稍后观看 ----
+
+    fun isWatchLater(uri: String) = allPlaylists.any { p -> p.name == com.aisub.player.media.WATCH_LATER_PLAYLIST && p.items.any { it.uri == uri } }
+
+    /** 返回之后是否在「稍后观看」里 */
+    fun toggleWatchLater(entry: MediaEntry): Boolean = store.toggleWatchLater(entry).also { reloadStored() }
+
+    // ---- 网络服务状态 ----
+
+    /** 打开网络服务的目录成功或失败时记一下，浏览页显示「x 前打开」或「上次连接失败」 */
+    fun recordServerVisit(id: String, ok: Boolean) {
+        val last = _state.value.serverVisits[id]
+        // 同一状态一分钟内不重复写
+        if (last != null && (last > 0) == ok && System.currentTimeMillis() - kotlin.math.abs(last) < 60_000) return
+        store.recordServerVisit(id, ok)
+        _state.update { it.copy(serverVisits = store.serverVisits()) }
     }
 
     // ---- 播放列表 ----

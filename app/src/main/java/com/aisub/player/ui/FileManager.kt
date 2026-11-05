@@ -192,6 +192,7 @@ class FileManager internal constructor(
         return listOfNotNull(
             MenuAction("影视信息") { openDetail(entry) }.takeIf { entry.isVideo },
             MenuAction("加入播放列表") { onAddToPlaylist(listOf(entry)) },
+            watchLaterAction(context, lib, entry).takeIf { entry.isVideo },
             MenuAction("分享") { share(listOf(entry)) }.takeIf { local },
             MenuAction("重命名") { rename(entry) }.takeIf { local },
             MenuAction("移动到…") { move(listOf(entry)) }.takeIf { local },
@@ -310,5 +311,14 @@ private fun FileDialogs(fm: FileManager) {
             },
             dismissButton = { TextButton(onClick = { fm.dialog = null }) { Text("取消") } },
         )
+    }
+}
+
+/** 视频菜单里的「稍后观看」/「移出稍后观看」 */
+internal fun watchLaterAction(context: android.content.Context, lib: LibraryViewModel, entry: MediaEntry): MenuAction {
+    val inList = lib.isWatchLater(entry.uri)
+    return MenuAction(if (inList) "移出稍后观看" else "稍后观看") {
+        val now = lib.toggleWatchLater(entry)
+        android.widget.Toast.makeText(context, if (now) "已加入「稍后观看」" else "已移出「稍后观看」", android.widget.Toast.LENGTH_SHORT).show()
     }
 }
