@@ -382,6 +382,8 @@ fun HomeScreen(
                     },
                     openLive = { nav.push(Screen.Live) },
                     openWeb = { nav.push(Screen.Web) },
+                    openManga = { nav.push(Screen.Manga) },
+                    openBooks = { nav.push(Screen.Books) },
                     openTelegram = { nav.push(Screen.Telegram) },
                     openStream = { dialog = HomeDialog.Stream },
                     onNotScrollable = { barVisible = true },
@@ -569,6 +571,8 @@ private fun BrowseTab(
     serverMenu: (Server) -> List<MenuAction>,
     openLive: () -> Unit,
     openWeb: () -> Unit,
+    openManga: () -> Unit,
+    openBooks: () -> Unit,
     openTelegram: () -> Unit,
     openStream: () -> Unit,
     onNotScrollable: () -> Unit,
@@ -636,6 +640,10 @@ private fun BrowseTab(
                 ListRow("网页", "在网页里看视频，边播边生成 AI 字幕", AppIcons.Web, onClick = openWeb)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 ListRow("Telegram", "看频道和群里的视频，边下边播", AppIcons.Telegram, onClick = openTelegram)
+                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow("漫画", "网页漫画阅读模式、本地 CBZ / PDF / EPUB / MOBI 和图片文件夹，遥控器翻页", AppIcons.MenuBook, onClick = openManga)
+                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow("电子书", "TXT / EPUB / MOBI / AZW3，可以朗读听书（锁屏也能听）", AppIcons.Description, onClick = openBooks)
             }
         }
     }
