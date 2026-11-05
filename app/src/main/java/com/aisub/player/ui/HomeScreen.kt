@@ -112,7 +112,8 @@ private sealed interface HomeDialog {
     data object Stream : HomeDialog
     data object Link : HomeDialog
     data object NewPlaylist : HomeDialog
-    data object AddSource : HomeDialog
+    /** 添加：kinds 为空 = 全部（浏览页右上角），否则只列那几类（分区的「添加」） */
+    data class AddSource(val kinds: Set<AddKind> = emptySet()) : HomeDialog
     data class AddToPlaylist(val entries: List<MediaEntry>) : HomeDialog
     data class EditServer(val server: Server, val hint: String? = null) : HomeDialog
     data class CloudLogin(val type: ServerType, val existing: Server?) : HomeDialog
@@ -228,6 +229,8 @@ fun HomeScreen(
                 },
                 actions = {
                     val mediaTab = tab == Tab.LOCAL
+                    // 浏览页：所有「添加」统一在这里（NAS、网盘、媒体服务器、直播源、串流、Telegram）
+                    if (tab == Tab.BROWSE) IconButton(onClick = { dialog = HomeDialog.AddSource() }) { Icon(AppIcons.Add, "添加") }
                     if (mediaTab) {
                         IconButton(onClick = {
                             searching = !searching
@@ -257,6 +260,7 @@ fun HomeScreen(
                             }
                             DropdownMenuItem(text = { Text("刷新媒体库") }, onClick = { menu = false; lib.refreshMedia() })
                             DropdownMenuItem(text = { Text("打开文件…") }, onClick = { menu = false; pickFile.launch(arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream")) })
+                            DropdownMenuItem(text = { Text("隐藏的文件夹") }, onClick = { menu = false; nav.push(Screen.HiddenFolders) })
                             DropdownMenuItem(text = { Text("设置") }, onClick = { menu = false; openSettings() })
                         }
                     }
@@ -340,7 +344,9 @@ fun HomeScreen(
                     },
                     goLocal = { lib.homeTab = Tab.LOCAL.ordinal },
                     goBrowse = { lib.homeTab = Tab.BROWSE.ordinal },
-                    addSource = { dialog = HomeDialog.AddSource },
+                    addSource = { dialog = HomeDialog.AddSource(setOf(AddKind.STORAGE, AddKind.MEDIA_SERVER)) },
+                    openReading = { nav.push(Screen.MangaRead(it)) },
+                    openWebManga = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
                 )
                 Tab.LOCAL -> Column {
                     // 视频 / 音乐 切换
@@ -369,7 +375,7 @@ fun HomeScreen(
                             "video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream",
                         ) + com.aisub.player.manga.MangaArchive.TYPES + "text/plain")
                     },
-                    addSource = { dialog = HomeDialog.AddSource },
+                    addSource = { kinds -> dialog = HomeDialog.AddSource(kinds) },
                     serverMenu = { s ->
                         if (s.type.isCloud) listOf(
                             MenuAction("重新登录") { dialog = HomeDialog.CloudLogin(s.type, s) },
@@ -434,8 +440,12 @@ fun HomeScreen(
             onDismiss = { dialog = null },
             onConfirm = { lib.createPlaylist(it); dialog = null },
         )
-        HomeDialog.AddSource -> AddSourceDialog(
+        is HomeDialog.AddSource -> AddSourceDialog(
+            kinds = d.kinds,
             onDismiss = { dialog = null },
+            onLive = { dialog = null; nav.push(Screen.Live) },
+            onStream = { dialog = HomeDialog.Stream },
+            onTelegram = { dialog = null; nav.push(Screen.Telegram) },
             onPick = { type ->
                 dialog = when (type) {
                     ServerType.WEBDAV, ServerType.OPENLIST ->
@@ -567,7 +577,7 @@ private fun BrowseTab(
     openLocal: (String, String) -> Unit,
     openRemote: (Server) -> Unit,
     pickFile: () -> Unit,
-    addSource: () -> Unit,
+    addSource: (Set<AddKind>) -> Unit,
     serverMenu: (Server) -> List<MenuAction>,
     openLive: () -> Unit,
     openWeb: () -> Unit,
@@ -582,7 +592,7 @@ private fun BrowseTab(
     // 分组折叠后页面短到滚不动时，底部导航不能一直藏着
     LaunchedEffect(scroll.maxValue) { if (scroll.maxValue == 0) onNotScrollable() }
     Column(Modifier.verticalScroll(scroll).padding(bottom = 24.dp)) {
-        CollapsibleSection("browse.local", "本机") {
+        CollapsibleSection("browse.local", "本地文件") {
             val local = listOf(
                 Triple("内部存储", AppIcons.Phone, ""),
                 Triple("Download", AppIcons.Download, "Download"),
@@ -609,73 +619,140 @@ private fun BrowseTab(
             }
         }
 
-        CollapsibleSection("browse.servers", "网络与网盘", actionLabel = "添加", onAction = addSource) {
+        // 文件存储（NAS、网盘）和媒体服务器（有自己的媒体库、海报墙）分开放
+        val storage = state.servers.filter { !it.type.isMediaServer }
+        val mediaServers = state.servers.filter { it.type.isMediaServer }
+        val serverRow: @Composable (Int, Server) -> Unit = { i, s ->
+            if (i > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            ListRow(
+                title = s.name,
+                subtitle = s.type.label + if (s.type.isCloud) " · 已登录" else " · ${s.baseUrl}",
+                icon = when {
+                    s.type.isMediaServer -> AppIcons.Movie
+                    s.type.isCloud || s.type == ServerType.OPENLIST -> AppIcons.Cloud
+                    else -> AppIcons.Dns
+                },
+                trailing = { OverflowMenu(serverMenu(s)) },
+                onClick = { openRemote(s) },
+            )
+        }
+
+        CollapsibleSection("browse.servers", "网络存储", actionLabel = "添加", onAction = { addSource(setOf(AddKind.STORAGE)) }, count = storage.size) {
             SurfaceCard {
-                if (state.servers.isEmpty()) {
+                if (storage.isEmpty()) {
                     ListRow(
-                        title = "添加网络位置或网盘",
-                        subtitle = "WebDAV、OpenList、115、阿里云盘、百度网盘、PikPak",
-                        icon = AppIcons.Add, mutedIcon = true, onClick = addSource,
+                        title = "添加 NAS 或网盘",
+                        subtitle = "WebDAV、OpenList、115、阿里云盘、百度网盘、PikPak、OneDrive 等",
+                        icon = AppIcons.Add, mutedIcon = true, onClick = { addSource(setOf(AddKind.STORAGE)) },
                     )
                 }
-                state.servers.forEachIndexed { i, s ->
-                    if (i > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                    ListRow(
-                        title = s.name,
-                        subtitle = s.type.label + if (s.type.isCloud) " · 已登录" else " · ${s.baseUrl}",
-                        icon = if (s.type.isCloud || s.type == ServerType.OPENLIST) AppIcons.Cloud else AppIcons.Dns,
-                        trailing = { OverflowMenu(serverMenu(s)) },
-                        onClick = { openRemote(s) },
-                    )
-                }
+                storage.forEachIndexed { i, s -> serverRow(i, s) }
             }
         }
 
-        CollapsibleSection("browse.streams", "直播与串流") {
+        CollapsibleSection("browse.mediaservers", "媒体服务器", actionLabel = "添加", onAction = { addSource(setOf(AddKind.MEDIA_SERVER)) }, count = mediaServers.size) {
             SurfaceCard {
-                ListRow("直播", "添加 M3U / TXT 直播源，按分组看电视直播", AppIcons.Live, onClick = openLive)
+                if (mediaServers.isEmpty()) {
+                    ListRow(
+                        title = "添加媒体服务器",
+                        subtitle = "Plex、Emby、Jellyfin：海报墙、继续观看，进度同步回服务器",
+                        icon = AppIcons.Add, mutedIcon = true, onClick = { addSource(setOf(AddKind.MEDIA_SERVER)) },
+                    )
+                }
+                mediaServers.forEachIndexed { i, s -> serverRow(i, s) }
+            }
+        }
+
+        CollapsibleSection("browse.streams", "在线内容", count = 4) {
+            SurfaceCard {
+                ListRow("电视直播", "添加 M3U / TXT 直播源，按分组看电视直播", AppIcons.Live, onClick = openLive)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                ListRow("新建串流", "播放网络地址（http、rtsp、m3u8 等）", AppIcons.Link, onClick = openStream)
+                ListRow("网络串流", "播放网络地址（http、rtsp、m3u8 等）", AppIcons.Link, onClick = openStream)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 ListRow("网页", "在网页里看视频，边播边生成 AI 字幕", AppIcons.Web, onClick = openWeb)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 ListRow("Telegram", "看频道和群里的视频，边下边播", AppIcons.Telegram, onClick = openTelegram)
-                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                ListRow("漫画", "网页漫画阅读模式、本地 CBZ / PDF / EPUB / MOBI 和图片文件夹，遥控器翻页", AppIcons.MenuBook, onClick = openManga)
-                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                ListRow("电子书", "TXT / EPUB / MOBI / AZW3，可以朗读听书（锁屏也能听）", AppIcons.Description, onClick = openBooks)
+            }
+        }
+
+        // 阅读是完整的独立功能：用大卡片，和上面的服务列表区分开
+        CollapsibleSection("browse.reading", "阅读", count = 2) {
+            val context = androidx.compose.ui.platform.LocalContext.current
+            remember { com.aisub.player.manga.MangaStore.init(context); com.aisub.player.book.BookStore.init(context) }
+            val mangaRecent by com.aisub.player.manga.MangaStore.recent.collectAsStateWithLifecycle()
+            val bookRecent by com.aisub.player.book.BookStore.recent.collectAsStateWithLifecycle()
+            Row(Modifier.padding(horizontal = 16.dp, vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                SourceCard(
+                    AppIcons.MenuBook, "漫画",
+                    if (mangaRecent.isEmpty()) "网页漫画、CBZ、PDF" else "继续阅读 ${mangaRecent.size} 部",
+                    Modifier.weight(1f), openManga,
+                )
+                SourceCard(
+                    AppIcons.Description, "电子书",
+                    if (bookRecent.isEmpty()) "TXT、EPUB、MOBI，可听书" else "继续阅读 ${bookRecent.size} 本",
+                    Modifier.weight(1f), openBooks,
+                )
+                if (LocalWideLayout.current) { Spacer(Modifier.weight(1f)); Spacer(Modifier.weight(1f)) }
             }
         }
     }
 }
 
-/** 添加来源：一个列表里选类型，未配置的入口不再常驻占位。 */
+/** 「添加」分哪几类 */
+internal enum class AddKind(val title: String) { STORAGE("网络存储"), MEDIA_SERVER("媒体服务器"), ONLINE("在线内容") }
+
+/** 添加来源：按类分组列出；kinds 为空时列全部（浏览页右上角的「添加」） */
 @Composable
-private fun AddSourceDialog(onDismiss: () -> Unit, onPick: (ServerType) -> Unit) {
-    val options = listOf(
+private fun AddSourceDialog(
+    kinds: Set<AddKind>,
+    onDismiss: () -> Unit,
+    onPick: (ServerType) -> Unit,
+    onLive: () -> Unit,
+    onStream: () -> Unit,
+    onTelegram: () -> Unit,
+) {
+    val storage = listOf(
+        ServerType.WEBDAV to "NAS、Alist 等 WebDAV 服务",
+        ServerType.OPENLIST to "OpenList / AList 站点",
         ServerType.PAN115 to "用 115 App 扫码登录",
         ServerType.ALIYUN to "用阿里云盘 App 扫码登录",
         ServerType.BAIDU to "自有 AppKey 扫码，或粘贴 refresh_token",
         ServerType.PIKPAK to "账号密码登录",
-        ServerType.EMBY to "Emby / Jellyfin 媒体服务器，账号密码登录",
-        ServerType.PLEX to "plex.tv 账号授权，或填服务器地址和令牌",
         ServerType.ONEDRIVE to "需要自己注册的应用 ID（免费）",
         ServerType.DROPBOX to "需要自己创建的 App key（免费）",
         ServerType.GDRIVE to "需要自己创建的 OAuth 客户端（免费）",
-        ServerType.WEBDAV to "NAS、Alist 等 WebDAV 服务",
-        ServerType.OPENLIST to "OpenList / AList 站点",
     )
+    val media = listOf(
+        ServerType.PLEX to "plex.tv 账号授权，或填服务器地址和令牌",
+        ServerType.EMBY to "Emby / Jellyfin 媒体服务器，账号密码登录",
+    )
+    val show = kinds.ifEmpty { AddKind.entries.toSet() }
     AppDialog(
         onDismissRequest = onDismiss,
-        title = { Text("添加网络位置") },
+        title = { Text(if (show.size == 1) "添加" + show.first().title else "添加") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                options.forEach { (type, desc) ->
-                    ListRow(
-                        title = type.label, subtitle = desc,
-                        icon = if (type == ServerType.WEBDAV) AppIcons.Dns else AppIcons.Cloud,
-                        onClick = { onPick(type) },
+                val header: @Composable (AddKind) -> Unit = { k ->
+                    if (show.size > 1) Text(
+                        k.title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 2.dp),
                     )
+                }
+                if (AddKind.STORAGE in show) {
+                    header(AddKind.STORAGE)
+                    storage.forEach { (type, desc) ->
+                        ListRow(type.label, desc, if (type == ServerType.WEBDAV) AppIcons.Dns else AppIcons.Cloud, onClick = { onPick(type) })
+                    }
+                }
+                if (AddKind.MEDIA_SERVER in show) {
+                    header(AddKind.MEDIA_SERVER)
+                    media.forEach { (type, desc) -> ListRow(type.label, desc, AppIcons.Movie, onClick = { onPick(type) }) }
+                }
+                if (AddKind.ONLINE in show) {
+                    header(AddKind.ONLINE)
+                    ListRow("直播源", "M3U / TXT 播放列表网址或文件", AppIcons.Live, onClick = onLive)
+                    ListRow("网络串流", "http、rtsp、m3u8 等地址", AppIcons.Link, onClick = onStream)
+                    ListRow("Telegram 账号", "用手机号登录，看频道和群里的视频", AppIcons.Telegram, onClick = onTelegram)
                 }
             }
         },
@@ -697,6 +774,10 @@ private fun HomeTab(
     goLocal: () -> Unit,
     goBrowse: () -> Unit,
     addSource: () -> Unit,
+    /** 继续阅读：本地 / 网盘漫画和电子书 */
+    openReading: (MangaOpen) -> Unit,
+    /** 继续阅读：网页漫画回到那一话的网页 */
+    openWebManga: (String) -> Unit,
 ) {
     val mediaServers = state.servers.filter { it.type == ServerType.PLEX || it.type == ServerType.EMBY }
     val resume = remember(state.history, mediaServers) {
@@ -710,6 +791,21 @@ private fun HomeTab(
     }
     // 继续收听：最近听的歌，点一首从它开始连着放；没听完的从上次的位置接着放
     val recentSongs = remember(state.history) { state.history.filter { it.entry.isMusic }.take(12) }
+    // 继续阅读：最近读过的漫画和电子书按时间排在一起
+    val context = LocalContext.current
+    remember { com.aisub.player.manga.MangaStore.init(context); com.aisub.player.book.BookStore.init(context) }
+    val mangaRecent by com.aisub.player.manga.MangaStore.recent.collectAsStateWithLifecycle()
+    val bookRecent by com.aisub.player.book.BookStore.recent.collectAsStateWithLifecycle()
+    val reading = remember(mangaRecent, bookRecent) {
+        (mangaRecent.map { r ->
+            ReadingItem(
+                r.key, r.title, if (r.total > 0) "第 ${r.page + 1} / ${r.total} 页" else "漫画", r.time, book = false,
+            ) { if (r.web) openWebManga(r.location) else mangaOpenOf(r)?.let(openReading) }
+        } + bookRecent.map { r ->
+            val pct = if (r.total > 0) (r.item + 1) * 100 / r.total else 0
+            ReadingItem(r.key, r.title, "读到 $pct%", r.time, book = true) { openReading(MangaOpen.Archive(r.title, r.location)) }
+        }).sortedByDescending { it.time }.take(12)
+    }
     val recentVideos = remember(state.videos) { state.videos.sortedBy(SortOrder.RECENT).take(12) }
     // 服务器删掉后它的收藏也不显示
     val favorites = remember(state.favoriteFolders, state.servers) {
@@ -730,6 +826,14 @@ private fun HomeTab(
                 val songs = recentSongs.map { it.entry }
                 LazyRow(contentPadding = PaddingValues(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     itemsIndexed(recentSongs, key = { _, h -> h.entry.uri }) { i, h -> SongTile(h.entry, h.positionMs) { play(songs, i) } }
+                }
+            }
+        }
+        if (reading.isNotEmpty()) {
+            item { SectionHeader("继续阅读") }
+            item {
+                LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(reading, key = { (if (it.book) "b:" else "m:") + it.key }) { r -> ReadingTile(r) }
                 }
             }
         }
@@ -758,7 +862,7 @@ private fun HomeTab(
                 }
             }
         }
-        if (resume.isEmpty() && recentSongs.isEmpty() && favorites.isEmpty() && mediaServers.isEmpty() && recentVideos.isEmpty()) item {
+        if (resume.isEmpty() && recentSongs.isEmpty() && reading.isEmpty() && favorites.isEmpty() && mediaServers.isEmpty() && recentVideos.isEmpty()) item {
             Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 IconBadge(AppIcons.Movie, size = 72.dp)
                 Spacer(Modifier.height(16.dp))
@@ -771,7 +875,7 @@ private fun HomeTab(
                 Spacer(Modifier.height(16.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedButton(onClick = goBrowse) { Text("浏览文件") }
-                    Button(onClick = addSource) { Text("添加媒体服务器") }
+                    Button(onClick = addSource) { Text("添加 NAS / 媒体服务器") }
                 }
             }
         }
@@ -813,6 +917,36 @@ private fun SongTile(entry: MediaEntry, positionMs: Long = 0, onClick: () -> Uni
         Text(
             entry.displayTitle, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        )
+    }
+}
+
+/** 首页「继续阅读」的一项（漫画或电子书） */
+private data class ReadingItem(
+    val key: String, val title: String, val progress: String, val time: Long, val book: Boolean, val open: () -> Unit,
+)
+
+/** 「继续阅读」卡片：竖版书本样式（没有封面，用图标）+ 名字 + 进度 */
+@Composable
+private fun ReadingTile(r: ReadingItem) {
+    Column(Modifier.width(110.dp).tvFocusRing(MaterialTheme.shapes.medium, scale = true).clip(MaterialTheme.shapes.medium).clickable(onClick = r.open)) {
+        Box(
+            Modifier.fillMaxWidth().aspectRatio(3f / 4f).clip(MaterialTheme.shapes.medium).background(MaterialTheme.colorScheme.surfaceContainerHigh),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                if (r.book) AppIcons.Description else AppIcons.MenuBook, contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(36.dp),
+            )
+        }
+        Text(
+            r.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 4.dp),
+        )
+        Text(
+            (if (r.book) "电子书 · " else "漫画 · ") + r.progress, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 4.dp),
         )
     }
 }

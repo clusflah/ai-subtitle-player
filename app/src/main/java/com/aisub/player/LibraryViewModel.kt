@@ -42,6 +42,11 @@ data class LibraryState(
     val videoGrid: Boolean = true,
     /** 字幕内容匹配搜索词的视频地址 */
     val subtitleMatches: Set<String> = emptySet(),
+    /** 隐藏的文件夹（全部，不管现在是否暂时显示） */
+    val hiddenFolders: List<FavoriteFolder> = emptyList(),
+    /** 输过密码后暂时显示隐藏的文件夹（重开 App 恢复隐藏） */
+    val showHidden: Boolean = false,
+    val hasHiddenPin: Boolean = false,
 )
 
 /** 首页的数据：本地媒体库、历史、播放列表、网络服务器。 */
@@ -52,6 +57,13 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private val viewPrefs = ViewPrefs(app)
     private val subtitles = SubtitleStore(app)
     private var searchJob: Job? = null
+
+    // 没去掉隐藏文件夹的原始数据（要在 init 之前声明，不然 init 里读到的会被初始值盖掉）
+    private var allVideos = emptyList<MediaEntry>()
+    private var allAudios = emptyList<MediaEntry>()
+    private var allHistory = emptyList<HistoryItem>()
+    private var allPlaylists = emptyList<Playlist>()
+    private var allFavorites = emptyList<FavoriteFolder>()
 
     private val _state = MutableStateFlow(LibraryState())
     val state: StateFlow<LibraryState> = _state.asStateFlow()
@@ -118,16 +130,76 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 runCatching { MediaLibrary.videos(getApplication()) to MediaLibrary.audios(getApplication()) }
                     .getOrDefault(emptyList<MediaEntry>() to emptyList())
             }
-            _state.update { it.copy(videos = videos, audios = audios, loading = false) }
+            allVideos = videos
+            allAudios = audios
+            _state.update { it.copy(loading = false) }
+            applyHidden()
         }
     }
 
     /** 历史、播放列表、服务器存在本地，回到首页时重新读一次。 */
     fun reloadStored() {
+        allHistory = store.history()
+        allPlaylists = store.playlists()
+        allFavorites = store.favoriteFolders()
         _state.update {
-            it.copy(history = store.history(), playlists = store.playlists(), favoriteFolders = store.favoriteFolders(), servers = store.servers())
+            it.copy(servers = store.servers(), hiddenFolders = store.hiddenFolders(), hasHiddenPin = store.hiddenPinHash.isNotEmpty())
         }
+        applyHidden()
     }
+
+    // ---- 隐藏的文件夹：从媒体库、浏览、历史、播放列表、收藏里都拿掉 ----
+
+    private fun under(path: String, folder: FavoriteFolder) = path == folder.path || path.startsWith(folder.path.trimEnd('/') + "/")
+
+    private fun applyHidden() = _state.update { s ->
+        val hidden = if (s.showHidden) emptyList() else s.hiddenFolders
+        val local = hidden.filter { it.serverId == null }
+        fun hiddenEntry(e: MediaEntry) = e.folder.isNotEmpty() && local.any { under(e.folder, it) }
+        s.copy(
+            videos = allVideos.filterNot(::hiddenEntry),
+            audios = allAudios.filterNot(::hiddenEntry),
+            history = allHistory.filterNot { hiddenEntry(it.entry) },
+            playlists = allPlaylists.map { p -> p.copy(items = p.items.filterNot(::hiddenEntry)) },
+            favoriteFolders = allFavorites.filterNot { f -> hidden.any { it.serverId == f.serverId && under(f.path, it) } },
+        )
+    }
+
+    /** 这个文件夹（或它的上级）被隐藏、现在也没有暂时显示：列表里不该出现 */
+    fun isHidden(serverId: String?, path: String): Boolean =
+        _state.value.let { s -> !s.showHidden && s.hiddenFolders.any { it.serverId == serverId && under(path, it) } }
+
+    /** 这个文件夹本身在隐藏列表里（暂时显示时菜单显示「取消隐藏」） */
+    fun isHiddenFolder(serverId: String?, path: String) = _state.value.hiddenFolders.any { it.serverId == serverId && it.path == path }
+
+    fun hideFolder(serverId: String?, path: String, title: String) {
+        store.saveHiddenFolders(
+            listOf(FavoriteFolder(serverId, path, title, System.currentTimeMillis())) +
+                store.hiddenFolders().filterNot { it.serverId == serverId && it.path == path },
+        )
+        reloadStored()
+    }
+
+    fun unhideFolder(serverId: String?, path: String) {
+        store.saveHiddenFolders(store.hiddenFolders().filterNot { it.serverId == serverId && it.path == path })
+        reloadStored()
+    }
+
+    fun setShowHidden(show: Boolean) {
+        _state.update { it.copy(showHidden = show) }
+        applyHidden()
+    }
+
+    fun checkHiddenPin(pin: String) = store.hiddenPinHash.let { it.isEmpty() || it == pinHash(pin) }
+
+    /** 设置密码；空字符串 = 去掉密码 */
+    fun setHiddenPin(pin: String) {
+        store.hiddenPinHash = if (pin.isEmpty()) "" else pinHash(pin)
+        reloadStored()
+    }
+
+    private fun pinHash(pin: String) = java.security.MessageDigest.getInstance("SHA-256")
+        .digest("voxtitle-hidden:$pin".toByteArray()).joinToString("") { "%02x".format(it) }
 
     fun clearHistory(music: Boolean) {
         store.clearHistory(music)

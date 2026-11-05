@@ -93,6 +93,21 @@ class AppStore(context: Context) {
         JSONObject().put("server", f.serverId.orEmpty()).put("path", f.path).put("title", f.title).put("addedAt", f.addedAt)
     })
 
+    // ---- 隐藏的文件夹（和收藏同样的结构；addedAt 是隐藏的时间） ----
+
+    fun hiddenFolders(): List<FavoriteFolder> = readArray("hiddenFolders").map { o ->
+        FavoriteFolder(o.optString("server").ifEmpty { null }, o.getString("path"), o.optString("title"), o.optLong("addedAt"))
+    }
+
+    fun saveHiddenFolders(list: List<FavoriteFolder>) = writeArray("hiddenFolders", list.map { f ->
+        JSONObject().put("server", f.serverId.orEmpty()).put("path", f.path).put("title", f.title).put("addedAt", f.addedAt)
+    })
+
+    /** 查看、取消隐藏要输入的密码（存的是摘要）；空 = 没设 */
+    var hiddenPinHash: String
+        get() = prefs.getString("hiddenPin", "")!!
+        set(v) { prefs.edit().putString("hiddenPin", v).apply() }
+
     // ---- 网络服务器 ----
 
     fun servers(): List<Server> = readArray("servers").map(Server::fromJson)
@@ -120,6 +135,7 @@ class AppStore(context: Context) {
         CloudRegistry.forget(id)
         writeArray("servers", servers().filter { it.id != id }.map { it.toJson() })
         saveFavoriteFolders(favoriteFolders().filter { it.serverId != id })
+        saveHiddenFolders(hiddenFolders().filter { it.serverId != id })
     }
 
     private fun readArray(key: String): List<JSONObject> = try {
