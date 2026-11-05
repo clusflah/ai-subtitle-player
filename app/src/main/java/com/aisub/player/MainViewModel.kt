@@ -367,6 +367,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var roleJob: Job? = null
     private var embeddedJob: Job? = null
     private var captionJob: Job? = null
+    private var playbackStatsJob: Job? = null
+    private var playbackStatsCheckpoint = 0L
     /** 读出的自带字幕轨载入后一定翻译（播放页的「翻译成…字幕」按钮），不看自动翻译设置 */
     private var translateEmbedded = false
     private var linkJob: Job? = null
@@ -411,16 +413,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            val counting = playbackStatsJob?.isActive == true
+            if (counting) savePlaybackStatsCheckpoint()
             // 自动连播下一集：上一集算看完，告诉 Plex
             if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) _state.value.current?.let { prev ->
                 ServerProgress.find(prev.uri)?.let { p -> reportPlex(prev.uri, "stopped", p.durationMs, p.durationMs) }
             }
             if (!usingVlc) queue.getOrNull(exoPlayer.currentMediaItemIndex)?.let(::onEntryChanged)
+            if (counting) _state.value.current?.let { library.recordPlayback(it, 0, started = true) }
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             reportPlexNow(if (isPlaying) "playing" else "paused")
             if (isPlaying) watchFirstFrame()
+            updatePlaybackStats(isPlaying)
         }
 
         override fun onRenderedFirstFrame() {
@@ -453,6 +459,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.value.current?.takeIf { it.isLive && !usingVlc }?.let { liveWorked += it.uri }
             }
         }
+    }
+
+    private fun updatePlaybackStats(playing: Boolean) {
+        if (playing) {
+            if (playbackStatsJob?.isActive == true) return
+            _state.value.current?.let { library.recordPlayback(it, 0, started = true) }
+            playbackStatsCheckpoint = android.os.SystemClock.elapsedRealtime()
+            playbackStatsJob = viewModelScope.launch {
+                while (true) {
+                    delay(30_000)
+                    savePlaybackStatsCheckpoint()
+                }
+            }
+        } else {
+            if (playbackStatsJob == null) return
+            savePlaybackStatsCheckpoint()
+            playbackStatsJob?.cancel()
+            playbackStatsJob = null
+        }
+    }
+
+    private fun savePlaybackStatsCheckpoint() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val elapsed = (now - playbackStatsCheckpoint).coerceAtLeast(0)
+        playbackStatsCheckpoint = now
+        _state.value.current?.let { library.recordPlayback(it, elapsed) }
     }
 
     /** 这次打开后默认内核放出过画面的直播频道：中途出错是直播流的问题，不是内核打不开 */
@@ -2472,6 +2504,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        if (playbackStatsJob != null) {
+            savePlaybackStatsCheckpoint()
+            playbackStatsJob?.cancel()
+            playbackStatsJob = null
+        }
         equalizer.release()
         ttsReader.stop()
         previewPlayer?.release()

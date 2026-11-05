@@ -106,7 +106,10 @@ fun ServerHomeScreen(
         val plex = lib.plex(serverId) ?: run { error = "找不到这个媒体服务器"; return@LaunchedEffect }
         try {
             data = plex.sections() to plex.hubs()
+            lib.recordServerVisit(serverId, ok = true)
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            lib.recordServerVisit(serverId, ok = false)
             error = e.message ?: e.toString()
         }
     }

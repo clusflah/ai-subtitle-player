@@ -211,7 +211,10 @@ fun RemoteFolderScreen(
         error = null
         try {
             loaded = lib.client(server).list(path)
+            lib.recordServerVisit(serverId, ok = true)
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            lib.recordServerVisit(serverId, ok = false)
             error = e.message ?: e.toString()
         }
     }
@@ -314,6 +317,10 @@ fun RemoteFolderScreen(
         MenuAction("详情") { showDetail(item) }.takeIf { !item.isDir || item.meta != null },
         item.takeIf { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }?.toMediaEntry()
             ?.let { MenuAction("加入播放列表") { addTo = listOf(it) } },
+        item.takeIf { !it.isDir && it.playUrl != null && MediaEntry.isVideoName(it.name) }?.toMediaEntry()
+            ?.let { watchLaterAction(context, lib, it) },
+        item.takeIf { !it.isDir && it.playUrl != null && MediaEntry.isVideoName(it.name) }?.toMediaEntry()
+            ?.let { favoriteVideoAction(context, lib, it) },
         if (item.isDir) MenuAction("下载文件夹") { downloadFolder(item) }
         else MenuAction("下载") { download(listOf(Downloads.Job(item, ""))) },
         MenuAction("重命名") { renaming = item },

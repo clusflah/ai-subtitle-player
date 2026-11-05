@@ -11,6 +11,10 @@ import java.util.UUID
 
 data class HistoryItem(val entry: MediaEntry, val positionMs: Long, val playedAt: Long)
 
+data class PlaybackStats(val videoMs: Long = 0, val musicMs: Long = 0, val liveMs: Long = 0, val starts: Long = 0) {
+    val totalMs get() = videoMs + musicMs + liveMs
+}
+
 data class Playlist(val id: String, val name: String, val items: List<MediaEntry>, val updatedAt: Long = 0)
 
 /** 收藏的文件夹：serverId 为 null 是本机文件夹（path 是相对存储根目录的路径），否则是网络服务器上的目录 */
@@ -20,6 +24,10 @@ data class FavoriteFolder(val serverId: String?, val path: String, val title: St
 
 /** 播放页点「♡」、小组件点「♡」的歌放在这个播放列表里 */
 const val LIKED_PLAYLIST = "我喜欢的音乐"
+
+/** 「稍后观看」也是一个播放列表，在「我的」里单独显示 */
+const val WATCH_LATER_PLAYLIST = "稍后观看"
+const val FAVORITE_VIDEOS_PLAYLIST = "收藏的视频"
 
 /** 播放历史、播放列表、网络服务器的持久化（SharedPreferences + JSON）。 */
 class AppStore(context: Context) {
@@ -81,6 +89,60 @@ class AppStore(context: Context) {
         val updated = liked.copy(items = items, updatedAt = System.currentTimeMillis())
         savePlaylists(playlists().map { if (it.id == liked.id) updated else it })
         return now
+    }
+
+    /** 加入 / 移出「稍后观看」，返回现在是否在里面 */
+    fun toggleWatchLater(entry: MediaEntry): Boolean {
+        val list = playlists().firstOrNull { it.name == WATCH_LATER_PLAYLIST } ?: createPlaylist(WATCH_LATER_PLAYLIST)
+        val now = list.items.none { it.uri == entry.uri }
+        val items = if (now) list.items + entry else list.items.filter { it.uri != entry.uri }
+        val updated = list.copy(items = items, updatedAt = System.currentTimeMillis())
+        savePlaylists(playlists().map { if (it.id == list.id) updated else it })
+        return now
+    }
+
+    fun isFavoriteVideo(uri: String) = playlists().firstOrNull { it.name == FAVORITE_VIDEOS_PLAYLIST }?.items?.any { it.uri == uri } == true
+
+    fun toggleFavoriteVideo(entry: MediaEntry): Boolean {
+        val list = playlists().firstOrNull { it.name == FAVORITE_VIDEOS_PLAYLIST } ?: createPlaylist(FAVORITE_VIDEOS_PLAYLIST)
+        val now = list.items.none { it.uri == entry.uri }
+        val items = if (now) listOf(entry) + list.items else list.items.filter { it.uri != entry.uri }
+        val updated = list.copy(items = items, updatedAt = System.currentTimeMillis())
+        savePlaylists(playlists().map { if (it.id == list.id) updated else it })
+        return now
+    }
+
+    // ---- 网络服务上次打开的时间：id → 毫秒，负数表示那次连接失败 ----
+
+    fun serverVisits(): Map<String, Long> = runCatching {
+        val o = JSONObject(prefs.getString("serverVisits", "{}")!!)
+        o.keys().asSequence().associateWith { o.getLong(it) }
+    }.getOrDefault(emptyMap())
+
+    fun recordServerVisit(id: String, ok: Boolean) {
+        val o = runCatching { JSONObject(prefs.getString("serverVisits", "{}")!!) }.getOrDefault(JSONObject())
+        val now = System.currentTimeMillis()
+        o.put(id, if (ok) now else -now)
+        prefs.edit().putString("serverVisits", o.toString()).apply()
+    }
+
+    @Synchronized
+    fun playbackStats(): PlaybackStats = runCatching {
+        val o = JSONObject(prefs.getString("playbackStats", "{}")!!)
+        PlaybackStats(o.optLong("video"), o.optLong("music"), o.optLong("live"), o.optLong("starts"))
+    }.getOrDefault(PlaybackStats())
+
+    @Synchronized
+    fun recordPlayback(entry: MediaEntry, elapsedMs: Long, started: Boolean = false) {
+        if (elapsedMs <= 0 && !started) return
+        val stats = playbackStats()
+        val updated = when {
+            entry.isLive -> stats.copy(liveMs = stats.liveMs + elapsedMs, starts = stats.starts + if (started) 1 else 0)
+            entry.isMusic -> stats.copy(musicMs = stats.musicMs + elapsedMs, starts = stats.starts + if (started) 1 else 0)
+            else -> stats.copy(videoMs = stats.videoMs + elapsedMs, starts = stats.starts + if (started) 1 else 0)
+        }
+        prefs.edit().putString("playbackStats", JSONObject().put("video", updated.videoMs).put("music", updated.musicMs)
+            .put("live", updated.liveMs).put("starts", updated.starts).toString()).apply()
     }
 
     // ---- 收藏的文件夹 ----

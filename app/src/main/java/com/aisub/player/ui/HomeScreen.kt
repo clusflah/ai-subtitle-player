@@ -127,12 +127,15 @@ fun HomeScreen(
     main: MainViewModel,
     nav: Navigator,
     onRequestPermission: () -> Unit,
+    onRequestImagePermission: () -> Unit,
 ) {
     val state by lib.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     // 标签和本机页的视频 / 音乐存在 ViewModel 里，进播放页再回来不会跳回第一个标签
     val tab = Tab.entries[lib.homeTab.coerceIn(Tab.entries.indices)]
     val localVideo = lib.localShowsVideo
+    var localPhotos by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(tab) { lib.reloadStored() }
     var searching by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     var dialog by remember { mutableStateOf<HomeDialog?>(null) }
@@ -351,15 +354,33 @@ fun HomeScreen(
                 Tab.LOCAL -> Column {
                     // 视频 / 音乐 切换
                     Row(Modifier.padding(horizontal = 12.dp, vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf(true to "视频", false to "音乐").forEach { (video, label) ->
+                        listOf("视频", "音乐", "照片").forEachIndexed { index, label ->
                             FilterChip(
-                                selected = localVideo == video,
-                                onClick = { lib.localShowsVideo = video; selected = emptySet() },
-                                label = { Text(label + " " + (if (video) state.videos.size else state.audios.size)) },
+                                selected = when (index) { 0 -> !localPhotos && localVideo; 1 -> !localPhotos && !localVideo; else -> localPhotos },
+                                onClick = {
+                                    localPhotos = index == 2
+                                    if (index < 2) lib.localShowsVideo = index == 0
+                                    selected = emptySet()
+                                    if (index == 2) {
+                                        if (!state.hasImagePermission) onRequestImagePermission() else lib.refreshImages()
+                                    }
+                                },
+                                label = { Text(label + " " + when (index) { 0 -> state.videos.size; 1 -> state.audios.size; else -> state.images.size }) },
                             )
                         }
                     }
-                    MediaTab(
+                    if (localPhotos) {
+                        if (!state.hasImagePermission) EmptyState("需要照片访问权限才能显示手机里的图片", "授予权限", icon = AppIcons.Image, onButton = onRequestImagePermission)
+                        else if (state.images.isEmpty()) EmptyState("手机里还没有照片", "刷新照片", icon = AppIcons.Image, onButton = lib::refreshImages)
+                        else LazyVerticalGrid(GridCells.Adaptive(if (LocalTv.current) 180.dp else 112.dp), contentPadding = PaddingValues(8.dp)) {
+                            itemsIndexed(state.images, key = { _, e -> e.uri }) { index, e ->
+                                NetImage(e.uri, Modifier.padding(3.dp).aspectRatio(1f).clip(MaterialTheme.shapes.small)
+                                    .clickable { nav.push(Screen.ImageViewer(null, state.images.map { image ->
+                                        com.aisub.player.remote.RemoteItem(image.title, image.uri, false, image.sizeBytes, image.uri)
+                                    }, index)) }, contentScale = androidx.compose.ui.layout.ContentScale.Crop, fallback = AppIcons.Image)
+                            }
+                        }
+                    } else MediaTab(
                         state, isVideo = localVideo, query, onRequestPermission, lib::refreshMedia, play, entryMenu, selected, toggle,
                         listState = lib.listState(if (localVideo) "local.video" else "local.audio"),
                         gridState = lib.gridState("local.video"),
@@ -407,6 +428,16 @@ fun HomeScreen(
                     onNewPlaylist = { dialog = HomeDialog.NewPlaylist },
                     onPlaylistFromHistory = lib::playlistFromHistory,
                     onDeletePlaylist = { lib.deletePlaylist(it.id) },
+                    onHiddenFolders = { nav.push(Screen.HiddenFolders) },
+                    onRefreshStats = lib::refreshPlaybackStats,
+                    openFavorite = { f ->
+                        if (f.serverId == null) nav.push(Screen.LocalFolder(f.path, f.title))
+                        else nav.push(Screen.Remote(f.serverId, f.path, f.title))
+                    },
+                    removeFavorite = { f -> lib.toggleFavoriteFolder(f.serverId, f.path, f.title) },
+                    openWebPage = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
+                    openManga = { nav.push(Screen.Manga) },
+                    openBooks = { nav.push(Screen.Books) },
                 )
             }
         }
@@ -624,15 +655,27 @@ private fun BrowseTab(
         val mediaServers = state.servers.filter { it.type.isMediaServer }
         val serverRow: @Composable (Int, Server) -> Unit = { i, s ->
             if (i > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            // 状态：上次打开的时间；上次连接失败时右边标出来
+            val visit = state.serverVisits[s.id]
+            val seen = when {
+                visit == null -> "还没打开过"
+                else -> DateUtils.getRelativeTimeSpanString(kotlin.math.abs(visit), System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString() +
+                    if (visit > 0) "打开" else "连接失败"
+            }
             ListRow(
                 title = s.name,
-                subtitle = s.type.label + if (s.type.isCloud) " · 已登录" else " · ${s.baseUrl}",
+                subtitle = s.type.label + " · " + seen,
                 icon = when {
                     s.type.isMediaServer -> AppIcons.Movie
                     s.type.isCloud || s.type == ServerType.OPENLIST -> AppIcons.Cloud
                     else -> AppIcons.Dns
                 },
-                trailing = { OverflowMenu(serverMenu(s)) },
+                trailing = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (visit != null && visit < 0) StatusChip("连接失败", StatusKind.ERROR)
+                        OverflowMenu(serverMenu(s))
+                    }
+                },
                 onClick = { openRemote(s) },
             )
         }
@@ -807,6 +850,11 @@ private fun HomeTab(
         }).sortedByDescending { it.time }.take(12)
     }
     val recentVideos = remember(state.videos) { state.videos.sortedBy(SortOrder.RECENT).take(12) }
+    val recentLive = remember(state.history) { state.history.filter { it.entry.isLive }.distinctBy { it.entry.uri }.take(5) }
+    val recentTelegram = remember(state.history) {
+        state.history.filter { com.aisub.player.telegram.Telegram.isTelegram(it.entry.uri) }.take(5)
+    }
+    val recentWeb = remember(state.history) { com.aisub.player.web.WebViewModel.savedPages(context, "history").take(6) }
     // 服务器删掉后它的收藏也不显示
     val favorites = remember(state.favoriteFolders, state.servers) {
         state.favoriteFolders.filter { f -> f.serverId == null || state.servers.any { it.id == f.serverId } }
@@ -862,7 +910,35 @@ private fun HomeTab(
                 }
             }
         }
-        if (resume.isEmpty() && recentSongs.isEmpty() && reading.isEmpty() && favorites.isEmpty() && mediaServers.isEmpty() && recentVideos.isEmpty()) item {
+        if (recentWeb.isNotEmpty() || recentLive.isNotEmpty() || recentTelegram.isNotEmpty()) {
+            item { SectionHeader("最近浏览") }
+            if (recentWeb.isNotEmpty()) item {
+                SurfaceCard(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    recentWeb.take(4).forEachIndexed { index, page ->
+                        if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                        ListRow(page.title.ifBlank { android.net.Uri.parse(page.url).host.orEmpty() }, android.net.Uri.parse(page.url).host,
+                            AppIcons.Web, onClick = { com.aisub.player.web.WebLaunch.pending = page.url; openWebManga(page.url) })
+                    }
+                }
+            }
+            if (recentLive.isNotEmpty()) item {
+                SurfaceCard(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    recentLive.forEachIndexed { index, h ->
+                        if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                        ListRow(h.entry.title, "最近看过的直播", AppIcons.Live, onClick = { play(listOf(h.entry), 0) })
+                    }
+                }
+            }
+            if (recentTelegram.isNotEmpty()) item {
+                SurfaceCard(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    recentTelegram.forEachIndexed { index, h ->
+                        if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                        ListRow(h.entry.displayTitle, "最近看过的 Telegram 视频", AppIcons.Telegram, onClick = { play(listOf(h.entry), 0) })
+                    }
+                }
+            }
+        }
+        if (resume.isEmpty() && recentSongs.isEmpty() && reading.isEmpty() && favorites.isEmpty() && mediaServers.isEmpty() && recentVideos.isEmpty() && recentWeb.isEmpty() && recentLive.isEmpty() && recentTelegram.isEmpty()) item {
             Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 IconBadge(AppIcons.Movie, size = 72.dp)
                 Spacer(Modifier.height(16.dp))
@@ -1025,17 +1101,111 @@ private fun MeTab(
     onNewPlaylist: () -> Unit,
     onPlaylistFromHistory: () -> Unit,
     onDeletePlaylist: (Playlist) -> Unit,
+    onHiddenFolders: () -> Unit,
+    onRefreshStats: () -> Unit,
+    openFavorite: (FavoriteFolder) -> Unit,
+    removeFavorite: (FavoriteFolder) -> Unit,
+    openWebPage: (String) -> Unit,
+    openManga: () -> Unit,
+    openBooks: () -> Unit,
 ) {
+    val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(30_000)
+            onRefreshStats()
+        }
+    }
+    // 「稍后观看」单独放最上面，不和普通播放列表混在一起
+    val watchLater = state.playlists.firstOrNull { it.name == com.aisub.player.media.WATCH_LATER_PLAYLIST }
+    val favoriteVideos = state.playlists.firstOrNull { it.name == com.aisub.player.media.FAVORITE_VIDEOS_PLAYLIST }
+    val likedMusic = state.playlists.firstOrNull { it.name == com.aisub.player.media.LIKED_PLAYLIST }
+    val playlists = state.playlists.filter { it.name !in setOf(
+        com.aisub.player.media.WATCH_LATER_PLAYLIST, com.aisub.player.media.FAVORITE_VIDEOS_PLAYLIST, com.aisub.player.media.LIKED_PLAYLIST,
+    ) }
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
+        val later = watchLater?.items.orEmpty()
+        SectionHeader(
+            "稍后观看" + if (later.isNotEmpty()) " ${later.size}" else "",
+            actionLabel = if (later.isNotEmpty()) "全部" else null, onAction = { watchLater?.let(onOpenPlaylist) },
+        )
+        if (later.isEmpty()) {
+            Text(
+                "在本机或网盘视频的「⋮」菜单里选「稍后观看」，想看的先存在这里", color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 20.dp),
+            )
+        } else {
+            LazyRow(contentPadding = PaddingValues(horizontal = 10.dp)) {
+                itemsIndexed(later.take(10), key = { _, e -> e.uri }) { i, e ->
+                    Box(Modifier.width(170.dp)) { VideoCard(e, emptyList()) { onPlayMusic(later, i) } }
+                }
+            }
+        }
+
+        // ---- 我的收藏：各处收藏的东西集中在这里，点进去到各自的地方 ----
+        SectionHeader("我的收藏")
+        val favorites = state.favoriteFolders.filter { f -> f.serverId == null || state.servers.any { it.id == f.serverId } }
+        if (favorites.isNotEmpty()) {
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(bottom = 8.dp),
+            ) {
+                items(favorites, key = { it.key }) { f ->
+                    val source = f.serverId?.let { id -> state.servers.firstOrNull { it.id == id }?.name } ?: "本机"
+                    FavoriteFolderTile(f, source, onRemove = { removeFavorite(f) }) { openFavorite(f) }
+                }
+            }
+        }
+        remember { com.aisub.player.manga.MangaStore.init(context); com.aisub.player.book.BookStore.init(context) }
+        val mangaRecent by com.aisub.player.manga.MangaStore.recent.collectAsStateWithLifecycle()
+        val bookRecent by com.aisub.player.book.BookStore.recent.collectAsStateWithLifecycle()
+        // 网页收藏、收藏的频道存在各自的地方；回到这一页时重新读
+        val bookmarks = remember(state.history) { com.aisub.player.web.WebViewModel.savedPages(context, "bookmarks") }
+        val channels = remember(state.history) { com.aisub.player.live.LiveSources(context).favorites() }
+        val favoriteManga = mangaRecent.filter { it.favorite }
+        val favoriteBooks = bookRecent.filter { it.favorite }
+        SurfaceCard {
+            if (favorites.isEmpty()) {
+                ListRow("收藏的文件夹", "文件夹右上角的 ☆ 或「⋮ → 收藏到首页」", AppIcons.Folder, mutedIcon = true)
+                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            }
+            ListRow(
+                "收藏的视频", if (favoriteVideos?.items.isNullOrEmpty()) "视频右侧「⋮ → 收藏视频」" else "${favoriteVideos!!.items.size} 个",
+                AppIcons.Movie, mutedIcon = favoriteVideos?.items.isNullOrEmpty(), onClick = favoriteVideos?.let { { onOpenPlaylist(it) } },
+            )
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            ListRow(
+                "我喜欢的音乐", if (likedMusic?.items.isNullOrEmpty()) "听歌时点 ♡ 收藏" else "${likedMusic!!.items.size} 首",
+                AppIcons.MusicNote, mutedIcon = likedMusic?.items.isNullOrEmpty(), onClick = likedMusic?.let { { onOpenPlaylist(it) } },
+            )
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            if (bookmarks.isEmpty()) ListRow("网页收藏", "网页里「⋮ → 收藏本页」", AppIcons.Web, mutedIcon = true)
+            else bookmarks.take(4).forEachIndexed { index, page ->
+                if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow(page.title, android.net.Uri.parse(page.url).host, AppIcons.Web, onClick = { openWebPage(page.url) })
+            }
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            if (channels.isEmpty()) ListRow("收藏的频道", "直播频道右边的星标", AppIcons.Live, mutedIcon = true)
+            else channels.take(4).forEachIndexed { index, channel ->
+                if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow(channel.name, channel.group.ifBlank { "直播收藏" }, AppIcons.Live,
+                    onClick = { onPlayHistory(MediaEntry(channel.url, channel.name, isLive = true, logo = channel.logo, folder = channel.group)) })
+            }
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            ListRow("收藏的漫画", if (favoriteManga.isEmpty()) "在漫画阅读列表里点星标" else "${favoriteManga.size} 部", AppIcons.MenuBook, onClick = openManga)
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            ListRow("收藏的电子书", if (favoriteBooks.isEmpty()) "在电子书阅读列表里点星标" else "${favoriteBooks.size} 本", AppIcons.Description, onClick = openBooks)
+        }
+
         SectionHeader("播放列表", actionLabel = "新建", onAction = onNewPlaylist)
         SurfaceCard {
-            if (state.playlists.isEmpty()) {
+            if (playlists.isEmpty()) {
                 ListRow(
                     "还没有播放列表", "在视频或音频的「⋮」菜单里加入；或者用最近播放生成一个", AppIcons.QueueMusic, mutedIcon = true,
                     onClick = if (state.history.isNotEmpty()) onPlaylistFromHistory else onNewPlaylist,
                 )
             }
-            state.playlists.forEachIndexed { i, p ->
+            playlists.forEachIndexed { i, p ->
                 if (i > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 val updated = if (p.updatedAt > 0) " · " + DateUtils.getRelativeTimeSpanString(p.updatedAt) + "更新" else ""
                 ListRow(
@@ -1083,14 +1253,39 @@ private fun MeTab(
             }
         }
 
-        SectionHeader("工具")
+        SectionHeader("播放统计")
+        fun statsTime(ms: Long) = if (ms <= 0) "0:00" else formatDuration(ms)
         SurfaceCard {
-            if (onLink != null) {
-                ListRow("从链接下载", "下载视频网站的视频，自动准备字幕后播放（也可以在其他 App 里分享给译幕）", AppIcons.Download, onClick = onLink)
-                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-            }
-            ListRow("设置", "语音识别、字幕翻译、播放、朗读", AppIcons.Settings, onClick = onSettings)
+            ListRow("累计播放", "${statsTime(state.playbackStats.totalMs)} · ${state.playbackStats.starts} 次开始播放", AppIcons.PlayArrow)
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            ListRow("视频", statsTime(state.playbackStats.videoMs), AppIcons.Movie)
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            ListRow("音乐", statsTime(state.playbackStats.musicMs), AppIcons.MusicNote)
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            ListRow("直播", statsTime(state.playbackStats.liveMs), AppIcons.Live)
+        }
+
+        SectionHeader("管理")
+        SurfaceCard {
+            ListRow("下载管理", "网盘、WebDAV 下载的文件和进度（系统下载列表）", AppIcons.Download, onClick = {
+                runCatching { context.startActivity(android.content.Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS)) }
+                    .onFailure { android.widget.Toast.makeText(context, "这台设备没有系统下载列表；文件在 Download 文件夹里", android.widget.Toast.LENGTH_LONG).show() }
+            })
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            ListRow(
+                "隐藏的文件夹",
+                if (state.hiddenFolders.isEmpty()) "不想让孩子看到的文件夹可以藏起来" else "${state.hiddenFolders.size} 个" + if (state.hasHiddenPin) " · 有密码" else "",
+                AppIcons.Lock, onClick = onHiddenFolders,
+            )
+            if (onLink != null) {
+                HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                ListRow("从链接下载", "下载视频网站的视频，自动准备字幕后播放（也可以在其他 App 里分享给译幕）", AppIcons.Download, onClick = onLink)
+            }
+        }
+
+        SectionHeader("设置与帮助")
+        SurfaceCard {
+            ListRow("设置", "语音识别、字幕翻译、播放、朗读", AppIcons.Settings, onClick = onSettings)
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
             ListRow("检查更新", "当前版本 ${com.aisub.player.BuildConfig.VERSION_NAME}", AppIcons.SystemUpdate,

@@ -138,6 +138,21 @@ fun MangaScreen(onBack: () -> Unit, openWeb: (String?) -> Unit, open: (MangaOpen
                     ListRow("图片文件夹", "一个文件夹里的图片按文件名排序当一话看", AppIcons.Folder) { launch { pickFolder.launch(null) } }
                 }
             }
+            val favorites = recent.filter { it.favorite }
+            if (favorites.isNotEmpty()) {
+                item { SectionHeader("我的收藏") }
+                items(favorites, key = { "favorite:" + it.key }) { r ->
+                    Box(Modifier.padding(horizontal = 16.dp, vertical = 3.dp)) {
+                        SurfaceCard {
+                            ListRow(
+                                r.title, recentSubtitle(r), if (r.web) AppIcons.Web else AppIcons.MenuBook,
+                                trailing = { IconButton(onClick = { MangaStore.toggleFavorite(r.key) }) { Icon(AppIcons.Star, "取消收藏") } },
+                                onClick = { if (r.web) openWeb(r.location) else mangaOpenOf(r)?.let(open) },
+                            )
+                        }
+                    }
+                }
+            }
             item { SectionHeader("继续阅读") }
             if (recent.isEmpty()) item {
                 Text(
@@ -153,7 +168,14 @@ fun MangaScreen(onBack: () -> Unit, openWeb: (String?) -> Unit, open: (MangaOpen
                             title = r.title,
                             subtitle = recentSubtitle(r),
                             icon = if (r.web) AppIcons.Web else AppIcons.MenuBook,
-                            trailing = { IconButton(onClick = { MangaStore.removeRecent(r.key) }) { Icon(AppIcons.Close, "从列表移除") } },
+                            trailing = {
+                                Row {
+                                    IconButton(onClick = { MangaStore.toggleFavorite(r.key) }) {
+                                        Icon(if (r.favorite) AppIcons.Star else AppIcons.StarBorder, if (r.favorite) "取消收藏" else "收藏漫画")
+                                    }
+                                    IconButton(onClick = { MangaStore.removeRecent(r.key) }) { Icon(AppIcons.Close, "从列表移除") }
+                                }
+                            },
                             onClick = {
                                 if (r.web) openWeb(r.location) else mangaOpenOf(r)?.let(open)
                             },

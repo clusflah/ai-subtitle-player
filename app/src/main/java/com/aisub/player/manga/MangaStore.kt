@@ -36,6 +36,7 @@ data class MangaRecent(
     val total: Int,
     val time: Long,
     val web: Boolean,
+    val favorite: Boolean = false,
 )
 
 /** 阅读进度、阅读设置、最近阅读，存在 SharedPreferences 里 */
@@ -83,7 +84,8 @@ object MangaStore {
         if (!book.recent) return
 
         val location = book.webUrl ?: book.key
-        val item = MangaRecent(book.key, book.title, location, page, book.pages.size, System.currentTimeMillis(), book.webUrl != null)
+        val item = MangaRecent(book.key, book.title, location, page, book.pages.size, System.currentTimeMillis(), book.webUrl != null,
+            favorite = _recent.value.firstOrNull { it.key == book.key }?.favorite ?: false)
         // 网页漫画：同一部漫画（同一网站、标题前半段一样）的不同话只留最新的一条
         val list = listOf(item) + _recent.value.filter { it.key != book.key && !(it.web && item.web && sameSeries(it, item)) }
         _recent.value = list.take(MAX_RECENT)
@@ -93,6 +95,13 @@ object MangaStore {
     fun removeRecent(key: String) {
         _recent.value = _recent.value.filter { it.key != key }
         saveRecent()
+    }
+
+    fun toggleFavorite(key: String): Boolean {
+        val now = _recent.value.firstOrNull { it.key == key }?.favorite != true
+        _recent.value = _recent.value.map { if (it.key == key) it.copy(favorite = now) else it }
+        saveRecent()
+        return now
     }
 
     private var cachedProgress: Map<String, Int>? = null
@@ -124,7 +133,7 @@ object MangaStore {
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
             MangaRecent(
                 o.optString("key"), o.optString("title"), o.optString("location"),
-                o.optInt("page"), o.optInt("total"), o.optLong("time"), o.optBoolean("web"),
+                o.optInt("page"), o.optInt("total"), o.optLong("time"), o.optBoolean("web"), o.optBoolean("favorite"),
             )
         }
     }
@@ -134,7 +143,7 @@ object MangaStore {
         _recent.value.forEach {
             arr.put(
                 JSONObject().put("key", it.key).put("title", it.title).put("location", it.location)
-                    .put("page", it.page).put("total", it.total).put("time", it.time).put("web", it.web),
+                    .put("page", it.page).put("total", it.total).put("time", it.time).put("web", it.web).put("favorite", it.favorite),
             )
         }
         prefs?.edit()?.putString("recent", arr.toString())?.apply()

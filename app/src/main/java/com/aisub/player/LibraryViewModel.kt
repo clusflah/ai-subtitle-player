@@ -11,6 +11,7 @@ import com.aisub.player.media.HistoryItem
 import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.MediaLibrary
 import com.aisub.player.media.Playlist
+import com.aisub.player.media.PlaybackStats
 import com.aisub.player.media.SortOrder
 import com.aisub.player.media.ViewPrefs
 import com.aisub.player.subtitle.SubtitleStore
@@ -33,6 +34,8 @@ data class LibraryState(
     val loading: Boolean = false,
     val videos: List<MediaEntry> = emptyList(),
     val audios: List<MediaEntry> = emptyList(),
+    val images: List<MediaEntry> = emptyList(),
+    val hasImagePermission: Boolean = false,
     val history: List<HistoryItem> = emptyList(),
     val playlists: List<Playlist> = emptyList(),
     val favoriteFolders: List<FavoriteFolder> = emptyList(),
@@ -47,6 +50,9 @@ data class LibraryState(
     /** 输过密码后暂时显示隐藏的文件夹（重开 App 恢复隐藏） */
     val showHidden: Boolean = false,
     val hasHiddenPin: Boolean = false,
+    /** 网络服务上次打开的时间（负数 = 那次连接失败），浏览页显示状态用 */
+    val serverVisits: Map<String, Long> = emptyMap(),
+    val playbackStats: PlaybackStats = PlaybackStats(),
 )
 
 /** 首页的数据：本地媒体库、历史、播放列表、网络服务器。 */
@@ -61,6 +67,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     // 没去掉隐藏文件夹的原始数据（要在 init 之前声明，不然 init 里读到的会被初始值盖掉）
     private var allVideos = emptyList<MediaEntry>()
     private var allAudios = emptyList<MediaEntry>()
+    private var allImages = emptyList<MediaEntry>()
     private var allHistory = emptyList<HistoryItem>()
     private var allPlaylists = emptyList<Playlist>()
     private var allFavorites = emptyList<FavoriteFolder>()
@@ -122,6 +129,19 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         if (granted) refreshMedia()
     }
 
+    fun onImagePermission(granted: Boolean) {
+        _state.update { it.copy(hasImagePermission = granted) }
+        if (granted) refreshImages()
+    }
+
+    fun refreshImages() {
+        if (!_state.value.hasImagePermission) return
+        viewModelScope.launch {
+            allImages = withContext(Dispatchers.IO) { MediaLibrary.images(getApplication()) }
+            applyHidden()
+        }
+    }
+
     fun refreshMedia() {
         if (!_state.value.hasPermission) return
         _state.update { it.copy(loading = true) }
@@ -143,7 +163,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         allPlaylists = store.playlists()
         allFavorites = store.favoriteFolders()
         _state.update {
-            it.copy(servers = store.servers(), hiddenFolders = store.hiddenFolders(), hasHiddenPin = store.hiddenPinHash.isNotEmpty())
+            it.copy(
+                servers = store.servers(), hiddenFolders = store.hiddenFolders(), hasHiddenPin = store.hiddenPinHash.isNotEmpty(),
+                serverVisits = store.serverVisits(),
+                playbackStats = store.playbackStats(),
+            )
         }
         applyHidden()
     }
@@ -155,10 +179,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private fun applyHidden() = _state.update { s ->
         val hidden = if (s.showHidden) emptyList() else s.hiddenFolders
         val local = hidden.filter { it.serverId == null }
-        fun hiddenEntry(e: MediaEntry) = e.folder.isNotEmpty() && local.any { under(e.folder, it) }
+        // 直播频道的 folder 是分组名，不是本机目录
+        fun hiddenEntry(e: MediaEntry) = !e.isLive && e.folder.isNotEmpty() && local.any { under(e.folder, it) }
         s.copy(
             videos = allVideos.filterNot(::hiddenEntry),
             audios = allAudios.filterNot(::hiddenEntry),
+            images = allImages.filterNot { image -> image.folder.isNotEmpty() && local.any { under(image.folder, it) } },
             history = allHistory.filterNot { hiddenEntry(it.entry) },
             playlists = allPlaylists.map { p -> p.copy(items = p.items.filterNot(::hiddenEntry)) },
             favoriteFolders = allFavorites.filterNot { f -> hidden.any { it.serverId == f.serverId && under(f.path, it) } },
@@ -220,6 +246,32 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         )
         reloadStored()
         return !exists
+    }
+
+    // ---- 稍后观看 ----
+
+    fun isWatchLater(uri: String) = allPlaylists.any { p -> p.name == com.aisub.player.media.WATCH_LATER_PLAYLIST && p.items.any { it.uri == uri } }
+
+    /** 返回之后是否在「稍后观看」里 */
+    fun toggleWatchLater(entry: MediaEntry): Boolean = store.toggleWatchLater(entry).also { reloadStored() }
+
+    fun isFavoriteVideo(uri: String) = store.isFavoriteVideo(uri)
+
+    fun toggleFavoriteVideo(entry: MediaEntry): Boolean = store.toggleFavoriteVideo(entry).also { reloadStored() }
+
+    // ---- 网络服务状态 ----
+
+    /** 打开网络服务的目录成功或失败时记一下，浏览页显示「x 前打开」或「上次连接失败」 */
+    fun recordServerVisit(id: String, ok: Boolean) {
+        val last = _state.value.serverVisits[id]
+        // 同一状态一分钟内不重复写
+        if (last != null && (last > 0) == ok && System.currentTimeMillis() - kotlin.math.abs(last) < 60_000) return
+        store.recordServerVisit(id, ok)
+        _state.update { it.copy(serverVisits = store.serverVisits()) }
+    }
+
+    fun refreshPlaybackStats() {
+        _state.update { it.copy(playbackStats = store.playbackStats()) }
     }
 
     // ---- 播放列表 ----
