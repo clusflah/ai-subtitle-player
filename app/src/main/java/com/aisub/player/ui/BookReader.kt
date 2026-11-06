@@ -76,6 +76,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisub.player.MainViewModel
 import androidx.media3.common.util.UnstableApi
 import com.aisub.player.book.BookChapter
+import com.aisub.player.book.BookBookmark
 import com.aisub.player.book.BookRecent
 import com.aisub.player.book.BookStore
 import com.aisub.player.book.BookTts
@@ -217,6 +218,7 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
     val context = LocalContext.current
     remember { BookStore.init(context) }
     val prefs by BookStore.settings.collectAsStateWithLifecycle()
+    val bookmarks by BookStore.bookmarks.collectAsStateWithLifecycle()
     val tts by BookTts.status.collectAsStateWithLifecycle()
     val theme = THEMES[prefs.theme.coerceIn(0, THEMES.lastIndex)]
     val rows = remember(book) {
@@ -238,6 +240,7 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
     val scope = rememberCoroutineScope()
     var controls by remember { mutableStateOf(false) }
     var showToc by remember { mutableStateOf(false) }
+    var showBookmarks by remember { mutableStateOf(false) }
     var showReadSettings by remember { mutableStateOf(false) }
     var showVoicePicker by remember { mutableStateOf(false) }
     var sleepMenu by remember { mutableStateOf(false) }
@@ -281,10 +284,11 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
         }
     }
 
-    BackHandler(enabled = showToc || controls || showReadSettings || showVoicePicker) {
+    BackHandler(enabled = showToc || showBookmarks || controls || showReadSettings || showVoicePicker) {
         when {
             showVoicePicker -> showVoicePicker = false
             showReadSettings -> showReadSettings = false
+            showBookmarks -> showBookmarks = false
             showToc -> showToc = false
             else -> controls = false
         }
@@ -292,6 +296,13 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
 
     fun speakFrom(index: Int) {
         BookTts.start(context, url, title, book.chapters, index)
+    }
+
+    fun toggleCurrentBookmark() {
+        val item = list.firstVisibleItemIndex
+        val chapter = book.chapters.getOrNull(chapterAt(item))?.title.orEmpty()
+        val preview = rows.getOrNull(item)?.block?.text?.replace(Regex("\\s+"), " ")?.take(80).orEmpty()
+        BookStore.toggleBookmark(url, item, list.firstVisibleItemScrollOffset, chapter, preview)
     }
 
     val tapModifier = Modifier.pointerInput(Unit) {
@@ -362,6 +373,9 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
                 Row(Modifier.statusBarsPadding().padding(horizontal = 4.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onBack, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "返回") }
                     Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { showBookmarks = true }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) {
+                        Icon(AppIcons.Bookmark, "书签（${bookmarks.count { it.key == url }}）")
+                    }
                     IconButton(onClick = { showToc = true }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ListIcon, "目录") }
                 }
             }
@@ -386,6 +400,8 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
                         toolbarButton("A+") { BookStore.update { it.copy(fontSize = (it.fontSize + 1).coerceAtMost(36)) } }
                         toolbarButton("行距") { BookStore.update { it.copy(lineSpacing = if (it.lineSpacing >= 2.1f) 1.4f else it.lineSpacing + 0.35f) } }
                         toolbarButton(THEME_NAMES[prefs.theme.coerceIn(0, 2)]) { BookStore.update { it.copy(theme = (it.theme + 1) % THEMES.size) } }
+                        val marked = bookmarks.any { it.key == url && it.item == list.firstVisibleItemIndex }
+                        toolbarButton(if (marked) "取消书签" else "书签") { toggleCurrentBookmark() }
                         toolbarButton("朗读") {
                             controls = false
                             if (!reading) speakFrom(list.firstVisibleItemIndex)
@@ -444,6 +460,11 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
             controls = false
             scope.launch { list.scrollToItem(chapterStart.getOrElse(ci) { 0 }) }
         }
+        if (showBookmarks) BookmarkDialog(bookmarks.filter { it.key == url }, onDismiss = { showBookmarks = false }, onPick = { bookmark ->
+            showBookmarks = false
+            controls = false
+            scope.launch { list.scrollToItem(bookmark.item.coerceIn(0, (rows.size - 1).coerceAtLeast(0)), bookmark.offset) }
+        }, onRemove = BookStore::removeBookmark)
         if (showReadSettings) {
             AlertDialog(
                 onDismissRequest = { showReadSettings = false },
@@ -482,6 +503,31 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
             }
         }
     }
+}
+
+@Composable
+private fun BookmarkDialog(bookmarks: List<BookBookmark>, onDismiss: () -> Unit, onPick: (BookBookmark) -> Unit, onRemove: (Long) -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        title = { Text("书签（${bookmarks.size}）") },
+        text = {
+            if (bookmarks.isEmpty()) {
+                Text("还没有书签。在阅读工具栏点「书签」即可保存当前位置。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else LazyColumn(Modifier.heightIn(max = 480.dp)) {
+                items(bookmarks, key = { it.id }) { bookmark ->
+                    Row(Modifier.fillMaxWidth().clickable { onPick(bookmark) }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(bookmark.chapter.ifBlank { "当前位置" }, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (bookmark.preview.isNotBlank()) Text(bookmark.preview, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                        IconButton(onClick = { onRemove(bookmark.id) }) { Icon(AppIcons.Delete, "删除书签") }
+                    }
+                    HorizontalDivider()
+                }
+            }
+        },
+    )
 }
 
 @Composable

@@ -23,6 +23,17 @@ data class BookRecent(
     val coverEntry: String? = null,
 )
 
+/** 书签保存的是整本书中的块位置和滚动偏移，重新打开后仍可准确跳回。 */
+data class BookBookmark(
+    val id: Long,
+    val key: String,
+    val item: Int,
+    val offset: Int,
+    val chapter: String,
+    val preview: String,
+    val time: Long,
+)
+
 /** 阅读设置：字号（sp）、行距倍数、主题（0 白底 1 护眼 2 夜间）、朗读速度 */
 data class BookPrefs(
     val fontSize: Int = 19, val lineSpacing: Float = 1.7f, val theme: Int = 0, val ttsSpeed: Float = 1f,
@@ -45,6 +56,9 @@ object BookStore {
     private val _prefs = MutableStateFlow(BookPrefs())
     val settings: StateFlow<BookPrefs> = _prefs.asStateFlow()
 
+    private val _bookmarks = MutableStateFlow<List<BookBookmark>>(emptyList())
+    val bookmarks: StateFlow<List<BookBookmark>> = _bookmarks.asStateFlow()
+
     @Synchronized
     fun init(context: Context) {
         if (prefs != null) return
@@ -63,6 +77,15 @@ object BookStore {
             p.getInt("fontSize", 19), p.getFloat("lineSpacing", 1.7f), p.getInt("theme", 0), p.getFloat("ttsSpeed", 1f),
             p.getBoolean("skipFrontMatter", true), p.getBoolean("unifiedNarrator", true), p.getString("ttsVoice", null),
         )
+        _bookmarks.value = runCatching {
+            val a = JSONArray(p.getString("bookmarks", "[]"))
+            (0 until a.length()).map { a.getJSONObject(it) }.map {
+                BookBookmark(
+                    it.optLong("id"), it.getString("key"), it.optInt("item"), it.optInt("offset"),
+                    it.optString("chapter"), it.optString("preview"), it.optLong("time"),
+                )
+            }
+        }.getOrDefault(emptyList())
     }
 
     fun progress(key: String): BookRecent? = _recent.value.firstOrNull { it.key == key }
@@ -86,6 +109,25 @@ object BookStore {
         persist()
     }
 
+    fun bookmarks(key: String): List<BookBookmark> = _bookmarks.value.filter { it.key == key }
+
+    /** 同一段落只保留一个书签；再次点击即可取消。 */
+    fun toggleBookmark(key: String, item: Int, offset: Int, chapter: String, preview: String): Boolean {
+        val old = _bookmarks.value.firstOrNull { it.key == key && it.item == item }
+        _bookmarks.value = if (old == null) {
+            listOf(BookBookmark(System.currentTimeMillis(), key, item, offset, chapter, preview, System.currentTimeMillis())) + _bookmarks.value
+        } else {
+            _bookmarks.value.filterNot { it.id == old.id }
+        }
+        persistBookmarks()
+        return old == null
+    }
+
+    fun removeBookmark(id: Long) {
+        _bookmarks.value = _bookmarks.value.filterNot { it.id == id }
+        persistBookmarks()
+    }
+
     fun update(change: (BookPrefs) -> BookPrefs) {
         val s = change(_prefs.value)
         _prefs.value = s
@@ -102,5 +144,14 @@ object BookStore {
                 .put("coverEntry", r.coverEntry),
         )
         prefs?.edit()?.putString("recent", a.toString())?.apply()
+    }
+
+    private fun persistBookmarks() {
+        val a = JSONArray()
+        for (b in _bookmarks.value) a.put(
+            JSONObject().put("id", b.id).put("key", b.key).put("item", b.item).put("offset", b.offset)
+                .put("chapter", b.chapter).put("preview", b.preview).put("time", b.time),
+        )
+        prefs?.edit()?.putString("bookmarks", a.toString())?.apply()
     }
 }
