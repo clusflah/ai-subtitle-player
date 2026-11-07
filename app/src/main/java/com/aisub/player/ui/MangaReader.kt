@@ -460,6 +460,10 @@ fun MangaReader(
                     val percent = if (pages.size > 1) page * 100 / (pages.size - 1) else 100
                     Text("第 ${page + 1} / ${pages.size} 页 · $percent% · ${mode.label}${if (rtl) " · 从右往左" else ""}", color = Color(0xCCFFFFFF), style = MaterialTheme.typography.bodySmall)
                 }
+                // 手机竖屏时底部按钮可能放不下；始终在顶部保留显示方式入口。
+                IconButton(onClick = { panel = ReaderPanel.SETTINGS }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) {
+                    Icon(AppIcons.Settings, "阅读设置", tint = Color.White)
+                }
             }
         }
 
