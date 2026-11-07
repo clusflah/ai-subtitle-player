@@ -706,6 +706,8 @@ private fun ReaderSettingsDialog(
     onToc: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // 先更新弹窗内的状态，让单选圆点在写入设置的同一帧切换；外层重组后会用实际模式同步。
+    var selectedMode by remember(mode) { mutableStateOf(mode) }
     AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("阅读设置") },
@@ -714,10 +716,13 @@ private fun ReaderSettingsDialog(
             Column(Modifier.verticalScroll(rememberScrollState()).widthIn(max = 480.dp)) {
                 MangaMode.entries.forEach { m ->
                     Row(
-                        Modifier.fillMaxWidth().tvFocusRing(RoundedCornerShape(8.dp)).clickable { onChange(settings.copy(mode = m)) }.padding(vertical = 2.dp),
+                        Modifier.fillMaxWidth().tvFocusRing(RoundedCornerShape(8.dp)).clickable {
+                            selectedMode = m
+                            onChange(settings.copy(mode = m))
+                        }.padding(vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        RadioButton(selected = m == mode, onClick = null)
+                        RadioButton(selected = m == selectedMode, onClick = null)
                         Column(Modifier.padding(start = 8.dp)) {
                             Text(m.label, style = MaterialTheme.typography.bodyLarge)
                             Text(m.hint, style = MaterialTheme.typography.bodySmall)
@@ -726,8 +731,8 @@ private fun ReaderSettingsDialog(
                 }
                 Spacer(Modifier.height(8.dp))
                 SettingToggle("从右往左翻页", "日本漫画的阅读顺序", settings.rtl) { onChange(settings.copy(rtl = it)) }
-                if (mode == MangaMode.DOUBLE) SettingToggle("封面单独一页", "跨页对不齐时切换试试", settings.coverSingle) { onChange(settings.copy(coverSingle = it)) }
-                if (mode == MangaMode.FIT || mode == MangaMode.DOUBLE) Row(
+                if (selectedMode == MangaMode.DOUBLE) SettingToggle("封面单独一页", "跨页对不齐时切换试试", settings.coverSingle) { onChange(settings.copy(coverSingle = it)) }
+                if (selectedMode == MangaMode.FIT || selectedMode == MangaMode.DOUBLE) Row(
                     Modifier.fillMaxWidth().tvFocusRing(RoundedCornerShape(8.dp))
                         .clickable { onChange(settings.copy(rotation = (settings.rotation + 90) % 360)) }.padding(vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
