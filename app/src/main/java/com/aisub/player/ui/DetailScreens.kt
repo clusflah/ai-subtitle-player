@@ -55,30 +55,23 @@ internal fun DetailScaffold(
     actions: @Composable () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
-    GlassBackdropBox { backdrop ->
-        Scaffold(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
-            topBar = {
-                TopAppBar(
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
-                    modifier = Modifier.liquidGlass(
-                        shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
-                        style = GlassStyle.Bar,
-                    ),
-                    navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回") } },
-                    title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    actions = { actions() },
-                )
-            },
-        ) { padding ->
-            Box(
-                Modifier
-                    .padding(padding)
-                    .fillMaxSize()
-                    .glassBackdropSource(backdrop),
-            ) {
-                content()
-            }
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
+        topBar = {
+            TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
+                navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回") } },
+                title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                actions = { actions() },
+            )
+        },
+    ) { padding ->
+        Box(
+            Modifier
+                .padding(padding)
+                .fillMaxSize(),
+        ) {
+            content()
         }
     }
 }

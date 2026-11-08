@@ -459,7 +459,7 @@ fun MangaReader(
         AnimatedVisibility(controls, Modifier.align(Alignment.TopCenter), enter = fadeIn(), exit = fadeOut()) {
             Row(
                 Modifier.fillMaxWidth()
-                    .liquidGlass(shape = RoundedCornerShape(bottomStart = 18.dp, bottomEnd = 18.dp), style = GlassStyle.Bar, tint = Color(0x780E121A))
+                    .background(Color(0xB3000000))
                     .statusBarsPadding().padding(horizontal = 4.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {

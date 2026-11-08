@@ -67,11 +67,7 @@ fun LinkScreen(vm: MainViewModel, onBack: () -> Unit, onDone: () -> Unit) {
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
-                modifier = Modifier.liquidGlass(
-                    shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
-                    style = GlassStyle.Bar,
-                ),
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
                 navigationIcon = { IconButton(onClick = leave) { Icon(AppIcons.ArrowBack, "返回") } },
                 title = { Text("下载视频") },
             )
@@ -304,12 +300,6 @@ private fun WebLoginDialog(site: LoginSite, onDismiss: () -> Unit, onDone: (List
         Scaffold(
             topBar = {
                 TopAppBar(
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
-                    modifier = Modifier.liquidGlass(
-                        shape = RoundedCornerShape(bottomStart = 18.dp, bottomEnd = 18.dp),
-                        style = GlassStyle.Bar,
-                        enableBackdrop = false,
-                    ),
                     navigationIcon = { IconButton(onClick = onDismiss) { Icon(AppIcons.Close, "取消") } },
                     title = { Text("登录 ${site.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     actions = {

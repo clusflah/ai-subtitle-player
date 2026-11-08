@@ -1505,12 +1505,7 @@ internal fun SelectionBar(
     onDelete: () -> Unit,
 ) {
     TopAppBar(
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
-        modifier = Modifier.liquidGlass(
-            shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
-            style = GlassStyle.Bar,
-            tint = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
-        ),
+        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
         navigationIcon = { IconButton(onClick = onClose) { Icon(AppIcons.Close, "退出多选") } },
         title = { Text("已选 $count 项", style = MaterialTheme.typography.titleMedium) },
         actions = {

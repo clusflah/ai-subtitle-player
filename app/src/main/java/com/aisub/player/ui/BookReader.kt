@@ -373,9 +373,8 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
 
         if (controls) {
             Surface(
-                color = Color.Transparent,
-                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
-                    .liquidGlass(shape = RoundedCornerShape(bottomStart = 18.dp, bottomEnd = 18.dp), style = GlassStyle.Bar),
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
             ) {
                 Row(Modifier.statusBarsPadding().padding(horizontal = 4.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onBack, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "返回") }

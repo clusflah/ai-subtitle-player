@@ -72,7 +72,7 @@ fun ImageViewerScreen(
                 val current = images.getOrNull(pager.currentPage)
                 Row(
                     Modifier.fillMaxWidth()
-                        .liquidGlass(shape = RoundedCornerShape(bottomStart = 18.dp, bottomEnd = 18.dp), style = GlassStyle.Bar, tint = Color(0x780E121A))
+                        .background(Color(0x99000000))
                         .statusBarsPadding(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
