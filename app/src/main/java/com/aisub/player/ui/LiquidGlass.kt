@@ -1,8 +1,6 @@
 package com.aisub.player.ui
 
-import android.graphics.RenderEffect as AndroidRenderEffect
 import android.graphics.RuntimeShader
-import android.graphics.Shader
 import android.os.Build
 import android.view.WindowManager
 import androidx.annotation.RequiresApi
@@ -16,16 +14,11 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.compositionLocalOf
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.RoundRect
@@ -36,16 +29,9 @@ import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
-import androidx.compose.ui.graphics.drawscope.translate
-import androidx.compose.ui.graphics.layer.GraphicsLayer
-import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.rememberGraphicsLayer
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.Dp
@@ -56,70 +42,40 @@ import kotlin.math.min
 
 /**
  * 液态玻璃（Liquid Glass）视觉引擎，按系统版本自动分级：
- * - Android 13+ (API 33+)：AGSL RuntimeShader 边缘透镜折射 + 色散 + Fresnel 高光 + 实时背景模糊
- * - Android 12  (API 31-32)：RenderEffect 实时高斯模糊 + 双角度高光折射描边 + 玻璃光泽层
- * - Android 8-11 (API 26-30)：多层半透明渐变玻璃基底 + 高光边缘折射描边回退
+ * - Android 13+ (API 33+)：AGSL RuntimeShader 曲面透镜边缘折射高光 + 棱镜色散 + Fresnel 双高光描边 + 系统级窗口背景模糊
+ * - Android 12  (API 31-32)：系统级窗口背景高斯模糊 + 双角度 Fresnel 高光折射描边 + 多层通透玻璃光泽层
+ * - Android 8-11 (API 26-30)：多层半透明渐变玻璃基底 + 斜向光泽流线 + 高光边缘折射描边回退
+ *
+ * 设计要点：完全通过无状态的 [drawWithCache] 绘制，不在绘制阶段录制嵌套 GraphicsLayer 或修改 Snapshot 状态，
+ * 避免父子组件间的 RenderNode 循环引用（libhwui 栈溢出闪退）与跨 Window（Dialog / Popup）图层引用崩溃。
  */
 @Stable
-class GlassBackdropState internal constructor(
-    internal val layer: GraphicsLayer,
-) {
-    internal var originInRoot by mutableStateOf(Offset.Zero)
-    internal var hasContent by mutableStateOf(false)
-    internal var isRecording by mutableStateOf(false)
-    internal var activeGlassDepth: Int = 0
-    internal var drawTick by mutableFloatStateOf(0f)
-}
+class GlassBackdropState internal constructor()
 
 val LocalGlassBackdrop = compositionLocalOf<GlassBackdropState?> { null }
 
 @Composable
 fun rememberGlassBackdrop(): GlassBackdropState {
-    val layer = rememberGraphicsLayer()
-    return remember(layer) { GlassBackdropState(layer) }
+    return remember { GlassBackdropState() }
 }
 
 /**
- * 标记作为液态玻璃背景采样的内容层。
- * 放在同一个 [LocalGlassBackdrop] 作用域下的顶栏、底栏、悬浮条会实时折射并模糊此层内容。
+ * 标记作为液态玻璃背景的容器层（保持轻量无副作用，避免嵌套 RenderNode 循环引用）。
  */
-fun Modifier.glassBackdropSource(state: GlassBackdropState?): Modifier {
-    if (state == null) return this
-    return this
-        .onGloballyPositioned { coords ->
-            if (coords.isAttached) {
-                state.originInRoot = coords.positionInRoot()
-            }
-        }
-        .drawWithContent {
-            state.isRecording = true
-            try {
-                state.layer.record {
-                    this@drawWithContent.drawContent()
-                }
-                state.hasContent = true
-                state.drawTick += 1f
-            } finally {
-                state.isRecording = false
-            }
-            drawLayer(state.layer)
-        }
-}
+fun Modifier.glassBackdropSource(@Suppress("UNUSED_PARAMETER") state: GlassBackdropState?): Modifier = this
 
 /**
- * 提供 [LocalGlassBackdrop] 上下文的容器，便于页面内部组件自动采样背景层。
+ * 提供 [LocalGlassBackdrop] 上下文的容器。
  */
 @Composable
 fun GlassBackdropBox(
     modifier: Modifier = Modifier,
-    captureContent: Boolean = false,
+    @Suppress("UNUSED_PARAMETER") captureContent: Boolean = false,
     content: @Composable BoxScope.(GlassBackdropState) -> Unit,
 ) {
     val backdrop = rememberGlassBackdrop()
     CompositionLocalProvider(LocalGlassBackdrop provides backdrop) {
-        Box(
-            modifier = if (captureContent) modifier.glassBackdropSource(backdrop) else modifier,
-        ) {
+        Box(modifier = modifier) {
             content(backdrop)
         }
     }
@@ -143,8 +99,8 @@ data class GlassStyle(
             bevelWidth = 14.dp,
             refractionStrength = 10.dp,
             borderWidth = 0.9.dp,
-            lightAlpha = 0.68f,
-            darkAlpha = 0.60f,
+            lightAlpha = 0.72f,
+            darkAlpha = 0.64f,
             specularIntensity = 0.85f,
             chromaticAberration = 1.6f,
         )
@@ -155,8 +111,8 @@ data class GlassStyle(
             bevelWidth = 16.dp,
             refractionStrength = 12.dp,
             borderWidth = 1.dp,
-            lightAlpha = 0.64f,
-            darkAlpha = 0.56f,
+            lightAlpha = 0.68f,
+            darkAlpha = 0.60f,
             specularIntensity = 0.95f,
             chromaticAberration = 2.0f,
         )
@@ -167,8 +123,8 @@ data class GlassStyle(
             bevelWidth = 18.dp,
             refractionStrength = 11.dp,
             borderWidth = 1.dp,
-            lightAlpha = 0.78f,
-            darkAlpha = 0.72f,
+            lightAlpha = 0.80f,
+            darkAlpha = 0.74f,
             specularIntensity = 0.80f,
             chromaticAberration = 1.5f,
         )
@@ -179,9 +135,9 @@ data class GlassStyle(
             bevelWidth = 12.dp,
             refractionStrength = 7.dp,
             borderWidth = 0.85.dp,
-            lightAlpha = 0.72f,
-            darkAlpha = 0.62f,
-            specularIntensity = 0.70f,
+            lightAlpha = 0.74f,
+            darkAlpha = 0.64f,
+            specularIntensity = 0.72f,
             chromaticAberration = 1.1f,
         )
 
@@ -191,8 +147,8 @@ data class GlassStyle(
             bevelWidth = 9.dp,
             refractionStrength = 6.dp,
             borderWidth = 0.8.dp,
-            lightAlpha = 0.62f,
-            darkAlpha = 0.54f,
+            lightAlpha = 0.64f,
+            darkAlpha = 0.56f,
             specularIntensity = 0.90f,
             chromaticAberration = 1.4f,
         )
@@ -200,16 +156,16 @@ data class GlassStyle(
 }
 
 /**
- * 为 Dialog / ModalBottomSheet / Popup 窗口开启 Android 12+ (API 31+) 系统级窗口背景模糊。
+ * 为 Dialog / ModalBottomSheet 窗口开启 Android 12+ (API 31+) 系统级窗口背景模糊（FLAG_BLUR_BEHIND）。
  */
 @Composable
 fun WindowBlurEffect(
     blurBehindRadius: Int = 52,
-    backgroundBlurRadius: Int = 68,
+    @Suppress("UNUSED_PARAMETER") backgroundBlurRadius: Int = 68,
 ) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
     val view = LocalView.current
-    DisposableEffect(view, blurBehindRadius, backgroundBlurRadius) {
+    DisposableEffect(view, blurBehindRadius) {
         val window = (view.parent as? DialogWindowProvider)?.window
         if (window != null) {
             runCatching {
@@ -217,7 +173,6 @@ fun WindowBlurEffect(
                 window.attributes = window.attributes.apply {
                     this.blurBehindRadius = blurBehindRadius
                 }
-                window.setBackgroundBlurRadius(backgroundBlurRadius)
             }
         }
         onDispose { }
@@ -226,16 +181,16 @@ fun WindowBlurEffect(
 
 /**
  * 核心液态玻璃修饰符：
- * 1. 若处于 [LocalGlassBackdrop] 作用域且不在背景录制层内部，则对下层画面做实时透镜折射（API 33+）与高斯模糊（API 31+）；
- * 2. 绘制多层半透明玻璃染色层；
- * 3. 绘制 AGSL 曲面玻璃高光折射与边缘色散（API 33+），或在旧系统上回退为双角度 Fresnel 高光渐变描边。
+ * 1. 绘制多层半透明玻璃染色层与斜向光泽流线；
+ * 2. 绘制 AGSL 3D 曲面玻璃边缘高光折射与棱镜色散（API 33+）；
+ * 3. 绘制双角度 Fresnel 高光渐变描边（API 26+ 全版本支持）。
  */
 fun Modifier.liquidGlass(
     shape: Shape = RoundedCornerShape(16.dp),
     style: GlassStyle = GlassStyle.Card,
     tint: Color = Color.Unspecified,
     borderColor: Color = Color.Unspecified,
-    enableBackdrop: Boolean = true,
+    @Suppress("UNUSED_PARAMETER") enableBackdrop: Boolean = true,
 ): Modifier = composed {
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val defaultBase = if (isDark) Color(0xFF1A222D) else Color(0xFFF7FAFF)
@@ -244,44 +199,18 @@ fun Modifier.liquidGlass(
     } else {
         defaultBase.copy(alpha = if (isDark) style.darkAlpha else style.lightAlpha)
     }
-    val backdropFallbackBg = MaterialTheme.colorScheme.background
-    val backdrop = if (enableBackdrop) LocalGlassBackdrop.current else null
-    val sampleLayer = if (backdrop != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        rememberGraphicsLayer()
-    } else {
-        null
-    }
 
-    var selfPosInRoot by remember { mutableStateOf(Offset.Zero) }
     val density = LocalDensity.current
-    val blurPx = with(density) { style.blurRadius.toPx() }
     val bevelPx = with(density) { style.bevelWidth.toPx() }
-    val refractionPx = with(density) { style.refractionStrength.toPx() }
     val borderPx = with(density) { style.borderWidth.toPx() }
 
-    val surfaceShaderHolder = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            AgslShaders.createSurfaceShader()
-        } else {
-            null
-        }
-    }
-    val backdropShaderHolder = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            AgslShaders.createBackdropRefractionShader()
-        } else {
-            null
-        }
-    }
-
     this
-        .onGloballyPositioned { coords ->
-            if (coords.isAttached) {
-                selfPosInRoot = coords.positionInRoot()
-            }
-        }
         .clip(shape)
         .drawWithCache {
+            val safeW = size.width.coerceAtLeast(1f)
+            val safeH = size.height.coerceAtLeast(1f)
+            val endOffset = Offset(safeW, safeH)
+
             val outline = shape.createOutline(size, layoutDirection, this)
             val cornerRadiusPx = extractCornerRadius(outline, size)
             val clipPath = Path().apply {
@@ -296,16 +225,16 @@ fun Modifier.liquidGlass(
             val baseAlpha = resolvedTint.alpha.coerceIn(0.08f, 0.94f)
             val baseColor = resolvedTint.copy(alpha = 1f)
             val highlightTint = if (isDark) {
-                Color.White.copy(alpha = (baseAlpha * 0.22f).coerceAtMost(0.28f))
+                Color.White.copy(alpha = (baseAlpha * 0.24f).coerceAtMost(0.30f))
             } else {
-                Color.White.copy(alpha = (baseAlpha * 0.55f).coerceAtMost(0.72f))
+                Color.White.copy(alpha = (baseAlpha * 0.58f).coerceAtMost(0.75f))
             }
             val fillBrush = Brush.linearGradient(
-                0f to baseColor.copy(alpha = (baseAlpha * 1.04f).coerceAtMost(0.95f)),
+                0f to baseColor.copy(alpha = (baseAlpha * 1.05f).coerceAtMost(0.95f)),
                 0.45f to baseColor.copy(alpha = (baseAlpha * 0.88f).coerceAtLeast(0.06f)),
                 1f to baseColor.copy(alpha = (baseAlpha * 0.96f).coerceAtMost(0.92f)),
                 start = Offset.Zero,
-                end = Offset(size.width, size.height),
+                end = endOffset,
             )
             val sheenBrush = Brush.linearGradient(
                 0f to highlightTint,
@@ -313,14 +242,14 @@ fun Modifier.liquidGlass(
                 0.72f to Color.Transparent,
                 1f to highlightTint.copy(alpha = highlightTint.alpha * 0.45f),
                 start = Offset.Zero,
-                end = Offset(size.width, size.height),
+                end = endOffset,
             )
 
-            // 边缘高光描边（Fresnel 双高光：左上亮白，中部柔和，右下冷色反光）
+            // 边缘高光描边（Fresnel 双高光：左上亮白，中部冷色棱镜微光，右下柔和反光）
             val spec = style.specularIntensity
-            val topRimAlpha = (if (isDark) 0.42f else 0.78f) * spec
-            val midRimAlpha = (if (isDark) 0.10f else 0.24f) * spec
-            val bottomRimAlpha = (if (isDark) 0.26f else 0.52f) * spec
+            val topRimAlpha = (if (isDark) 0.44f else 0.80f) * spec
+            val midRimAlpha = (if (isDark) 0.12f else 0.26f) * spec
+            val bottomRimAlpha = (if (isDark) 0.28f else 0.54f) * spec
             val rimBrush = if (borderColor != Color.Unspecified) {
                 Brush.linearGradient(
                     listOf(
@@ -329,7 +258,7 @@ fun Modifier.liquidGlass(
                         borderColor.copy(alpha = borderColor.alpha * 0.8f),
                     ),
                     start = Offset.Zero,
-                    end = Offset(size.width, size.height),
+                    end = endOffset,
                 )
             } else {
                 Brush.linearGradient(
@@ -338,19 +267,17 @@ fun Modifier.liquidGlass(
                     0.65f to Color(0xFFD6C8FF).copy(alpha = midRimAlpha.coerceIn(0f, 1f)),
                     1f to Color.White.copy(alpha = bottomRimAlpha.coerceIn(0f, 1f)),
                     start = Offset.Zero,
-                    end = Offset(size.width, size.height),
+                    end = endOffset,
                 )
             }
 
-            // Android 13+ AGSL 表面液态玻璃光泽画刷
+            // Android 13+ AGSL 表面液态玻璃曲面高光与色散画刷
             val agslSurfaceBrush = if (
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                surfaceShaderHolder != null &&
-                size.width > 1f &&
-                size.height > 1f
+                size.width > 2f &&
+                size.height > 2f
             ) {
-                AgslShaders.configureSurfaceShader(
-                    shader = surfaceShaderHolder,
+                AgslShaders.createConfiguredSurfaceBrush(
                     width = size.width,
                     height = size.height,
                     cornerRadius = cornerRadiusPx,
@@ -362,95 +289,52 @@ fun Modifier.liquidGlass(
                 null
             }
 
-            // 配置采样层的 RenderEffect（API 33+ 折射+模糊，API 31-32 模糊）
-            if (sampleLayer != null && size.width > 1f && size.height > 1f && blurPx > 0.5f) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && backdropShaderHolder != null) {
-                    AgslShaders.configureBackdropEffect(
-                        layer = sampleLayer,
-                        shader = backdropShaderHolder,
-                        width = size.width,
-                        height = size.height,
-                        cornerRadius = cornerRadiusPx,
-                        bevelWidth = bevelPx.coerceAtMost(min(size.width, size.height) * 0.45f),
-                        refraction = refractionPx,
-                        aberration = style.chromaticAberration,
-                        blurRadius = blurPx,
-                    )
-                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    Api31Blur.applyBlur(sampleLayer, blurPx)
-                }
-            }
-
             onDrawWithContent {
+                if (size.width <= 0f || size.height <= 0f) {
+                    this@onDrawWithContent.drawContent()
+                    return@onDrawWithContent
+                }
                 clipPath(clipPath) {
-                    val canSampleBackdrop = backdrop != null &&
-                        sampleLayer != null &&
-                        backdrop.hasContent &&
-                        !backdrop.isRecording &&
-                        backdrop.activeGlassDepth == 0 &&
-                        size.width > 1f &&
-                        size.height > 1f
-
-                    // 1. 实时背景采样 + 透镜折射 + 高斯模糊（Android 12+ / 13+）
-                    if (canSampleBackdrop && backdrop != null && sampleLayer != null) {
-                        // 读取 drawTick 确保背景更新时触发重绘
-                        val tick = backdrop.drawTick
-                        if (tick >= 0f) {
-                            val relX = selfPosInRoot.x - backdrop.originInRoot.x
-                            val relY = selfPosInRoot.y - backdrop.originInRoot.y
-                            sampleLayer.record {
-                                drawRect(backdropFallbackBg)
-                                translate(-relX, -relY) {
-                                    drawLayer(backdrop.layer)
-                                }
-                            }
-                            drawLayer(sampleLayer)
-                        }
-                    }
-
-                    // 2. 液态玻璃半透明染色层 + 斜向光泽层
+                    // 1. 液态玻璃半透明染色层 + 斜向光泽层
                     drawRect(brush = fillBrush)
                     drawRect(brush = sheenBrush)
 
-                    // 3. Android 13+ AGSL 曲面透镜高光与色散层
+                    // 2. Android 13+ AGSL 曲面透镜高光与色散层
                     if (agslSurfaceBrush != null) {
                         drawRect(brush = agslSurfaceBrush)
                     }
 
-                    // 4. 组件自身内容（标记已处于玻璃层内部，避免内嵌子玻璃重复穿透采样背景层）
-                    if (backdrop != null) backdrop.activeGlassDepth += 1
-                    try {
-                        this@onDrawWithContent.drawContent()
-                    } finally {
-                        if (backdrop != null) backdrop.activeGlassDepth -= 1
-                    }
+                    // 3. 组件自身内容
+                    this@onDrawWithContent.drawContent()
 
-                    // 5. 边缘 Fresnel 折射高光描边
-                    if (borderPx > 0f) {
+                    // 4. 边缘 Fresnel 折射高光描边
+                    if (borderPx > 0f && size.width > borderPx && size.height > borderPx) {
                         when (outline) {
                             is Outline.Rounded -> {
                                 val rr = outline.roundRect
-                                drawRoundRect(
-                                    brush = rimBrush,
-                                    topLeft = Offset(rr.left + borderPx * 0.5f, rr.top + borderPx * 0.5f),
-                                    size = Size(
-                                        (rr.width - borderPx).coerceAtLeast(0f),
-                                        (rr.height - borderPx).coerceAtLeast(0f),
-                                    ),
-                                    cornerRadius = CornerRadius(
-                                        max(0f, rr.topLeftCornerRadius.x - borderPx * 0.5f),
-                                        max(0f, rr.topLeftCornerRadius.y - borderPx * 0.5f),
-                                    ),
-                                    style = Stroke(width = borderPx),
-                                )
+                                if (rr.width > borderPx && rr.height > borderPx) {
+                                    drawRoundRect(
+                                        brush = rimBrush,
+                                        topLeft = Offset(rr.left + borderPx * 0.5f, rr.top + borderPx * 0.5f),
+                                        size = Size(
+                                            (rr.width - borderPx).coerceAtLeast(1f),
+                                            (rr.height - borderPx).coerceAtLeast(1f),
+                                        ),
+                                        cornerRadius = CornerRadius(
+                                            max(0f, rr.topLeftCornerRadius.x - borderPx * 0.5f),
+                                            max(0f, rr.topLeftCornerRadius.y - borderPx * 0.5f),
+                                        ),
+                                        style = Stroke(width = borderPx),
+                                    )
+                                }
                             }
                             is Outline.Rectangle -> {
                                 drawRect(
                                     brush = rimBrush,
                                     topLeft = Offset(borderPx * 0.5f, borderPx * 0.5f),
                                     size = Size(
-                                        (size.width - borderPx).coerceAtLeast(0f),
-                                        (size.height - borderPx).coerceAtLeast(0f),
+                                        (size.width - borderPx).coerceAtLeast(1f),
+                                        (size.height - borderPx).coerceAtLeast(1f),
                                     ),
                                     style = Stroke(width = borderPx),
                                 )
@@ -502,6 +386,7 @@ fun GlassBox(
 
 private fun extractCornerRadius(outline: Outline, size: Size): Float {
     val maxR = min(size.width, size.height) * 0.5f
+    if (maxR <= 0f) return 0f
     return when (outline) {
         is Outline.Rounded -> {
             val rr: RoundRect = outline.roundRect
@@ -512,21 +397,9 @@ private fun extractCornerRadius(outline: Outline, size: Size): Float {
     }
 }
 
-@RequiresApi(Build.VERSION_CODES.S)
-private object Api31Blur {
-    fun applyBlur(layer: GraphicsLayer, blurRadius: Float) {
-        val r = blurRadius.coerceAtLeast(1f)
-        layer.renderEffect = AndroidRenderEffect.createBlurEffect(
-            r,
-            r,
-            Shader.TileMode.CLAMP,
-        ).asComposeRenderEffect()
-    }
-}
-
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
 private object AgslShaders {
-    // AGSL 表面液态玻璃曲面高光与边缘色散着色器
+    // AGSL 表面液态玻璃曲面高光与边缘色散着色器（全数值安全，无 pow(0, y) 或除以 0）
     private const val SURFACE_GLASS_SKSL = """
         uniform float2 size;
         uniform float cornerRadius;
@@ -540,33 +413,42 @@ private object AgslShaders {
         }
 
         half4 main(float2 fragCoord) {
-            float2 halfSize = size * 0.5;
+            float2 halfSize = max(size * 0.5, float2(1.0, 1.0));
             float2 p = fragCoord - halfSize;
-            float r = min(cornerRadius, min(halfSize.x, halfSize.y));
+            float r = clamp(cornerRadius, 0.0, min(halfSize.x, halfSize.y));
             float d = sdRoundBox(p, halfSize, r);
 
             float bw = max(bevelWidth, 2.0);
             // 边缘斜面因子：在 [-bw, 0] 区间内从 0 平滑升至 1
             float edge = smoothstep(-bw, 0.0, d);
 
-            // 计算曲面法线方向
+            // 计算曲面法线方向（避免中心点 0/0 NaN）
             float2 inner = max(abs(p) - (halfSize - float2(r)), 0.0);
-            float2 grad = (length(inner) > 0.001)
-                ? normalize(inner) * sign(p)
-                : normalize(p / max(halfSize, float2(1.0)));
+            float innerLen = length(inner);
+            float2 safeP = p / halfSize;
+            float safePLen = max(length(safeP), 0.0001);
+            float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+            float2 grad = (innerLen > 0.001)
+                ? (inner / innerLen) * signP
+                : (safeP / safePLen);
 
             // 模拟水滴形玻璃边缘的 3D 倾角
             float2 n2d = grad * edge * 0.85;
             float nz = sqrt(max(0.04, 1.0 - dot(n2d, n2d)));
             float3 normal = normalize(float3(n2d.x, n2d.y, nz));
 
-            // 主光源（左上）与副反光（右下）
-            float3 lightTopLeft = normalize(float3(-0.62, -0.74, 0.52));
-            float3 lightBottomRight = normalize(float3(0.58, 0.68, 0.45));
+            // 主光源（左上）与副反光（右下），已预先归一化
+            float3 lightTopLeft = float3(-0.489, -0.584, 0.648);
+            float3 lightBottomRight = float3(0.493, 0.578, 0.650);
 
-            float specPrimary = pow(max(0.0, dot(normal, lightTopLeft)), 5.0);
-            float specSecondary = pow(max(0.0, dot(normal, lightBottomRight)), 6.0);
-            float fresnel = pow(1.0 - nz, 2.4);
+            float d1 = max(0.0, dot(normal, lightTopLeft));
+            float d2 = max(0.0, dot(normal, lightBottomRight));
+            float d1_2 = d1 * d1;
+            float d2_2 = d2 * d2;
+            float specPrimary = d1_2 * d1_2 * d1;
+            float specSecondary = d2_2 * d2_2 * d2_2;
+            float oneMinusNz = clamp(1.0 - nz, 0.0, 1.0);
+            float fresnel = oneMinusNz * oneMinusNz;
 
             // 边缘微小棱镜色散（冷暖微光）
             float3 prismColor = mix(
@@ -576,73 +458,18 @@ private object AgslShaders {
             );
 
             // 顶边内侧柔光流线
-            float topGlow = smoothstep(size.y * 0.42, 0.0, fragCoord.y) * 0.07;
+            float topGlow = smoothstep(max(size.y * 0.42, 1.0), 0.0, fragCoord.y) * 0.07;
 
-            float rimStrength = (specPrimary * 0.34 + specSecondary * 0.18 + fresnel * 0.28) * edge;
-            float darkScale = mix(1.0, 0.68, isDark);
-            float alpha = clamp((rimStrength + topGlow) * intensity * darkScale, 0.0, 0.55);
+            float rimStrength = (specPrimary * 0.36 + specSecondary * 0.20 + fresnel * 0.30) * edge;
+            float darkScale = mix(1.0, 0.70, isDark);
+            float alpha = clamp((rimStrength + topGlow) * intensity * darkScale, 0.0, 0.56);
 
-            float3 finalRgb = mix(prismColor, float3(1.0), 0.65) * alpha;
+            float3 finalRgb = mix(prismColor, float3(1.0, 1.0, 1.0), 0.65) * alpha;
             return half4(half3(finalRgb), half(alpha));
         }
     """
 
-    // AGSL 背景实时透镜折射 + 边缘色散着色器
-    private const val BACKDROP_REFRACTION_SKSL = """
-        uniform shader content;
-        uniform float2 size;
-        uniform float cornerRadius;
-        uniform float bevelWidth;
-        uniform float refraction;
-        uniform float aberration;
-
-        float sdRoundBox(float2 p, float2 b, float r) {
-            float2 q = abs(p) - b + float2(r);
-            return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
-        }
-
-        half4 main(float2 fragCoord) {
-            float2 halfSize = size * 0.5;
-            float2 p = fragCoord - halfSize;
-            float r = min(cornerRadius, min(halfSize.x, halfSize.y));
-            float d = sdRoundBox(p, halfSize, r);
-
-            float bw = max(bevelWidth, 2.0);
-            float edge = smoothstep(-bw, 0.0, d);
-            float lensCurve = edge * edge * (3.0 - 2.0 * edge);
-
-            float2 inner = max(abs(p) - (halfSize - float2(r)), 0.0);
-            float2 normal = (length(inner) > 0.001)
-                ? normalize(inner) * sign(p)
-                : normalize(p / max(halfSize, float2(1.0)));
-
-            // 边缘向内折射位移
-            float2 shift = -normal * lensCurve * refraction;
-            float2 chromaShift = normal * lensCurve * aberration;
-
-            float2 minCoord = float2(1.0, 1.0);
-            float2 maxCoord = max(size - float2(1.0, 1.0), minCoord);
-
-            float2 uvR = clamp(fragCoord + shift + chromaShift, minCoord, maxCoord);
-            float2 uvG = clamp(fragCoord + shift, minCoord, maxCoord);
-            float2 uvB = clamp(fragCoord + shift - chromaShift, minCoord, maxCoord);
-
-            half4 cR = content.eval(uvR);
-            half4 cG = content.eval(uvG);
-            half4 cB = content.eval(uvB);
-
-            return half4(cR.r, cG.g, cB.b, cG.a);
-        }
-    """
-
-    fun createSurfaceShader(): RuntimeShader? =
-        runCatching { RuntimeShader(SURFACE_GLASS_SKSL) }.getOrNull()
-
-    fun createBackdropRefractionShader(): RuntimeShader? =
-        runCatching { RuntimeShader(BACKDROP_REFRACTION_SKSL) }.getOrNull()
-
-    fun configureSurfaceShader(
-        shader: RuntimeShader,
+    fun createConfiguredSurfaceBrush(
         width: Float,
         height: Float,
         cornerRadius: Float,
@@ -650,6 +477,7 @@ private object AgslShaders {
         intensity: Float,
         isDark: Boolean,
     ): ShaderBrush? = runCatching {
+        val shader = RuntimeShader(SURFACE_GLASS_SKSL)
         shader.setFloatUniform("size", width, height)
         shader.setFloatUniform("cornerRadius", cornerRadius)
         shader.setFloatUniform("bevelWidth", bevelWidth)
@@ -657,30 +485,4 @@ private object AgslShaders {
         shader.setFloatUniform("isDark", if (isDark) 1f else 0f)
         ShaderBrush(shader)
     }.getOrNull()
-
-    fun configureBackdropEffect(
-        layer: GraphicsLayer,
-        shader: RuntimeShader,
-        width: Float,
-        height: Float,
-        cornerRadius: Float,
-        bevelWidth: Float,
-        refraction: Float,
-        aberration: Float,
-        blurRadius: Float,
-    ) {
-        runCatching {
-            shader.setFloatUniform("size", width, height)
-            shader.setFloatUniform("cornerRadius", cornerRadius)
-            shader.setFloatUniform("bevelWidth", bevelWidth)
-            shader.setFloatUniform("refraction", refraction)
-            shader.setFloatUniform("aberration", aberration)
-            val refractionEffect = AndroidRenderEffect.createRuntimeShaderEffect(shader, "content")
-            val r = blurRadius.coerceAtLeast(1f)
-            val blurEffect = AndroidRenderEffect.createBlurEffect(r, r, Shader.TileMode.CLAMP)
-            // 先对底层画面做高斯模糊，再通过透镜折射着色器对边缘做弯曲折射与色散
-            layer.renderEffect = AndroidRenderEffect.createChainEffect(refractionEffect, blurEffect)
-                .asComposeRenderEffect()
-        }
-    }
 }

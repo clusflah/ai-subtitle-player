@@ -73,7 +73,7 @@ val LightPopupColors = PopupColors(
     selectedBg = Color(0xCCFBEBD6),
     selectedText = Color(0xFFB0661A),
     scrim = 0.24f,
-    shadow = 12.dp,
+    shadow = 0.dp,
     dark = false,
 )
 

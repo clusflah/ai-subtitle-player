@@ -84,7 +84,7 @@ fun NowPlayingBar(
             ),
         shape = shape,
         tonalElevation = 0.dp,
-        shadowElevation = 8.dp,
+        shadowElevation = 0.dp,
         color = Color.Transparent,
     ) {
         Column {
