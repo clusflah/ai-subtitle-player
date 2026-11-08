@@ -773,8 +773,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 val shown = if (!showingHost) field else TextFieldValue(tab.pageUrl?.let { Uri.parse(it).host?.removePrefix("www.") } ?: address)
                 // 电视：地址栏是个按钮，焦点经过时不弹输入法；按确认键用手机输入
                 if (tv) Box(
-                    Modifier.weight(1f).height(40.dp).clip(RoundedCornerShape(20.dp))
-                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    Modifier.weight(1f).height(40.dp)
+                        .liquidGlass(shape = RoundedCornerShape(20.dp), style = GlassStyle.Pill, enableBackdrop = false)
                         .focusRequester(toolbarFocus)
                         .clickable { dialog = WebDialog.ADDRESS }
                         .padding(horizontal = 14.dp),
@@ -801,7 +801,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
                     keyboardActions = KeyboardActions(onGo = { focusManager.clearFocus(); go(field.text) }),
-                    modifier = Modifier.weight(1f).height(40.dp).clip(RoundedCornerShape(20.dp))
+                    modifier = Modifier.weight(1f).height(40.dp)
+                        .liquidGlass(shape = RoundedCornerShape(20.dp), style = GlassStyle.Pill, enableBackdrop = false)
                         // 实体键盘、电视遥控器的确认键：输入法的「前往」管不到
                         .onPreviewKeyEvent { e ->
                             val enter = e.key == androidx.compose.ui.input.key.Key.Enter || e.key == androidx.compose.ui.input.key.Key.NumPadEnter
@@ -811,7 +812,6 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                             }
                             enter && editing
                         }
-                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
                         .onFocusChanged { f ->
                             if (f.isFocused && !editing) {
                                 val full = tab.pageUrl ?: address
@@ -981,11 +981,11 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     blockedNav?.let { url ->
                         LaunchedEffect(url) { delay(6_000); if (blockedNav == url) blockedNav = null }
                         androidx.compose.material3.Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.inverseSurface,
-                            contentColor = MaterialTheme.colorScheme.inverseOnSurface,
-                            shadowElevation = 6.dp,
-                            modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp),
+                            color = Color.Transparent,
+                            contentColor = Color.White,
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).fillMaxWidth()
+                                .liquidGlass(shape = RoundedCornerShape(14.dp), style = GlassStyle.Floating, tint = Color(0x8810141C), enableBackdrop = false),
                         ) {
                             Row(Modifier.padding(start = 14.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text(
@@ -1009,9 +1009,14 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                         androidx.compose.material3.Surface(
                             onClick = ::openReader,
                             shape = RoundedCornerShape(24.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            shadowElevation = 6.dp,
-                            modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
+                            color = Color.Transparent,
+                            modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp)
+                                .liquidGlass(
+                                    shape = RoundedCornerShape(24.dp),
+                                    style = GlassStyle.Floating,
+                                    tint = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
+                                    enableBackdrop = false,
+                                ),
                         ) {
                             Row(Modifier.padding(start = 14.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Icon(AppIcons.MenuBook, null, Modifier.size(18.dp))
@@ -1156,12 +1161,12 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     // 横着的视频转成竖屏时 WebView 会直接退出全屏：只有竖视频才给切换横竖屏
                     if (videoAspect?.let { it < 1f } == true) IconButton(
                         onClick = { fullscreenLandscape = !fullscreenLandscape },
-                        modifier = Modifier.clip(RoundedCornerShape(50)).background(Color(0x66000000)),
+                        modifier = Modifier.liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Floating, tint = Color(0x660E121A), enableBackdrop = false),
                     ) { Icon(AppIcons.ScreenRotation, if (fullscreenLandscape) "切换到竖屏" else "切换到横屏", tint = Color.White) }
                     Spacer(Modifier.size(8.dp))
                     IconButton(
                         onClick = ::exitFullscreen,
-                        modifier = Modifier.clip(RoundedCornerShape(50)).background(Color(0x66000000)),
+                        modifier = Modifier.liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Floating, tint = Color(0x660E121A), enableBackdrop = false),
                     ) { Icon(AppIcons.FullscreenExit, "退出全屏", tint = Color.White) }
                 }
             }
@@ -1368,7 +1373,8 @@ private fun androidx.compose.foundation.layout.BoxScope.WebSubtitles(
         Column(
             (if (below != null) Modifier.align(Alignment.TopCenter).padding(top = below + 8.dp, start = 24.dp, end = 24.dp)
             else Modifier.align(Alignment.BottomCenter).padding(bottom = bottom, start = 24.dp, end = 24.dp)).widthIn(max = 520.dp)
-                .clip(RoundedCornerShape(8.dp)).background(Color(0xCC000000)).padding(horizontal = 12.dp, vertical = 8.dp),
+                .liquidGlass(shape = RoundedCornerShape(12.dp), style = GlassStyle.Floating, tint = Color(0x8810141C), enableBackdrop = false)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
             Text(state.status, color = Color.White, fontSize = 13.sp)
             if (state.directUrl != null || state.canCapture) {
@@ -1450,9 +1456,9 @@ private fun PickerBar(
     modifier: Modifier = Modifier,
 ) {
     androidx.compose.material3.Surface(
-        modifier = modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        shadowElevation = 8.dp,
+        modifier = modifier.fillMaxWidth()
+            .liquidGlass(shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp), style = GlassStyle.Bar, enableBackdrop = false),
+        color = Color.Transparent,
     ) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
             if (picked == null) {

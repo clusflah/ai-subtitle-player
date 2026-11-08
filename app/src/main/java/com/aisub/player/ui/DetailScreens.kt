@@ -31,8 +31,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -53,17 +55,32 @@ internal fun DetailScaffold(
     actions: @Composable () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
-        topBar = {
-            TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
-                navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回") } },
-                title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                actions = { actions() },
-            )
-        },
-    ) { padding -> Box(Modifier.padding(padding).fillMaxSize()) { content() } }
+    GlassBackdropBox { backdrop ->
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
+            topBar = {
+                TopAppBar(
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+                    modifier = Modifier.liquidGlass(
+                        shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
+                        style = GlassStyle.Bar,
+                    ),
+                    navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回") } },
+                    title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    actions = { actions() },
+                )
+            },
+        ) { padding ->
+            Box(
+                Modifier
+                    .padding(padding)
+                    .fillMaxSize()
+                    .glassBackdropSource(backdrop),
+            ) {
+                content()
+            }
+        }
+    }
 }
 
 /** 本地目录：子文件夹 + 媒体文件。 */

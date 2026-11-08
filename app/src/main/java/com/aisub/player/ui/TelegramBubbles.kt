@@ -168,7 +168,9 @@ private fun DateChip(date: Int) {
     Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
         Text(
             text, style = MaterialTheme.typography.labelMedium, color = Color.White,
-            modifier = Modifier.background(Color(0x66000000), RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 3.dp),
+            modifier = Modifier
+                .liquidGlass(shape = RoundedCornerShape(12.dp), style = GlassStyle.Pill, tint = Color(0x660D1117), enableBackdrop = false)
+                .padding(horizontal = 10.dp, vertical = 3.dp),
         )
     }
 }
@@ -212,7 +214,7 @@ private fun Bubble(
         }
         Column(
             Modifier.then(if (media) Modifier.width(260.dp) else Modifier.widthIn(min = 64.dp, max = 300.dp))
-                .clip(shape).background(background)
+                .liquidGlass(shape = shape, style = GlassStyle.Card, tint = background.copy(alpha = 0.72f), enableBackdrop = false)
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick),
         ) {
             val header = Modifier.padding(horizontal = 10.dp).padding(top = 6.dp)
@@ -239,7 +241,12 @@ private fun Bubble(
             when {
                 media -> Box(Modifier.padding(top = if (hasHeader) 6.dp else 0.dp)) {
                     MediaThumb(v, meta?.mediaWidth ?: 0, meta?.mediaHeight ?: 0, watched)
-                    if (text.isEmpty()) Footer(footer, Color.White, Modifier.align(Alignment.BottomEnd).padding(6.dp).background(Color(0x66000000), RoundedCornerShape(8.dp)).padding(horizontal = 6.dp, vertical = 1.dp))
+                    if (text.isEmpty()) Footer(
+                        footer, Color.White,
+                        Modifier.align(Alignment.BottomEnd).padding(6.dp)
+                            .liquidGlass(shape = RoundedCornerShape(8.dp), style = GlassStyle.Pill, tint = Color(0x660D1117), enableBackdrop = false)
+                            .padding(horizontal = 6.dp, vertical = 1.dp),
+                    )
                 }
                 v.kind == TgKind.FILE -> Row(
                     Modifier.padding(start = 10.dp, end = 12.dp, top = if (hasHeader) 6.dp else 8.dp, bottom = if (text.isEmpty()) 0.dp else 2.dp),
@@ -268,7 +275,14 @@ private fun Bubble(
                 meta.reactions.forEach { (emoji, count) ->
                     Text(
                         "$emoji $count", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(12.dp)).padding(horizontal = 8.dp, vertical = 3.dp),
+                        modifier = Modifier
+                            .liquidGlass(
+                                shape = RoundedCornerShape(12.dp),
+                                style = GlassStyle.Pill,
+                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                                enableBackdrop = false,
+                            )
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
                     )
                 }
             }
@@ -295,13 +309,19 @@ private fun MediaThumb(v: TgVideo, width: Int, height: Int, watched: Pair<Long, 
     Box(Modifier.fillMaxWidth().aspectRatio(ratio).background(MaterialTheme.colorScheme.surfaceContainerHigh)) {
         (thumb ?: mini)?.let { Image(it, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
         if (v.isVideo) {
-            Box(Modifier.align(Alignment.Center).size(48.dp).clip(CircleShape).background(Color(0x66000000)), contentAlignment = Alignment.Center) {
+            Box(
+                Modifier.align(Alignment.Center).size(48.dp)
+                    .liquidGlass(shape = CircleShape, style = GlassStyle.Floating, tint = Color(0x660D1117), enableBackdrop = false),
+                contentAlignment = Alignment.Center,
+            ) {
                 Icon(AppIcons.PlayArrow, "播放", tint = Color.White, modifier = Modifier.size(30.dp))
             }
             val label = listOfNotNull(v.durationSec.takeIf { it > 0 }?.let { formatDuration(it * 1000L) }, v.size.takeIf { it > 0 }?.let(::formatSize)).joinToString(" · ")
             if (label.isNotEmpty()) Text(
                 label, style = MaterialTheme.typography.labelSmall, color = Color.White,
-                modifier = Modifier.align(Alignment.TopStart).padding(6.dp).background(Color(0x66000000), RoundedCornerShape(8.dp)).padding(horizontal = 6.dp, vertical = 1.dp),
+                modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+                    .liquidGlass(shape = RoundedCornerShape(8.dp), style = GlassStyle.Pill, tint = Color(0x660D1117), enableBackdrop = false)
+                    .padding(horizontal = 6.dp, vertical = 1.dp),
             )
             val duration = watched?.second?.takeIf { it > 0 } ?: (v.durationSec * 1000L)
             if (watched != null && duration > 0 && watched.first > 0) {

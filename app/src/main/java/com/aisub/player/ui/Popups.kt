@@ -62,34 +62,34 @@ data class PopupColors(
 
 val LightPopupColors = PopupColors(
     page = Color(0xFFF3F2EF),
-    surface = Color(0xFFFFFFFF),
-    card = Color(0xFFF4F3F0),
-    button = Color(0xFFE9E7E3),
-    textPrimary = Color(0xFF242424),
-    textSecondary = Color(0xFF858585),
-    divider = Color(0xFFEAE8E4),
+    surface = Color(0xCCFFFFFF),
+    card = Color(0xB8F4F5F8),
+    button = Color(0xCCE6E8EE),
+    textPrimary = Color(0xFF1F2226),
+    textSecondary = Color(0xFF6E737B),
+    divider = Color(0x331F2226),
     accent = Color(0xFFC47B20),
     disabled = Color(0xFFC8C6C1),
-    selectedBg = Color(0xFFFBEBD6),
+    selectedBg = Color(0xCCFBEBD6),
     selectedText = Color(0xFFB0661A),
-    scrim = 0.35f,
-    shadow = 8.dp,
+    scrim = 0.24f,
+    shadow = 12.dp,
     dark = false,
 )
 
 val DarkPopupColors = PopupColors(
     page = Color(0xFF171819),
-    surface = Color(0xFF292B2C),
-    card = Color(0xFF414344),
-    button = Color(0xFF55585A),
+    surface = Color(0xB822262E),
+    card = Color(0x99353B45),
+    button = Color(0xB348505C),
     textPrimary = Color(0xFFFFFFFF),
-    textSecondary = Color(0xFFAAAAAA),
-    divider = Color(0xFF484A4A),
+    textSecondary = Color(0xFFB4BCC8),
+    divider = Color(0x38FFFFFF),
     accent = Color(0xFFE49A36),
     disabled = Color(0xFF666666),
-    selectedBg = Color(0xFF4A3B2A),
+    selectedBg = Color(0xB34A3B2A),
     selectedText = Color(0xFFF2AA4A),
-    scrim = 0.6f,
+    scrim = 0.42f,
     shadow = 0.dp,
     dark = true,
 )
@@ -149,11 +149,13 @@ fun AppSheet(
         containerColor = Color.Transparent, contentColor = c.textPrimary, tonalElevation = 0.dp,
         scrimColor = Color.Black.copy(alpha = c.scrim), dragHandle = null,
     ) {
-        // 悬浮的完整圆角框，不贴屏幕边缘
+        WindowBlurEffect(blurBehindRadius = 56, backgroundBlurRadius = 72)
+        // 悬浮的完整圆角液态玻璃框，不贴屏幕边缘
         val shape = RoundedCornerShape(28.dp)
         Column(
             Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp).fillMaxWidth()
-                .shadow(c.shadow, shape).clip(shape).background(c.surface),
+                .shadow(c.shadow, shape)
+                .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface),
         ) {
             Box(Modifier.align(Alignment.CenterHorizontally)) { BottomSheetDefaults.DragHandle() }
             content()
@@ -171,10 +173,21 @@ fun AppMenu(
     content: @Composable ColumnScope.() -> Unit,
 ) = PopupTheme {
     val c = LocalPopupColors.current
+    val shape = RoundedCornerShape(18.dp)
     DropdownMenu(
-        expanded = expanded, onDismissRequest = onDismissRequest, modifier = modifier, offset = offset,
-        scrollState = scrollState, shape = MaterialTheme.shapes.medium, containerColor = c.surface,
-        tonalElevation = 0.dp, shadowElevation = c.shadow, content = content,
+        expanded = expanded,
+        onDismissRequest = onDismissRequest,
+        modifier = modifier.liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface),
+        offset = offset,
+        scrollState = scrollState,
+        shape = shape,
+        containerColor = Color.Transparent,
+        tonalElevation = 0.dp,
+        shadowElevation = c.shadow,
+        content = {
+            WindowBlurEffect(blurBehindRadius = 40, backgroundBlurRadius = 56)
+            content()
+        },
     )
 }
 
@@ -190,10 +203,26 @@ fun AppDialog(
     properties: DialogProperties = DialogProperties(),
 ) = PopupTheme {
     val c = LocalPopupColors.current
+    val shape = RoundedCornerShape(28.dp)
     androidx.compose.material3.AlertDialog(
-        onDismissRequest = onDismissRequest, confirmButton = confirmButton, modifier = modifier,
-        dismissButton = dismissButton, icon = icon, title = title, text = text,
-        containerColor = c.surface, titleContentColor = c.textPrimary, textContentColor = c.textSecondary,
-        iconContentColor = c.accent, tonalElevation = 0.dp, properties = properties,
+        onDismissRequest = onDismissRequest,
+        confirmButton = {
+            WindowBlurEffect(blurBehindRadius = 56, backgroundBlurRadius = 72)
+            confirmButton()
+        },
+        modifier = modifier
+            .shadow(c.shadow, shape)
+            .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface),
+        dismissButton = dismissButton,
+        icon = icon,
+        title = title,
+        text = text,
+        shape = shape,
+        containerColor = Color.Transparent,
+        titleContentColor = c.textPrimary,
+        textContentColor = c.textSecondary,
+        iconContentColor = c.accent,
+        tonalElevation = 0.dp,
+        properties = properties,
     )
 }

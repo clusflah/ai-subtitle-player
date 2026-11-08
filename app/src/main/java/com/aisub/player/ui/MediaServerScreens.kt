@@ -205,11 +205,13 @@ private fun BoxScope.WatchBadge(item: ServerItem) {
     when {
         item.isFolder && item.unwatchedLeaves > 0 && item.type != "artist" && item.type != "album" -> Text(
             item.unwatchedLeaves.toString(), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold,
-            modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).clip(RoundedCornerShape(50)).background(Orange)
+            modifier = Modifier.align(Alignment.TopEnd).padding(4.dp)
+                .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Orange.copy(alpha = 0.82f), enableBackdrop = false)
                 .padding(horizontal = 6.dp, vertical = 1.dp),
         )
         item.watched -> Box(
-            Modifier.align(Alignment.TopEnd).padding(4.dp).size(18.dp).clip(CircleShape).background(Color(0xCC000000)),
+            Modifier.align(Alignment.TopEnd).padding(4.dp).size(18.dp)
+                .liquidGlass(shape = CircleShape, style = GlassStyle.Pill, tint = Color(0x880D1117), enableBackdrop = false),
             contentAlignment = Alignment.Center,
         ) { Icon(AppIcons.Check, "已看", tint = Orange, modifier = Modifier.size(13.dp)) }
         !item.isFolder && item.viewOffsetMs == 0L && item.type in setOf("movie", "episode") -> Box(

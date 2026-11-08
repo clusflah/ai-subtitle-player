@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -42,7 +43,14 @@ fun SubtitleLine(text: String, style: LineStyle, globalScale: Float, pinyin: Boo
     val size = (18 * style.scale * globalScale).sp
     val weight = if (style.bold) FontWeight.Medium else FontWeight.Normal
     val box = if (style.background > 0f) {
-        modifier.background(Color.Black.copy(alpha = style.background)).padding(horizontal = 6.dp, vertical = 2.dp)
+        modifier
+            .liquidGlass(
+                shape = RoundedCornerShape(8.dp),
+                style = GlassStyle.Pill,
+                tint = Color.Black.copy(alpha = style.background),
+                enableBackdrop = false,
+            )
+            .padding(horizontal = 8.dp, vertical = 3.dp)
     } else {
         modifier.padding(horizontal = 6.dp, vertical = 2.dp)
     }

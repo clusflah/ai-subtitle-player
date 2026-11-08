@@ -29,6 +29,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -71,16 +72,24 @@ fun NowPlayingBar(
     }
     if (entry == null || !main.playingMusic || dismissed || player.mediaItemCount == 0 || state.playbackError != null) return
     val cover: ImageBitmap? = remember(music.cover) { music.cover?.asImageBitmap() }
+    val shape = RoundedCornerShape(18.dp)
     Surface(
-        (if (navigationBarInset) modifier.navigationBarsPadding() else modifier).padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = bottomPadding).fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        tonalElevation = 6.dp,
-        shadowElevation = 6.dp,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = (if (navigationBarInset) modifier.navigationBarsPadding() else modifier)
+            .padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = bottomPadding)
+            .fillMaxWidth()
+            .liquidGlass(
+                shape = shape,
+                style = GlassStyle.Floating,
+                tint = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.68f),
+            ),
+        shape = shape,
+        tonalElevation = 0.dp,
+        shadowElevation = 8.dp,
+        color = Color.Transparent,
     ) {
         Column {
             Row(Modifier.clickable(onClick = onOpen).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                Box(Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)), contentAlignment = Alignment.Center) {
                     if (cover != null) Image(cover, null, contentScale = ContentScale.Crop, modifier = Modifier.size(44.dp))
                     else Icon(AppIcons.MusicNote, null, tint = MaterialTheme.colorScheme.outline)
                 }
@@ -98,7 +107,7 @@ fun NowPlayingBar(
                     Icon(AppIcons.Close, "关闭", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            Box(Modifier.fillMaxWidth().height(2.dp).background(MaterialTheme.colorScheme.surfaceVariant)) {
+            Box(Modifier.fillMaxWidth().height(2.dp).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))) {
                 Box(Modifier.fillMaxWidth(progress).height(2.dp).background(Orange))
             }
         }

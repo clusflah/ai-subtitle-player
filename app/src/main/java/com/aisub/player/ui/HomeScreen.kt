@@ -31,6 +31,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -192,6 +193,7 @@ fun HomeScreen(
         barVisible = true
     }
 
+    GlassBackdropBox { backdrop ->
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -208,7 +210,11 @@ fun HomeScreen(
                 )
             } else {
             TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+                modifier = Modifier.liquidGlass(
+                    shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
+                    style = GlassStyle.Bar,
+                ),
                 title = {
                     if (searching) {
                         TextField(
@@ -280,7 +286,14 @@ fun HomeScreen(
             NowPlayingBar(main, bottomPadding = 4.dp, onOpen = { nav.push(Screen.Player) }, navigationBarInset = false)
             // 电视、横屏平板：标签放在左侧竖栏（见下面），底部不放
             if (!wide) AnimatedVisibility(barVisible, enter = slideInVertically { it }, exit = slideOutVertically { it }) {
-                NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest, tonalElevation = 0.dp) {
+                val navShape = RoundedCornerShape(26.dp)
+                NavigationBar(
+                    containerColor = Color.Transparent,
+                    tonalElevation = 0.dp,
+                    modifier = Modifier
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .liquidGlass(shape = navShape, style = GlassStyle.Floating),
+                ) {
                     Tab.entries.forEach { t ->
                         NavigationBarItem(
                             selected = tab == t,
@@ -290,7 +303,7 @@ fun HomeScreen(
                             colors = NavigationBarItemDefaults.colors(
                                 selectedIconColor = MaterialTheme.colorScheme.primary,
                                 selectedTextColor = MaterialTheme.colorScheme.primary,
-                                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                indicatorColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f),
                             ),
                         )
                     }
@@ -299,9 +312,14 @@ fun HomeScreen(
           }
         },
     ) { padding ->
-      Row(Modifier.padding(padding).fillMaxSize()) {
+      Row(Modifier.padding(top = padding.calculateTopPadding()).fillMaxSize()) {
         if (wide) {
-            NavigationRail(containerColor = MaterialTheme.colorScheme.background, modifier = Modifier.padding(end = 8.dp)) {
+            NavigationRail(
+                containerColor = Color.Transparent,
+                modifier = Modifier
+                    .padding(start = 6.dp, top = 6.dp, bottom = 6.dp, end = 8.dp)
+                    .liquidGlass(shape = RoundedCornerShape(24.dp), style = GlassStyle.Bar),
+            ) {
                 Spacer(Modifier.weight(1f))
                 Tab.entries.forEach { t ->
                     NavigationRailItem(
@@ -312,7 +330,7 @@ fun HomeScreen(
                         colors = NavigationRailItemDefaults.colors(
                             selectedIconColor = MaterialTheme.colorScheme.primary,
                             selectedTextColor = MaterialTheme.colorScheme.primary,
-                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                            indicatorColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f),
                         ),
                     )
                 }
@@ -320,7 +338,9 @@ fun HomeScreen(
             }
         }
         Box(
-            Modifier.weight(1f).fillMaxSize().nestedScroll(scrollWatcher)
+            Modifier.weight(1f).fillMaxSize()
+                .glassBackdropSource(backdrop)
+                .nestedScroll(scrollWatcher)
                 // 内容不够长、没法滚动时（比如分组都折叠了），往下拉也能叫回底部导航
                 .pointerInput(Unit) {
                     awaitEachGesture {
@@ -375,7 +395,7 @@ fun HomeScreen(
                     if (localPhotos) {
                         if (!state.hasImagePermission) EmptyState("需要照片访问权限才能显示手机里的图片", "授予权限", icon = AppIcons.Image, onButton = onRequestImagePermission)
                         else if (state.images.isEmpty()) EmptyState("手机里还没有照片", "刷新照片", icon = AppIcons.Image, onButton = lib::refreshImages)
-                        else LazyVerticalGrid(GridCells.Adaptive(if (LocalTv.current) 180.dp else 112.dp), contentPadding = PaddingValues(8.dp)) {
+                        else LazyVerticalGrid(GridCells.Adaptive(if (LocalTv.current) 180.dp else 112.dp), contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 104.dp)) {
                             itemsIndexed(state.images, key = { _, e -> e.uri }) { index, e ->
                                 NetImage(e.uri, Modifier.padding(3.dp).aspectRatio(1f).clip(MaterialTheme.shapes.small)
                                     .clickable { nav.push(Screen.ImageViewer(null, state.images.map { image ->
@@ -446,6 +466,7 @@ fun HomeScreen(
             }
         }
       }
+    }
     }
 
     when (val d = dialog) {
@@ -564,7 +585,7 @@ private fun MediaTab(
     }?.takeIf { q.isEmpty() }
 
     if (isVideo && state.videoGrid) {
-        LazyVerticalGrid(GridCells.Adaptive(if (LocalTv.current) 200.dp else 160.dp), state = gridState, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+        LazyVerticalGrid(GridCells.Adaptive(if (LocalTv.current) 200.dp else 160.dp), state = gridState, contentPadding = PaddingValues(start = 10.dp, end = 10.dp, top = 4.dp, bottom = 104.dp)) {
             if (resume != null) item(span = { GridItemSpan(maxLineSpan) }) { ResumeCard(resume) { play(listOf(resume.entry), 0) } }
             itemsIndexed(list, key = { _, e -> e.uri }) { i, e ->
                 VideoCard(e, menu(e), selected = if (selecting) e.uri in selected else null, onLongClick = { onToggle(e) }) {
@@ -573,7 +594,7 @@ private fun MediaTab(
             }
         }
     } else {
-        LazyColumn(state = listState, contentPadding = PaddingValues(vertical = 4.dp)) {
+        LazyColumn(state = listState, contentPadding = PaddingValues(top = 4.dp, bottom = 104.dp)) {
             if (resume != null) item { ResumeCard(resume) { play(listOf(resume.entry), 0) } }
             itemsIndexed(list, key = { _, e -> e.uri }) { i, e ->
                 MediaRow(e, menu(e), selected = if (selecting) e.uri in selected else null, onLongClick = { onToggle(e) }) {
@@ -589,9 +610,17 @@ private fun MediaTab(
 private fun ResumeCard(item: HistoryItem, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
-        color = MaterialTheme.colorScheme.primaryContainer,
+        color = Color.Transparent,
         shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp).tvFocusRing(MaterialTheme.shapes.large),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 6.dp, vertical = 6.dp)
+            .tvFocusRing(MaterialTheme.shapes.large)
+            .liquidGlass(
+                shape = MaterialTheme.shapes.large,
+                style = GlassStyle.Card,
+                tint = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+            ),
     ) {
         Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
             MediaThumbnail(item.entry, Modifier.size(width = 96.dp, height = 54.dp).clip(MaterialTheme.shapes.small))
@@ -626,7 +655,7 @@ private fun BrowseTab(
     val scroll = rememberScrollState()
     // 分组折叠后页面短到滚不动时，底部导航不能一直藏着
     LaunchedEffect(scroll.maxValue) { if (scroll.maxValue == 0) onNotScrollable() }
-    Column(Modifier.verticalScroll(scroll).padding(bottom = 24.dp)) {
+    Column(Modifier.verticalScroll(scroll).padding(bottom = 104.dp)) {
         CollapsibleSection("browse.local", "本地文件") {
             val local = listOf(
                 Triple("内部存储", AppIcons.Phone, ""),
@@ -872,7 +901,7 @@ private fun HomeTab(
     val favorites = remember(state.favoriteFolders, state.servers) {
         state.favoriteFolders.filter { f -> f.serverId == null || state.servers.any { it.id == f.serverId } }
     }
-    LazyColumn(state = lib.listState("home"), contentPadding = PaddingValues(bottom = 24.dp)) {
+    LazyColumn(state = lib.listState("home"), contentPadding = PaddingValues(bottom = 104.dp)) {
         if (resume.isNotEmpty()) {
             item { SectionHeader("继续观看") }
             item {
@@ -975,8 +1004,16 @@ private fun HomeTab(
 @Composable
 private fun FavoriteFolderTile(folder: FavoriteFolder, source: String, onRemove: () -> Unit, onClick: () -> Unit) {
     Row(
-        Modifier.width(200.dp).tvFocusRing(MaterialTheme.shapes.medium, scale = true).clip(MaterialTheme.shapes.medium)
-            .background(MaterialTheme.colorScheme.surfaceContainer).clickable(onClick = onClick)
+        Modifier
+            .width(200.dp)
+            .tvFocusRing(MaterialTheme.shapes.medium, scale = true)
+            .liquidGlass(
+                shape = MaterialTheme.shapes.medium,
+                style = GlassStyle.Card,
+                tint = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.76f),
+                enableBackdrop = false,
+            )
+            .clickable(onClick = onClick)
             .padding(start = 12.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1152,7 +1189,7 @@ private fun MeTab(
     val playlists = state.playlists.filter { it.name !in setOf(
         com.aisub.player.media.WATCH_LATER_PLAYLIST, com.aisub.player.media.FAVORITE_VIDEOS_PLAYLIST, com.aisub.player.media.LIKED_PLAYLIST,
     ) }
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 104.dp)) {
         val later = watchLater?.items.orEmpty()
         SectionHeader(
             "稍后观看" + if (later.isNotEmpty()) " ${later.size}" else "",
@@ -1336,7 +1373,12 @@ internal fun SelectionBar(
     onDelete: () -> Unit,
 ) {
     TopAppBar(
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+        modifier = Modifier.liquidGlass(
+            shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
+            style = GlassStyle.Bar,
+            tint = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+        ),
         navigationIcon = { IconButton(onClick = onClose) { Icon(AppIcons.Close, "退出多选") } },
         title = { Text("已选 $count 项", style = MaterialTheme.typography.titleMedium) },
         actions = {

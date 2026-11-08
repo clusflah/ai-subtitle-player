@@ -548,7 +548,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center,
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .padding(start = 24.dp, end = 24.dp, bottom = (if (controls && !PipState.inPip) 150 else 24).dp + state.settings.subtitleOffset.dp)
-                    .clip(RoundedCornerShape(8.dp)).background(Color(0xAA000000)).padding(horizontal = 12.dp, vertical = 8.dp),
+                    .liquidGlass(shape = RoundedCornerShape(10.dp), style = GlassStyle.Pill, tint = Color(0x88141820))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
             )
         }
         // 流式识别进行中：控制栏收起时在角上留一个小标记
@@ -556,7 +557,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             Text(
                 "● 流式识别", color = Color(0xCCFFFFFF), fontSize = 11.sp,
                 modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(12.dp)
-                    .clip(RoundedCornerShape(50)).background(Color(0x55F28C00)).padding(horizontal = 8.dp, vertical = 2.dp),
+                    .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Color(0x66F28C00))
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
             )
         }
         if (PipState.inPip) return@Box
@@ -586,7 +588,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             val (summary, detail) = error.split(PLAYBACK_ERROR_DETAIL, limit = 2).let { it[0] to it.getOrNull(1) }
             var showDetail by remember(error) { mutableStateOf(false) }
             Column(
-                Modifier.align(Alignment.Center).padding(24.dp).clip(RoundedCornerShape(12.dp)).background(Color(0xDD000000)).padding(20.dp),
+                Modifier.align(Alignment.Center).padding(24.dp)
+                    .liquidGlass(shape = RoundedCornerShape(18.dp), style = GlassStyle.Sheet, tint = Color(0xB8181C24))
+                    .padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text("无法播放", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium)
@@ -608,7 +612,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         // ---- 画面出不来（手机解不了这种格式）：说明原因，给出办法 ----
         state.videoProblem?.let { msg ->
             Column(
-                Modifier.align(Alignment.Center).padding(24.dp).clip(RoundedCornerShape(12.dp)).background(Color(0xDD000000)).padding(20.dp),
+                Modifier.align(Alignment.Center).padding(24.dp)
+                    .liquidGlass(shape = RoundedCornerShape(18.dp), style = GlassStyle.Sheet, tint = Color(0xB8181C24))
+                    .padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(msg, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
@@ -654,7 +660,15 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         // ---- 顶部：返回 + 标题 + 任务状态 ----
         AnimatedVisibility(controls && !locked && !musicMode, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.TopCenter)) {
             Column(
-                Modifier.fillMaxWidth().background(Color(0x66000000)).statusBarsPadding().padding(horizontal = 4.dp, vertical = 4.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .liquidGlass(
+                        shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
+                        style = GlassStyle.Bar,
+                        tint = Color(0x5810141C),
+                    )
+                    .statusBarsPadding()
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回", tint = Color.White) }
@@ -695,21 +709,24 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     // 兼容模式下直播不能出字幕：直接说明，不显示「实时生成字幕」
                     Text(
                         MainViewModel.VLC_NO_SUBTITLES, color = Color.White, fontSize = 12.sp,
-                        modifier = Modifier.padding(start = 52.dp, bottom = 4.dp).clip(RoundedCornerShape(50)).background(Color(0x66000000))
+                        modifier = Modifier.padding(start = 52.dp, bottom = 4.dp)
+                            .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Color(0x66000000))
                             .padding(horizontal = 10.dp, vertical = 3.dp),
                     )
                 } else if (quick != null && idle && (state.current?.isVideo == true || isLive) && !aiChipDismissed) {
                     Row(Modifier.padding(start = 52.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Row(
-                            Modifier.clip(RoundedCornerShape(50)).background(Orange).clickable {
-                                when (quick) {
-                                    // 先选视频里说的语言（选错会降低准确率），再识别并翻译
-                                    // 生成：识别服务、语言、翻译模型在一个对话框里选；翻译：先选翻译模型
-                                    QuickSubtitle.GENERATE -> { generateTranslate = true; dialog = PlayerDialog.ASR_LANGUAGE }
-                                    QuickSubtitle.TRANSLATE_LOADED -> chooseModel("选择翻译模型") { vm.startTranslation() }
-                                    QuickSubtitle.TRANSLATE_EMBEDDED -> chooseModel("选择翻译模型") { vm.extractEmbeddedSubtitles(translate = true) }
+                            Modifier
+                                .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Orange.copy(alpha = 0.86f))
+                                .clickable {
+                                    when (quick) {
+                                        // 先选视频里说的语言（选错会降低准确率），再识别并翻译
+                                        // 生成：识别服务、语言、翻译模型在一个对话框里选；翻译：先选翻译模型
+                                        QuickSubtitle.GENERATE -> { generateTranslate = true; dialog = PlayerDialog.ASR_LANGUAGE }
+                                        QuickSubtitle.TRANSLATE_LOADED -> chooseModel("选择翻译模型") { vm.startTranslation() }
+                                        QuickSubtitle.TRANSLATE_EMBEDDED -> chooseModel("选择翻译模型") { vm.extractEmbeddedSubtitles(translate = true) }
+                                    }
                                 }
-                            }
                                 .padding(start = 10.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -726,7 +743,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 extras.detecting?.let { msg ->
                     Text(
                         msg, color = Color.White, fontSize = 12.sp,
-                        modifier = Modifier.padding(start = 52.dp, bottom = 4.dp).clip(RoundedCornerShape(50)).background(Color(0x5580DEEA))
+                        modifier = Modifier.padding(start = 52.dp, bottom = 4.dp)
+                            .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Color(0x5580DEEA))
                             .clickable { showSkip = true }.padding(horizontal = 10.dp, vertical = 3.dp),
                     )
                 }
@@ -735,7 +753,17 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
         // ---- 底部：时间 + 进度条 + 五个按钮 ----
         AnimatedVisibility(controls && !locked && !musicMode, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter)) {
-            Column(Modifier.fillMaxWidth().background(Color(0x66000000)).navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .liquidGlass(
+                        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+                        style = GlassStyle.Bar,
+                        tint = Color(0x5810141C),
+                    )
+                    .navigationBarsPadding()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
                 val duration = player.duration.takeIf { it > 0 } ?: 0L
                 var dragging by remember { mutableStateOf<Float?>(null) }
                 // 暂停时：逐帧、截图、书签
@@ -827,7 +855,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         modifier = Modifier.focusRequester(playFocus).tvFocusRing(CircleShape, color = Color.White).size(64.dp).clip(CircleShape).background(Color.Transparent),
                     ) {
                         Box(
-                            Modifier.size(60.dp).clip(CircleShape).background(Color(0x22FFFFFF)),
+                            Modifier
+                                .size(60.dp)
+                                .liquidGlass(shape = CircleShape, style = GlassStyle.Floating, tint = Color(0x36FFFFFF)),
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow, if (wantsPlay) "暂停" else "播放", tint = Color.White, modifier = Modifier.size(36.dp))
@@ -901,7 +931,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     else { locked = true; controls = true; indicator = AppIcons.Lock to "已锁定屏幕" }
                     interactions++
                 },
-                modifier = Modifier.clip(CircleShape).background(Color(0x66000000)),
+                modifier = Modifier.liquidGlass(shape = CircleShape, style = GlassStyle.Floating, tint = Color(0x66141820)),
             ) { Icon(if (locked) AppIcons.Lock else AppIcons.LockOpen, if (locked) "解锁" else "锁定", tint = Color.White) }
         }
 
@@ -911,7 +941,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 Image(
                     bmp.asImageBitmap(), null, contentScale = ContentScale.Fit,
                     modifier = Modifier.align(Alignment.Center).offset(y = (-80).dp).width(200.dp).aspectRatio(16f / 9f)
-                        .clip(RoundedCornerShape(8.dp)).background(Color.Black),
+                        .liquidGlass(shape = RoundedCornerShape(10.dp), style = GlassStyle.Floating, tint = Color(0xCC000000)),
                 )
             }
         }
@@ -922,14 +952,17 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 onClick = vm.extras::skipActive,
                 modifier = Modifier.align(Alignment.BottomEnd)
                     .padding(end = 24.dp, bottom = (if (!controls || locked) 48 else if (!wantsPlay) 250 else 190).dp)
-                    .clip(RoundedCornerShape(8.dp)).background(Color(0xCC000000)),
+                    .liquidGlass(shape = RoundedCornerShape(12.dp), style = GlassStyle.Floating, tint = Color(0x88141820)),
             ) { Text("跳过${r.kind.short} »", color = Color.White, fontSize = 15.sp) }
         }
 
         // ---- 中央提示 ----
         indicator?.let { (icon, text) ->
             Row(
-                Modifier.align(Alignment.Center).clip(RoundedCornerShape(12.dp)).background(Color(0xAA000000)).padding(horizontal = 16.dp, vertical = 10.dp),
+                Modifier
+                    .align(Alignment.Center)
+                    .liquidGlass(shape = RoundedCornerShape(16.dp), style = GlassStyle.Floating, tint = Color(0x88141820))
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (icon != null) {
@@ -1311,7 +1344,10 @@ private fun SeekPreview(fraction: Float, image: android.graphics.Bitmap?, time: 
         val w = 168.dp
         val x = (maxWidth * fraction - w / 2).coerceIn(0.dp, (maxWidth - w).coerceAtLeast(0.dp))
         Column(
-            Modifier.offset(x = x).width(w).clip(RoundedCornerShape(8.dp)).background(Color(0xCC000000)),
+            Modifier
+                .offset(x = x)
+                .width(w)
+                .liquidGlass(shape = RoundedCornerShape(12.dp), style = GlassStyle.Floating, tint = Color(0x99141820)),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Color(0xFF222222)), contentAlignment = Alignment.Center) {
@@ -1413,8 +1449,14 @@ private fun TaskChip(state: UiState, onClick: () -> Unit, modifier: Modifier = M
         else -> return
     }
     Row(
-        modifier.clip(RoundedCornerShape(50)).background(if (state.failedTask != null) Color(0x55D93025) else Color(0x55F28C00))
-            .clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 3.dp),
+        modifier
+            .liquidGlass(
+                shape = RoundedCornerShape(50),
+                style = GlassStyle.Pill,
+                tint = if (state.failedTask != null) Color(0x66D93025) else Color(0x66F28C00),
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (state.transcribing || state.translating || state.extractingEmbedded) {
@@ -1584,9 +1626,11 @@ private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAct
     )
     PopupTheme {
     val c = LocalPopupColors.current
+    val shape = RoundedCornerShape(28.dp)
     Column(
         Modifier.fillMaxHeight().statusBarsPadding().navigationBarsPadding().padding(12.dp).width(300.dp)
-            .shadow(c.shadow, RoundedCornerShape(28.dp)).clip(RoundedCornerShape(28.dp)).background(c.surface)
+            .shadow(c.shadow, shape)
+            .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface)
             .statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(vertical = 16.dp),
     ) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {

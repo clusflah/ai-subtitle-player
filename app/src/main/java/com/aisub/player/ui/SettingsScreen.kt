@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
@@ -180,17 +181,22 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
         }
     }
 
+    GlassBackdropBox { backdrop ->
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+                modifier = Modifier.liquidGlass(
+                    shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
+                    style = GlassStyle.Bar,
+                ),
                 navigationIcon = { IconButton(onClick = leave) { Icon(AppIcons.ArrowBack, "返回") } },
                 title = { Text("设置") },
             )
         },
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 4.dp, bottom = 32.dp)) {
+        Column(Modifier.padding(padding).fillMaxSize().glassBackdropSource(backdrop).verticalScroll(rememberScrollState()).padding(top = 4.dp, bottom = 32.dp)) {
 
             // ---------------- 语音识别 ----------------
             val asrProblem = s.asrProblem()
@@ -742,6 +748,7 @@ private fun ProxySettings(s: AppSettings, onChange: (AppSettings) -> Unit) {
                 }
             }
         }
+    }
     }
 }
 

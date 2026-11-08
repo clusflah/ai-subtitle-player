@@ -284,6 +284,7 @@ fun MangaReader(
         }
     }
 
+    GlassBackdropBox(Modifier.fillMaxSize()) { backdrop ->
     BoxWithConstraints(
         Modifier.fillMaxSize().background(Color.Black)
             .onSizeChanged { boxSize = it }
@@ -336,6 +337,7 @@ fun MangaReader(
         }
         val onFailed: (Int) -> Unit = { failed[it] = true }
 
+        Box(Modifier.fillMaxSize().glassBackdropSource(backdrop)) {
         if (pages.isEmpty()) {
             Text("没有找到漫画图片", color = Color.Gray, modifier = Modifier.align(Alignment.Center))
         } else if (mode == MangaMode.STRIP) {
@@ -432,26 +434,33 @@ fun MangaReader(
                 }
             }
         }
+        }
 
         // 提示（已经是最后一页之类）
         endHint?.let {
             Text(
                 it, color = Color.White,
-                modifier = Modifier.align(Alignment.Center).background(Color(0xCC000000), RoundedCornerShape(12.dp)).padding(horizontal = 20.dp, vertical = 12.dp),
+                modifier = Modifier.align(Alignment.Center)
+                    .liquidGlass(shape = RoundedCornerShape(14.dp), style = GlassStyle.Floating, tint = Color(0x8810141C))
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
             )
         }
 
         // 不显示控制栏时右下角小小的页码
         if (!controls && pages.isNotEmpty()) {
             Text(
-                "${page + 1} / ${pages.size}", color = Color(0xB3FFFFFF), style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp).background(Color(0x66000000), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
+                "${page + 1} / ${pages.size}", color = Color(0xD9FFFFFF), style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
+                    .liquidGlass(shape = RoundedCornerShape(8.dp), style = GlassStyle.Pill, tint = Color(0x660D1117), enableBackdrop = false)
+                    .padding(horizontal = 7.dp, vertical = 2.dp),
             )
         }
 
         AnimatedVisibility(controls, Modifier.align(Alignment.TopCenter), enter = fadeIn(), exit = fadeOut()) {
             Row(
-                Modifier.fillMaxWidth().background(Color(0xB3000000)).statusBarsPadding().padding(horizontal = 4.dp, vertical = 4.dp),
+                Modifier.fillMaxWidth()
+                    .liquidGlass(shape = RoundedCornerShape(bottomStart = 18.dp, bottomEnd = 18.dp), style = GlassStyle.Bar, tint = Color(0x780E121A))
+                    .statusBarsPadding().padding(horizontal = 4.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = onExit, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "退出阅读", tint = Color.White) }
@@ -468,7 +477,11 @@ fun MangaReader(
         }
 
         AnimatedVisibility(controls, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
-            Column(Modifier.fillMaxWidth().background(Color(0xB3000000)).navigationBarsPadding().padding(horizontal = 8.dp, vertical = 6.dp)) {
+            Column(
+                Modifier.fillMaxWidth()
+                    .liquidGlass(shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp), style = GlassStyle.Bar, tint = Color(0x780E121A))
+                    .navigationBarsPadding().padding(horizontal = 8.dp, vertical = 6.dp),
+            ) {
                 if (!tv && pages.size > 1) {
                     // 手机：拖动跳页（日漫从右往左时滑块也反过来）
                     var dragging by remember { mutableStateOf<Float?>(null) }
@@ -519,6 +532,7 @@ fun MangaReader(
             )
             null -> {}
         }
+    }
     }
 }
 
@@ -666,7 +680,11 @@ private fun ThumbnailPanel(pages: List<MangaPage>, current: Int, onPick: (Int) -
     val grid = rememberLazyGridState((current - 4).coerceAtLeast(0))
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { delay(100); runCatching { focus.requestFocus() } }
-    Column(Modifier.fillMaxSize().background(Color(0xF0000000)).statusBarsPadding().navigationBarsPadding()) {
+    Column(
+        Modifier.fillMaxSize()
+            .liquidGlass(shape = RoundedCornerShape(0.dp), style = GlassStyle.Sheet, tint = Color(0xCC0D1117))
+            .statusBarsPadding().navigationBarsPadding(),
+    ) {
         Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onClose, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "返回", tint = Color.White) }
             Text("目录 · 共 ${pages.size} 页", color = Color.White, style = MaterialTheme.typography.titleMedium)

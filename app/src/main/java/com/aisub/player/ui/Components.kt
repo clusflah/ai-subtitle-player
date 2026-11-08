@@ -136,13 +136,20 @@ fun CollapsibleSection(
     }
 }
 
-/** 白色圆角卡片，用背景层次与浅灰页面区分，不加边框和阴影。 */
+/** 圆角液态玻璃卡片，带柔和折射边缘高光与通透基底。 */
 @Composable
 fun SurfaceCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Surface(
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        color = Color.Transparent,
         shape = MaterialTheme.shapes.large,
-        modifier = modifier.fillMaxWidth().padding(horizontal = PageGutter - 4.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = PageGutter - 4.dp)
+            .liquidGlass(
+                shape = MaterialTheme.shapes.large,
+                style = GlassStyle.Card,
+                tint = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.78f),
+            ),
     ) { Column(content = content) }
 }
 
@@ -162,9 +169,16 @@ fun CollapsibleCard(
     var expanded by rememberSaveable(title) { mutableStateOf(initiallyExpanded) }
     val arrow by animateFloatAsState(if (expanded) 180f else 0f, label = "arrow")
     Surface(
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        color = Color.Transparent,
         shape = MaterialTheme.shapes.large,
-        modifier = modifier.fillMaxWidth().padding(horizontal = PageGutter - 4.dp, vertical = 6.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = PageGutter - 4.dp, vertical = 6.dp)
+            .liquidGlass(
+                shape = MaterialTheme.shapes.large,
+                style = GlassStyle.Card,
+                tint = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.78f),
+            ),
     ) {
         Column {
             Row(
@@ -206,12 +220,19 @@ fun appFieldColors() = androidx.compose.material3.OutlinedTextFieldDefaults.colo
 @Composable
 fun CardDivider(inset: Dp = 0.dp) = HorizontalDivider(Modifier.padding(start = inset), color = MaterialTheme.colorScheme.outlineVariant)
 
-/** 浅橙圆底图标，用于来源、设置项等。 */
+/** 浅橙圆底液态玻璃图标，用于来源、设置项等。 */
 @Composable
 fun IconBadge(icon: ImageVector, size: Dp = 40.dp, muted: Boolean = false) {
+    val baseBg = if (muted) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.primaryContainer
     Box(
-        Modifier.size(size).clip(CircleShape)
-            .background(if (muted) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.primaryContainer),
+        Modifier
+            .size(size)
+            .liquidGlass(
+                shape = CircleShape,
+                style = GlassStyle.Pill,
+                tint = baseBg.copy(alpha = 0.72f),
+                enableBackdrop = false,
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
@@ -228,13 +249,20 @@ enum class StatusKind { OK, NEUTRAL, ERROR }
 @Composable
 fun StatusChip(text: String, kind: StatusKind) {
     val (bg, fg) = when (kind) {
-        StatusKind.OK -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
-        StatusKind.NEUTRAL -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
-        StatusKind.ERROR -> MaterialTheme.colorScheme.error.copy(alpha = 0.12f) to MaterialTheme.colorScheme.error
+        StatusKind.OK -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f) to MaterialTheme.colorScheme.onPrimaryContainer
+        StatusKind.NEUTRAL -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f) to MaterialTheme.colorScheme.onSurfaceVariant
+        StatusKind.ERROR -> MaterialTheme.colorScheme.error.copy(alpha = 0.16f) to MaterialTheme.colorScheme.error
     }
     Text(
         text, color = fg, style = MaterialTheme.typography.labelSmall,
-        modifier = Modifier.clip(RoundedCornerShape(50)).background(bg).padding(horizontal = 8.dp, vertical = 2.dp),
+        modifier = Modifier
+            .liquidGlass(
+                shape = RoundedCornerShape(50),
+                style = GlassStyle.Pill,
+                tint = bg,
+                enableBackdrop = false,
+            )
+            .padding(horizontal = 8.dp, vertical = 2.dp),
     )
 }
 
@@ -277,9 +305,15 @@ fun ListRow(
 fun SourceCard(icon: ImageVector, title: String, subtitle: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        color = Color.Transparent,
         shape = MaterialTheme.shapes.large,
-        modifier = modifier.tvFocusRing(MaterialTheme.shapes.large),
+        modifier = modifier
+            .tvFocusRing(MaterialTheme.shapes.large)
+            .liquidGlass(
+                shape = MaterialTheme.shapes.large,
+                style = GlassStyle.Card,
+                tint = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.78f),
+            ),
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             IconBadge(icon, size = 36.dp)
@@ -298,9 +332,15 @@ fun countText(folders: Int, files: Int): String =
 @Composable
 private fun SelectionBadge(selected: Boolean, modifier: Modifier = Modifier) {
     Box(
-        modifier.size(24.dp).clip(CircleShape)
-            .background(if (selected) MaterialTheme.colorScheme.primary else Color(0x66000000))
-            .border(2.dp, Color.White, CircleShape),
+        modifier
+            .size(24.dp)
+            .liquidGlass(
+                shape = CircleShape,
+                style = GlassStyle.Pill,
+                tint = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.88f) else Color(0x66000000),
+                borderColor = Color.White.copy(alpha = 0.88f),
+                enableBackdrop = false,
+            ),
         contentAlignment = Alignment.Center,
     ) {
         if (selected) Icon(AppIcons.Check, null, tint = Color.White, modifier = Modifier.size(16.dp))
@@ -334,9 +374,13 @@ fun VideoCard(
                 Text(
                     d, color = Color.White, fontSize = 10.sp,
                     modifier = Modifier.align(Alignment.BottomEnd).padding(5.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(Color(0x99000000))
-                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                        .liquidGlass(
+                            shape = RoundedCornerShape(6.dp),
+                            style = GlassStyle.Pill,
+                            tint = Color(0x78000000),
+                            enableBackdrop = false,
+                        )
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
                 )
             }
         }

@@ -178,6 +178,7 @@ fun MusicView(
         }
     }
 
+    GlassBackdropBox(Modifier.fillMaxSize()) { backdrop ->
     Box(
         Modifier.fillMaxSize().background(Color(0xFF1E201F))
             .pointerInput(Unit) {
@@ -197,7 +198,9 @@ fun MusicView(
             }
             .pointerInput(Unit) { detectTapGestures { } },
     ) {
-        Backdrop(music)
+        Box(Modifier.fillMaxSize().glassBackdropSource(backdrop)) {
+            Backdrop(music)
+        }
         val pages: @Composable (Modifier) -> Unit = { mod ->
             Column(mod) {
                 TopTabs(pager.currentPage, onBack) { scope.launch { pager.animateScrollToPage(it) } }
@@ -240,6 +243,7 @@ fun MusicView(
                 ) { controls(Modifier.fillMaxWidth().padding(bottom = 20.dp)) }
             }
         }
+    }
     }
 
     if (showQueue) AppSheet(
@@ -439,7 +443,9 @@ private fun PlayControls(vm: MainViewModel, player: Player, wantsPlay: Boolean, 
             Icon(AppIcons.SkipPrevious, "上一首", tint = Color.White, modifier = Modifier.size(34.dp))
         }
         Box(
-            Modifier.size(68.dp).clip(CircleShape).border(2.5.dp, Color.White, CircleShape).clickable { vm.togglePlay() },
+            Modifier.size(68.dp)
+                .liquidGlass(shape = CircleShape, style = GlassStyle.Floating, tint = Color(0x2EFFFFFF), borderColor = Color.White.copy(alpha = 0.85f))
+                .clickable { vm.togglePlay() },
             contentAlignment = Alignment.Center,
         ) {
             Icon(if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow, if (wantsPlay) "暂停" else "播放", tint = Color.White, modifier = Modifier.size(38.dp))
@@ -510,8 +516,9 @@ private fun LyricsPage(
                 Box {
                     Text(
                         "LRC", color = Color(0xCCFFFFFF), fontSize = 13.sp,
-                        modifier = Modifier.clip(RoundedCornerShape(4.dp)).border(1.dp, Dim, RoundedCornerShape(4.dp))
-                            .clickable { menu = true }.padding(horizontal = 6.dp, vertical = 4.dp),
+                        modifier = Modifier
+                            .liquidGlass(shape = RoundedCornerShape(6.dp), style = GlassStyle.Pill, tint = Color(0x28FFFFFF))
+                            .clickable { menu = true }.padding(horizontal = 8.dp, vertical = 4.dp),
                     )
                     AppMenu(menu, onDismissRequest = { menu = false }) {
                         val own = music.lyrics
@@ -543,7 +550,10 @@ private fun LyricsPage(
 @Composable
 private fun Pill(text: String, onClick: () -> Unit) = Text(
     text, color = Color.White, fontSize = 13.sp,
-    modifier = Modifier.clip(RoundedCornerShape(50)).background(Color(0x33FFFFFF)).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 6.dp),
+    modifier = Modifier
+        .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Color(0x33FFFFFF))
+        .clickable(onClick = onClick)
+        .padding(horizontal = 12.dp, vertical = 6.dp),
 )
 
 @Composable
@@ -639,7 +649,9 @@ private fun QueueSheet(vm: MainViewModel, player: Player, current: MediaEntry?, 
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 2).coerceAtLeast(0))
     // 歌曲放在一块浅灰卡片里；正在播放的那首除了文字变色，整行也有底色
     LazyColumn(
-        Modifier.heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.65f).dp).padding(start = 16.dp, end = 16.dp, bottom = 16.dp).clip(RoundedCornerShape(14.dp)).background(c.card),
+        Modifier.heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.65f).dp)
+            .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
+            .liquidGlass(shape = RoundedCornerShape(14.dp), style = GlassStyle.Card, tint = c.card, enableBackdrop = false),
         state = listState, contentPadding = PaddingValues(vertical = 6.dp),
     ) {
         itemsIndexed(entries, key = { i, e -> "$i:${e.uri}" }) { i, e ->
@@ -674,7 +686,9 @@ private fun ActionSheet(music: MusicState, current: MediaEntry?, liked: Boolean,
     val tags = music.tags ?: return
     Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 16.dp)) {
         Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(LocalPopupColors.current.card).padding(10.dp),
+            Modifier.fillMaxWidth()
+                .liquidGlass(shape = RoundedCornerShape(14.dp), style = GlassStyle.Card, tint = LocalPopupColors.current.card, enableBackdrop = false)
+                .padding(10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.size(60.dp).clip(RoundedCornerShape(8.dp)).background(LocalPopupColors.current.button), contentAlignment = Alignment.Center) {
@@ -725,7 +739,9 @@ private fun ActionSheet(music: MusicState, current: MediaEntry?, liked: Boolean,
 @Composable
 private fun ActionGroup(items: List<Triple<MusicAction, ImageVector, String>>, onAction: (MusicAction) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(14.dp)).background(LocalPopupColors.current.card).padding(vertical = 12.dp),
+        Modifier.fillMaxWidth().padding(top = 12.dp)
+            .liquidGlass(shape = RoundedCornerShape(14.dp), style = GlassStyle.Card, tint = LocalPopupColors.current.card, enableBackdrop = false)
+            .padding(vertical = 12.dp),
     ) {
         items.forEach { (action, icon, label) ->
             Column(

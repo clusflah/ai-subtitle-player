@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,6 +43,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import com.aisub.player.media.Downloads
 import com.aisub.player.remote.RemoteItem
 import kotlinx.coroutines.launch
@@ -61,37 +63,41 @@ fun ImageViewerScreen(
     val scope = rememberCoroutineScope()
     val pager = rememberPagerState(start.coerceIn(0, (images.size - 1).coerceAtLeast(0))) { images.size }
     var bars by remember { mutableStateOf(true) }
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        HorizontalPager(pager, Modifier.fillMaxSize(), beyondViewportPageCount = 1, key = { images[it].path }) { page ->
-            ZoomableImage(images[page].playUrl) { bars = !bars }
-        }
-        AnimatedVisibility(bars, enter = fadeIn(), exit = fadeOut()) {
-            val current = images.getOrNull(pager.currentPage)
-            Row(
-                Modifier.fillMaxWidth().background(Color(0x99000000)).statusBarsPadding(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回", tint = Color.White) }
-                Column(Modifier.weight(1f)) {
-                    Text(current?.name.orEmpty(), color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
-                    if (images.size > 1) Text("${pager.currentPage + 1} / ${images.size}", color = Color(0xCCFFFFFF), style = MaterialTheme.typography.bodySmall)
-                }
-                if (images.size > 1) IconButton(onClick = { openManga(images, pager.currentPage) }) {
-                    Icon(AppIcons.MenuBook, "漫画模式", tint = Color.White)
-                }
-                if (current != null) {
-                    IconButton(onClick = { openDetail(current) }) { Icon(AppIcons.Info, "详情", tint = Color.White) }
-                    if (serverId != null) {
-                        IconButton(onClick = {
-                            scope.launch {
-                                try {
-                                    Downloads.enqueue(context, listOf(Downloads.Job(current, "")))
-                                    Toast.makeText(context, "已加入下载，保存到 Download/${Downloads.ROOT}", Toast.LENGTH_SHORT).show()
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "下载失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
+    GlassBackdropBox(Modifier.fillMaxSize()) { backdrop ->
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            HorizontalPager(pager, Modifier.fillMaxSize().glassBackdropSource(backdrop), beyondViewportPageCount = 1, key = { images[it].path }) { page ->
+                ZoomableImage(images[page].playUrl) { bars = !bars }
+            }
+            AnimatedVisibility(bars, enter = fadeIn(), exit = fadeOut()) {
+                val current = images.getOrNull(pager.currentPage)
+                Row(
+                    Modifier.fillMaxWidth()
+                        .liquidGlass(shape = RoundedCornerShape(bottomStart = 18.dp, bottomEnd = 18.dp), style = GlassStyle.Bar, tint = Color(0x780E121A))
+                        .statusBarsPadding(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回", tint = Color.White) }
+                    Column(Modifier.weight(1f)) {
+                        Text(current?.name.orEmpty(), color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
+                        if (images.size > 1) Text("${pager.currentPage + 1} / ${images.size}", color = Color(0xCCFFFFFF), style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (images.size > 1) IconButton(onClick = { openManga(images, pager.currentPage) }) {
+                        Icon(AppIcons.MenuBook, "漫画模式", tint = Color.White)
+                    }
+                    if (current != null) {
+                        IconButton(onClick = { openDetail(current) }) { Icon(AppIcons.Info, "详情", tint = Color.White) }
+                        if (serverId != null) {
+                            IconButton(onClick = {
+                                scope.launch {
+                                    try {
+                                        Downloads.enqueue(context, listOf(Downloads.Job(current, "")))
+                                        Toast.makeText(context, "已加入下载，保存到 Download/${Downloads.ROOT}", Toast.LENGTH_SHORT).show()
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "下载失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
+                                    }
                                 }
-                            }
-                        }) { Icon(AppIcons.Download, "下载", tint = Color.White) }
+                            }) { Icon(AppIcons.Download, "下载", tint = Color.White) }
+                        }
                     }
                 }
             }

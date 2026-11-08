@@ -309,8 +309,9 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
         detectTapGestures(onTap = { controls = !controls })
     }
 
+    GlassBackdropBox(Modifier.fillMaxSize()) { backdrop ->
     Box(
-        Modifier.fillMaxSize().background(theme.background)
+        Modifier.fillMaxSize()
             .onPreviewKeyEvent { e ->
                 // 遥控器：上下翻一屏，确认键显示工具栏
                 if (e.type != KeyEventType.KeyDown || controls || showToc) return@onPreviewKeyEvent false
@@ -323,40 +324,42 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
                 }
             },
     ) {
-        LazyColumn(
-            state = list,
-            modifier = Modifier.fillMaxSize().then(tapModifier),
-            contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = 48.dp, bottom = if (reading) 140.dp else 72.dp),
-        ) {
-            items(rows, key = { it.index }) { row ->
-                val b = row.block
-                val image = b.image
-                if (image != null) {
-                    BookImage(url, image, Modifier.fillMaxWidth().padding(vertical = 10.dp))
-                    return@items
+        Box(Modifier.fillMaxSize().glassBackdropSource(backdrop).background(theme.background)) {
+            LazyColumn(
+                state = list,
+                modifier = Modifier.fillMaxSize().then(tapModifier),
+                contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = 48.dp, bottom = if (reading) 140.dp else 72.dp),
+            ) {
+                items(rows, key = { it.index }) { row ->
+                    val b = row.block
+                    val image = b.image
+                    if (image != null) {
+                        BookImage(url, image, Modifier.fillMaxWidth().padding(vertical = 10.dp))
+                        return@items
+                    }
+                    val highlight = reading && tts.block == row.index
+                    val text = if (highlight) buildAnnotatedString {
+                        val s = tts.start.coerceIn(0, b.text.length)
+                        val e = tts.end.coerceIn(s, b.text.length)
+                        append(b.text.substring(0, s))
+                        withStyle(SpanStyle(background = theme.highlight)) { append(b.text.substring(s, e)) }
+                        append(b.text.substring(e))
+                    } else buildAnnotatedString { append(b.text) }
+                    val size = if (b.heading) prefs.fontSize + 5 else prefs.fontSize
+                    val chapterTop = row.index == chapterStart.getOrNull(row.chapter) && row.index > 0
+                    Text(
+                        text,
+                        color = theme.text,
+                        fontSize = size.sp,
+                        lineHeight = (size * prefs.lineSpacing).sp,
+                        fontWeight = if (b.heading) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier.fillMaxWidth()
+                            .padding(top = if (chapterTop) 36.dp else if (b.heading) 16.dp else 0.dp, bottom = if (b.heading) 14.dp else (prefs.fontSize * 0.6f).dp)
+                            .pointerInput(row.index) {
+                                detectTapGestures(onTap = { controls = !controls }, onLongPress = { speakFrom(row.index) })
+                            },
+                    )
                 }
-                val highlight = reading && tts.block == row.index
-                val text = if (highlight) buildAnnotatedString {
-                    val s = tts.start.coerceIn(0, b.text.length)
-                    val e = tts.end.coerceIn(s, b.text.length)
-                    append(b.text.substring(0, s))
-                    withStyle(SpanStyle(background = theme.highlight)) { append(b.text.substring(s, e)) }
-                    append(b.text.substring(e))
-                } else buildAnnotatedString { append(b.text) }
-                val size = if (b.heading) prefs.fontSize + 5 else prefs.fontSize
-                val chapterTop = row.index == chapterStart.getOrNull(row.chapter) && row.index > 0
-                Text(
-                    text,
-                    color = theme.text,
-                    fontSize = size.sp,
-                    lineHeight = (size * prefs.lineSpacing).sp,
-                    fontWeight = if (b.heading) FontWeight.Bold else FontWeight.Normal,
-                    modifier = Modifier.fillMaxWidth()
-                        .padding(top = if (chapterTop) 36.dp else if (b.heading) 16.dp else 0.dp, bottom = if (b.heading) 14.dp else (prefs.fontSize * 0.6f).dp)
-                        .pointerInput(row.index) {
-                            detectTapGestures(onTap = { controls = !controls }, onLongPress = { speakFrom(row.index) })
-                        },
-                )
             }
         }
 
@@ -369,7 +372,11 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
         )
 
         if (controls) {
-            Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
+            Surface(
+                color = Color.Transparent,
+                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
+                    .liquidGlass(shape = RoundedCornerShape(bottomStart = 18.dp, bottomEnd = 18.dp), style = GlassStyle.Bar),
+            ) {
                 Row(Modifier.statusBarsPadding().padding(horizontal = 4.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onBack, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "返回") }
                     Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
@@ -379,7 +386,11 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
                     IconButton(onClick = { showToc = true }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ListIcon, "目录") }
                 }
             }
-            Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
+            Surface(
+                color = Color.Transparent,
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                    .liquidGlass(shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp), style = GlassStyle.Bar),
+            ) {
                 Column(Modifier.navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
                     val pct = if (rows.isEmpty()) 0 else (list.firstVisibleItemIndex + 1) * 100 / rows.size
                     Text(
@@ -414,8 +425,9 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
         // 朗读条
         if (reading && !controls) {
             Surface(
-                color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = RoundedCornerShape(20.dp), tonalElevation = 3.dp,
-                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(12.dp).fillMaxWidth(),
+                color = Color.Transparent, shape = RoundedCornerShape(22.dp),
+                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(12.dp).fillMaxWidth()
+                    .liquidGlass(shape = RoundedCornerShape(22.dp), style = GlassStyle.Floating),
             ) {
                 Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
                     val err = tts.error
@@ -466,7 +478,7 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
             scope.launch { list.scrollToItem(bookmark.item.coerceIn(0, (rows.size - 1).coerceAtLeast(0)), bookmark.offset) }
         }, onRemove = BookStore::removeBookmark)
         if (showReadSettings) {
-            AlertDialog(
+            AppDialog(
                 onDismissRequest = { showReadSettings = false },
                 title = { Text("朗读设置") },
                 text = {
@@ -503,11 +515,12 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
             }
         }
     }
+    }
 }
 
 @Composable
 private fun BookmarkDialog(bookmarks: List<BookBookmark>, onDismiss: () -> Unit, onPick: (BookBookmark) -> Unit, onRemove: (Long) -> Unit) {
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
         title = { Text("书签（${bookmarks.size}）") },
@@ -533,7 +546,7 @@ private fun BookmarkDialog(bookmarks: List<BookBookmark>, onDismiss: () -> Unit,
 @Composable
 private fun TocDialog(chapters: List<BookChapter>, volumes: List<com.aisub.player.book.BookVolume>, current: Int, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
     val state = rememberLazyListState((current - 3).coerceAtLeast(0))
-    AlertDialog(
+    AppDialog(
         onDismissRequest = onDismiss,
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
         title = { Text("目录（${chapters.size}）") },

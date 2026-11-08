@@ -85,15 +85,20 @@ private fun PosterCard(item: RemoteItem, wide: Boolean, settings: AppSettings, m
                 Text(
                     badge, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.align(Alignment.TopEnd).padding(5.dp)
-                        .clip(RoundedCornerShape(4.dp)).background(MaterialTheme.colorScheme.primary)
-                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                        .liquidGlass(
+                            shape = RoundedCornerShape(6.dp),
+                            style = GlassStyle.Pill,
+                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.78f),
+                            enableBackdrop = false,
+                        )
+                        .padding(horizontal = 6.dp, vertical = 1.dp),
                 )
             }
             meta?.rating?.let { r ->
                 Row(
                     Modifier.align(Alignment.BottomStart).padding(5.dp)
-                        .clip(RoundedCornerShape(4.dp)).background(Color(0x99000000))
-                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                        .liquidGlass(shape = RoundedCornerShape(6.dp), style = GlassStyle.Pill, tint = Color(0x880D1117), enableBackdrop = false)
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(AppIcons.Star, null, tint = Color(0xFFFFC107), modifier = Modifier.size(11.dp))

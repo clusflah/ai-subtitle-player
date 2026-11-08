@@ -28,8 +28,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -60,18 +62,23 @@ fun LinkScreen(vm: MainViewModel, onBack: () -> Unit, onDone: () -> Unit) {
     }
     BackHandler(onBack = leave)
 
+    GlassBackdropBox { backdrop ->
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+                modifier = Modifier.liquidGlass(
+                    shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
+                    style = GlassStyle.Bar,
+                ),
                 navigationIcon = { IconButton(onClick = leave) { Icon(AppIcons.ArrowBack, "返回") } },
                 title = { Text("下载视频") },
             )
         },
     ) { padding ->
         Column(
-            Modifier.padding(padding).fillMaxSize().padding(24.dp),
+            Modifier.padding(padding).fillMaxSize().glassBackdropSource(backdrop).padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             if (task == null) {
@@ -140,6 +147,7 @@ fun LinkScreen(vm: MainViewModel, onBack: () -> Unit, onDone: () -> Unit) {
                 )
             }
         }
+    }
     }
 }
 
@@ -296,6 +304,12 @@ private fun WebLoginDialog(site: LoginSite, onDismiss: () -> Unit, onDone: (List
         Scaffold(
             topBar = {
                 TopAppBar(
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+                    modifier = Modifier.liquidGlass(
+                        shape = RoundedCornerShape(bottomStart = 18.dp, bottomEnd = 18.dp),
+                        style = GlassStyle.Bar,
+                        enableBackdrop = false,
+                    ),
                     navigationIcon = { IconButton(onClick = onDismiss) { Icon(AppIcons.Close, "取消") } },
                     title = { Text("登录 ${site.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     actions = {
