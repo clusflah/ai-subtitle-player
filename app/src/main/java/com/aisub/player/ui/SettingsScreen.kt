@@ -705,6 +705,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             BackupCard(flush = { if (s != vm.state.value.settings) vm.updateSettings(s) })
         }
     }
+    }
 }
 
 /** 网络代理：类型、地址、端口。填局域网里电脑或路由器的代理（如 Clash 打开「允许局域网连接」） */
@@ -748,7 +749,6 @@ private fun ProxySettings(s: AppSettings, onChange: (AppSettings) -> Unit) {
                 }
             }
         }
-    }
     }
 }
 

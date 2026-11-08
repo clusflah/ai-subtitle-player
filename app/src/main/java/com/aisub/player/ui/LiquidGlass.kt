@@ -420,7 +420,7 @@ fun Modifier.liquidGlass(
                     // 4. 组件自身内容（标记已处于玻璃层内部，避免内嵌子玻璃重复穿透采样背景层）
                     if (backdrop != null) backdrop.activeGlassDepth += 1
                     try {
-                        drawContent()
+                        this@onDrawWithContent.drawContent()
                     } finally {
                         if (backdrop != null) backdrop.activeGlassDepth -= 1
                     }
