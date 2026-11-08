@@ -21,6 +21,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -212,13 +213,62 @@ fun Modifier.liquidGlass(
             val endOffset = Offset(safeW, safeH)
 
             val outline = shape.createOutline(size, layoutDirection, this)
-            val cornerRadiusPx = extractCornerRadius(outline, size)
+            val cornerRadiiPx = extractCornerRadii(outline, size)
             val clipPath = Path().apply {
                 when (outline) {
                     is Outline.Generic -> addPath(outline.path)
                     is Outline.Rounded -> addRoundRect(outline.roundRect)
                     is Outline.Rectangle -> addRect(outline.rect)
                 }
+            }
+            val hasTopRound = max(cornerRadiiPx[0], cornerRadiiPx[1]) >= 0.5f
+            val hasBottomRound = max(cornerRadiiPx[2], cornerRadiiPx[3]) >= 0.5f
+            val topFlush = !hasTopRound && hasBottomRound
+            val bottomFlush = hasTopRound && !hasBottomRound
+
+            val strokePath = if (borderPx > 0f && size.width > borderPx && size.height > borderPx) {
+                val inset = borderPx * 0.5f
+                Path().apply {
+                    when (outline) {
+                        is Outline.Generic -> addPath(outline.path)
+                        is Outline.Rounded -> {
+                            val rr = outline.roundRect
+                            if (rr.width > borderPx && rr.height > borderPx) {
+                                fun shrink(c: CornerRadius) = CornerRadius(
+                                    max(0f, c.x - inset),
+                                    max(0f, c.y - inset),
+                                )
+                                addRoundRect(
+                                    RoundRect(
+                                        left = rr.left + inset,
+                                        top = if (topFlush) rr.top - borderPx * 2f else rr.top + inset,
+                                        right = rr.right - inset,
+                                        bottom = if (bottomFlush) rr.bottom + borderPx * 2f else rr.bottom - inset,
+                                        topLeftCornerRadius = shrink(rr.topLeftCornerRadius),
+                                        topRightCornerRadius = shrink(rr.topRightCornerRadius),
+                                        bottomRightCornerRadius = shrink(rr.bottomRightCornerRadius),
+                                        bottomLeftCornerRadius = shrink(rr.bottomLeftCornerRadius),
+                                    ),
+                                )
+                            }
+                        }
+                        is Outline.Rectangle -> {
+                            val r = outline.rect
+                            if (r.width > borderPx && r.height > borderPx) {
+                                addRect(
+                                    Rect(
+                                        left = r.left + inset,
+                                        top = r.top + inset,
+                                        right = r.right - inset,
+                                        bottom = r.bottom - inset,
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                null
             }
 
             // 玻璃基底渐变（左上略亮，中间通透，右下微反光）
@@ -280,7 +330,7 @@ fun Modifier.liquidGlass(
                 AgslShaders.createConfiguredSurfaceBrush(
                     width = size.width,
                     height = size.height,
-                    cornerRadius = cornerRadiusPx,
+                    cornerRadii = cornerRadiiPx,
                     bevelWidth = bevelPx.coerceAtMost(min(size.width, size.height) * 0.45f),
                     intensity = style.specularIntensity,
                     isDark = isDark,
@@ -307,46 +357,13 @@ fun Modifier.liquidGlass(
                     // 3. 组件自身内容
                     this@onDrawWithContent.drawContent()
 
-                    // 4. 边缘 Fresnel 折射高光描边
-                    if (borderPx > 0f && size.width > borderPx && size.height > borderPx) {
-                        when (outline) {
-                            is Outline.Rounded -> {
-                                val rr = outline.roundRect
-                                if (rr.width > borderPx && rr.height > borderPx) {
-                                    drawRoundRect(
-                                        brush = rimBrush,
-                                        topLeft = Offset(rr.left + borderPx * 0.5f, rr.top + borderPx * 0.5f),
-                                        size = Size(
-                                            (rr.width - borderPx).coerceAtLeast(1f),
-                                            (rr.height - borderPx).coerceAtLeast(1f),
-                                        ),
-                                        cornerRadius = CornerRadius(
-                                            max(0f, rr.topLeftCornerRadius.x - borderPx * 0.5f),
-                                            max(0f, rr.topLeftCornerRadius.y - borderPx * 0.5f),
-                                        ),
-                                        style = Stroke(width = borderPx),
-                                    )
-                                }
-                            }
-                            is Outline.Rectangle -> {
-                                drawRect(
-                                    brush = rimBrush,
-                                    topLeft = Offset(borderPx * 0.5f, borderPx * 0.5f),
-                                    size = Size(
-                                        (size.width - borderPx).coerceAtLeast(1f),
-                                        (size.height - borderPx).coerceAtLeast(1f),
-                                    ),
-                                    style = Stroke(width = borderPx),
-                                )
-                            }
-                            is Outline.Generic -> {
-                                drawPath(
-                                    path = outline.path,
-                                    brush = rimBrush,
-                                    style = Stroke(width = borderPx),
-                                )
-                            }
-                        }
+                    // 4. 边缘 Fresnel 折射高光描边（完整遵循四角独立圆角）
+                    if (strokePath != null) {
+                        drawPath(
+                            path = strokePath,
+                            brush = rimBrush,
+                            style = Stroke(width = borderPx),
+                        )
                     }
                 }
             }
@@ -384,41 +401,66 @@ fun GlassBox(
     )
 }
 
-private fun extractCornerRadius(outline: Outline, size: Size): Float {
+/**
+ * 提取四个角的圆角半径（顺序：topLeft, topRight, bottomRight, bottomLeft）。
+ */
+private fun extractCornerRadii(outline: Outline, size: Size): FloatArray {
     val maxR = min(size.width, size.height) * 0.5f
-    if (maxR <= 0f) return 0f
+    if (maxR <= 0f) return floatArrayOf(0f, 0f, 0f, 0f)
     return when (outline) {
         is Outline.Rounded -> {
             val rr: RoundRect = outline.roundRect
-            max(rr.topLeftCornerRadius.x, rr.bottomRightCornerRadius.x).coerceIn(0f, maxR)
+            floatArrayOf(
+                rr.topLeftCornerRadius.x.coerceIn(0f, maxR),
+                rr.topRightCornerRadius.x.coerceIn(0f, maxR),
+                rr.bottomRightCornerRadius.x.coerceIn(0f, maxR),
+                rr.bottomLeftCornerRadius.x.coerceIn(0f, maxR),
+            )
         }
-        is Outline.Rectangle -> 0f
-        is Outline.Generic -> min(size.width, size.height) * 0.25f
+        is Outline.Rectangle -> floatArrayOf(0f, 0f, 0f, 0f)
+        is Outline.Generic -> {
+            val r = min(size.width, size.height) * 0.25f
+            floatArrayOf(r, r, r, r)
+        }
     }
 }
 
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
 private object AgslShaders {
-    // AGSL 表面液态玻璃曲面高光与边缘色散着色器（全数值安全，无 pow(0, y) 或除以 0）
+    // AGSL 表面液态玻璃曲面高光与边缘色散着色器（支持四角独立圆角与贴边顶栏/底栏，全数值安全）
     private const val SURFACE_GLASS_SKSL = """
         uniform float2 size;
-        uniform float cornerRadius;
+        uniform float4 cornerRadii;
         uniform float bevelWidth;
         uniform float intensity;
         uniform float isDark;
 
-        float sdRoundBox(float2 p, float2 b, float r) {
-            float2 q = abs(p) - b + float2(r);
-            return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+        float pickRadius(float2 p, float4 r) {
+            return (p.x < 0.0)
+                ? ((p.y < 0.0) ? r.x : r.w)
+                : ((p.y < 0.0) ? r.y : r.z);
         }
 
         half4 main(float2 fragCoord) {
-            float2 halfSize = max(size * 0.5, float2(1.0, 1.0));
-            float2 p = fragCoord - halfSize;
-            float r = clamp(cornerRadius, 0.0, min(halfSize.x, halfSize.y));
-            float d = sdRoundBox(p, halfSize, r);
-
             float bw = max(bevelWidth, 2.0);
+            float hasTopRound = step(0.5, max(cornerRadii.x, cornerRadii.y));
+            float hasBottomRound = step(0.5, max(cornerRadii.z, cornerRadii.w));
+            float topFlush = (1.0 - hasTopRound) * hasBottomRound;
+            float bottomFlush = hasTopRound * (1.0 - hasBottomRound);
+
+            float boxMinY = -topFlush * bw * 2.0;
+            float boxMaxY = size.y + bottomFlush * bw * 2.0;
+            float2 center = float2(size.x * 0.5, (boxMinY + boxMaxY) * 0.5);
+            float2 halfSize = max(float2(size.x * 0.5, (boxMaxY - boxMinY) * 0.5), float2(1.0, 1.0));
+            float2 p = fragCoord - center;
+
+            float maxR = min(halfSize.x, halfSize.y);
+            float4 r4 = clamp(cornerRadii, float4(0.0), float4(maxR));
+            float r = pickRadius(p, r4);
+
+            float2 q = abs(p) - halfSize + float2(r);
+            float d = min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+
             // 边缘斜面因子：在 [-bw, 0] 区间内从 0 平滑升至 1
             float edge = smoothstep(-bw, 0.0, d);
 
@@ -457,8 +499,8 @@ private object AgslShaders {
                 clamp(grad.x * 0.5 + 0.5, 0.0, 1.0)
             );
 
-            // 顶边内侧柔光流线
-            float topGlow = smoothstep(max(size.y * 0.42, 1.0), 0.0, fragCoord.y) * 0.07;
+            // 顶边内侧柔光流线（贴顶栏不额外叠加顶边光带）
+            float topGlow = (1.0 - topFlush) * smoothstep(max(size.y * 0.42, 1.0), 0.0, fragCoord.y) * 0.07;
 
             float rimStrength = (specPrimary * 0.36 + specSecondary * 0.20 + fresnel * 0.30) * edge;
             float darkScale = mix(1.0, 0.70, isDark);
@@ -472,14 +514,20 @@ private object AgslShaders {
     fun createConfiguredSurfaceBrush(
         width: Float,
         height: Float,
-        cornerRadius: Float,
+        cornerRadii: FloatArray,
         bevelWidth: Float,
         intensity: Float,
         isDark: Boolean,
     ): ShaderBrush? = runCatching {
         val shader = RuntimeShader(SURFACE_GLASS_SKSL)
         shader.setFloatUniform("size", width, height)
-        shader.setFloatUniform("cornerRadius", cornerRadius)
+        shader.setFloatUniform(
+            "cornerRadii",
+            cornerRadii.getOrElse(0) { 0f },
+            cornerRadii.getOrElse(1) { 0f },
+            cornerRadii.getOrElse(2) { 0f },
+            cornerRadii.getOrElse(3) { 0f },
+        )
         shader.setFloatUniform("bevelWidth", bevelWidth)
         shader.setFloatUniform("intensity", intensity)
         shader.setFloatUniform("isDark", if (isDark) 1f else 0f)

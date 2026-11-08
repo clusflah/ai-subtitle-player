@@ -105,6 +105,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -662,11 +663,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .liquidGlass(
-                        shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
-                        style = GlassStyle.Bar,
-                        tint = Color(0x5810141C),
-                    )
+                    .background(Brush.verticalGradient(listOf(Color(0x88000000), Color.Transparent)))
                     .statusBarsPadding()
                     .padding(horizontal = 4.dp, vertical = 4.dp),
             ) {
