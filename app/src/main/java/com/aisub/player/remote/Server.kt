@@ -12,7 +12,8 @@ enum class ServerType(val label: String, val isCloud: Boolean = false, val rootR
     ALIYUN("阿里云盘", isCloud = true, rootRef = "root"),
     BAIDU("百度网盘", isCloud = true, rootRef = "/"),
     PIKPAK("PikPak", isCloud = true, rootRef = ""),
-    EMBY("Emby / Jellyfin", isCloud = true, rootRef = ""),
+    EMBY("Emby", isCloud = true, rootRef = ""),
+    JELLYFIN("Jellyfin", isCloud = true, rootRef = ""),
     PLEX("Plex", isCloud = true, rootRef = ""),
     ONEDRIVE("OneDrive", isCloud = true, rootRef = ""),
     DROPBOX("Dropbox", isCloud = true, rootRef = ""),
@@ -20,7 +21,7 @@ enum class ServerType(val label: String, val isCloud: Boolean = false, val rootR
     ;
 
     /** 媒体服务器（有自己的媒体库、海报、进度同步），和普通文件存储分开显示 */
-    val isMediaServer: Boolean get() = this == PLEX || this == EMBY
+    val isMediaServer: Boolean get() = this == PLEX || this == EMBY || this == JELLYFIN
 }
 
 /**

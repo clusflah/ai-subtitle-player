@@ -56,7 +56,12 @@ fun CloudLoginDialog(type: ServerType, existing: Server?, onDismiss: () -> Unit,
     val finish: (String) -> Unit = { onLoggedIn(base.copy(extra = it)) }
     AppDialog(
         onDismissRequest = onDismiss,
-        title = { Text("登录${type.label}") },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                ServerTypeIcon(type, size = 28.dp)
+                Text("登录${type.label}")
+            }
+        },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 when (type) {
@@ -80,7 +85,7 @@ fun CloudLoginDialog(type: ServerType, existing: Server?, onDismiss: () -> Unit,
                     )
                     ServerType.BAIDU -> BaiduLogin(finish)
                     ServerType.PIKPAK -> PikPakLogin(finish)
-                    ServerType.EMBY -> EmbyLogin(existing?.baseUrl.orEmpty(), existing?.lanUrl.orEmpty()) { creds, url, lan ->
+                    ServerType.EMBY, ServerType.JELLYFIN -> EmbyLogin(existing?.baseUrl.orEmpty(), existing?.lanUrl.orEmpty()) { creds, url, lan ->
                         onLoggedIn(base.copy(extra = creds, baseUrl = url, lanUrl = lan))
                     }
                     ServerType.PLEX -> PlexLogin(finish)

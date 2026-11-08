@@ -168,6 +168,16 @@ fun CollapsibleCard(
 ) {
     var expanded by rememberSaveable(title) { mutableStateOf(initiallyExpanded) }
     val arrow by animateFloatAsState(if (expanded) 180f else 0f, label = "arrow")
+    val sectionIcon = when {
+        "识别" in title -> AppIcons.AutoAwesome
+        "翻译" in title -> AppIcons.Translate
+        "样式" in title || "字幕" in title -> AppIcons.Subtitles
+        "朗读" in title || "配音" in title -> AppIcons.Volume
+        "播放" in title -> AppIcons.PlayArrow
+        "代理" in title || "网络" in title -> AppIcons.Web
+        "备份" in title -> AppIcons.Cloud
+        else -> AppIcons.Settings
+    }
     Surface(
         color = Color.Transparent,
         shape = MaterialTheme.shapes.large,
@@ -177,16 +187,16 @@ fun CollapsibleCard(
             .liquidGlass(
                 shape = MaterialTheme.shapes.large,
                 style = GlassStyle.Card,
-                tint = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.78f),
+                tint = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.82f),
             ),
     ) {
         Column {
             Row(
-                Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 18.dp, vertical = 16.dp),
+                Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 16.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(Modifier.size(width = 3.dp, height = 14.dp).background(MaterialTheme.colorScheme.tertiary, RoundedCornerShape(2.dp)))
-                Spacer(Modifier.width(10.dp))
+                IconBadge(sectionIcon, size = 36.dp)
+                Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     if (!expanded && summary.isNotEmpty()) Text(
@@ -220,25 +230,67 @@ fun appFieldColors() = androidx.compose.material3.OutlinedTextFieldDefaults.colo
 @Composable
 fun CardDivider(inset: Dp = 0.dp) = HorizontalDivider(Modifier.padding(start = inset), color = MaterialTheme.colorScheme.outlineVariant)
 
-/** 浅橙圆底液态玻璃图标，用于来源、设置项等。 */
+/** 彩色圆角方块（Squircle）液态玻璃图标徽章，按图标语义自动配色（仿演示视频 00:02 风格）。 */
 @Composable
-fun IconBadge(icon: ImageVector, size: Dp = 40.dp, muted: Boolean = false) {
-    val baseBg = if (muted) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.primaryContainer
+fun IconBadge(icon: ImageVector, size: Dp = 38.dp, muted: Boolean = false) {
+    val shape = RoundedCornerShape(size * 0.28f)
+    if (muted) {
+        Box(
+            Modifier
+                .size(size)
+                .liquidGlass(
+                    shape = shape,
+                    style = GlassStyle.Pill,
+                    tint = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f),
+                    enableBackdrop = false,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                icon, null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(size * 0.54f),
+            )
+        }
+        return
+    }
+    val badgeColor = when (icon) {
+        AppIcons.AutoAwesome -> Color(0xFF9C27B0)
+        AppIcons.Translate -> Color(0xFF2979FF)
+        AppIcons.Subtitles -> Color(0xFFFF8F00)
+        AppIcons.Volume -> Color(0xFFEC407A)
+        AppIcons.PlayArrow -> Color(0xFFFF5252)
+        AppIcons.Movie -> Color(0xFFE53935)
+        AppIcons.MusicNote, AppIcons.QueueMusic -> Color(0xFFD81B60)
+        AppIcons.Web -> Color(0xFF039BE5)
+        AppIcons.Live -> Color(0xFFF4511E)
+        AppIcons.Telegram -> Color(0xFF29B6F6)
+        AppIcons.MenuBook -> Color(0xFFFF7043)
+        AppIcons.Description -> Color(0xFF43A047)
+        AppIcons.Download -> Color(0xFF00897B)
+        AppIcons.Lock -> Color(0xFF5C6BC0)
+        AppIcons.Settings -> Color(0xFF1E88E5)
+        AppIcons.SystemUpdate -> Color(0xFF43A047)
+        AppIcons.Info -> Color(0xFF8E24AA)
+        AppIcons.Folder -> Color(0xFFFBC02D)
+        AppIcons.Phone -> Color(0xFF3949AB)
+        else -> MaterialTheme.colorScheme.primary
+    }
     Box(
         Modifier
             .size(size)
             .liquidGlass(
-                shape = CircleShape,
+                shape = shape,
                 style = GlassStyle.Pill,
-                tint = baseBg.copy(alpha = 0.72f),
+                tint = badgeColor.copy(alpha = 0.90f),
                 enableBackdrop = false,
             ),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             icon, null,
-            tint = if (muted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(size * 0.5f),
+            tint = Color.White,
+            modifier = Modifier.size(size * 0.54f),
         )
     }
 }
@@ -302,7 +354,7 @@ fun ListRow(
 
 /** 浏览页里的紧凑来源卡片（两列网格）。 */
 @Composable
-fun SourceCard(icon: ImageVector, title: String, subtitle: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun SourceCard(icon: ImageVector, title: String, subtitle: String, modifier: Modifier = Modifier, badge: (@Composable () -> Unit)? = null, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
         color = Color.Transparent,
@@ -316,7 +368,7 @@ fun SourceCard(icon: ImageVector, title: String, subtitle: String, modifier: Mod
             ),
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconBadge(icon, size = 36.dp)
+            if (badge != null) badge() else IconBadge(icon, size = 36.dp)
             Column(Modifier.padding(start = 10.dp)) {
                 Text(title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)

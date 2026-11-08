@@ -19,9 +19,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -209,75 +212,139 @@ fun HomeScreen(
                     onDelete = { files.delete(selectedEntries); selected = emptySet() },
                 )
             } else {
-            TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
-                modifier = Modifier.liquidGlass(
-                    shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
-                    style = GlassStyle.Bar,
-                ),
-                title = {
-                    if (searching) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(start = 20.dp, end = 16.dp, top = 10.dp, bottom = 6.dp),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = when (tab) {
+                            Tab.HOME -> "译幕"
+                            Tab.BROWSE -> "资源库"
+                            else -> tab.label
+                        },
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        val mediaTab = tab == Tab.LOCAL
+                        // 浏览页与首页右上角：点击「+」直接弹出液态玻璃来源菜单（仿演示视频与截图）
+                        if (tab == Tab.BROWSE || tab == Tab.HOME) {
+                            var addMenu by remember { mutableStateOf(false) }
+                            Box {
+                                LiquidGlassIconButton(
+                                    onClick = { addMenu = true },
+                                    icon = AppIcons.Add,
+                                    contentDescription = "添加",
+                                )
+                                AddSourceDropdownMenu(
+                                    expanded = addMenu,
+                                    onDismiss = { addMenu = false },
+                                    onPick = { type ->
+                                        addMenu = false
+                                        dialog = when (type) {
+                                            ServerType.WEBDAV, ServerType.OPENLIST ->
+                                                HomeDialog.EditServer(Server(type = type, name = if (type == ServerType.OPENLIST) "OpenList" else "", baseUrl = ""))
+                                            else -> HomeDialog.CloudLogin(type, null)
+                                        }
+                                    },
+                                    onLive = { addMenu = false; nav.push(Screen.Live) },
+                                    onStream = { addMenu = false; dialog = HomeDialog.Stream },
+                                    onTelegram = { addMenu = false; nav.push(Screen.Telegram) },
+                                )
+                            }
+                        }
+                        if (mediaTab) {
+                            LiquidGlassIconButton(
+                                onClick = {
+                                    searching = !searching
+                                    if (!searching) { query = ""; lib.searchSubtitles("") }
+                                },
+                                icon = if (searching) AppIcons.Close else AppIcons.Search,
+                                contentDescription = "搜索",
+                            )
+                        }
+                        var menu by remember { mutableStateOf(false) }
+                        Box {
+                            LiquidGlassIconButton(
+                                onClick = { menu = true },
+                                icon = AppIcons.MoreHoriz,
+                                contentDescription = "更多",
+                            )
+                            AppMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                if (mediaTab) {
+                                    val page = if (localVideo) "video" else "audio"
+                                    val current = if (localVideo) state.videoSort else state.audioSort
+                                    SortOrder.entries.forEach { o ->
+                                        DropdownMenuItem(
+                                            text = { Text((if (o == current) "✓ " else "    ") + "按${o.label}排序") },
+                                            onClick = { menu = false; lib.setSort(page, o) },
+                                        )
+                                    }
+                                    if (localVideo) {
+                                        DropdownMenuItem(
+                                            text = { Text(if (state.videoGrid) "    列表视图" else "    网格视图") },
+                                            onClick = { menu = false; lib.setVideoGrid(!state.videoGrid) },
+                                        )
+                                    }
+                                    HorizontalDivider()
+                                }
+                                DropdownMenuItem(text = { Text("刷新媒体库") }, onClick = { menu = false; lib.refreshMedia() })
+                                DropdownMenuItem(text = { Text("打开文件…") }, onClick = { menu = false; pickFile.launch(arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream")) })
+                                DropdownMenuItem(text = { Text("隐藏的文件夹") }, onClick = { menu = false; nav.push(Screen.HiddenFolders) })
+                                DropdownMenuItem(text = { Text("设置") }, onClick = { menu = false; openSettings() })
+                            }
+                        }
+                    }
+                }
+                AnimatedVisibility(searching) {
+                    val searchPillShape = RoundedCornerShape(50)
+                    Row(
+                        Modifier
+                            .padding(top = 10.dp)
+                            .fillMaxWidth()
+                            .liquidGlass(shape = searchPillShape, style = GlassStyle.Pill)
+                            .padding(start = 14.dp, end = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(AppIcons.Search, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
                         TextField(
                             value = query,
                             onValueChange = { query = it; lib.searchSubtitles(it) },
-                            // 标题栏只有一行高：提示文字不换行，输入内容超长时横向滚动
                             placeholder = {
                                 Text(
                                     "搜索文件名、文件夹或字幕内容", maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                    style = MaterialTheme.typography.bodyLarge,
+                                    style = MaterialTheme.typography.bodyMedium,
                                 )
                             },
                             singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyLarge,
+                            textStyle = MaterialTheme.typography.bodyMedium,
                             colors = TextFieldDefaults.colors(
-                                focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
+                                focusedContainerColor = Color.Transparent,
+                                unfocusedContainerColor = Color.Transparent,
+                                focusedIndicatorColor = Color.Transparent,
+                                unfocusedIndicatorColor = Color.Transparent,
                             ),
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.weight(1f),
                         )
-                    } else {
-                        // 标题就是当前标签的名字，一行，把地方留给内容
-                        Text(if (tab == Tab.HOME) "译幕" else tab.label, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    }
-                },
-                actions = {
-                    val mediaTab = tab == Tab.LOCAL
-                    // 浏览页：所有「添加」统一在这里（NAS、网盘、媒体服务器、直播源、串流、Telegram）
-                    if (tab == Tab.BROWSE) IconButton(onClick = { dialog = HomeDialog.AddSource() }) { Icon(AppIcons.Add, "添加") }
-                    if (mediaTab) {
-                        IconButton(onClick = {
-                            searching = !searching
-                            if (!searching) { query = ""; lib.searchSubtitles("") }
-                        }) { Icon(if (searching) AppIcons.Close else AppIcons.Search, "搜索") }
-                    }
-                    var menu by remember { mutableStateOf(false) }
-                    Box {
-                        IconButton(onClick = { menu = true }) { Icon(AppIcons.MoreVert, "更多") }
-                        AppMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            if (mediaTab) {
-                                val page = if (localVideo) "video" else "audio"
-                                val current = if (localVideo) state.videoSort else state.audioSort
-                                SortOrder.entries.forEach { o ->
-                                    DropdownMenuItem(
-                                        text = { Text((if (o == current) "✓ " else "    ") + "按${o.label}排序") },
-                                        onClick = { menu = false; lib.setSort(page, o) },
-                                    )
-                                }
-                                if (localVideo) {
-                                    DropdownMenuItem(
-                                        text = { Text(if (state.videoGrid) "    列表视图" else "    网格视图") },
-                                        onClick = { menu = false; lib.setVideoGrid(!state.videoGrid) },
-                                    )
-                                }
-                                HorizontalDivider()
+                        if (query.isNotEmpty()) {
+                            IconButton(onClick = { query = ""; lib.searchSubtitles("") }) {
+                                Icon(AppIcons.Close, "清除")
                             }
-                            DropdownMenuItem(text = { Text("刷新媒体库") }, onClick = { menu = false; lib.refreshMedia() })
-                            DropdownMenuItem(text = { Text("打开文件…") }, onClick = { menu = false; pickFile.launch(arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream")) })
-                            DropdownMenuItem(text = { Text("隐藏的文件夹") }, onClick = { menu = false; nav.push(Screen.HiddenFolders) })
-                            DropdownMenuItem(text = { Text("设置") }, onClick = { menu = false; openSettings() })
                         }
                     }
-                },
-            )
+                }
+            }
             }
         },
         bottomBar = {
@@ -286,28 +353,20 @@ fun HomeScreen(
             NowPlayingBar(main, bottomPadding = 4.dp, onOpen = { nav.push(Screen.Player) }, navigationBarInset = false)
             // 电视、横屏平板：标签放在左侧竖栏（见下面），底部不放
             if (!wide) AnimatedVisibility(barVisible, enter = slideInVertically { it }, exit = slideOutVertically { it }) {
-                val navShape = RoundedCornerShape(26.dp)
-                NavigationBar(
-                    containerColor = Color.Transparent,
-                    tonalElevation = 0.dp,
-                    modifier = Modifier
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                        .liquidGlass(shape = navShape, style = GlassStyle.Floating),
-                ) {
-                    Tab.entries.forEach { t ->
-                        NavigationBarItem(
-                            selected = tab == t,
-                            onClick = { selectTab(t) },
-                            icon = { Icon(t.icon, null) },
-                            label = { Text(t.label) },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = MaterialTheme.colorScheme.primary,
-                                selectedTextColor = MaterialTheme.colorScheme.primary,
-                                indicatorColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f),
-                            ),
-                        )
-                    }
-                }
+                LiquidGlassBottomBar(
+                    items = remember {
+                        Tab.entries.map { t ->
+                            LiquidNavTabItem(
+                                value = t,
+                                label = if (t == Tab.BROWSE) "资源库" else t.label,
+                                icon = t.icon,
+                            )
+                        }
+                    },
+                    selected = tab,
+                    onSelect = selectTab,
+                    modifier = Modifier.navigationBarsPadding(),
+                )
             }
           }
         },
@@ -356,7 +415,7 @@ fun HomeScreen(
         ) {
             val openServer: (Server) -> Unit = { s ->
                 // Plex、Emby / Jellyfin 用官方客户端那样的首页；首页菜单里还能切回按文件夹浏览
-                if (s.type == ServerType.PLEX || s.type == ServerType.EMBY) nav.push(Screen.ServerHome(s.id, s.name))
+                if (s.type.isMediaServer) nav.push(Screen.ServerHome(s.id, s.name))
                 else nav.push(Screen.Remote(s.id, s.rootPath, s.name))
             }
             when (tab) {
@@ -375,23 +434,29 @@ fun HomeScreen(
                     openWebManga = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
                 )
                 Tab.LOCAL -> Column {
-                    // 视频 / 音乐 切换
-                    Row(Modifier.padding(horizontal = 12.dp, vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("视频", "音乐", "照片").forEachIndexed { index, label ->
-                            FilterChip(
-                                selected = when (index) { 0 -> !localPhotos && localVideo; 1 -> !localPhotos && !localVideo; else -> localPhotos },
-                                onClick = {
-                                    localPhotos = index == 2
-                                    if (index < 2) lib.localShowsVideo = index == 0
-                                    selected = emptySet()
-                                    if (index == 2) {
-                                        if (!state.hasImagePermission) onRequestImagePermission() else lib.refreshImages()
-                                    }
-                                },
-                                label = { Text(label + " " + when (index) { 0 -> state.videos.size; 1 -> state.audios.size; else -> state.images.size }) },
-                            )
-                        }
+                    // 视频 / 音乐 / 照片 液态玻璃分段切换器（仿演示视频 00:03）
+                    val selectedMediaIdx = when {
+                        localPhotos -> 2
+                        localVideo -> 0
+                        else -> 1
                     }
+                    LiquidGlassSegmentedControl(
+                        options = listOf(
+                            "视频 ${state.videos.size}",
+                            "音乐 ${state.audios.size}",
+                            "照片 ${state.images.size}",
+                        ),
+                        selectedIndex = selectedMediaIdx,
+                        onSelect = { index ->
+                            localPhotos = index == 2
+                            if (index < 2) lib.localShowsVideo = index == 0
+                            selected = emptySet()
+                            if (index == 2) {
+                                if (!state.hasImagePermission) onRequestImagePermission() else lib.refreshImages()
+                            }
+                        },
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                    )
                     if (localPhotos) {
                         if (!state.hasImagePermission) EmptyState("需要照片访问权限才能显示手机里的图片", "授予权限", icon = AppIcons.Image, onButton = onRequestImagePermission)
                         else if (state.images.isEmpty()) EmptyState("手机里还没有照片", "刷新照片", icon = AppIcons.Image, onButton = lib::refreshImages)
@@ -657,27 +722,34 @@ private fun BrowseTab(
     LaunchedEffect(scroll.maxValue) { if (scroll.maxValue == 0) onNotScrollable() }
     Column(Modifier.verticalScroll(scroll).padding(bottom = 104.dp)) {
         CollapsibleSection("browse.local", "本地文件") {
+            data class LocalSpec(val name: String, val icon: ImageVector, val badge: SourceBadgeKind, val path: String)
             val local = listOf(
-                Triple("内部存储", AppIcons.Phone, ""),
-                Triple("Download", AppIcons.Download, "Download"),
-                Triple("Movies", AppIcons.Movie, "Movies"),
-                Triple("Music", AppIcons.MusicNote, "Music"),
-                Triple("DCIM", AppIcons.Folder, "DCIM"),
+                LocalSpec("内部存储", AppIcons.Phone, SourceBadgeKind.LOCAL_PHONE, ""),
+                LocalSpec("Download", AppIcons.Download, SourceBadgeKind.LOCAL_DOWNLOAD, "Download"),
+                LocalSpec("Movies", AppIcons.Movie, SourceBadgeKind.LOCAL_MOVIES, "Movies"),
+                LocalSpec("Music", AppIcons.MusicNote, SourceBadgeKind.LOCAL_MUSIC, "Music"),
+                LocalSpec("DCIM", AppIcons.Folder, SourceBadgeKind.LOCAL_DCIM, "DCIM"),
             )
-            data class Card(val icon: ImageVector, val title: String, val subtitle: String, val onClick: () -> Unit)
+            data class Card(val icon: ImageVector, val badge: SourceBadgeKind, val title: String, val subtitle: String, val onClick: () -> Unit)
             val cards = remember(all, state.hasPermission) {
-                local.map { (name, icon, path) ->
+                local.map { (name, icon, badge, path) ->
                     val sum = LocalBrowser.summary(all, path)
-                    Card(icon, name, if (state.hasPermission) countText(sum.folderCount, sum.fileCount) else "需要权限") {
+                    Card(icon, badge, name, if (state.hasPermission) countText(sum.folderCount, sum.fileCount) else "需要权限") {
                         if (state.hasPermission) openLocal(path, name) else onRequestPermission()
                     }
-                } + Card(AppIcons.File, "选择文件…", "系统文件选择器", pickFile)
+                } + Card(AppIcons.File, SourceBadgeKind.LOCAL_PICKER, "选择文件…", "系统文件选择器", pickFile)
             }
             // 两列网格（大屏四列）
             val columns = if (LocalWideLayout.current) 4 else 2
             cards.chunked(columns).forEach { row ->
                 Row(Modifier.padding(horizontal = 16.dp, vertical = 5.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    row.forEach { c -> SourceCard(c.icon, c.title, c.subtitle, Modifier.weight(1f), c.onClick) }
+                    row.forEach { c ->
+                        SourceCard(
+                            c.icon, c.title, c.subtitle, Modifier.weight(1f),
+                            badge = { SourceBadgeIcon(c.badge, size = 36.dp) },
+                            onClick = c.onClick,
+                        )
+                    }
                     repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
@@ -698,11 +770,7 @@ private fun BrowseTab(
             ListRow(
                 title = s.name,
                 subtitle = s.type.label + " · " + seen,
-                icon = when {
-                    s.type.isMediaServer -> AppIcons.Movie
-                    s.type.isCloud || s.type == ServerType.OPENLIST -> AppIcons.Cloud
-                    else -> AppIcons.Dns
-                },
+                leading = { ServerSourceIcon(s) },
                 trailing = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (visit != null && visit < 0) StatusChip("连接失败", StatusKind.ERROR)
@@ -741,13 +809,13 @@ private fun BrowseTab(
 
         CollapsibleSection("browse.streams", "在线内容", count = 4) {
             SurfaceCard {
-                ListRow("电视直播", "添加 M3U / TXT 直播源，按分组看电视直播", AppIcons.Live, onClick = openLive)
+                ListRow("电视直播", "添加 M3U / TXT 直播源，按分组看电视直播", leading = { SourceBadgeIcon(SourceBadgeKind.LIVE) }, onClick = openLive)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                ListRow("网络串流", "播放网络地址（http、rtsp、m3u8 等）", AppIcons.Link, onClick = openStream)
+                ListRow("网络串流", "播放网络地址（http、rtsp、m3u8 等）", leading = { SourceBadgeIcon(SourceBadgeKind.STREAM) }, onClick = openStream)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                ListRow("网页", "在网页里看视频，边播边生成 AI 字幕", AppIcons.Web, onClick = openWeb)
+                ListRow("网页", "在网页里看视频，边播边生成 AI 字幕", leading = { SourceBadgeIcon(SourceBadgeKind.WEB) }, onClick = openWeb)
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                ListRow("Telegram", "看频道和群里的视频，边下边播", AppIcons.Telegram, onClick = openTelegram)
+                ListRow("Telegram", "看频道和群里的视频，边下边播", leading = { SourceBadgeIcon(SourceBadgeKind.TELEGRAM) }, onClick = openTelegram)
             }
         }
 
@@ -761,12 +829,16 @@ private fun BrowseTab(
                 SourceCard(
                     AppIcons.MenuBook, "漫画",
                     if (mangaRecent.isEmpty()) "网页漫画、CBZ、PDF" else "继续阅读 ${mangaRecent.size} 部",
-                    Modifier.weight(1f), openManga,
+                    Modifier.weight(1f),
+                    badge = { SourceBadgeIcon(SourceBadgeKind.MANGA, size = 36.dp) },
+                    onClick = openManga,
                 )
                 SourceCard(
                     AppIcons.Description, "电子书",
                     if (bookRecent.isEmpty()) "TXT、EPUB、MOBI，可听书" else "继续阅读 ${bookRecent.size} 本",
-                    Modifier.weight(1f), openBooks,
+                    Modifier.weight(1f),
+                    badge = { SourceBadgeIcon(SourceBadgeKind.BOOK, size = 36.dp) },
+                    onClick = openBooks,
                 )
                 if (LocalWideLayout.current) { Spacer(Modifier.weight(1f)); Spacer(Modifier.weight(1f)) }
             }
@@ -776,6 +848,60 @@ private fun BrowseTab(
 
 /** 「添加」分哪几类 */
 internal enum class AddKind(val title: String) { STORAGE("网络存储"), MEDIA_SERVER("媒体服务器"), ONLINE("在线内容") }
+
+/**
+ * 右上角「+」弹出的液态玻璃悬浮菜单（对应参考截图中的彩色图标下拉列表）。
+ */
+@Composable
+private fun AddSourceDropdownMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    onPick: (ServerType) -> Unit,
+    onLive: () -> Unit,
+    onStream: () -> Unit,
+    onTelegram: () -> Unit,
+) {
+    AppMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        @Composable
+        fun ServerMenuItem(type: ServerType) {
+            DropdownMenuItem(
+                leadingIcon = { ServerTypeIcon(type, size = 28.dp) },
+                text = { Text(type.label, style = MaterialTheme.typography.bodyLarge) },
+                onClick = { onPick(type) },
+            )
+        }
+        ServerMenuItem(ServerType.WEBDAV)
+        ServerMenuItem(ServerType.OPENLIST)
+        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+        ServerMenuItem(ServerType.EMBY)
+        ServerMenuItem(ServerType.JELLYFIN)
+        ServerMenuItem(ServerType.PLEX)
+        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+        ServerMenuItem(ServerType.PAN115)
+        ServerMenuItem(ServerType.ALIYUN)
+        ServerMenuItem(ServerType.BAIDU)
+        ServerMenuItem(ServerType.PIKPAK)
+        ServerMenuItem(ServerType.ONEDRIVE)
+        ServerMenuItem(ServerType.DROPBOX)
+        ServerMenuItem(ServerType.GDRIVE)
+        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+        DropdownMenuItem(
+            leadingIcon = { SourceBadgeIcon(SourceBadgeKind.LIVE, size = 28.dp) },
+            text = { Text("电视直播", style = MaterialTheme.typography.bodyLarge) },
+            onClick = onLive,
+        )
+        DropdownMenuItem(
+            leadingIcon = { SourceBadgeIcon(SourceBadgeKind.STREAM, size = 28.dp) },
+            text = { Text("网络串流", style = MaterialTheme.typography.bodyLarge) },
+            onClick = onStream,
+        )
+        DropdownMenuItem(
+            leadingIcon = { SourceBadgeIcon(SourceBadgeKind.TELEGRAM, size = 28.dp) },
+            text = { Text("Telegram", style = MaterialTheme.typography.bodyLarge) },
+            onClick = onTelegram,
+        )
+    }
+}
 
 /** 添加来源：按类分组列出；kinds 为空时列全部（浏览页右上角的「添加」） */
 @Composable
@@ -799,8 +925,9 @@ private fun AddSourceDialog(
         ServerType.GDRIVE to "需要自己创建的 OAuth 客户端（免费）",
     )
     val media = listOf(
+        ServerType.EMBY to "Emby 媒体服务器，账号密码登录",
+        ServerType.JELLYFIN to "Jellyfin 媒体服务器，账号密码登录",
         ServerType.PLEX to "plex.tv 账号授权，或填服务器地址和令牌",
-        ServerType.EMBY to "Emby / Jellyfin 媒体服务器，账号密码登录",
     )
     val show = kinds.ifEmpty { AddKind.entries.toSet() }
     AppDialog(
@@ -817,18 +944,20 @@ private fun AddSourceDialog(
                 if (AddKind.STORAGE in show) {
                     header(AddKind.STORAGE)
                     storage.forEach { (type, desc) ->
-                        ListRow(type.label, desc, if (type == ServerType.WEBDAV) AppIcons.Dns else AppIcons.Cloud, onClick = { onPick(type) })
+                        ListRow(type.label, desc, leading = { ServerTypeIcon(type) }, onClick = { onPick(type) })
                     }
                 }
                 if (AddKind.MEDIA_SERVER in show) {
                     header(AddKind.MEDIA_SERVER)
-                    media.forEach { (type, desc) -> ListRow(type.label, desc, AppIcons.Movie, onClick = { onPick(type) }) }
+                    media.forEach { (type, desc) ->
+                        ListRow(type.label, desc, leading = { ServerTypeIcon(type) }, onClick = { onPick(type) })
+                    }
                 }
                 if (AddKind.ONLINE in show) {
                     header(AddKind.ONLINE)
-                    ListRow("直播源", "M3U / TXT 播放列表网址或文件", AppIcons.Live, onClick = onLive)
-                    ListRow("网络串流", "http、rtsp、m3u8 等地址", AppIcons.Link, onClick = onStream)
-                    ListRow("Telegram 账号", "用手机号登录，看频道和群里的视频", AppIcons.Telegram, onClick = onTelegram)
+                    ListRow("直播源", "M3U / TXT 播放列表网址或文件", leading = { SourceBadgeIcon(SourceBadgeKind.LIVE) }, onClick = onLive)
+                    ListRow("网络串流", "http、rtsp、m3u8 等地址", leading = { SourceBadgeIcon(SourceBadgeKind.STREAM) }, onClick = onStream)
+                    ListRow("Telegram 账号", "用手机号登录，看频道和群里的视频", leading = { SourceBadgeIcon(SourceBadgeKind.TELEGRAM) }, onClick = onTelegram)
                 }
             }
         },
@@ -855,7 +984,7 @@ private fun HomeTab(
     /** 继续阅读：网页漫画回到那一话的网页 */
     openWebManga: (String) -> Unit,
 ) {
-    val mediaServers = state.servers.filter { it.type == ServerType.PLEX || it.type == ServerType.EMBY }
+    val mediaServers = state.servers.filter { it.type.isMediaServer }
     val resume = remember(state.history, mediaServers) {
         // Plex、Emby 的条目在它们自己那一行里显示（进度以服务器为准），这里不重复
         val serverIds = mediaServers.map { it.id }.toSet()
@@ -932,9 +1061,10 @@ private fun HomeTab(
             item {
                 LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     items(favorites, key = { it.key }) { f ->
-                        val source = f.serverId?.let { id -> state.servers.firstOrNull { it.id == id }?.name } ?: "本机"
+                        val srv = f.serverId?.let { id -> state.servers.firstOrNull { it.id == id } }
+                        val source = srv?.name ?: "本机"
                         FavoriteFolderTile(
-                            f, source,
+                            f, source, srv,
                             onRemove = { lib.toggleFavoriteFolder(f.serverId, f.path, f.title) },
                         ) { openFavorite(f) }
                     }
@@ -959,7 +1089,7 @@ private fun HomeTab(
                     recentWeb.take(4).forEachIndexed { index, page ->
                         if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                         ListRow(page.title.ifBlank { android.net.Uri.parse(page.url).host.orEmpty() }, android.net.Uri.parse(page.url).host,
-                            AppIcons.Web, onClick = { com.aisub.player.web.WebLaunch.pending = page.url; openWebManga(page.url) })
+                            leading = { SourceBadgeIcon(SourceBadgeKind.WEB) }, onClick = { com.aisub.player.web.WebLaunch.pending = page.url; openWebManga(page.url) })
                     }
                 }
             }
@@ -967,7 +1097,7 @@ private fun HomeTab(
                 SurfaceCard(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
                     recentLive.forEachIndexed { index, h ->
                         if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                        ListRow(h.entry.title, "最近看过的直播", AppIcons.Live, onClick = { play(listOf(h.entry), 0) })
+                        ListRow(h.entry.title, "最近看过的直播", leading = { SourceBadgeIcon(SourceBadgeKind.LIVE) }, onClick = { play(listOf(h.entry), 0) })
                     }
                 }
             }
@@ -975,7 +1105,7 @@ private fun HomeTab(
                 SurfaceCard(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
                     recentTelegram.forEachIndexed { index, h ->
                         if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                        ListRow(h.entry.displayTitle, "最近看过的 Telegram 视频", AppIcons.Telegram, onClick = { play(listOf(h.entry), 0) })
+                        ListRow(h.entry.displayTitle, "最近看过的 Telegram 视频", leading = { SourceBadgeIcon(SourceBadgeKind.TELEGRAM) }, onClick = { play(listOf(h.entry), 0) })
                     }
                 }
             }
@@ -1002,7 +1132,7 @@ private fun HomeTab(
 
 /** 首页「收藏的文件夹」卡片：文件夹名 + 来源（本机或服务器名），「⋮」里取消收藏 */
 @Composable
-private fun FavoriteFolderTile(folder: FavoriteFolder, source: String, onRemove: () -> Unit, onClick: () -> Unit) {
+private fun FavoriteFolderTile(folder: FavoriteFolder, source: String, server: Server? = null, onRemove: () -> Unit, onClick: () -> Unit) {
     Row(
         Modifier
             .width(200.dp)
@@ -1017,7 +1147,8 @@ private fun FavoriteFolderTile(folder: FavoriteFolder, source: String, onRemove:
             .padding(start = 12.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(AppIcons.Folder, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
+        if (server != null) ServerSourceIcon(server, size = 28.dp)
+        else Icon(AppIcons.Folder, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
         Column(Modifier.weight(1f).padding(start = 10.dp)) {
             Text(folder.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
             Text(source, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1141,7 +1272,7 @@ private fun ServerContinueRow(
     Column {
         SectionHeader(server.name, actionLabel = "进入", onAction = onOpen)
         if (items.isNullOrEmpty()) {
-            SurfaceCard { ListRow(server.name, "${server.type.label} · 点「进入」浏览媒体库", AppIcons.Cloud, onClick = onOpen) }
+            SurfaceCard { ListRow(server.name, "${server.type.label} · 点「进入」浏览媒体库", leading = { ServerSourceIcon(server) }, onClick = onOpen) }
         } else {
             LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(items, key = { it.ratingKey }) { item -> WideCard(item, Modifier.width(180.dp)) { onItem(item) } }
@@ -1217,8 +1348,9 @@ private fun MeTab(
                 modifier = Modifier.padding(bottom = 8.dp),
             ) {
                 items(favorites, key = { it.key }) { f ->
-                    val source = f.serverId?.let { id -> state.servers.firstOrNull { it.id == id }?.name } ?: "本机"
-                    FavoriteFolderTile(f, source, onRemove = { removeFavorite(f) }) { openFavorite(f) }
+                    val srv = f.serverId?.let { id -> state.servers.firstOrNull { it.id == id } }
+                    val source = srv?.name ?: "本机"
+                    FavoriteFolderTile(f, source, srv, onRemove = { removeFavorite(f) }) { openFavorite(f) }
                 }
             }
         }

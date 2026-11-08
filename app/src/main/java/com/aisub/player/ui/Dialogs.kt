@@ -106,7 +106,7 @@ fun ServerDialog(initial: Server, hint: String? = null, onDismiss: () -> Unit, o
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(ServerType.WEBDAV, ServerType.OPENLIST).forEach { t ->
-                        FilterChip(selected = s.type == t, onClick = { s = s.copy(type = t) }, label = { Text(t.label) })
+                        FilterChip(selected = s.type == t, onClick = { s = s.copy(type = t) }, leadingIcon = { ServerTypeIcon(t, size = 18.dp) }, label = { Text(t.label) })
                     }
                 }
                 OutlinedTextField(s.name, { s = s.copy(name = it) }, label = { Text("名称") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
