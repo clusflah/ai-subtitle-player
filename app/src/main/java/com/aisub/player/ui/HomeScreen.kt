@@ -1248,8 +1248,15 @@ private fun ReadingThumbnail(page: com.aisub.player.manga.MangaPage?, sourceUrl:
 @Composable
 private fun ResumeTile(item: HistoryItem, settings: com.aisub.player.AppSettings, onClick: () -> Unit) {
     val context = LocalContext.current
-    val cover by produceState(com.aisub.player.meta.VideoCovers.saved(context, item.entry.uri)?.ifEmpty { null }, item.entry.uri) {
-        if (value == null) value = com.aisub.player.meta.VideoCovers.find(context, settings, item.entry)
+    // 关掉了识别（总开关或这个视频单独关）：不用网上的封面，直接用视频画面
+    val online = remember(item.entry.uri, settings.metaOnline, com.aisub.player.meta.MetaRepository.disabledVersion) {
+        com.aisub.player.meta.MetaRepository.onlineAllowed(context, settings, item.entry.uri)
+    }
+    val cover by produceState(
+        if (online) com.aisub.player.meta.VideoCovers.saved(context, item.entry.uri)?.ifEmpty { null } else null,
+        item.entry.uri, online,
+    ) {
+        if (value == null && online) value = com.aisub.player.meta.VideoCovers.find(context, settings, item.entry)
     }
     var coverFailed by remember(cover) { mutableStateOf(false) }
     Column(Modifier.width(180.dp).tvFocusRing(MaterialTheme.shapes.medium, scale = true).clip(MaterialTheme.shapes.medium).clickable(onClick = onClick)) {

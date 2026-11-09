@@ -150,6 +150,8 @@ data class AppSettings(
     val assrtToken: String = "",
     /** 在线字幕搜索语言，OpenSubtitles 语言代码，逗号分隔 */
     val subtitleLanguages: String = "zh-cn,en",
+    /** 影视信息：总开关。关掉后不再按文件名到网上匹配简介和封面，视频用自己的画面 */
+    val metaOnline: Boolean = true,
     /** 影视信息：TMDB 的 API Key（v3 Key 或 v4 Read Access Token），不填只显示豆瓣评分 */
     val tmdbKey: String = "",
     /** TMDB 接口和图片地址，国内可换成反代；空为官方地址 */
@@ -342,6 +344,7 @@ class SettingsRepository(context: Context) {
             osPassword = prefs.getString("osPassword", "")!!,
             assrtToken = prefs.getString("assrtToken", "")!!,
             subtitleLanguages = prefs.getString("subtitleLanguages", d.subtitleLanguages)!!,
+            metaOnline = prefs.getBoolean("metaOnline", d.metaOnline),
             tmdbKey = prefs.getString("tmdbKey", "")!!,
             tmdbBaseUrl = prefs.getString("tmdbBaseUrl", "")!!,
             tmdbImageBase = prefs.getString("tmdbImageBase", "")!!,
@@ -401,6 +404,7 @@ class SettingsRepository(context: Context) {
             .putString("osPassword", s.osPassword)
             .putString("assrtToken", s.assrtToken)
             .putString("subtitleLanguages", s.subtitleLanguages)
+            .putBoolean("metaOnline", s.metaOnline)
             .putString("tmdbKey", s.tmdbKey)
             .putString("tmdbBaseUrl", s.tmdbBaseUrl)
             .putString("tmdbImageBase", s.tmdbImageBase)

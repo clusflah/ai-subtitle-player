@@ -129,6 +129,9 @@ fun FileDetailScreen(
 
     var reload by remember { mutableIntStateOf(0) }
     var rematching by remember { mutableStateOf(false) }
+    // 这个视频单独关掉了识别（不是电影电视剧，匹配出来的是错的）
+    var metaOff by remember(fileKey) { mutableStateOf(MetaRepository.isDisabled(context, fileKey)) }
+    val online = isVideo && settings.metaOnline && !metaOff
     val query = remember(item, reload) {
         MetaRepository.override(context, fileKey)?.let { (t, y) -> MetaQuery.manual(t, y) } ?: MetaQuery.of(item)
     }
@@ -137,7 +140,13 @@ fun FileDetailScreen(
     var preview by remember { mutableStateOf<Lookup<String>>(Lookup.Idle) }
     var local by remember { mutableStateOf<LocalMeta?>(null) }
 
-    LaunchedEffect(query, settings) {
+    LaunchedEffect(query, settings, online) {
+        if (!online) {
+            // 关掉识别：不读 NFO、不联网，界面只显示文件本身和视频画面
+            detail = DetailMeta()
+            local = null
+            return@LaunchedEffect
+        }
         if (!isVideo) return@LaunchedEffect
         // 1. 先读本地：视频旁边的 NFO、海报、背景图，以及目录名里的 {tmdb-xxx}（媒体服务器条目自带信息，不需要）
         val loc = if (local != null) local else if (server != null && folder != null && meta == null) {
@@ -175,7 +184,12 @@ fun FileDetailScreen(
 
     val info = detail.info
     val parsed = remember(name) { NameParser.parse(name) }
-    val title = info?.title?.takeIf { it.isNotEmpty() } ?: meta?.seriesName ?: meta?.title ?: if (isVideo) parsed.title else name
+    val title = info?.title?.takeIf { it.isNotEmpty() } ?: meta?.seriesName ?: meta?.title ?: when {
+        // 关掉识别：文件名解析出来的片名多半也不对，直接用文件名
+        isVideo && !online -> name.substringBeforeLast('.').ifEmpty { name }
+        isVideo -> parsed.title
+        else -> name
+    }
     val backdrop = local?.backdropUrl ?: info?.backdropUrl ?: meta?.backdropUrl
     val poster = when {
         isImage -> item.playUrl
@@ -198,9 +212,16 @@ fun FileDetailScreen(
     }
     var subtitles by remember { mutableStateOf(false) }
     val isTelegram = item.playUrl?.let(com.aisub.player.telegram.Telegram::isTelegram) == true
-    // 首页「继续观看」用这张做封面
-    LaunchedEffect(backdrop, poster) {
-        if (isVideo && item.playUrl != null) com.aisub.player.meta.VideoCovers.remember(context, item.playUrl, backdrop ?: poster)
+    // 首页「继续观看」用这张做封面；关掉识别时忘掉以前记下的（多半是错的），首页改用视频画面
+    LaunchedEffect(backdrop, poster, online) {
+        if (!isVideo || item.playUrl == null) return@LaunchedEffect
+        if (online) com.aisub.player.meta.VideoCovers.remember(context, item.playUrl, backdrop ?: poster)
+        else com.aisub.player.meta.VideoCovers.forget(context, item.playUrl)
+    }
+
+    fun setMetaOff(off: Boolean) {
+        MetaRepository.setDisabled(context, fileKey, off)
+        metaOff = off
     }
 
     fun download() {
@@ -224,7 +245,9 @@ fun FileDetailScreen(
         actions = {
             OverflowMenu(
                 listOfNotNull(
-                    MenuAction("重新匹配影片…") { rematching = true }.takeIf { isVideo },
+                    MenuAction("重新匹配影片…") { rematching = true }.takeIf { online },
+                    MenuAction("关闭在线识别（不是影视剧）") { setMetaOff(true) }.takeIf { isVideo && settings.metaOnline && !metaOff },
+                    MenuAction("重新开启在线识别") { setMetaOff(false) }.takeIf { isVideo && settings.metaOnline && metaOff },
                     MenuAction("下载") { download() }.takeIf { server != null && !item.isDir && item.playUrl != null },
                 ) + detail.links.map { (label, url) -> MenuAction(label) { openUrl(url) } },
             )
@@ -257,7 +280,14 @@ fun FileDetailScreen(
                 )
             }
             Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.Top) {
-                if (!isImage && (poster != null || isVideo)) {
+                if (isVideo && !online && poster == null) {
+                    // 关掉识别、也没有服务器给的海报：用视频自己的画面（本机视频的缩略图、网络视频播放时截的图）
+                    MediaThumbnail(
+                        item.toMediaEntry(),
+                        Modifier.width(160.dp).aspectRatio(16f / 9f).clip(MaterialTheme.shapes.medium),
+                    )
+                    Spacer(Modifier.width(16.dp))
+                } else if (!isImage && (poster != null || isVideo)) {
                     NetImage(
                         poster,
                         Modifier.width(112.dp).aspectRatio(2f / 3f).clip(MaterialTheme.shapes.medium),
@@ -310,10 +340,26 @@ fun FileDetailScreen(
                 if (isVideo && item.playUrl != null) OutlinedButton(onClick = { subtitles = true }) {
                     Icon(AppIcons.Subtitles, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("下载字幕")
                 }
-                if (isVideo) FilledTonalButton(onClick = { rematching = true }) { Text("重新匹配") }
+                if (online) FilledTonalButton(onClick = { rematching = true }) { Text("重新匹配") }
             }
 
-            if (isVideo && !detail.loading && settings.tmdbKey.isBlank() && info?.backdropUrl == null && local?.backdropUrl == null) {
+            if (isVideo && !online) {
+                Spacer(Modifier.height(12.dp))
+                SurfaceCard {
+                    ListRow(
+                        title = "在线识别已关闭",
+                        subtitle = if (!settings.metaOnline) "设置里关掉了影视信息的在线识别，视频用自己的画面"
+                        else "这个视频不再匹配影片信息和封面，用视频自己的画面",
+                        icon = AppIcons.Info,
+                        trailing = {
+                            if (settings.metaOnline) TextButton(onClick = { setMetaOff(false) }) { Text("重新开启") }
+                            else TextButton(onClick = openSettings) { Text("去设置") }
+                        },
+                    )
+                }
+            }
+
+            if (online && !detail.loading && settings.tmdbKey.isBlank() && info?.backdropUrl == null && local?.backdropUrl == null) {
                 Spacer(Modifier.height(12.dp))
                 SurfaceCard {
                     ListRow(

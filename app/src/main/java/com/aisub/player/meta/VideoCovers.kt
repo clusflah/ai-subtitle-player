@@ -19,12 +19,18 @@ object VideoCovers {
         prefs(context).edit().putString(uri, url).apply()
     }
 
+    /** 忘掉记下的封面（关掉识别、重新匹配后） */
+    fun forget(context: Context, uri: String) {
+        prefs(context).edit().remove(uri).apply()
+    }
+
     /** 记下的封面；null 表示还没查过，"" 表示查过、没有 */
     fun saved(context: Context, uri: String): String? = prefs(context).getString(uri, null)
 
     /** 封面地址；找不到返回 null。会联网，网络出错时不记，下次再查 */
     suspend fun find(context: Context, settings: AppSettings, entry: MediaEntry): String? {
         if (!entry.isVideo || entry.isLive) return null
+        if (!MetaRepository.onlineAllowed(context, settings, entry.uri)) return null
         saved(context, entry.uri)?.let { return it.ifEmpty { null } }
         if (settings.tmdbKey.isBlank() && !settings.doubanEnabled) return null
         val query = MetaRepository.override(context, entry.uri)?.let { (t, y) -> MetaQuery.manual(t, y) }

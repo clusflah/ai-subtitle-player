@@ -2,6 +2,8 @@ package com.aisub.player.meta
 
 import android.content.Context
 import android.util.LruCache
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import com.aisub.player.AppSettings
 import com.aisub.player.remote.RemoteItem
 import kotlinx.coroutines.Dispatchers
@@ -110,7 +112,7 @@ object MetaRepository {
      */
     suspend fun poster(settings: AppSettings, item: RemoteItem): String? {
         val kind = item.meta?.kind
-        if (kind == "episode" || item.meta?.title == null) return null
+        if (!settings.metaOnline || kind == "episode" || item.meta?.title == null) return null
         return posterGate.withPermit {
             val q = MetaQuery.of(item)
             runCatching { tmdb(settings, q)?.posterUrl }.getOrNull()
@@ -129,4 +131,22 @@ object MetaRepository {
             if (title.isBlank()) remove(fileKey) else putString(fileKey, title.trim() + "\n" + (year ?: ""))
         }.apply()
     }
+
+    private fun offPrefs(context: Context) = context.getSharedPreferences("meta_disabled", Context.MODE_PRIVATE)
+
+    /** 这个视频关掉了在线识别（不是电影电视剧，匹配出来的是错的）：不查简介、封面，用视频自己的画面 */
+    fun isDisabled(context: Context, fileKey: String): Boolean = offPrefs(context).getBoolean(fileKey, false)
+
+    fun setDisabled(context: Context, fileKey: String, disabled: Boolean) {
+        offPrefs(context).edit().apply { if (disabled) putBoolean(fileKey, true) else remove(fileKey) }.apply()
+        disabledVersion++
+    }
+
+    /** 改过单个视频的识别开关就加一，界面（首页继续观看）据此重新判断 */
+    var disabledVersion by androidx.compose.runtime.mutableIntStateOf(0)
+        private set
+
+    /** 这个视频要不要到网上识别：总开关开着、并且没单独关掉 */
+    fun onlineAllowed(context: Context, settings: AppSettings, fileKey: String): Boolean =
+        settings.metaOnline && !isDisabled(context, fileKey)
 }

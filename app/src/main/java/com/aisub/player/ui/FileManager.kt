@@ -278,6 +278,8 @@ private fun FileDialogs(fm: FileManager) {
         }
         is FileDialog.Info -> {
             val x = d.details
+            // formatDateTime 带时间时要用 context 判断 12/24 小时制，传 null 会闪退
+            val ctx = LocalContext.current
             val rows = listOfNotNull(
                 "名称" to x.name,
                 "位置" to "内部存储/${x.folder}",
@@ -285,7 +287,7 @@ private fun FileDialogs(fm: FileManager) {
                 formatDuration(x.durationMs).takeIf { it.isNotEmpty() }?.let { "时长" to it },
                 if (x.width > 0) "分辨率" to "${x.width}×${x.height}" else null,
                 x.mime.takeIf { it.isNotEmpty() }?.let { "类型" to it },
-                if (x.dateAdded > 0) "添加时间" to DateUtils.formatDateTime(null, x.dateAdded, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_SHOW_YEAR) else null,
+                if (x.dateAdded > 0) "添加时间" to DateUtils.formatDateTime(ctx, x.dateAdded, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_SHOW_YEAR) else null,
             )
             AppDialog(
                 onDismissRequest = { fm.dialog = null },
