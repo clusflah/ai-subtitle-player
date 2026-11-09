@@ -794,18 +794,26 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             }
         }
 
-        // ---- 底部：时间 + 进度条 + 五个按钮 ----
+        // ---- 底部：时间 + 进度条 + 五个按钮（悬浮圆角液态玻璃胶囊，与主页底部一致） ----
         AnimatedVisibility(controls && !locked && !musicMode, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter)) {
+            val barShape = RoundedCornerShape(28.dp)
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .liquidGlass(
-                        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                        style = GlassStyle.Bar,
-                        tint = Color(0x5810141C),
-                    )
                     .navigationBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .shadow(
+                        elevation = 16.dp,
+                        shape = barShape,
+                        ambientColor = Color(0x28000000),
+                        spotColor = Color(0x36000000),
+                    )
+                    .liquidGlass(
+                        shape = barShape,
+                        style = GlassStyle.Floating,
+                        tint = Color(0x78161D2A),
+                    )
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
             ) {
                 val duration = player.duration.takeIf { it > 0 } ?: 0L
                 var dragging by remember { mutableStateOf<Float?>(null) }
@@ -883,7 +891,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         onDrag = { f -> dragging = f * duration; vm.extras.requestThumbnail((f * duration).toLong()); interactions++ },
                         onDragEnd = { dragging?.let { player.seekTo(it.toLong()) }; dragging = null; vm.extras.clearThumbnail() },
                     )
-                } else Spacer(Modifier.height(12.dp))
+                } else Spacer(Modifier.height(4.dp))
                 // 播放键居中，左右各一个上一集/下一集；外侧两组对称：
                 // 手机左=字幕、AI 字幕，右=旋转、更多；电视左=字幕、AI 字幕，右=倍速、更多（电视不能转屏）
                 val canSkip = vm.queueSize > 1 && !vm.usingVlc

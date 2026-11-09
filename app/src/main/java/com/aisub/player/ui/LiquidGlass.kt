@@ -695,8 +695,8 @@ fun <T> LiquidGlassBottomBar(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 8.dp)
-            .height(64.dp)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .height(68.dp)
             .graphicsLayer {
                 scaleX = barScaleX
                 scaleY = barScaleY
@@ -714,9 +714,9 @@ fun <T> LiquidGlassBottomBar(
                 sampleBackdrop = true,
                 lightShift = lightPhase * 0.6f,
             )
-            .padding(horizontal = 5.dp, vertical = 5.dp),
+            .padding(horizontal = 4.dp, vertical = 4.dp),
     ) {
-        // 1. 底层滑动、拉长与果冻回弹的液态玻璃水滴胶囊指示器
+        // 1. 底层滑动、拉长与果冻回弹的液态玻璃水滴胶囊指示器（始终完整包裹图标和文字）
         androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
             val count = items.size.coerceAtLeast(1)
             val slotWidth = maxWidth / count
@@ -724,12 +724,12 @@ fun <T> LiquidGlassBottomBar(
             val rightEdgeIndex = max(fastPos, slowPos)
             val stretch = (rightEdgeIndex - leftEdgeIndex).coerceIn(0f, count.toFloat())
             // 放大水滴拉伸感，并在落定瞬间通过 wobble 产生横向/纵向果冻回弹
-            val extraWidthFactor = (stretch * 1.48f + abs(wobble) * 0.42f + touchPress * 0.10f).coerceIn(0f, count.toFloat())
+            val extraWidthFactor = (stretch * 1.42f + abs(wobble) * 0.38f + touchPress * 0.08f).coerceIn(0f, count.toFloat())
             val centerShift = (extraWidthFactor - stretch) * 0.5f
-            val dropletLeft = (slotWidth * (leftEdgeIndex - centerShift)).coerceIn(0.dp, maxWidth - slotWidth * 0.6f)
-            val dropletWidth = (slotWidth * (1f + extraWidthFactor)).coerceIn(slotWidth * 0.75f, maxWidth)
-            val scaleY = (1f - (stretch * 0.30f).coerceAtMost(0.36f) + abs(wobble) * 0.22f + touchPress * 0.08f)
-                .coerceIn(0.64f, 1.22f)
+            val dropletLeft = (slotWidth * (leftEdgeIndex - centerShift)).coerceIn(0.dp, maxWidth - slotWidth * 0.8f)
+            val dropletWidth = (slotWidth * (1f + extraWidthFactor)).coerceIn(slotWidth, maxWidth - dropletLeft)
+            val scaleY = (1f - (stretch * 0.18f).coerceAtMost(0.20f) + abs(wobble) * 0.10f + touchPress * 0.04f)
+                .coerceIn(0.80f, 1.06f)
 
             Box(
                 Modifier
@@ -754,7 +754,7 @@ fun <T> LiquidGlassBottomBar(
             )
         }
 
-        // 2. 顶层各标签图标与文字（支持点击与手指滑动跟随切换）
+        // 2. 顶层各标签图标与文字（紧凑居中排布，确保完全处于液态玻璃水滴内部）
         Row(
             modifier = Modifier
                 .fillMaxSize()
@@ -782,19 +782,11 @@ fun <T> LiquidGlassBottomBar(
         ) {
             items.forEachIndexed { index, item ->
                 val isSelected = index == selectedIndex
-                val distance = abs(fastPos - index)
-                val proximity = (1f - distance.coerceIn(0f, 1f))
                 val bounceScale by animateFloatAsState(
-                    targetValue = if (isSelected) 1.16f else 0.94f,
-                    animationSpec = spring(dampingRatio = 0.40f, stiffness = 320f),
+                    targetValue = if (isSelected) 1.05f else 0.96f,
+                    animationSpec = spring(dampingRatio = 0.42f, stiffness = 340f),
                     label = "navItemBounce",
                 )
-                val liftY by animateFloatAsState(
-                    targetValue = if (isSelected) -5f else 0f,
-                    animationSpec = spring(dampingRatio = 0.44f, stiffness = 300f),
-                    label = "navItemLift",
-                )
-                val itemScale = bounceScale + proximity * 0.04f
                 val color by animateColorAsState(
                     targetValue = if (isSelected) activeColor else inactiveColor,
                     animationSpec = tween(durationMillis = 160),
@@ -804,10 +796,10 @@ fun <T> LiquidGlassBottomBar(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
+                        .padding(vertical = 6.dp)
                         .graphicsLayer {
-                            scaleX = itemScale
-                            scaleY = itemScale
-                            translationY = liftY
+                            scaleX = bounceScale
+                            scaleY = bounceScale
                         },
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
@@ -816,13 +808,14 @@ fun <T> LiquidGlassBottomBar(
                         imageVector = item.icon,
                         contentDescription = item.label,
                         tint = color,
-                        modifier = Modifier.size(23.dp),
+                        modifier = Modifier.size(22.dp),
                     )
                     Spacer(Modifier.height(2.dp))
                     Text(
                         text = item.label,
                         color = color,
                         fontSize = 11.sp,
+                        lineHeight = 13.sp,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -900,12 +893,12 @@ fun LiquidGlassSegmentedControl(
             val leftEdge = min(fastPos, slowPos)
             val rightEdge = max(fastPos, slowPos)
             val stretch = (rightEdge - leftEdge).coerceIn(0f, count.toFloat())
-            val extraWidth = (stretch * 1.45f + abs(wobble) * 0.40f + touchPress * 0.08f).coerceIn(0f, count.toFloat())
+            val extraWidth = (stretch * 1.40f + abs(wobble) * 0.36f + touchPress * 0.06f).coerceIn(0f, count.toFloat())
             val centerShift = (extraWidth - stretch) * 0.5f
-            val thumbLeft = (slotWidth * (leftEdge - centerShift)).coerceIn(0.dp, maxWidth - slotWidth * 0.6f)
-            val thumbWidth = (slotWidth * (1f + extraWidth)).coerceIn(slotWidth * 0.75f, maxWidth)
-            val thumbScaleY = (1f - (stretch * 0.28f).coerceAtMost(0.34f) + abs(wobble) * 0.20f + touchPress * 0.06f)
-                .coerceIn(0.66f, 1.20f)
+            val thumbLeft = (slotWidth * (leftEdge - centerShift)).coerceIn(0.dp, maxWidth - slotWidth * 0.8f)
+            val thumbWidth = (slotWidth * (1f + extraWidth)).coerceIn(slotWidth, maxWidth - thumbLeft)
+            val thumbScaleY = (1f - (stretch * 0.18f).coerceAtMost(0.20f) + abs(wobble) * 0.10f + touchPress * 0.04f)
+                .coerceIn(0.80f, 1.05f)
 
             Box(
                 Modifier

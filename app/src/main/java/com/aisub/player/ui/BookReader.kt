@@ -385,12 +385,17 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
                     IconButton(onClick = { showToc = true }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ListIcon, "目录") }
                 }
             }
+            val barShape = RoundedCornerShape(28.dp)
             Surface(
                 color = Color.Transparent,
-                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                    .liquidGlass(shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp), style = GlassStyle.Bar),
+                shape = barShape,
+                modifier = Modifier.align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .fillMaxWidth()
+                    .liquidGlass(shape = barShape, style = GlassStyle.Floating, sampleBackdrop = true),
             ) {
-                Column(Modifier.navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
                     val pct = if (rows.isEmpty()) 0 else (list.firstVisibleItemIndex + 1) * 100 / rows.size
                     Text(
                         "${book.chapters.getOrNull(current)?.title.orEmpty()} · $pct%",

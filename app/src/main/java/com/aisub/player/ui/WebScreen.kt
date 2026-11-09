@@ -40,6 +40,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.FlowRow
@@ -1483,9 +1484,14 @@ private fun PickerBar(
     onBlockFloating: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val barShape = RoundedCornerShape(28.dp)
     androidx.compose.material3.Surface(
-        modifier = modifier.fillMaxWidth()
-            .liquidGlass(shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp), style = GlassStyle.Bar, enableBackdrop = false),
+        modifier = modifier
+            .navigationBarsPadding()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .fillMaxWidth()
+            .liquidGlass(shape = barShape, style = GlassStyle.Floating, enableBackdrop = false),
+        shape = barShape,
         color = Color.Transparent,
     ) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {

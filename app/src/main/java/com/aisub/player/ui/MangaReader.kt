@@ -43,6 +43,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -478,10 +479,19 @@ fun MangaReader(
         }
 
         AnimatedVisibility(controls, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
+            val barShape = RoundedCornerShape(28.dp)
             Column(
                 Modifier.fillMaxWidth()
-                    .liquidGlass(shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp), style = GlassStyle.Bar, tint = Color(0x780E121A))
-                    .navigationBarsPadding().padding(horizontal = 8.dp, vertical = 6.dp),
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .shadow(
+                        elevation = 16.dp,
+                        shape = barShape,
+                        ambientColor = Color(0x28000000),
+                        spotColor = Color(0x36000000),
+                    )
+                    .liquidGlass(shape = barShape, style = GlassStyle.Floating, tint = Color(0x88161D2A))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
                 if (!tv && pages.size > 1) {
                     // 手机：拖动跳页（日漫从右往左时滑块也反过来）
