@@ -145,6 +145,12 @@ import com.aisub.player.AppSettings
 import com.aisub.player.MainViewModel
 import com.aisub.player.Task
 import com.aisub.player.UiState
+import com.aisub.player.live.CatchupUrl
+import com.aisub.player.live.EpgProgram
+import com.aisub.player.live.EpgRepository
+import com.aisub.player.live.EpgStatus
+import com.aisub.player.live.LiveChannel
+import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.formatDuration
 import com.aisub.player.subtitle.Cue
 import com.aisub.player.subtitle.EmbeddedTrackInfo
@@ -298,7 +304,23 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     /** 字幕列表里正在编辑的一句 */
     var editing by remember { mutableStateOf<Cue?>(null) }
     var showChannels by remember { mutableStateOf(false) }
+    /** 直播面板当前标签：0 = 分类，1 = 频道，2 = 节目 */
+    var channelSheetTab by remember { mutableIntStateOf(2) }
     val isLive = state.current?.isLive == true
+    val epgVer = EpgRepository.version
+    var epgNowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(isLive) {
+        while (isLive) {
+            epgNowMs = System.currentTimeMillis()
+            delay(30_000L)
+        }
+    }
+    LaunchedEffect(isLive, state.current?.uri) {
+        val cur = state.current
+        if (isLive && cur != null) {
+            EpgRepository.ensureChannel(EpgRepository.channelOf(cur))
+        }
+    }
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     val extras by vm.extras.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -671,16 +693,40 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回", tint = Color.White) }
                     Text(
                         music.tags?.title?.takeIf { isMusic } ?: state.current?.displayTitle ?: "", color = Color.White, fontSize = 20.sp,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 12.dp),
+                        maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 8.dp),
                     )
-                    // 播放队列（直播时是频道列表），点一项切过去
+                    // 播放队列（直播时提供频道与节目单入口）
                     // 兼容模式下直播也保留频道列表（换台时按各频道记住的内核打开）
-                    if (vm.queueSize > 1 && (!vm.usingVlc || isLive)) {
+                    if (isLive) {
+                        if (vm.queueSize > 1) {
+                            TextButton(onClick = { channelSheetTab = 1; showChannels = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                Icon(AppIcons.ListIcon, null, tint = Color.White, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("频道", color = Color.White)
+                            }
+                        }
+                        TextButton(onClick = { channelSheetTab = 2; showChannels = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                            Text("节目单", color = Color.White)
+                        }
+                    } else if (vm.queueSize > 1 && !vm.usingVlc) {
                         TextButton(onClick = { showChannels = true }) {
                             Icon(AppIcons.ListIcon, null, tint = Color.White, modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text(if (isLive) "频道" else "列表", color = Color.White)
+                            Text("列表", color = Color.White)
                         }
+                    }
+                }
+                if (isLive) {
+                    val curEpgProg = remember(state.current?.uri, epgVer, epgNowMs) {
+                        state.current?.let { EpgRepository.currentProgram(EpgRepository.channelOf(it), epgNowMs) }
+                    }
+                    if (curEpgProg != null) {
+                        Text(
+                            "正在播放：${curEpgProg.title}  ${curEpgProg.timeRangeLabel()}",
+                            color = Color(0xFFFF8A65), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(start = 52.dp, end = 12.dp, bottom = 4.dp)
+                                .clickable { channelSheetTab = 2; showChannels = true },
+                        )
                     }
                 }
                 TaskChip(state, onClick = { tracksAi = true; showTracks = true }, modifier = Modifier.padding(start = 52.dp, bottom = 4.dp))
@@ -1098,29 +1144,46 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         )
     }
 
-    // ---- 播放队列 / 直播频道列表 ----
+    // ---- 播放队列 / 直播频道与节目单面板 ----
     if (showChannels) {
-        AppSheet(onDismissRequest = { showChannels = false }) {
+        AppSheet(
+            onDismissRequest = { showChannels = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        ) {
             val channels = vm.queueEntries
             val currentIndex = channels.indexOfFirst { it.uri == state.current?.uri }
-            val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 3).coerceAtLeast(0))
-            Text(if (isLive) "频道" else "播放列表（${currentIndex + 1} / ${channels.size}）", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
-            LazyColumn(Modifier.fillMaxHeight(0.75f), state = listState) {
-                itemsIndexed(channels) { i, c ->
-                    val active = i == currentIndex
-                    Row(
-                        Modifier.fillMaxWidth().background(if (active) Color(0x33F28C00) else Color.Transparent)
-                            .clickable { vm.playQueueIndex(i); showChannels = false }.padding(horizontal = 20.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        NetImage(
-                            c.logo.ifEmpty { null }, Modifier.size(width = 56.dp, height = 34.dp), contentScale = ContentScale.Fit, maxSize = 200,
-                            fallback = when { c.isLive -> AppIcons.Live; c.isVideo -> AppIcons.Movie; else -> AppIcons.MusicNote }, background = false,
-                        )
-                        Spacer(Modifier.width(14.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(c.displayTitle, color = if (active) Orange else MaterialTheme.colorScheme.onSurface, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (c.folder.isNotBlank()) Text(c.folder, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1)
+            if (isLive) {
+                LiveChannelEpgSheet(
+                    channels = channels,
+                    currentEntry = state.current,
+                    currentIndex = currentIndex,
+                    initialTab = channelSheetTab,
+                    onTabChange = { channelSheetTab = it },
+                    epgVer = epgVer,
+                    nowMs = epgNowMs,
+                    onSelectChannel = { idx -> vm.playQueueIndex(idx); showChannels = false },
+                    onPlayCatchup = { entry -> vm.play(listOf(entry), 0); showChannels = false },
+                )
+            } else {
+                val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 3).coerceAtLeast(0))
+                Text("播放列表（${currentIndex + 1} / ${channels.size}）", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+                LazyColumn(Modifier.fillMaxHeight(0.75f), state = listState) {
+                    itemsIndexed(channels) { i, c ->
+                        val active = i == currentIndex
+                        Row(
+                            Modifier.fillMaxWidth().background(if (active) Color(0x33F28C00) else Color.Transparent)
+                                .clickable { vm.playQueueIndex(i); showChannels = false }.padding(horizontal = 20.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            NetImage(
+                                c.logo.ifEmpty { null }, Modifier.size(width = 56.dp, height = 34.dp), contentScale = ContentScale.Fit, maxSize = 200,
+                                fallback = when { c.isLive -> AppIcons.Live; c.isVideo -> AppIcons.Movie; else -> AppIcons.MusicNote }, background = false,
+                            )
+                            Spacer(Modifier.width(14.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(c.displayTitle, color = if (active) Orange else MaterialTheme.colorScheme.onSurface, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (c.folder.isNotBlank()) Text(c.folder, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1)
+                            }
                         }
                     }
                 }
@@ -2366,4 +2429,443 @@ private fun formatTime(ms: Long): String {
     val tenth = ms % 1000 / 100
     return if (total >= 3600) "%d:%02d:%02d.%d".format(total / 3600, total / 60 % 60, total % 60, tenth)
     else "%02d:%02d.%d".format(total / 60, total % 60, tenth)
+}
+
+private sealed interface EpgSheetRow {
+    data class DateHeader(val date: String) : EpgSheetRow
+    data class Item(val program: EpgProgram) : EpgSheetRow
+}
+
+/**
+ * 直播面板：顶部分段标签（分类 | 频道 | 节目），支持按分组切台、浏览节目单、显示已播放 / 正在直播 / 未播放状态及回看。
+ */
+@Composable
+private fun LiveChannelEpgSheet(
+    channels: List<MediaEntry>,
+    currentEntry: MediaEntry?,
+    currentIndex: Int,
+    initialTab: Int,
+    onTabChange: (Int) -> Unit,
+    epgVer: Int,
+    nowMs: Long,
+    onSelectChannel: (Int) -> Unit,
+    onPlayCatchup: (MediaEntry) -> Unit,
+) {
+    var tab by remember(initialTab) { mutableIntStateOf(initialTab.coerceIn(0, 2)) }
+    val groups = remember(channels) {
+        channels.mapNotNull { it.folder.takeIf(String::isNotBlank) }.distinct()
+    }
+    var selectedGroup by remember(currentEntry?.folder) {
+        mutableStateOf(currentEntry?.folder?.takeIf { it.isNotBlank() && groups.size > 1 })
+    }
+    val liveCoral = Color(0xFFE85D4A)
+    val pastBlue = Color(0xFF2196F3)
+
+    Column(Modifier.fillMaxWidth().fillMaxHeight(0.78f)) {
+        // 顶部分段标签栏：分类 | 频道 | 节目
+        val tabTitles = listOf("分类", "频道", "节目")
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                .padding(3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            tabTitles.forEachIndexed { idx, label ->
+                val selected = tab == idx
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (selected) MaterialTheme.colorScheme.surfaceContainer else Color.Transparent)
+                        .clickable { tab = idx; onTabChange(idx) }
+                        .padding(vertical = 7.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        label,
+                        fontSize = 14.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        when (tab) {
+            // ---- 0: 分类 ----
+            0 -> {
+                LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 4.dp)) {
+                    item {
+                        val allChosen = selectedGroup == null
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .background(if (allChosen) Color(0x26F28C00) else Color.Transparent)
+                                .clickable { selectedGroup = null; tab = 1; onTabChange(1) }
+                                .padding(horizontal = 20.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "全部频道",
+                                fontSize = 16.sp,
+                                fontWeight = if (allChosen) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (allChosen) Orange else MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text("${channels.size} 个", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                    }
+                    items(groups) { g ->
+                        val chosen = selectedGroup == g
+                        val count = channels.count { it.folder == g }
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .background(if (chosen) Color(0x26F28C00) else Color.Transparent)
+                                .clickable { selectedGroup = g; tab = 1; onTabChange(1) }
+                                .padding(horizontal = 20.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                g,
+                                fontSize = 16.sp,
+                                fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (chosen) Orange else MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text("$count 个", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                    }
+                }
+            }
+
+            // ---- 1: 频道 ----
+            1 -> {
+                val indexedChannels = remember(channels, selectedGroup) {
+                    channels.mapIndexedNotNull { idx, entry ->
+                        if (selectedGroup == null || entry.folder == selectedGroup) idx to entry else null
+                    }
+                }
+                val activeInFiltered = indexedChannels.indexOfFirst { it.first == currentIndex }
+                val listState = rememberLazyListState(
+                    initialFirstVisibleItemIndex = (activeInFiltered - 3).coerceAtLeast(0),
+                )
+                if (groups.size > 1) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        FilterChip(
+                            selected = selectedGroup == null,
+                            onClick = { selectedGroup = null },
+                            label = { Text("全部") },
+                        )
+                        groups.forEach { g ->
+                            FilterChip(
+                                selected = selectedGroup == g,
+                                onClick = { selectedGroup = g },
+                                label = { Text(g, maxLines = 1) },
+                            )
+                        }
+                    }
+                }
+                LazyColumn(Modifier.fillMaxSize(), state = listState) {
+                    itemsIndexed(indexedChannels, key = { _, pair -> "${pair.first}|${pair.second.uri}" }) { _, (realIdx, c) ->
+                        val active = realIdx == currentIndex
+                        val chObj = remember(c.uri, epgVer) { EpgRepository.channelOf(c) }
+                        val curProg = remember(chObj, epgVer, nowMs) { EpgRepository.currentProgram(chObj, nowMs) }
+                        LaunchedEffect(chObj.tvgId, chObj.tvgName, chObj.name) {
+                            delay(250)
+                            EpgRepository.ensureChannel(chObj)
+                        }
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .background(if (active) Color(0x33F28C00) else Color.Transparent)
+                                .clickable { onSelectChannel(realIdx) }
+                                .padding(horizontal = 20.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            NetImage(
+                                c.logo.ifEmpty { null },
+                                Modifier.size(width = 56.dp, height = 34.dp),
+                                contentScale = ContentScale.Fit,
+                                maxSize = 200,
+                                fallback = AppIcons.Live,
+                                background = false,
+                            )
+                            Spacer(Modifier.width(14.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    c.displayTitle,
+                                    color = if (active) Orange else MaterialTheme.colorScheme.onSurface,
+                                    fontSize = 16.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                val sub = curProg?.let { "正在播放：${it.title}" } ?: c.folder
+                                if (sub.isNotBlank()) {
+                                    Text(
+                                        sub,
+                                        color = if (curProg != null) liveCoral else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                            TextButton(
+                                onClick = {
+                                    if (!active) onSelectChannel(realIdx)
+                                    tab = 2
+                                    onTabChange(2)
+                                },
+                            ) {
+                                Text("节目单", fontSize = 12.sp)
+                            }
+                        }
+                        HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+                    }
+                }
+            }
+
+            // ---- 2: 节目 ----
+            2 -> {
+                val scope = rememberCoroutineScope()
+                val liveChannel = remember(currentEntry?.uri, epgVer) {
+                    currentEntry?.let { EpgRepository.channelOf(it) }
+                }
+                val programs = remember(liveChannel, epgVer) {
+                    liveChannel?.let { EpgRepository.programsFor(it) }.orEmpty()
+                }
+                val curProg = remember(programs, nowMs) {
+                    programs.firstOrNull { nowMs in it.startMs until it.endMs }
+                }
+                var loadingEpg by remember(liveChannel?.url) { mutableStateOf(programs.isEmpty()) }
+                LaunchedEffect(liveChannel?.url, epgVer) {
+                    if (programs.isNotEmpty()) {
+                        loadingEpg = false
+                    } else if (liveChannel != null) {
+                        loadingEpg = true
+                        EpgRepository.ensureChannel(liveChannel)
+                        delay(2500)
+                        loadingEpg = false
+                    }
+                }
+
+                // 节目单头部：左侧「节目单」，右侧珊瑚红「正在播放: xxx \n yyyy-MM-dd HH:mm - HH:mm」
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "节目单",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    if (curProg != null) {
+                        Column(Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+                            Text(
+                                "正在播放: ${curProg.title}",
+                                color = liveCoral,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.End,
+                            )
+                            Text(
+                                curProg.dateTimeRangeLabel(),
+                                color = liveCoral,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                textAlign = TextAlign.End,
+                            )
+                        }
+                    } else {
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            currentEntry?.displayTitle.orEmpty(),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+
+                if (programs.isEmpty()) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        if (loadingEpg) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(color = Orange, modifier = Modifier.size(32.dp))
+                                Spacer(Modifier.height(10.dp))
+                                Text("正在加载节目单…", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+                            }
+                        } else {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("暂无该频道的节目单", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 15.sp)
+                                Spacer(Modifier.height(8.dp))
+                                if (liveChannel != null) {
+                                    TextButton(onClick = {
+                                        loadingEpg = true
+                                        scope.launch {
+                                            EpgRepository.ensureChannel(liveChannel)
+                                            loadingEpg = false
+                                        }
+                                    }) {
+                                        Text("重新加载")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    val rows = remember(programs) {
+                        buildList {
+                            var lastDate = ""
+                            for (p in programs) {
+                                val d = p.dateKey()
+                                if (d != lastDate) {
+                                    add(EpgSheetRow.DateHeader(d))
+                                    lastDate = d
+                                }
+                                add(EpgSheetRow.Item(p))
+                            }
+                        }
+                    }
+                    val liveRowIndex = remember(rows, nowMs) {
+                        val liveIdx = rows.indexOfFirst { it is EpgSheetRow.Item && nowMs in it.program.startMs until it.program.endMs }
+                        if (liveIdx >= 0) liveIdx
+                        else rows.indexOfLast { it is EpgSheetRow.Item && it.program.endMs <= nowMs }.coerceAtLeast(0)
+                    }
+                    val epgListState = rememberLazyListState(
+                        initialFirstVisibleItemIndex = (liveRowIndex - 2).coerceAtLeast(0),
+                    )
+                    LaunchedEffect(liveRowIndex, rows.size) {
+                        if (liveRowIndex > 0) {
+                            epgListState.scrollToItem((liveRowIndex - 2).coerceAtLeast(0))
+                        }
+                    }
+                    val canCatchup = remember(liveChannel) { liveChannel != null && CatchupUrl.canCatchup(liveChannel) }
+
+                    LazyColumn(Modifier.fillMaxSize(), state = epgListState) {
+                        itemsIndexed(
+                            rows,
+                            key = { idx, r ->
+                                when (r) {
+                                    is EpgSheetRow.DateHeader -> "d|${r.date}"
+                                    is EpgSheetRow.Item -> "p|$idx|${r.program.startMs}"
+                                }
+                            },
+                        ) { _, row ->
+                            when (row) {
+                                is EpgSheetRow.DateHeader -> {
+                                    Box(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                                            .padding(horizontal = 16.dp, vertical = 7.dp),
+                                    ) {
+                                        Text(
+                                            row.date,
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+
+                                is EpgSheetRow.Item -> {
+                                    val prog = row.program
+                                    val status = prog.statusAt(nowMs)
+                                    val isCurrent = status == EpgStatus.LIVE
+                                    val clickablePast = status == EpgStatus.PAST && canCatchup && liveChannel != null && currentEntry != null
+                                    Row(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .background(if (isCurrent) Color(0x1AE85D4A) else Color.Transparent)
+                                            .then(
+                                                if (clickablePast) {
+                                                    Modifier.clickable {
+                                                        val url = CatchupUrl.build(liveChannel!!, prog)
+                                                        if (url != null) {
+                                                            onPlayCatchup(
+                                                                currentEntry!!.copy(
+                                                                    uri = url,
+                                                                    title = "${liveChannel.name}（回看：${prog.title}）",
+                                                                    isLive = false,
+                                                                ),
+                                                            )
+                                                        }
+                                                    }
+                                                } else if (isCurrent && currentIndex >= 0) {
+                                                    Modifier.clickable { onSelectChannel(currentIndex) }
+                                                } else Modifier,
+                                            )
+                                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        // 左侧开播时间（HH:mm）
+                                        Text(
+                                            prog.startClock(),
+                                            color = liveCoral,
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier.width(56.dp),
+                                        )
+                                        // 中间节目标题 + 时长
+                                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                                            Text(
+                                                prog.title,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                fontSize = 15.sp,
+                                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                            Text(
+                                                prog.durationLabel(),
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                fontSize = 12.sp,
+                                                modifier = Modifier.padding(top = 2.dp),
+                                            )
+                                        }
+                                        // 右侧状态标签：已播放（蓝） / 正在直播（珊瑚红） / 未播放（灰）
+                                        val (statusText, statusColor) = when (status) {
+                                            EpgStatus.PAST -> (if (canCatchup) "回看" else "已播放") to pastBlue
+                                            EpgStatus.LIVE -> "正在直播" to liveCoral
+                                            EpgStatus.UPCOMING -> "未播放" to MaterialTheme.colorScheme.onSurfaceVariant
+                                        }
+                                        Text(
+                                            statusText,
+                                            color = statusColor,
+                                            fontSize = 14.sp,
+                                            fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Medium,
+                                        )
+                                    }
+                                    HorizontalDivider(
+                                        thickness = 0.5.dp,
+                                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

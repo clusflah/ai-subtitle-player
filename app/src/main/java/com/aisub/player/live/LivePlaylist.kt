@@ -11,6 +11,15 @@ data class LiveChannel(
     val tvgId: String = "",
     val userAgent: String = "",
     val referrer: String = "",
+    val tvgName: String = "",
+    val catchup: String = "",
+    val catchupSource: String = "",
+)
+
+/** 解析出的播放列表：频道列表 + 表头里写的节目单地址（x-tvg-url / url-tvg）。 */
+data class ParsedPlaylist(
+    val channels: List<LiveChannel>,
+    val epgUrls: List<String> = emptyList(),
 )
 
 /**
@@ -21,15 +30,20 @@ data class LiveChannel(
 object LivePlaylist {
     private val ATTR = Regex("""([A-Za-z0-9_-]+)="([^"]*)"""")
 
-    fun parse(text: String): List<LiveChannel> {
-        val body = text.removePrefix("﻿")
+    fun parse(text: String): List<LiveChannel> = parseWithHeader(text).channels
+
+    fun parseWithHeader(text: String): ParsedPlaylist {
+        val body = text.removePrefix("\uFEFF")
         return if (body.lineSequence().any { it.trimStart().startsWith("#EXTINF", ignoreCase = true) } ||
             body.trimStart().startsWith("#EXTM3U", ignoreCase = true)
-        ) parseM3u(body) else parseTxt(body)
+        ) parseM3u(body) else ParsedPlaylist(parseTxt(body))
     }
 
-    private fun parseM3u(text: String): List<LiveChannel> {
+    private fun parseM3u(text: String): ParsedPlaylist {
         val out = mutableListOf<LiveChannel>()
+        val epgUrls = mutableListOf<String>()
+        var defaultCatchup = ""
+        var defaultCatchupSource = ""
         var info: Map<String, String> = emptyMap()
         var name = ""
         var group = ""
@@ -39,6 +53,15 @@ object LivePlaylist {
             val line = raw.trim()
             when {
                 line.isEmpty() -> {}
+                line.startsWith("#EXTM3U", ignoreCase = true) -> {
+                    val attrs = ATTR.findAll(line).associate { it.groupValues[1].lowercase() to it.groupValues[2] }
+                    val rawEpg = listOfNotNull(attrs["x-tvg-url"], attrs["url-tvg"], attrs["tvg-url"]).joinToString(",")
+                    rawEpg.split(',', ';').map { it.trim() }
+                        .filter { it.startsWith("http://") || it.startsWith("https://") }
+                        .forEach { if (it !in epgUrls) epgUrls += it }
+                    defaultCatchup = attrs["catchup"] ?: attrs["catchup-type"].orEmpty()
+                    defaultCatchupSource = attrs["catchup-source"].orEmpty()
+                }
                 line.startsWith("#EXTINF", ignoreCase = true) -> {
                     val head = line.substringAfter(':')
                     info = ATTR.findAll(head).associate { it.groupValues[1].lowercase() to it.groupValues[2] }
@@ -59,11 +82,15 @@ object LivePlaylist {
                 line.startsWith("#") -> {}
                 else -> {
                     val url = line
-                    val title = name.ifEmpty { info["tvg-name"].orEmpty() }.ifEmpty { url.substringAfterLast('/') }
+                    val tvgName = info["tvg-name"].orEmpty()
+                    val title = name.ifEmpty { tvgName }.ifEmpty { url.substringAfterLast('/') }
+                    val catchup = info["catchup"] ?: info["catchup-type"] ?: defaultCatchup
+                    val catchupSource = info["catchup-source"] ?: defaultCatchupSource
                     out += LiveChannel(
                         name = title, url = url, group = group,
                         logo = info["tvg-logo"].orEmpty(), tvgId = info["tvg-id"].orEmpty(),
                         userAgent = userAgent, referrer = referrer,
+                        tvgName = tvgName, catchup = catchup, catchupSource = catchupSource,
                     )
                     info = emptyMap(); name = ""; userAgent = ""; referrer = ""
                     // #EXTGRP 只作用于下一条；group-title 每条 #EXTINF 都会重新给
@@ -71,7 +98,7 @@ object LivePlaylist {
                 }
             }
         }
-        return out
+        return ParsedPlaylist(out, epgUrls)
     }
 
     private fun parseTxt(text: String): List<LiveChannel> {

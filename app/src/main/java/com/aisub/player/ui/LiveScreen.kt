@@ -31,7 +31,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -44,10 +46,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aisub.player.live.EpgRepository
 import com.aisub.player.live.LiveSource
 import com.aisub.player.live.LiveState
 import com.aisub.player.live.LiveViewModel
 import com.aisub.player.media.MediaEntry
+import kotlinx.coroutines.delay
 
 /**
  * 直播：添加 M3U / TXT 直播源，按分组浏览、搜索频道，点频道播放（播放页里可以切台）。
@@ -154,6 +158,14 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
                     }
                 }
                 val visible = state.visible
+                val epgVer = EpgRepository.version
+                var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+                LaunchedEffect(Unit) {
+                    while (true) {
+                        delay(60_000L)
+                        nowMs = System.currentTimeMillis()
+                    }
+                }
                 if (visible.isEmpty() && !state.loading) {
                     EmptyState(
                         when {
@@ -166,6 +178,13 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
                 }
                 LazyColumn(contentPadding = PaddingValues(vertical = 4.dp)) {
                     itemsIndexed(visible, key = { i, c -> "$i|${c.url}" }) { i, c ->
+                        val curProg = remember(c.tvgId, c.tvgName, c.name, epgVer, nowMs) {
+                            EpgRepository.currentProgram(c, nowMs)
+                        }
+                        LaunchedEffect(c.tvgId, c.tvgName, c.name, state.selected?.id) {
+                            delay(250)
+                            EpgRepository.ensureChannel(c, state.selected?.epgUrl.orEmpty())
+                        }
                         Row(
                             Modifier.fillMaxWidth().clickable { play(vm.playlist(), i) }.padding(horizontal = 16.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -178,7 +197,19 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
                             Spacer(Modifier.width(14.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(c.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                if (c.group.isNotBlank() && (state.group == null || state.group == LiveState.FAVORITES)) {
+                                if (curProg != null) {
+                                    Text(
+                                        "正在播放：${curProg.title}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    LinearProgressIndicator(
+                                        progress = { curProg.progressAt(nowMs) },
+                                        modifier = Modifier.fillMaxWidth().padding(top = 3.dp).height(2.dp).clip(RoundedCornerShape(1.dp)),
+                                    )
+                                } else if (c.group.isNotBlank() && (state.group == null || state.group == LiveState.FAVORITES)) {
                                     Text(c.group, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                                 }
                             }
@@ -196,18 +227,28 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
         }
     }
 
-    if (adding) LiveSourceDialog(onDismiss = { adding = false }) { name, url -> vm.add(name, url); adding = false }
+    if (adding) LiveSourceDialog(onDismiss = { adding = false }) { name, url, epgUrl -> vm.add(name, url, epgUrl); adding = false }
     editing?.let { s ->
-        LiveSourceDialog(initial = s, onDismiss = { editing = null }) { name, url -> vm.edit(s, name, url); editing = null }
+        LiveSourceDialog(
+            initial = s,
+            detectedEpgUrl = state.headerEpgUrls.firstOrNull().orEmpty(),
+            onDismiss = { editing = null },
+        ) { name, url, epgUrl -> vm.edit(s, name, url, epgUrl); editing = null }
     }
 }
 
 /** 添加 / 编辑直播源：填网址，或选手机里的 M3U / TXT 文件。 */
 @Composable
-private fun LiveSourceDialog(initial: LiveSource? = null, onDismiss: () -> Unit, onSave: (name: String, url: String) -> Unit) {
+private fun LiveSourceDialog(
+    initial: LiveSource? = null,
+    detectedEpgUrl: String = "",
+    onDismiss: () -> Unit,
+    onSave: (name: String, url: String, epgUrl: String) -> Unit,
+) {
     val context = LocalContext.current
     var name by remember { mutableStateOf(initial?.name.orEmpty()) }
     var url by remember { mutableStateOf(initial?.url.orEmpty()) }
+    var epgUrl by remember { mutableStateOf(initial?.epgUrl.orEmpty()) }
     val title = if (initial == null) "添加直播源" else "编辑直播源"
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -218,6 +259,7 @@ private fun LiveSourceDialog(initial: LiveSource? = null, onDismiss: () -> Unit,
         }
     }
     val valid = url.startsWith("http://") || url.startsWith("https://") || url.startsWith("content://")
+    val epgPlaceholder = detectedEpgUrl.ifBlank { "https://…/epg.xml.gz（不填则自动识别）" }
     AppDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
@@ -226,22 +268,33 @@ private fun LiveSourceDialog(initial: LiveSource? = null, onDismiss: () -> Unit,
                 OutlinedTextField(url, { url = it.trim() }, label = { Text("播放列表地址") }, placeholder = { Text("https://…/live.m3u") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
                 TextButton(onClick = { picker.launch(arrayOf("*/*")) }) { Text("或选择手机里的 M3U / TXT 文件") }
                 OutlinedTextField(name, { name = it }, label = { Text("名称（可不填）") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
+                OutlinedTextField(
+                    epgUrl, { epgUrl = it.trim() },
+                    label = { Text("节目单地址（可不填）") },
+                    placeholder = { Text(epgPlaceholder, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false,
+                )
                 // 电视：长地址用手机粘贴
                 PhoneInputButton(
-                    listOf(PhoneField("url", "播放列表地址", url), PhoneField("name", "名称（可不填）", name)),
+                    listOf(
+                        PhoneField("url", "播放列表地址", url),
+                        PhoneField("name", "名称（可不填）", name),
+                        PhoneField("epgUrl", "节目单地址（可不填）", epgUrl),
+                    ),
                     title = title,
                 ) { v ->
                     url = v["url"]?.trim() ?: url
                     name = v["name"] ?: name
+                    epgUrl = v["epgUrl"]?.trim() ?: epgUrl
                 }
                 Text(
-                    "支持 M3U / M3U8 播放列表（含 tvg-logo、group-title 分组、User-Agent / Referer），以及「分组,#genre#」「频道名,地址」TXT 格式",
+                    "支持 M3U / M3U8 播放列表（含 x-tvg-url 节目单、tvg-logo、group-title 分组、回看 catchup），以及「分组,#genre#」「频道名,地址」TXT 格式（自动匹配在线节目单）",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(2.dp))
             }
         },
-        confirmButton = { TextButton(onClick = { onSave(name, url) }, enabled = valid) { Text(if (initial == null) "添加" else "保存") } },
+        confirmButton = { TextButton(onClick = { onSave(name, url, epgUrl) }, enabled = valid) { Text(if (initial == null) "添加" else "保存") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }

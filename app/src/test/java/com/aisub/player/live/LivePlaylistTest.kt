@@ -19,9 +19,11 @@ class LivePlaylistTest {
             #EXTGRP:新闻
             rtmp://live.example/news
         """.trimIndent()
-        val ch = LivePlaylist.parse(text)
+        val parsed = LivePlaylist.parseWithHeader(text)
+        assertEquals(listOf("http://epg.example/e.xml"), parsed.epgUrls)
+        val ch = parsed.channels
         assertEquals(3, ch.size)
-        assertEquals(LiveChannel("CCTV-1 综合", "http://live.example/cctv1.m3u8", "央视", "http://logo/cctv1.png", "cctv1"), ch[0])
+        assertEquals(LiveChannel("CCTV-1 综合", "http://live.example/cctv1.m3u8", "央视", "http://logo/cctv1.png", "cctv1", tvgName = "CCTV1"), ch[0])
         assertEquals("湖南卫视", ch[1].name)
         assertEquals("卫视", ch[1].group)
         assertEquals("Mozilla/5.0", ch[1].userAgent)

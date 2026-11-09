@@ -17,6 +17,7 @@ data class LiveState(
     val sources: List<LiveSource> = emptyList(),
     val selected: LiveSource? = null,
     val channels: List<LiveChannel> = emptyList(),
+    val headerEpgUrls: List<String> = emptyList(),
     val loading: Boolean = false,
     val error: String? = null,
     /** 当前分组；null 为全部，[FAVORITES] 为收藏 */
@@ -50,6 +51,7 @@ class LiveViewModel(app: Application) : AndroidViewModel(app) {
     init {
         val sources = store.list()
         val favorites = store.favorites()
+        EpgRepository.registerAll(favorites)
         _state.update { it.copy(sources = sources, favorites = favorites, group = if (favorites.isNotEmpty()) LiveState.FAVORITES else null) }
         (sources.firstOrNull { it.id == store.lastSourceId } ?: sources.firstOrNull())?.let { select(it) }
     }
@@ -57,8 +59,19 @@ class LiveViewModel(app: Application) : AndroidViewModel(app) {
     /** 切到某个源：先显示缓存，再联网更新 */
     fun select(source: LiveSource, refresh: Boolean = true) {
         store.lastSourceId = source.id
-        val cached = store.cached(source)
-        _state.update { it.copy(selected = source, channels = cached.orEmpty(), group = it.group?.takeIf { g -> g == LiveState.FAVORITES }, error = null) }
+        val cached = store.cachedPlaylist(source)
+        val channels = cached?.channels.orEmpty()
+        val epgUrls = cached?.epgUrls.orEmpty()
+        EpgRepository.registerAll(channels)
+        _state.update {
+            it.copy(
+                selected = source, channels = channels, headerEpgUrls = epgUrls,
+                group = it.group?.takeIf { g -> g == LiveState.FAVORITES }, error = null,
+            )
+        }
+        if (channels.isNotEmpty()) {
+            viewModelScope.launch { EpgRepository.loadSourceEpg(getApplication(), source, channels, epgUrls) }
+        }
         if (refresh || cached == null) refresh()
     }
 
@@ -68,9 +81,17 @@ class LiveViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(loading = true, error = null) }
         loadJob = viewModelScope.launch {
             try {
-                val channels = withContext(Dispatchers.IO) { store.fetch(source) }
+                val parsed = withContext(Dispatchers.IO) { store.fetchPlaylist(source) }
+                val channels = parsed.channels
+                EpgRepository.registerAll(channels)
                 if (_state.value.selected?.id == source.id) {
-                    _state.update { s -> s.copy(channels = channels, group = s.group?.takeIf { g -> g == LiveState.FAVORITES || channels.any { it.group == g } }) }
+                    _state.update { s ->
+                        s.copy(
+                            channels = channels, headerEpgUrls = parsed.epgUrls,
+                            group = s.group?.takeIf { g -> g == LiveState.FAVORITES || channels.any { it.group == g } },
+                        )
+                    }
+                    launch { EpgRepository.loadSourceEpg(getApplication(), source, channels, parsed.epgUrls) }
                 }
             } catch (e: Exception) {
                 val hasCache = _state.value.channels.isNotEmpty()
@@ -81,19 +102,27 @@ class LiveViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun add(name: String, url: String) {
-        val source = store.add(name.ifBlank { url.substringAfterLast('/').substringBefore('?').ifBlank { "直播源" } }, url.trim())
+    fun add(name: String, url: String, epgUrl: String = "") {
+        val source = store.add(name.ifBlank { url.substringAfterLast('/').substringBefore('?').ifBlank { "直播源" } }, url.trim(), epgUrl)
         _state.update { it.copy(sources = store.list()) }
         select(source)
     }
 
-    /** 编辑名称、地址；地址变了重新取频道 */
-    fun edit(source: LiveSource, name: String, url: String) {
+    /** 编辑名称、地址、节目单地址；地址变了重新取频道 */
+    fun edit(source: LiveSource, name: String, url: String, epgUrl: String = "") {
         val newUrl = url.trim()
-        store.update(source.id, name.ifBlank { source.name }, newUrl)
+        val newEpg = epgUrl.trim()
+        store.update(source.id, name.ifBlank { source.name }, newUrl, newEpg)
         val sources = store.list()
+        val updated = sources.firstOrNull { it.id == source.id }
         _state.update { s -> s.copy(sources = sources, selected = sources.firstOrNull { it.id == s.selected?.id }) }
-        if (newUrl != source.url) sources.firstOrNull { it.id == source.id }?.let { select(it) }
+        if (newUrl != source.url) {
+            updated?.let { select(it) }
+        } else if (newEpg != source.epgUrl && updated != null && _state.value.selected?.id == source.id) {
+            viewModelScope.launch {
+                EpgRepository.loadSourceEpg(getApplication(), updated, _state.value.channels, _state.value.headerEpgUrls, force = true)
+            }
+        }
     }
 
     fun remove(source: LiveSource) {
@@ -120,6 +149,7 @@ class LiveViewModel(app: Application) : AndroidViewModel(app) {
     /** 播放列表：当前筛选下的频道，切台就在这些里面切 */
     fun playlist(): List<MediaEntry> = _state.value.visible.map { c ->
         LiveHeaders.register(c)
+        EpgRepository.register(c)
         MediaEntry(c.url, c.name, isLive = true, logo = c.logo, folder = c.group)
     }
 }
