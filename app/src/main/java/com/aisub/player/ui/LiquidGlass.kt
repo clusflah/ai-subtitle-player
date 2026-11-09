@@ -42,6 +42,7 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -296,6 +297,22 @@ fun Modifier.liquidGlass(
     } else {
         null
     }
+    val blurRenderEffect = remember(blurPx) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && blurPx > 0.5f) {
+            RenderEffect
+                .createBlurEffect(blurPx, blurPx, Shader.TileMode.CLAMP)
+                .asComposeRenderEffect()
+        } else {
+            null
+        }
+    }
+    val runtimeShader = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            AgslShaders.newSurfaceShader()
+        } else {
+            null
+        }
+    }
 
     this
         .let { mod ->
@@ -314,8 +331,9 @@ fun Modifier.liquidGlass(
             val safeW = size.width.coerceAtLeast(1f)
             val safeH = size.height.coerceAtLeast(1f)
             val endOffset = Offset(safeW, safeH)
-            val shiftWave = sin(lightShift * 1.6f)
-            val shiftCos = cos(lightShift * 1.2f)
+            val safeLightShift = if (lightShift.isFinite()) lightShift else 0f
+            val shiftWave = sin(safeLightShift * 1.6f)
+            val shiftCos = cos(safeLightShift * 1.2f)
             val sheenStart = Offset(
                 x = (safeW * (0.18f + shiftWave * 0.28f)).coerceIn(0f, safeW),
                 y = 0f,
@@ -325,10 +343,8 @@ fun Modifier.liquidGlass(
                 y = safeH,
             )
 
-            if (blurredBackdropLayer != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && blurPx > 0.5f) {
-                blurredBackdropLayer.renderEffect = RenderEffect
-                    .createBlurEffect(blurPx, blurPx, Shader.TileMode.CLAMP)
-                    .asComposeRenderEffect()
+            if (blurredBackdropLayer != null && blurRenderEffect != null) {
+                blurredBackdropLayer.renderEffect = blurRenderEffect
             }
 
             val outline = shape.createOutline(size, layoutDirection, this)
@@ -441,20 +457,22 @@ fun Modifier.liquidGlass(
                 )
             }
 
-            // Android 13+ AGSL 表面液态玻璃曲面高光与色散画刷
+            // Android 13+ AGSL 表面液态玻璃曲面高光与色散画刷（复用已编译的 RuntimeShader，避免动画帧重复创建）
             val agslSurfaceBrush = if (
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                runtimeShader != null &&
                 size.width > 2f &&
                 size.height > 2f
             ) {
-                AgslShaders.createConfiguredSurfaceBrush(
+                AgslShaders.configureSurfaceBrush(
+                    shader = runtimeShader,
                     width = size.width,
                     height = size.height,
                     cornerRadii = cornerRadiiPx,
                     bevelWidth = bevelPx.coerceAtMost(min(size.width, size.height) * 0.45f),
                     intensity = style.specularIntensity,
                     isDark = isDark,
-                    lightPhase = lightShift,
+                    lightPhase = safeLightShift,
                 )
             } else {
                 null
@@ -470,12 +488,14 @@ fun Modifier.liquidGlass(
                     if (blurredBackdropLayer != null && backdrop != null && backdrop.hasRecorded) {
                         val dx = backdrop.sourceRootOffset.x - posHolder.offsetInRoot.x
                         val dy = backdrop.sourceRootOffset.y - posHolder.offsetInRoot.y
-                        blurredBackdropLayer.record {
-                            translate(left = dx, top = dy) {
-                                drawLayer(backdrop.contentLayer)
+                        runCatching {
+                            blurredBackdropLayer.record {
+                                translate(left = dx, top = dy) {
+                                    drawLayer(backdrop.contentLayer)
+                                }
                             }
+                            drawLayer(blurredBackdropLayer)
                         }
-                        drawLayer(blurredBackdropLayer)
                     }
 
                     // 1. 液态玻璃半透明染色层 + 斜向光泽层
@@ -656,6 +676,8 @@ fun <T> LiquidGlassBottomBar(
 ) {
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val selectedIndex = items.indexOfFirst { it.value == selected }.coerceAtLeast(0)
+    val currentSelected by rememberUpdatedState(selected)
+    val currentOnSelect by rememberUpdatedState(onSelect)
     var touching by remember { mutableStateOf(false) }
 
     // 三弹簧驱动：前缘快速跃出 + 后缘粘滞拉长 + 落定果冻回弹振荡
@@ -719,15 +741,17 @@ fun <T> LiquidGlassBottomBar(
         // 1. 底层滑动、拉长与果冻回弹的液态玻璃水滴胶囊指示器（始终完整包裹图标和文字）
         androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
             val count = items.size.coerceAtLeast(1)
-            val slotWidth = maxWidth / count
+            val safeMaxW = maxWidth.coerceAtLeast(1.dp)
+            val slotWidth = (safeMaxW / count).coerceIn(1.dp, safeMaxW)
             val leftEdgeIndex = min(fastPos, slowPos)
             val rightEdgeIndex = max(fastPos, slowPos)
             val stretch = (rightEdgeIndex - leftEdgeIndex).coerceIn(0f, count.toFloat())
             // 放大水滴拉伸感，并在落定瞬间通过 wobble 产生横向/纵向果冻回弹
             val extraWidthFactor = (stretch * 1.42f + abs(wobble) * 0.38f + touchPress * 0.08f).coerceIn(0f, count.toFloat())
             val centerShift = (extraWidthFactor - stretch) * 0.5f
-            val dropletLeft = (slotWidth * (leftEdgeIndex - centerShift)).coerceIn(0.dp, maxWidth - slotWidth * 0.8f)
-            val dropletWidth = (slotWidth * (1f + extraWidthFactor)).coerceIn(slotWidth, maxWidth - dropletLeft)
+            val dropletWidth = (slotWidth * (1f + extraWidthFactor)).coerceIn(slotWidth, safeMaxW)
+            val maxLeft = (safeMaxW - dropletWidth).coerceAtLeast(0.dp)
+            val dropletLeft = (slotWidth * (leftEdgeIndex - centerShift)).coerceIn(0.dp, maxLeft)
             val scaleY = (1f - (stretch * 0.18f).coerceAtMost(0.20f) + abs(wobble) * 0.10f + touchPress * 0.04f)
                 .coerceIn(0.80f, 1.06f)
 
@@ -759,23 +783,29 @@ fun <T> LiquidGlassBottomBar(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(items) {
+                    if (items.isEmpty()) return@pointerInput
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         touching = true
-                        val count = items.size.coerceAtLeast(1)
-                        val slotW = (size.width / count.toFloat()).coerceAtLeast(1f)
-                        val initialSlot = (down.position.x / slotW).toInt().coerceIn(0, items.lastIndex)
-                        onSelect(items[initialSlot].value)
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                            if (!change.pressed) break
-                            val curSlot = (change.position.x / slotW).toInt().coerceIn(0, items.lastIndex)
-                            if (curSlot != items.indexOfFirst { it.value == selected }) {
-                                onSelect(items[curSlot].value)
+                        try {
+                            val count = items.size.coerceAtLeast(1)
+                            val maxIdx = (items.size - 1).coerceAtLeast(0)
+                            val slotW = (size.width / count.toFloat()).coerceAtLeast(1f)
+                            var lastSlot = (down.position.x / slotW).toInt().coerceIn(0, maxIdx)
+                            currentOnSelect(items[lastSlot].value)
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!change.pressed) break
+                                val curSlot = (change.position.x / slotW).toInt().coerceIn(0, maxIdx)
+                                if (curSlot != lastSlot && items[curSlot].value != currentSelected) {
+                                    lastSlot = curSlot
+                                    currentOnSelect(items[curSlot].value)
+                                }
                             }
+                        } finally {
+                            touching = false
                         }
-                        touching = false
                     }
                 },
             verticalAlignment = Alignment.CenterVertically,
@@ -838,6 +868,8 @@ fun LiquidGlassSegmentedControl(
 ) {
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val safeIndex = selectedIndex.coerceIn(0, (options.size - 1).coerceAtLeast(0))
+    val currentSafeIndex by rememberUpdatedState(safeIndex)
+    val currentOnSelect by rememberUpdatedState(onSelect)
     var touching by remember { mutableStateOf(false) }
 
     val fastPos by animateFloatAsState(
@@ -889,14 +921,16 @@ fun LiquidGlassSegmentedControl(
     ) {
         androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
             val count = options.size.coerceAtLeast(1)
-            val slotWidth = maxWidth / count
+            val safeMaxW = maxWidth.coerceAtLeast(1.dp)
+            val slotWidth = (safeMaxW / count).coerceIn(1.dp, safeMaxW)
             val leftEdge = min(fastPos, slowPos)
             val rightEdge = max(fastPos, slowPos)
             val stretch = (rightEdge - leftEdge).coerceIn(0f, count.toFloat())
             val extraWidth = (stretch * 1.40f + abs(wobble) * 0.36f + touchPress * 0.06f).coerceIn(0f, count.toFloat())
             val centerShift = (extraWidth - stretch) * 0.5f
-            val thumbLeft = (slotWidth * (leftEdge - centerShift)).coerceIn(0.dp, maxWidth - slotWidth * 0.8f)
-            val thumbWidth = (slotWidth * (1f + extraWidth)).coerceIn(slotWidth, maxWidth - thumbLeft)
+            val thumbWidth = (slotWidth * (1f + extraWidth)).coerceIn(slotWidth, safeMaxW)
+            val maxLeft = (safeMaxW - thumbWidth).coerceAtLeast(0.dp)
+            val thumbLeft = (slotWidth * (leftEdge - centerShift)).coerceIn(0.dp, maxLeft)
             val thumbScaleY = (1f - (stretch * 0.18f).coerceAtMost(0.20f) + abs(wobble) * 0.10f + touchPress * 0.04f)
                 .coerceIn(0.80f, 1.05f)
 
@@ -922,21 +956,29 @@ fun LiquidGlassSegmentedControl(
             Modifier
                 .fillMaxSize()
                 .pointerInput(options) {
+                    if (options.isEmpty()) return@pointerInput
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         touching = true
-                        val count = options.size.coerceAtLeast(1)
-                        val slotW = (size.width / count.toFloat()).coerceAtLeast(1f)
-                        val initialSlot = (down.position.x / slotW).toInt().coerceIn(0, options.lastIndex)
-                        onSelect(initialSlot)
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                            if (!change.pressed) break
-                            val curSlot = (change.position.x / slotW).toInt().coerceIn(0, options.lastIndex)
-                            onSelect(curSlot)
+                        try {
+                            val count = options.size.coerceAtLeast(1)
+                            val maxIdx = (options.size - 1).coerceAtLeast(0)
+                            val slotW = (size.width / count.toFloat()).coerceAtLeast(1f)
+                            var lastSlot = (down.position.x / slotW).toInt().coerceIn(0, maxIdx)
+                            currentOnSelect(lastSlot)
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!change.pressed) break
+                                val curSlot = (change.position.x / slotW).toInt().coerceIn(0, maxIdx)
+                                if (curSlot != lastSlot && curSlot != currentSafeIndex) {
+                                    lastSlot = curSlot
+                                    currentOnSelect(curSlot)
+                                }
+                            }
+                        } finally {
+                            touching = false
                         }
-                        touching = false
                     }
                 },
             verticalAlignment = Alignment.CenterVertically,
@@ -1090,7 +1132,12 @@ private object AgslShaders {
         }
     """
 
-    fun createConfiguredSurfaceBrush(
+    fun newSurfaceShader(): RuntimeShader? = runCatching {
+        RuntimeShader(SURFACE_GLASS_SKSL)
+    }.getOrNull()
+
+    fun configureSurfaceBrush(
+        shader: RuntimeShader,
         width: Float,
         height: Float,
         cornerRadii: FloatArray,
@@ -1099,7 +1146,6 @@ private object AgslShaders {
         isDark: Boolean,
         lightPhase: Float = 0f,
     ): ShaderBrush? = runCatching {
-        val shader = RuntimeShader(SURFACE_GLASS_SKSL)
         shader.setFloatUniform("size", width, height)
         shader.setFloatUniform(
             "cornerRadii",
