@@ -20,9 +20,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -471,7 +473,10 @@ fun MangaReader(
                     val percent = if (pages.size > 1) page * 100 / (pages.size - 1) else 100
                     Text("第 ${page + 1} / ${pages.size} 页 · $percent% · ${mode.label}${if (rtl) " · 从右往左" else ""}", color = Color(0xCCFFFFFF), style = MaterialTheme.typography.bodySmall)
                 }
-                // 手机竖屏时底部按钮可能放不下；始终在顶部保留显示方式入口。
+                // 手机竖屏时底部按钮可能放不下；始终在顶部保留目录与显示方式入口。
+                IconButton(onClick = { panel = ReaderPanel.THUMBS }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) {
+                    Icon(AppIcons.ListIcon, "目录", tint = Color.White)
+                }
                 IconButton(onClick = { panel = ReaderPanel.SETTINGS }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) {
                     Icon(AppIcons.Settings, "阅读设置", tint = Color.White)
                 }
@@ -483,7 +488,7 @@ fun MangaReader(
             Column(
                 Modifier.fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
                     .shadow(
                         elevation = 16.dp,
                         shape = barShape,
@@ -491,7 +496,7 @@ fun MangaReader(
                         spotColor = Color(0x36000000),
                     )
                     .liquidGlass(shape = barShape, style = GlassStyle.Floating, tint = Color(0x88161D2A))
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
             ) {
                 if (!tv && pages.size > 1) {
                     // 手机：拖动跳页（日漫从右往左时滑块也反过来）
@@ -502,28 +507,34 @@ fun MangaReader(
                         onValueChange = { dragging = if (rtl) (pages.size - 1) - it else it; lastInteraction = System.currentTimeMillis() },
                         onValueChangeFinished = { dragging?.let { jumpTo(it.toInt()) }; dragging = null },
                         valueRange = 0f..(pages.size - 1).toFloat(),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
                     )
                 }
                 Row(
                     Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                    horizontalArrangement = if (tv) Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally) else Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     val chapterNav = onOpenUrl != null
-                    if (chapterNav && book.prev != null) ReaderButton("上一话") { openChapter(book.prev) }
+                    val btnMod = if (tv) Modifier else Modifier.weight(1f)
+                    if (chapterNav && book.prev != null) ReaderButton("上一话", btnMod) { openChapter(book.prev) }
                     // 上一页 / 下一页按钮按屏幕方向摆：从右往左读时「下一页」在左边
-                    val back = @Composable { ReaderButton(if (rtl) "下一页" else "上一页", Modifier) { turn(rtl) } }
-                    val fwd = @Composable { ReaderButton(if (rtl) "上一页" else "下一页", Modifier.focusRequester(controlsFocus)) { turn(!rtl) } }
+                    val back = @Composable { ReaderButton(if (rtl) "下一页" else "上一页", btnMod) { turn(rtl) } }
+                    val fwd = @Composable { ReaderButton(if (rtl) "上一页" else "下一页", btnMod.focusRequester(controlsFocus)) { turn(!rtl) } }
                     back()
-                    Text("${page + 1} / ${pages.size}", color = Color.White, modifier = Modifier.padding(horizontal = 6.dp))
+                    Text("${page + 1} / ${pages.size}", color = Color.White, maxLines = 1, softWrap = false, modifier = Modifier.padding(horizontal = 4.dp))
                     fwd()
-                    if (chapterNav && book.next != null) ReaderButton("下一话") { openChapter(book.next) }
-                    ReaderButton("目录") { panel = ReaderPanel.THUMBS }
-                    if (mode != MangaMode.WIDTH) {
+                    if (chapterNav && book.next != null) ReaderButton("下一话", btnMod) { openChapter(book.next) }
+                    if (tv || !chapterNav) {
+                        ReaderButton("目录", btnMod) { panel = ReaderPanel.THUMBS }
+                    }
+                    if (tv && mode != MangaMode.WIDTH) {
                         ReaderButton("缩小") { setZoom(ZOOMS.lastOrNull { it < zoom - 0.01f } ?: 1f) }
                         ReaderButton("放大") { setZoom(ZOOMS.firstOrNull { it > zoom + 0.01f } ?: 3f) }
                     }
-                    ReaderButton("设置") { panel = ReaderPanel.SETTINGS }
+                    if (tv || !chapterNav) {
+                        ReaderButton("设置", btnMod) { panel = ReaderPanel.SETTINGS }
+                    }
                 }
                 if (tv) Text(
                     "←→ 翻页 · 放大后方向键移动 · 确认键显示控制栏 · 长按确认 / 菜单键：阅读设置 · 返回退出",
@@ -681,7 +692,13 @@ private fun ChapterEnd(book: MangaBook, onOpenUrl: ((String, Boolean) -> Unit)?,
 
 @Composable
 private fun ReaderButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    TextButton(onClick = onClick, modifier = modifier.tvFocusRing(RoundedCornerShape(50))) { Text(label, color = Color.White) }
+    TextButton(
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp),
+        modifier = modifier.defaultMinSize(minWidth = 1.dp, minHeight = 36.dp).tvFocusRing(RoundedCornerShape(50)),
+    ) {
+        Text(label, color = Color.White, maxLines = 1, softWrap = false)
+    }
 }
 
 /** 缩略图：快速跳到某一页 */

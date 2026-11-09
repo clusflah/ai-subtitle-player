@@ -66,8 +66,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 26
         targetSdk = 36
-        versionCode = 132
-        versionName = "2.9.71"
+        versionCode = 133
+        versionName = "2.9.72"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用

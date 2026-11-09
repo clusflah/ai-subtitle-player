@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -391,11 +392,11 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
                 shape = barShape,
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .navigationBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
                     .fillMaxWidth()
                     .liquidGlass(shape = barShape, style = GlassStyle.Floating, sampleBackdrop = true),
             ) {
-                Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                Column(Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
                     val pct = if (rows.isEmpty()) 0 else (list.firstVisibleItemIndex + 1) * 100 / rows.size
                     Text(
                         "${book.chapters.getOrNull(current)?.title.orEmpty()} · $pct%",
@@ -408,7 +409,7 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
                             TextButton(
                                 onClick = onClick,
                                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 8.dp),
-                                modifier = Modifier.weight(1f).tvFocusRing(RoundedCornerShape(50)),
+                                modifier = Modifier.weight(1f).defaultMinSize(minWidth = 1.dp, minHeight = 36.dp).tvFocusRing(RoundedCornerShape(50)),
                             ) { Text(label, maxLines = 1, softWrap = false) }
                         }
                         toolbarButton("A-") { BookStore.update { it.copy(fontSize = (it.fontSize - 1).coerceAtLeast(12)) } }
