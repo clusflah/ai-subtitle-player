@@ -2462,37 +2462,13 @@ private fun LiveChannelEpgSheet(
     val pastBlue = Color(0xFF2196F3)
 
     Column(Modifier.fillMaxWidth().fillMaxHeight(0.78f)) {
-        // 顶部分段标签栏：分类 | 频道 | 节目
-        val tabTitles = listOf("分类", "频道", "节目")
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                .padding(3.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            tabTitles.forEachIndexed { idx, label ->
-                val selected = tab == idx
-                Box(
-                    Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (selected) MaterialTheme.colorScheme.surfaceContainer else Color.Transparent)
-                        .clickable { tab = idx; onTabChange(idx) }
-                        .padding(vertical = 7.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        label,
-                        fontSize = 14.sp,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                        color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
+        // 顶部分段标签栏：分类 | 频道 | 节目（液态玻璃水滴滑动动画）
+        LiquidGlassSegmentedControl(
+            options = listOf("分类", "频道", "节目"),
+            selectedIndex = tab,
+            onSelect = { idx -> tab = idx; onTabChange(idx) },
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        )
 
         when (tab) {
             // ---- 0: 分类 ----
@@ -2751,12 +2727,13 @@ private fun LiveChannelEpgSheet(
                         if (liveIdx >= 0) liveIdx
                         else rows.indexOfLast { it is EpgSheetRow.Item && it.program.endMs <= nowMs }.coerceAtLeast(0)
                     }
+                    val targetScrollIndex = (liveRowIndex - 2).coerceIn(0, (rows.size - 1).coerceAtLeast(0))
                     val epgListState = rememberLazyListState(
-                        initialFirstVisibleItemIndex = (liveRowIndex - 2).coerceAtLeast(0),
+                        initialFirstVisibleItemIndex = targetScrollIndex,
                     )
-                    LaunchedEffect(liveRowIndex, rows.size) {
-                        if (liveRowIndex > 0) {
-                            epgListState.scrollToItem((liveRowIndex - 2).coerceAtLeast(0))
+                    LaunchedEffect(targetScrollIndex, rows.size) {
+                        if (rows.isNotEmpty() && liveRowIndex > 0) {
+                            runCatching { epgListState.scrollToItem(targetScrollIndex) }
                         }
                     }
                     val canCatchup = remember(liveChannel) { liveChannel != null && CatchupUrl.canCatchup(liveChannel) }
@@ -2766,7 +2743,7 @@ private fun LiveChannelEpgSheet(
                             rows,
                             key = { idx, r ->
                                 when (r) {
-                                    is EpgSheetRow.DateHeader -> "d|${r.date}"
+                                    is EpgSheetRow.DateHeader -> "d|$idx|${r.date}"
                                     is EpgSheetRow.Item -> "p|$idx|${r.program.startMs}"
                                 }
                             },

@@ -86,7 +86,7 @@ data class EpgProgram(
  * 把「CCTV-1 综合」「CCTV1高清」「CCTV-5+ 体育赛事」「CCTV5-4K」「湖南卫视 HD」统一成能和节目单对上的标准名。
  */
 object EpgMatcher {
-    private val BRACKETS = Regex("""\[[^\]]*]|\([^)]*\)|【[^】]*】|（[^）]*）""")
+    private val BRACKETS = Regex("""\[[^\]]*\]|\([^)]*\)|【[^】]*】|（[^）]*）""")
     private val CCTV_NUM = Regex("""^cctv[-_\s]*(\d+\+?)(?:[-_\s]*(?:4k|8k|hd|fhd|uhd)|[^0-9+].*)?$""")
     private val CCTV_4K = Regex("""^cctv[-_\s]*(4k|8k).*$""")
     private val CETV_NUM = Regex("""^(?:cetv|中国教育\s*电视台|中国教育)[-_\s]*(\d+).*$""")
@@ -348,7 +348,7 @@ object DiypEpg {
  * 直播回看地址生成：支持 M3U 的 `catchup` / `catchup-source` 时间占位符（`${(b)yyyyMMddHHmmss}`、`{utc}` 等）。
  */
 object CatchupUrl {
-    private val FMT_TOKEN = Regex("""\$\{\(([be])\)([^}]+)}""")
+    private val FMT_TOKEN = Regex("""\$\{\(([be])\)([^}]+)\}""")
 
     fun canCatchup(channel: LiveChannel): Boolean =
         channel.catchupSource.isNotBlank() || channel.catchup.lowercase(Locale.ROOT) in setOf("append", "default", "shift", "flussonic")

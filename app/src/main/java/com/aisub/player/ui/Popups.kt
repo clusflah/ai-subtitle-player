@@ -22,12 +22,20 @@ import androidx.compose.material3.SheetState
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
@@ -144,6 +152,23 @@ fun AppSheet(
     content: @Composable ColumnScope.() -> Unit,
 ) = PopupTheme {
     val c = LocalPopupColors.current
+    var entered by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { entered = true }
+    val scaleX by animateFloatAsState(
+        targetValue = if (entered) 1f else 0.93f,
+        animationSpec = spring(dampingRatio = 0.48f, stiffness = 340f),
+        label = "sheetScaleX",
+    )
+    val scaleY by animateFloatAsState(
+        targetValue = if (entered) 1f else 0.90f,
+        animationSpec = spring(dampingRatio = 0.44f, stiffness = 300f),
+        label = "sheetScaleY",
+    )
+    val lightShift by animateFloatAsState(
+        targetValue = if (entered) 1.5f else 0f,
+        animationSpec = spring(dampingRatio = 0.56f, stiffness = 200f),
+        label = "sheetLight",
+    )
     ModalBottomSheet(
         onDismissRequest = onDismissRequest, modifier = modifier, sheetState = sheetState,
         containerColor = Color.Transparent, contentColor = c.textPrimary, tonalElevation = 0.dp,
@@ -154,8 +179,12 @@ fun AppSheet(
         val shape = RoundedCornerShape(28.dp)
         Column(
             Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp).fillMaxWidth()
+                .graphicsLayer {
+                    this.scaleX = scaleX
+                    this.scaleY = scaleY
+                }
                 .shadow(c.shadow, shape)
-                .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface),
+                .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface, lightShift = lightShift),
         ) {
             Box(Modifier.align(Alignment.CenterHorizontally)) { BottomSheetDefaults.DragHandle() }
             content()

@@ -12,6 +12,8 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -38,7 +40,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -80,8 +84,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogWindowProvider
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
 
 /**
  * 液态玻璃（Liquid Glass）视觉与物理动画引擎：
@@ -259,6 +265,7 @@ private class SelfPositionHolder {
  * 核心液态玻璃修饰符：
  * @param sampleBackdrop 是否采样 [LocalGlassBackdrop] 的实时背景模糊。默认 false（防止子卡片递归引用父容器图层）；
  *                       仅在悬浮底栏等与内容层处于兄弟关系的浮层上设为 true。
+ * @param lightShift     液态高光与棱镜折射相位偏移（随水滴移动、按压或弹簧动画变化，驱动表面光泽扫过与边缘折射旋转）。
  */
 fun Modifier.liquidGlass(
     shape: Shape = RoundedCornerShape(16.dp),
@@ -267,6 +274,7 @@ fun Modifier.liquidGlass(
     borderColor: Color = Color.Unspecified,
     @Suppress("UNUSED_PARAMETER") enableBackdrop: Boolean = true,
     sampleBackdrop: Boolean = false,
+    lightShift: Float = 0f,
 ): Modifier = composed {
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val defaultBase = if (isDark) Color(0xFF1A222D) else Color(0xFFF7F9FC)
@@ -306,6 +314,16 @@ fun Modifier.liquidGlass(
             val safeW = size.width.coerceAtLeast(1f)
             val safeH = size.height.coerceAtLeast(1f)
             val endOffset = Offset(safeW, safeH)
+            val shiftWave = sin(lightShift * 1.6f)
+            val shiftCos = cos(lightShift * 1.2f)
+            val sheenStart = Offset(
+                x = (safeW * (0.18f + shiftWave * 0.28f)).coerceIn(0f, safeW),
+                y = 0f,
+            )
+            val sheenEnd = Offset(
+                x = (safeW * (0.82f + shiftCos * 0.24f)).coerceIn(0.1f, safeW),
+                y = safeH,
+            )
 
             if (blurredBackdropLayer != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && blurPx > 0.5f) {
                 blurredBackdropLayer.renderEffect = RenderEffect
@@ -376,49 +394,50 @@ fun Modifier.liquidGlass(
             val baseAlpha = resolvedTint.alpha.coerceIn(0.08f, 0.94f)
             val baseColor = resolvedTint.copy(alpha = 1f)
             val highlightTint = if (isDark) {
-                Color.White.copy(alpha = (baseAlpha * 0.24f).coerceAtMost(0.32f))
+                Color.White.copy(alpha = (baseAlpha * 0.30f).coerceAtMost(0.42f))
             } else {
-                Color.White.copy(alpha = (baseAlpha * 0.65f).coerceAtMost(0.82f))
+                Color.White.copy(alpha = (baseAlpha * 0.72f).coerceAtMost(0.88f))
             }
             val fillBrush = Brush.linearGradient(
                 0f to baseColor.copy(alpha = (baseAlpha * 1.04f).coerceAtMost(0.95f)),
-                0.45f to baseColor.copy(alpha = (baseAlpha * 0.86f).coerceAtLeast(0.06f)),
+                0.45f to baseColor.copy(alpha = (baseAlpha * 0.84f).coerceAtLeast(0.06f)),
                 1f to baseColor.copy(alpha = (baseAlpha * 0.95f).coerceAtMost(0.92f)),
                 start = Offset.Zero,
                 end = endOffset,
             )
+            val sheenCenter = (0.34f + shiftWave * 0.16f).coerceIn(0.16f, 0.56f)
             val sheenBrush = Brush.linearGradient(
                 0f to highlightTint,
-                0.38f to Color.Transparent,
-                0.72f to Color.Transparent,
-                1f to highlightTint.copy(alpha = highlightTint.alpha * 0.48f),
-                start = Offset.Zero,
-                end = endOffset,
+                sheenCenter to highlightTint.copy(alpha = highlightTint.alpha * 0.32f),
+                (sheenCenter + 0.28f).coerceAtMost(0.92f) to Color.Transparent,
+                1f to highlightTint.copy(alpha = highlightTint.alpha * 0.56f),
+                start = sheenStart,
+                end = sheenEnd,
             )
 
             // 边缘高光描边（Fresnel 双高光：左上亮白，中部冷色棱镜微光，右下柔和反光）
             val spec = style.specularIntensity
-            val topRimAlpha = (if (isDark) 0.46f else 0.86f) * spec
-            val midRimAlpha = (if (isDark) 0.14f else 0.32f) * spec
-            val bottomRimAlpha = (if (isDark) 0.30f else 0.58f) * spec
+            val topRimAlpha = (if (isDark) 0.54f else 0.92f) * spec
+            val midRimAlpha = (if (isDark) 0.20f else 0.38f) * spec
+            val bottomRimAlpha = (if (isDark) 0.36f else 0.64f) * spec
             val rimBrush = if (borderColor != Color.Unspecified) {
                 Brush.linearGradient(
                     listOf(
                         borderColor,
                         borderColor.copy(alpha = borderColor.alpha * 0.45f),
-                        borderColor.copy(alpha = borderColor.alpha * 0.8f),
+                        borderColor.copy(alpha = borderColor.alpha * 0.85f),
                     ),
-                    start = Offset.Zero,
-                    end = endOffset,
+                    start = sheenStart,
+                    end = sheenEnd,
                 )
             } else {
                 Brush.linearGradient(
                     0f to Color.White.copy(alpha = topRimAlpha.coerceIn(0f, 1f)),
-                    0.35f to Color(0xFFB8DCFF).copy(alpha = midRimAlpha.coerceIn(0f, 1f)),
-                    0.65f to Color(0xFFD6C8FF).copy(alpha = midRimAlpha.coerceIn(0f, 1f)),
+                    0.35f to Color(0xFFA8D8FF).copy(alpha = midRimAlpha.coerceIn(0f, 1f)),
+                    0.65f to Color(0xFFDCC4FF).copy(alpha = midRimAlpha.coerceIn(0f, 1f)),
                     1f to Color.White.copy(alpha = bottomRimAlpha.coerceIn(0f, 1f)),
-                    start = Offset.Zero,
-                    end = endOffset,
+                    start = sheenStart,
+                    end = sheenEnd,
                 )
             }
 
@@ -435,6 +454,7 @@ fun Modifier.liquidGlass(
                     bevelWidth = bevelPx.coerceAtMost(min(size.width, size.height) * 0.45f),
                     intensity = style.specularIntensity,
                     isDark = isDark,
+                    lightPhase = lightShift,
                 )
             } else {
                 null
@@ -498,15 +518,49 @@ fun GlassBox(
     contentAlignment: Alignment = Alignment.TopStart,
     content: @Composable BoxScope.() -> Unit,
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scaleX by animateFloatAsState(
+        targetValue = if (onClick != null && isPressed) 0.95f else 1f,
+        animationSpec = spring(dampingRatio = 0.42f, stiffness = 360f),
+        label = "glassBoxScaleX",
+    )
+    val scaleY by animateFloatAsState(
+        targetValue = if (onClick != null && isPressed) 0.91f else 1f,
+        animationSpec = spring(dampingRatio = 0.38f, stiffness = 320f),
+        label = "glassBoxScaleY",
+    )
+    val lightShift by animateFloatAsState(
+        targetValue = if (isPressed) 1.2f else 0f,
+        animationSpec = spring(dampingRatio = 0.50f, stiffness = 260f),
+        label = "glassBoxLight",
+    )
     val glassModifier = modifier
+        .let {
+            if (onClick != null) {
+                it.graphicsLayer {
+                    this.scaleX = scaleX
+                    this.scaleY = scaleY
+                }
+            } else it
+        }
         .liquidGlass(
             shape = shape,
             style = style,
             tint = tint,
             borderColor = borderColor,
             enableBackdrop = enableBackdrop,
+            lightShift = lightShift,
         )
-        .let { if (onClick != null) it.clickable(onClick = onClick) else it }
+        .let {
+            if (onClick != null) {
+                it.clickable(
+                    interactionSource = interactionSource,
+                    indication = null,
+                    onClick = onClick,
+                )
+            } else it
+        }
     Box(
         modifier = glassModifier,
         contentAlignment = contentAlignment,
@@ -515,7 +569,7 @@ fun GlassBox(
 }
 
 /**
- * 顶栏右侧独立圆形液态玻璃按钮（带按压弹性缩放与折射高光描边，对应演示视频顶栏的 `+`、`⋯` 按钮）。
+ * 顶栏右侧独立圆形液态玻璃按钮（带明显的水滴按压扁平化形变与高弹回跃动画，对应演示视频顶栏的 `+`、`⋯` 按钮）。
  */
 @Composable
 fun LiquidGlassIconButton(
@@ -528,10 +582,20 @@ fun LiquidGlassIconButton(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.88f else 1f,
-        animationSpec = spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMediumLow),
-        label = "glassBtnScale",
+    val scaleX by animateFloatAsState(
+        targetValue = if (isPressed) 0.82f else 1f,
+        animationSpec = spring(dampingRatio = 0.36f, stiffness = 340f),
+        label = "glassBtnScaleX",
+    )
+    val scaleY by animateFloatAsState(
+        targetValue = if (isPressed) 0.74f else 1f,
+        animationSpec = spring(dampingRatio = 0.34f, stiffness = 300f),
+        label = "glassBtnScaleY",
+    )
+    val lightShift by animateFloatAsState(
+        targetValue = if (isPressed) 1.6f else 0f,
+        animationSpec = spring(dampingRatio = 0.45f, stiffness = 240f),
+        label = "glassBtnLight",
     )
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val glassTint = if (isDark) Color(0xCC222A38) else Color(0xE6FFFFFF)
@@ -540,8 +604,8 @@ fun LiquidGlassIconButton(
         modifier = modifier
             .size(size)
             .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
+                this.scaleX = scaleX
+                this.scaleY = scaleY
             }
             .shadow(
                 elevation = if (isDark) 6.dp else 4.dp,
@@ -553,6 +617,7 @@ fun LiquidGlassIconButton(
                 shape = CircleShape,
                 style = GlassStyle.Floating,
                 tint = glassTint,
+                lightShift = lightShift,
             )
             .clickable(
                 interactionSource = interactionSource,
@@ -571,10 +636,10 @@ fun LiquidGlassIconButton(
 }
 
 /**
- * 悬浮胶囊液态玻璃底部导航栏（仿演示视频 UI 与水滴弹性形变动画）：
- * - 外层为全圆角胶囊悬浮条，实时模糊下方滚过的页面内容；
+ * 悬浮胶囊液态玻璃底部导航栏（仿演示视频 UI 与明显的水滴拉伸、挤压与果冻回弹动画）：
+ * - 外层为全圆角胶囊悬浮条，实时模糊下方滚过的页面内容，并随水滴运动产生微弹共振；
  * - 选中项指示器为包裹「图标 + 文字」的完整液态玻璃水滴胶囊；
- * - 切换标签时，水滴指示器前缘与后缘以不同刚度弹簧运动，产生真实水滴拉伸、回弹与光泽折射动画。
+ * - 切换标签或手指滑动时，水滴前缘高速跃出、后缘粘滞牵引拉长，纵向明顯收缩（体积守恒），落定瞬间产生果冻回弹与光泽扫过。
  */
 data class LiquidNavTabItem<T>(
     val value: T,
@@ -591,22 +656,39 @@ fun <T> LiquidGlassBottomBar(
 ) {
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val selectedIndex = items.indexOfFirst { it.value == selected }.coerceAtLeast(0)
+    var touching by remember { mutableStateOf(false) }
 
-    // 双弹簧驱动水滴首尾两端，切换时形成液态水滴拉伸与弹性收拢效果
+    // 三弹簧驱动：前缘快速跃出 + 后缘粘滞拉长 + 落定果冻回弹振荡
     val fastPos by animateFloatAsState(
         targetValue = selectedIndex.toFloat(),
-        animationSpec = spring(dampingRatio = 0.76f, stiffness = 520f),
+        animationSpec = spring(dampingRatio = 0.54f, stiffness = 580f),
         label = "dropletFast",
     )
     val slowPos by animateFloatAsState(
         targetValue = selectedIndex.toFloat(),
-        animationSpec = spring(dampingRatio = 0.70f, stiffness = 260f),
+        animationSpec = spring(dampingRatio = 0.44f, stiffness = 105f),
         label = "dropletSlow",
     )
+    val jellyPos by animateFloatAsState(
+        targetValue = selectedIndex.toFloat(),
+        animationSpec = spring(dampingRatio = 0.34f, stiffness = 185f),
+        label = "dropletJelly",
+    )
+    val touchPress by animateFloatAsState(
+        targetValue = if (touching) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.42f, stiffness = 360f),
+        label = "barTouchPress",
+    )
+
+    val rawStretch = abs(fastPos - slowPos)
+    val wobble = fastPos - jellyPos
+    val lightPhase = fastPos * 1.1f + rawStretch * 1.4f + wobble * 0.9f
+    val barScaleX = 1f + (rawStretch * 0.028f).coerceAtMost(0.048f) + touchPress * 0.018f
+    val barScaleY = 1f - (rawStretch * 0.022f).coerceAtMost(0.036f) + touchPress * 0.024f
 
     val pillShape = RoundedCornerShape(50)
     val barTint = if (isDark) Color(0xBF181F2C) else Color(0xD8F7F9FC)
-    val dropletTint = if (isDark) Color(0xD92B364B) else Color(0xE8E4EBF5)
+    val dropletTint = if (isDark) Color(0xE02E3B52) else Color(0xF0E6EEF8)
     val activeColor = if (isDark) Color(0xFF4DA3FF) else Color(0xFF007AFF)
     val inactiveColor = if (isDark) Color(0xFFD5DCE6) else Color(0xFF1C1C1E)
 
@@ -615,6 +697,10 @@ fun <T> LiquidGlassBottomBar(
             .fillMaxWidth()
             .padding(horizontal = 20.dp, vertical = 8.dp)
             .height(64.dp)
+            .graphicsLayer {
+                scaleX = barScaleX
+                scaleY = barScaleY
+            }
             .shadow(
                 elevation = if (isDark) 18.dp else 14.dp,
                 shape = pillShape,
@@ -626,47 +712,70 @@ fun <T> LiquidGlassBottomBar(
                 style = GlassStyle.Floating,
                 tint = barTint,
                 sampleBackdrop = true,
+                lightShift = lightPhase * 0.6f,
             )
             .padding(horizontal = 5.dp, vertical = 5.dp),
     ) {
-        // 1. 底层滑动与拉伸的液态玻璃水滴胶囊指示器
+        // 1. 底层滑动、拉长与果冻回弹的液态玻璃水滴胶囊指示器
         androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
             val count = items.size.coerceAtLeast(1)
             val slotWidth = maxWidth / count
             val leftEdgeIndex = min(fastPos, slowPos)
             val rightEdgeIndex = max(fastPos, slowPos)
             val stretch = (rightEdgeIndex - leftEdgeIndex).coerceIn(0f, count.toFloat())
-            // 水滴在拉伸运动中横向延展、纵向微收（体积守恒感），落定后回弹
-            val dropletLeft = slotWidth * leftEdgeIndex
-            val dropletWidth = slotWidth * (1f + stretch)
-            val scaleY = (1f - (stretch * 0.08f).coerceAtMost(0.12f))
+            // 放大水滴拉伸感，并在落定瞬间通过 wobble 产生横向/纵向果冻回弹
+            val extraWidthFactor = (stretch * 1.48f + abs(wobble) * 0.42f + touchPress * 0.10f).coerceIn(0f, count.toFloat())
+            val centerShift = (extraWidthFactor - stretch) * 0.5f
+            val dropletLeft = (slotWidth * (leftEdgeIndex - centerShift)).coerceIn(0.dp, maxWidth - slotWidth * 0.6f)
+            val dropletWidth = (slotWidth * (1f + extraWidthFactor)).coerceIn(slotWidth * 0.75f, maxWidth)
+            val scaleY = (1f - (stretch * 0.30f).coerceAtMost(0.36f) + abs(wobble) * 0.22f + touchPress * 0.08f)
+                .coerceIn(0.64f, 1.22f)
 
             Box(
                 Modifier
-                    .padding(start = dropletLeft.coerceAtLeast(0.dp))
-                    .size(width = dropletWidth.coerceAtMost(maxWidth), height = maxHeight)
+                    .padding(start = dropletLeft)
+                    .size(width = dropletWidth, height = maxHeight)
                     .graphicsLayer {
                         this.scaleY = scaleY
                     }
+                    .shadow(
+                        elevation = if (isDark) 8.dp else 6.dp,
+                        shape = pillShape,
+                        ambientColor = activeColor.copy(alpha = 0.22f),
+                        spotColor = activeColor.copy(alpha = 0.32f),
+                    )
                     .liquidGlass(
                         shape = pillShape,
-                        style = GlassStyle.Pill,
+                        style = GlassStyle.Floating,
                         tint = dropletTint,
-                        borderColor = if (isDark) Color(0x66FFFFFF) else Color(0xCCFFFFFF),
+                        borderColor = if (isDark) Color(0x88FFFFFF) else Color(0xEEFFFFFF),
+                        lightShift = lightPhase,
                     ),
             )
         }
 
-        // 2. 顶层各标签图标与文字（支持点击与横向滑动切换）
+        // 2. 顶层各标签图标与文字（支持点击与手指滑动跟随切换）
         Row(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(items) {
-                    detectTapGestures { offset ->
-                        val slot = (offset.x / (size.width / items.size.coerceAtLeast(1)))
-                            .toInt()
-                            .coerceIn(0, items.lastIndex)
-                        onSelect(items[slot].value)
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        touching = true
+                        val count = items.size.coerceAtLeast(1)
+                        val slotW = (size.width / count.toFloat()).coerceAtLeast(1f)
+                        val initialSlot = (down.position.x / slotW).toInt().coerceIn(0, items.lastIndex)
+                        onSelect(items[initialSlot].value)
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) break
+                            val curSlot = (change.position.x / slotW).toInt().coerceIn(0, items.lastIndex)
+                            if (curSlot != items.indexOfFirst { it.value == selected }) {
+                                onSelect(items[curSlot].value)
+                            }
+                        }
+                        touching = false
                     }
                 },
             verticalAlignment = Alignment.CenterVertically,
@@ -674,10 +783,21 @@ fun <T> LiquidGlassBottomBar(
             items.forEachIndexed { index, item ->
                 val isSelected = index == selectedIndex
                 val distance = abs(fastPos - index)
-                val itemScale = (1f + (1f - distance.coerceIn(0f, 1f)) * 0.05f)
+                val proximity = (1f - distance.coerceIn(0f, 1f))
+                val bounceScale by animateFloatAsState(
+                    targetValue = if (isSelected) 1.16f else 0.94f,
+                    animationSpec = spring(dampingRatio = 0.40f, stiffness = 320f),
+                    label = "navItemBounce",
+                )
+                val liftY by animateFloatAsState(
+                    targetValue = if (isSelected) -5f else 0f,
+                    animationSpec = spring(dampingRatio = 0.44f, stiffness = 300f),
+                    label = "navItemLift",
+                )
+                val itemScale = bounceScale + proximity * 0.04f
                 val color by animateColorAsState(
                     targetValue = if (isSelected) activeColor else inactiveColor,
-                    animationSpec = tween(durationMillis = 180),
+                    animationSpec = tween(durationMillis = 160),
                     label = "navItemColor",
                 )
                 Column(
@@ -687,6 +807,7 @@ fun <T> LiquidGlassBottomBar(
                         .graphicsLayer {
                             scaleX = itemScale
                             scaleY = itemScale
+                            translationY = liftY
                         },
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
@@ -702,7 +823,7 @@ fun <T> LiquidGlassBottomBar(
                         text = item.label,
                         color = color,
                         fontSize = 11.sp,
-                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -713,7 +834,7 @@ fun <T> LiquidGlassBottomBar(
 }
 
 /**
- * 液态玻璃分段控制器（对应演示视频 00:03 的胶囊分段切换条，带水滴滑动拉伸动画）。
+ * 液态玻璃分段控制器（对应演示视频 00:03 的胶囊分段切换条，带明显的水滴滑动拉伸与果冻回弹动画）。
  */
 @Composable
 fun LiquidGlassSegmentedControl(
@@ -724,32 +845,52 @@ fun LiquidGlassSegmentedControl(
 ) {
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val safeIndex = selectedIndex.coerceIn(0, (options.size - 1).coerceAtLeast(0))
+    var touching by remember { mutableStateOf(false) }
 
     val fastPos by animateFloatAsState(
         targetValue = safeIndex.toFloat(),
-        animationSpec = spring(dampingRatio = 0.76f, stiffness = 540f),
+        animationSpec = spring(dampingRatio = 0.54f, stiffness = 600f),
         label = "segFast",
     )
     val slowPos by animateFloatAsState(
         targetValue = safeIndex.toFloat(),
-        animationSpec = spring(dampingRatio = 0.72f, stiffness = 280f),
+        animationSpec = spring(dampingRatio = 0.44f, stiffness = 115f),
         label = "segSlow",
     )
+    val jellyPos by animateFloatAsState(
+        targetValue = safeIndex.toFloat(),
+        animationSpec = spring(dampingRatio = 0.34f, stiffness = 195f),
+        label = "segJelly",
+    )
+    val touchPress by animateFloatAsState(
+        targetValue = if (touching) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.42f, stiffness = 360f),
+        label = "segTouchPress",
+    )
+
+    val rawStretch = abs(fastPos - slowPos)
+    val wobble = fastPos - jellyPos
+    val lightPhase = fastPos * 1.15f + rawStretch * 1.5f + wobble
 
     val trackShape = RoundedCornerShape(50)
     val trackBg = if (isDark) Color(0xCC1A212E) else Color(0xFFEAECEF)
-    val thumbTint = if (isDark) Color(0xE62E3A50) else Color(0xF5FFFFFF)
+    val thumbTint = if (isDark) Color(0xEC32405A) else Color(0xFAFFFFFF)
     val activeText = if (isDark) Color(0xFF4DA3FF) else Color(0xFF007AFF)
     val inactiveText = if (isDark) Color(0xFFB0BAC9) else Color(0xFF3C3C43)
 
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(42.dp)
+            .height(44.dp)
+            .graphicsLayer {
+                scaleX = 1f + (rawStretch * 0.02f).coerceAtMost(0.035f) + touchPress * 0.015f
+                scaleY = 1f - (rawStretch * 0.016f).coerceAtMost(0.028f) + touchPress * 0.02f
+            }
             .liquidGlass(
                 shape = trackShape,
                 style = GlassStyle.Pill,
                 tint = trackBg,
+                lightShift = lightPhase * 0.5f,
             )
             .padding(3.dp),
     ) {
@@ -759,25 +900,61 @@ fun LiquidGlassSegmentedControl(
             val leftEdge = min(fastPos, slowPos)
             val rightEdge = max(fastPos, slowPos)
             val stretch = (rightEdge - leftEdge).coerceIn(0f, count.toFloat())
-            val thumbLeft = slotWidth * leftEdge
-            val thumbWidth = slotWidth * (1f + stretch)
+            val extraWidth = (stretch * 1.45f + abs(wobble) * 0.40f + touchPress * 0.08f).coerceIn(0f, count.toFloat())
+            val centerShift = (extraWidth - stretch) * 0.5f
+            val thumbLeft = (slotWidth * (leftEdge - centerShift)).coerceIn(0.dp, maxWidth - slotWidth * 0.6f)
+            val thumbWidth = (slotWidth * (1f + extraWidth)).coerceIn(slotWidth * 0.75f, maxWidth)
+            val thumbScaleY = (1f - (stretch * 0.28f).coerceAtMost(0.34f) + abs(wobble) * 0.20f + touchPress * 0.06f)
+                .coerceIn(0.66f, 1.20f)
 
             Box(
                 Modifier
-                    .padding(start = thumbLeft.coerceAtLeast(0.dp))
-                    .size(width = thumbWidth.coerceAtMost(maxWidth), height = maxHeight)
-                    .shadow(2.dp, trackShape, ambientColor = Color(0x1A000000), spotColor = Color(0x22000000))
+                    .padding(start = thumbLeft)
+                    .size(width = thumbWidth, height = maxHeight)
+                    .graphicsLayer {
+                        scaleY = thumbScaleY
+                    }
+                    .shadow(4.dp, trackShape, ambientColor = activeText.copy(alpha = 0.20f), spotColor = activeText.copy(alpha = 0.28f))
                     .liquidGlass(
                         shape = trackShape,
                         style = GlassStyle.Floating,
                         tint = thumbTint,
+                        borderColor = if (isDark) Color(0x88FFFFFF) else Color(0xEEFFFFFF),
+                        lightShift = lightPhase,
                     ),
             )
         }
 
-        Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(options) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        touching = true
+                        val count = options.size.coerceAtLeast(1)
+                        val slotW = (size.width / count.toFloat()).coerceAtLeast(1f)
+                        val initialSlot = (down.position.x / slotW).toInt().coerceIn(0, options.lastIndex)
+                        onSelect(initialSlot)
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) break
+                            val curSlot = (change.position.x / slotW).toInt().coerceIn(0, options.lastIndex)
+                            onSelect(curSlot)
+                        }
+                        touching = false
+                    }
+                },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             options.forEachIndexed { index, label ->
                 val selected = index == safeIndex
+                val textScale by animateFloatAsState(
+                    targetValue = if (selected) 1.08f else 0.96f,
+                    animationSpec = spring(dampingRatio = 0.42f, stiffness = 340f),
+                    label = "segTextScale",
+                )
                 val textColor by animateColorAsState(
                     targetValue = if (selected) activeText else inactiveText,
                     animationSpec = tween(160),
@@ -787,18 +964,17 @@ fun LiquidGlassSegmentedControl(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
-                        .clip(trackShape)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) { onSelect(index) },
+                        .graphicsLayer {
+                            scaleX = textScale
+                            scaleY = textScale
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         text = label,
                         color = textColor,
                         fontSize = 14.sp,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -834,13 +1010,14 @@ private fun extractCornerRadii(outline: Outline, size: Size): FloatArray {
 
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)
 private object AgslShaders {
-    // AGSL 表面液态玻璃曲面高光与边缘色散着色器（支持四角独立圆角与贴边顶栏/底栏，全数值安全）
+    // AGSL 表面液态玻璃曲面高光与边缘色散着色器（支持四角独立圆角、贴边顶栏/底栏与动态光线相位旋转）
     private const val SURFACE_GLASS_SKSL = """
         uniform float2 size;
         uniform float4 cornerRadii;
         uniform float bevelWidth;
         uniform float intensity;
         uniform float isDark;
+        uniform float lightPhase;
 
         float pickRadius(float2 p, float4 r) {
             return (p.x < 0.0)
@@ -882,13 +1059,15 @@ private object AgslShaders {
                 : (safeP / safePLen);
 
             // 模拟水滴形玻璃边缘的 3D 倾角
-            float2 n2d = grad * edge * 0.85;
+            float2 n2d = grad * edge * 0.88;
             float nz = sqrt(max(0.04, 1.0 - dot(n2d, n2d)));
             float3 normal = normalize(float3(n2d.x, n2d.y, nz));
 
-            // 主光源（左上）与副反光（右下），已预先归一化
-            float3 lightTopLeft = float3(-0.489, -0.584, 0.648);
-            float3 lightBottomRight = float3(0.493, 0.578, 0.650);
+            // 随水滴运动偏转主光源与副反光角度，形成流动折射高光
+            float shiftSin = sin(lightPhase * 1.4) * 0.32;
+            float shiftCos = cos(lightPhase * 1.1) * 0.24;
+            float3 lightTopLeft = normalize(float3(-0.489 + shiftSin, -0.584 + shiftCos, 0.648));
+            float3 lightBottomRight = normalize(float3(0.493 - shiftSin, 0.578 - shiftCos, 0.650));
 
             float d1 = max(0.0, dot(normal, lightTopLeft));
             float d2 = max(0.0, dot(normal, lightBottomRight));
@@ -899,21 +1078,21 @@ private object AgslShaders {
             float oneMinusNz = clamp(1.0 - nz, 0.0, 1.0);
             float fresnel = oneMinusNz * oneMinusNz;
 
-            // 边缘微小棱镜色散（冷暖微光）
+            // 边缘微小棱镜色散（随 lightPhase 流动的冷暖微光）
             float3 prismColor = mix(
-                float3(0.76, 0.90, 1.0),
-                float3(1.0, 0.88, 0.98),
-                clamp(grad.x * 0.5 + 0.5, 0.0, 1.0)
+                float3(0.70, 0.88, 1.0),
+                float3(1.0, 0.84, 0.98),
+                clamp(grad.x * 0.5 + 0.5 + shiftSin * 0.4, 0.0, 1.0)
             );
 
             // 顶边内侧柔光流线（贴顶栏不额外叠加顶边光带）
-            float topGlow = (1.0 - topFlush) * smoothstep(max(size.y * 0.42, 1.0), 0.0, fragCoord.y) * 0.07;
+            float topGlow = (1.0 - topFlush) * smoothstep(max(size.y * 0.46, 1.0), 0.0, fragCoord.y) * 0.09;
 
-            float rimStrength = (specPrimary * 0.36 + specSecondary * 0.20 + fresnel * 0.30) * edge;
-            float darkScale = mix(1.0, 0.70, isDark);
-            float alpha = clamp((rimStrength + topGlow) * intensity * darkScale, 0.0, 0.56);
+            float rimStrength = (specPrimary * 0.42 + specSecondary * 0.24 + fresnel * 0.34) * edge;
+            float darkScale = mix(1.0, 0.74, isDark);
+            float alpha = clamp((rimStrength + topGlow) * intensity * darkScale, 0.0, 0.64);
 
-            float3 finalRgb = mix(prismColor, float3(1.0, 1.0, 1.0), 0.65) * alpha;
+            float3 finalRgb = mix(prismColor, float3(1.0, 1.0, 1.0), 0.62) * alpha;
             return half4(half3(finalRgb), half(alpha));
         }
     """
@@ -925,6 +1104,7 @@ private object AgslShaders {
         bevelWidth: Float,
         intensity: Float,
         isDark: Boolean,
+        lightPhase: Float = 0f,
     ): ShaderBrush? = runCatching {
         val shader = RuntimeShader(SURFACE_GLASS_SKSL)
         shader.setFloatUniform("size", width, height)
@@ -938,6 +1118,7 @@ private object AgslShaders {
         shader.setFloatUniform("bevelWidth", bevelWidth)
         shader.setFloatUniform("intensity", intensity)
         shader.setFloatUniform("isDark", if (isDark) 1f else 0f)
+        shader.setFloatUniform("lightPhase", lightPhase)
         ShaderBrush(shader)
     }.getOrNull()
 }

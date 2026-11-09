@@ -70,13 +70,13 @@ object EpgRepository {
         byUrl[entry.uri] ?: LiveChannel(name = entry.title, url = entry.uri, group = entry.folder, logo = entry.logo)
 
     /** 查询某个频道的完整节目单（按开始时间升序）。 */
-    fun programsFor(channel: LiveChannel): List<EpgProgram> {
+    fun programsFor(channel: LiveChannel): List<EpgProgram> = runCatching {
         for (k in EpgMatcher.keysOf(channel)) {
             val list = programsByKey[k]
-            if (!list.isNullOrEmpty()) return list
+            if (!list.isNullOrEmpty()) return@runCatching list
         }
-        return emptyList()
-    }
+        emptyList<EpgProgram>()
+    }.getOrDefault(emptyList())
 
     fun programsFor(entry: MediaEntry): List<EpgProgram> = programsFor(channelOf(entry))
 
@@ -137,38 +137,40 @@ object EpgRepository {
         customEpgUrl: String = "",
         defaultEpgUrl: String = "",
     ): List<EpgProgram> = withContext(Dispatchers.IO) {
-        register(channel)
-        val existing = programsFor(channel)
-        val now = System.currentTimeMillis()
-        if (existing.any { it.endMs > now }) return@withContext existing
+        runCatching {
+            register(channel)
+            val existing = programsFor(channel)
+            val now = System.currentTimeMillis()
+            if (existing.any { it.endMs > now }) return@runCatching existing
 
-        val qName = EpgMatcher.queryName(channel)
-        val normKey = EpgMatcher.normalize(qName).ifEmpty { qName.lowercase(Locale.ROOT) }
-        val lastTried = diypTriedAt[normKey] ?: 0L
-        if (now - lastTried < 15 * 60_000L) return@withContext existing
-        diypTriedAt[normKey] = now
+            val qName = EpgMatcher.queryName(channel)
+            val normKey = EpgMatcher.normalize(qName).ifEmpty { qName.lowercase(Locale.ROOT) }
+            val lastTried = diypTriedAt[normKey] ?: 0L
+            if (now - lastTried < 15 * 60_000L) return@runCatching existing
+            diypTriedAt[normKey] = now
 
-        val apis = buildList {
-            for (u in listOf(customEpgUrl, defaultEpgUrl)) {
-                u.split(',', ';').map { it.trim() }.filter { it.isNotEmpty() && !looksLikeXmlTv(it) }.forEach { add(it) }
-            }
-            DEFAULT_DIYP_APIS.forEach { if (it !in this) add(it) }
-        }
-        val tz = TimeZone.getTimeZone("Asia/Shanghai")
-        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { timeZone = tz }.format(Date(now))
-        diypGate.withPermit {
-            for (api in apis) {
-                val list = runCatching { fetchDiyp(api, qName, today, tz) }.getOrNull()
-                if (!list.isNullOrEmpty()) {
-                    for (k in EpgMatcher.keysOf(channel) + normKey) {
-                        programsByKey[k] = list
-                    }
-                    bumpVersion()
-                    return@withPermit list
+            val apis = buildList {
+                for (u in listOf(customEpgUrl, defaultEpgUrl)) {
+                    u.split(',', ';').map { it.trim() }.filter { it.isNotEmpty() && !looksLikeXmlTv(it) }.forEach { add(it) }
                 }
+                DEFAULT_DIYP_APIS.forEach { if (it !in this) add(it) }
             }
-            existing
-        }
+            val tz = TimeZone.getTimeZone("Asia/Shanghai")
+            val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { timeZone = tz }.format(Date(now))
+            diypGate.withPermit {
+                for (api in apis) {
+                    val list = runCatching { fetchDiyp(api, qName, today, tz) }.getOrNull()
+                    if (!list.isNullOrEmpty()) {
+                        for (k in EpgMatcher.keysOf(channel) + normKey) {
+                            programsByKey[k] = list
+                        }
+                        bumpVersion()
+                        return@withPermit list
+                    }
+                }
+                existing
+            }
+        }.getOrDefault(emptyList())
     }
 
     private fun looksLikeXmlTv(url: String): Boolean {
