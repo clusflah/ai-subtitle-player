@@ -232,6 +232,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         reloadStored()
     }
 
+    /** 删掉单条播放记录（首页「最近浏览」） */
+    fun removeHistory(uri: String) {
+        store.removeHistory(uri)
+        reloadStored()
+    }
+
     // ---- 收藏的文件夹 ----
 
     fun isFavoriteFolder(serverId: String?, path: String) = _state.value.favoriteFolders.any { it.serverId == serverId && it.path == path }

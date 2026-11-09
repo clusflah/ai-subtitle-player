@@ -284,7 +284,8 @@ fun MangaReader(
         }
     }
 
-    GlassBackdropBox(Modifier.fillMaxSize()) { backdrop ->
+    // 不用 GlassBackdropBox：阅读页没有要采样背景的玻璃，整页大图每一帧再录一遍图层是白费
+    Box(Modifier.fillMaxSize()) {
     BoxWithConstraints(
         Modifier.fillMaxSize().background(Color.Black)
             .onSizeChanged { boxSize = it }
@@ -337,7 +338,7 @@ fun MangaReader(
         }
         val onFailed: (Int) -> Unit = { failed[it] = true }
 
-        Box(Modifier.fillMaxSize().glassBackdropSource(backdrop)) {
+        Box(Modifier.fillMaxSize()) {
         if (pages.isEmpty()) {
             Text("没有找到漫画图片", color = Color.Gray, modifier = Modifier.align(Alignment.Center))
         } else if (mode == MangaMode.STRIP) {

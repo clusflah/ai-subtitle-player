@@ -237,6 +237,8 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onPageFinished(title: String?, url: String) {
         if (!url.startsWith("http")) return
+        // 首页可能删过记录：以存着的为准，免得删掉的又写回去
+        _history.value = loadHistory()
         val key = historyKey(url)
         val known = _history.value.firstOrNull { historyKey(it.url) == key }
         val page = WebPage(goodTitle(title) ?: known?.title ?: Uri.parse(url).host.orEmpty(), url)
@@ -383,6 +385,13 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
             val arr = JSONArray(context.getSharedPreferences("web", Context.MODE_PRIVATE).getString(key, "[]"))
             (0 until arr.length()).map { arr.getJSONObject(it).let { o -> WebPage(o.optString("t"), o.optString("u")) } }
         }.getOrDefault(emptyList())
+
+        /** 不开网页也能删：从网页收藏 / 浏览记录里去掉一条 */
+        fun removeSavedPage(context: Context, key: String, url: String) {
+            val prefs = context.getSharedPreferences("web", Context.MODE_PRIVATE)
+            val list = savedPages(context, key).filter { it.url != url }
+            prefs.edit().putString(key, JSONArray(list.map { JSONObject().put("t", it.title).put("u", it.url) }).toString()).apply()
+        }
 
         private const val MAX_HISTORY = 30
         const val ZOOM_MIN = 40

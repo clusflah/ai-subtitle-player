@@ -53,6 +53,14 @@ class AppStore(context: Context) {
 
     fun positionOf(uri: String): Long = history().firstOrNull { it.entry.uri == uri }?.positionMs ?: 0L
 
+    /** 删掉一条播放记录 */
+    fun removeHistory(uri: String) = writeArray(
+        "history",
+        history().filter { it.entry.uri != uri }.map {
+            JSONObject().put("entry", it.entry.toJson()).put("position", it.positionMs).put("playedAt", it.playedAt)
+        },
+    )
+
     /** 只清空音乐（music = true）或视频的播放记录 */
     fun clearHistory(music: Boolean) = writeArray(
         "history",

@@ -1025,7 +1025,9 @@ private fun HomeTab(
     val recentTelegram = remember(state.history) {
         state.history.filter { com.aisub.player.telegram.Telegram.isTelegram(it.entry.uri) }.take(5)
     }
-    val recentWeb = remember(state.history) { com.aisub.player.web.WebViewModel.savedPages(context, "history").take(6) }
+    // 删掉网页记录后要重新读一遍
+    var webHistoryVersion by remember { mutableStateOf(0) }
+    val recentWeb = remember(state.history, webHistoryVersion) { com.aisub.player.web.WebViewModel.savedPages(context, "history").take(6) }
     // 服务器删掉后它的收藏也不显示
     val favorites = remember(state.favoriteFolders, state.servers) {
         state.favoriteFolders.filter { f -> f.serverId == null || state.servers.any { it.id == f.serverId } }
@@ -1089,7 +1091,14 @@ private fun HomeTab(
                     recentWeb.take(4).forEachIndexed { index, page ->
                         if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                         ListRow(page.title.ifBlank { android.net.Uri.parse(page.url).host.orEmpty() }, android.net.Uri.parse(page.url).host,
-                            leading = { SourceBadgeIcon(SourceBadgeKind.WEB) }, onClick = { com.aisub.player.web.WebLaunch.pending = page.url; openWebManga(page.url) })
+                            leading = { SourceBadgeIcon(SourceBadgeKind.WEB) },
+                            trailing = {
+                                RemoveRecentButton {
+                                    com.aisub.player.web.WebViewModel.removeSavedPage(context, "history", page.url)
+                                    webHistoryVersion++
+                                }
+                            },
+                            onClick = { com.aisub.player.web.WebLaunch.pending = page.url; openWebManga(page.url) })
                     }
                 }
             }
@@ -1097,7 +1106,9 @@ private fun HomeTab(
                 SurfaceCard(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
                     recentLive.forEachIndexed { index, h ->
                         if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                        ListRow(h.entry.title, "最近看过的直播", leading = { SourceBadgeIcon(SourceBadgeKind.LIVE) }, onClick = { play(listOf(h.entry), 0) })
+                        ListRow(h.entry.title, "最近看过的直播", leading = { SourceBadgeIcon(SourceBadgeKind.LIVE) },
+                            trailing = { RemoveRecentButton { lib.removeHistory(h.entry.uri) } },
+                            onClick = { play(listOf(h.entry), 0) })
                     }
                 }
             }
@@ -1105,7 +1116,9 @@ private fun HomeTab(
                 SurfaceCard(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
                     recentTelegram.forEachIndexed { index, h ->
                         if (index > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                        ListRow(h.entry.displayTitle, "最近看过的 Telegram 视频", leading = { SourceBadgeIcon(SourceBadgeKind.TELEGRAM) }, onClick = { play(listOf(h.entry), 0) })
+                        ListRow(h.entry.displayTitle, "最近看过的 Telegram 视频", leading = { SourceBadgeIcon(SourceBadgeKind.TELEGRAM) },
+                            trailing = { RemoveRecentButton { lib.removeHistory(h.entry.uri) } },
+                            onClick = { play(listOf(h.entry), 0) })
                     }
                 }
             }
@@ -1127,6 +1140,14 @@ private fun HomeTab(
                 }
             }
         }
+    }
+}
+
+/** 首页「最近浏览」每一条右边的删除按钮 */
+@Composable
+private fun RemoveRecentButton(onRemove: () -> Unit) {
+    IconButton(onClick = onRemove) {
+        Icon(AppIcons.Close, "删除这条记录", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
     }
 }
 

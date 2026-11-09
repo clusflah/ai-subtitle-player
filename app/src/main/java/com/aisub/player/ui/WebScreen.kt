@@ -1174,13 +1174,41 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
 
         // 漫画阅读模式：盖在网页上面（网页留着，退出后还在原处）
         val readingManga = tab.manga.manga
-        if (reading && readingManga != null) {
+        // 网页这边一有变化（加载进度、标题、字幕状态）整页都会重组：书只在漫画内容真变了时才换，阅读页不跟着整个重来
+        val readingBook = remember(readingManga) { readingManga?.toBook() }
+        val readerShown = reading && readingManga != null
+        // 网页解密图（voxblob:）要网页滚过去现取，网页得照常跑；其余的看漫画时网页暂停、不画，省得后台的广告、动画、脚本越跑越卡
+        val needsPage = readingManga?.pages?.any { com.aisub.player.web.WebPageImages.isPage(it.url) } == true
+        DisposableEffect(readerShown, needsPage, tab.id) {
+            val t = tab
+            val w = t.webView
+            if (readerShown && w != null) {
+                runCatching {
+                    w.evaluateJavascript("window.__voxManga&&__voxManga.idle&&__voxManga.idle(true)", null)
+                    if (!needsPage) {
+                        pauseMedia(w)
+                        w.onPause()
+                        w.visibility = android.view.View.INVISIBLE
+                    }
+                }
+            }
+            onDispose {
+                if (readerShown && w != null) runCatching {
+                    w.evaluateJavascript("window.__voxManga&&__voxManga.idle&&__voxManga.idle(false)", null)
+                    if (!needsPage) {
+                        w.visibility = android.view.View.VISIBLE
+                        if (t.active) w.onResume()
+                    }
+                }
+            }
+        }
+        if (readerShown && readingBook != null) {
             MangaReader(
-                readingManga.toBook(),
+                readingBook,
                 onExit = { reading = false },
                 onOpenUrl = { url, reader ->
                     reading = false
-                    reopenAfter = if (reader) readingManga.pageUrl else null
+                    reopenAfter = if (reader) readingBook.webUrl else null
                     go(url)
                 },
             )

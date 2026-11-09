@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -90,20 +91,52 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
             ) { adding = true }
         } else {
             Column(Modifier.fillMaxSize()) {
-                // 直播源
-                LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(state.sources, key = { it.id }) { s ->
-                        FilterChip(state.selected?.id == s.id, { vm.select(s, refresh = false) }, label = { Text(s.name, maxLines = 1) })
-                    }
-                }
                 if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 12.dp))
                 state.error?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
                 }
                 OutlinedTextField(
                     state.query, vm::setQuery, singleLine = true,
-                    placeholder = { Text("搜索频道（共 ${state.channels.size} 个）") },
+                    placeholder = { Text("搜索频道（共 ${state.channels.size} 个）", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     leadingIcon = { Icon(AppIcons.Search, null) },
+                    // 直播源收在搜索框右边的下拉菜单里，不再单独占一行
+                    trailingIcon = if (state.sources.isEmpty()) null else {
+                        {
+                            var sourceMenu by remember { mutableStateOf(false) }
+                            Box {
+                                Row(
+                                    Modifier.clip(RoundedCornerShape(50)).clickable { sourceMenu = true }
+                                        .padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        state.selected?.name ?: "直播源", maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.widthIn(max = 110.dp),
+                                    )
+                                    Icon(AppIcons.ArrowDropDown, "切换直播源", tint = MaterialTheme.colorScheme.primary)
+                                }
+                                AppMenu(expanded = sourceMenu, onDismissRequest = { sourceMenu = false }) {
+                                    state.sources.forEach { s ->
+                                        val chosen = state.selected?.id == s.id
+                                        DropdownMenuItem(
+                                            text = { Text(s.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                            leadingIcon = {
+                                                if (chosen) Icon(AppIcons.Check, null, tint = MaterialTheme.colorScheme.primary)
+                                                else Spacer(Modifier.size(24.dp))
+                                            },
+                                            onClick = { sourceMenu = false; if (!chosen) vm.select(s, refresh = false) },
+                                        )
+                                    }
+                                    DropdownMenuItem(
+                                        text = { Text("添加直播源…") },
+                                        leadingIcon = { Icon(AppIcons.Add, null) },
+                                        onClick = { sourceMenu = false; adding = true },
+                                    )
+                                }
+                            }
+                        }
+                    },
                     colors = appFieldColors(),
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
                 )

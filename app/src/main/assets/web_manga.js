@@ -225,8 +225,22 @@
     timer = setTimeout(scan, ms);
   }
 
-  // 网页加载、懒加载新图片时重新看一遍（最多 1 秒一次）
-  const obs = new MutationObserver(() => later(1000));
+  // 网页加载、懒加载新图片时重新看一遍（最多 1 秒一次）。
+  // 只看和图片有关的变化：广告轮播、计时器之类整页不停在变，每次都重新量一遍所有图片，网页开久了会越来越卡
+  function hasImg(n) {
+    return n.nodeType === 1 && (n.tagName === 'IMG' || (n.firstElementChild && n.getElementsByTagName('img').length > 0));
+  }
+  function relevant(records) {
+    for (const r of records) {
+      if (r.type === 'attributes') { if (r.target.tagName === 'IMG') return true; continue; }
+      for (const n of r.addedNodes) if (hasImg(n)) return true;
+      for (const n of r.removedNodes) if (hasImg(n)) return true;
+    }
+    return false;
+  }
+  // App 在用阅读模式看：网页在后面，少看几次
+  let idle = false;
+  const obs = new MutationObserver((records) => { if (relevant(records)) later(idle ? 5000 : 1000); });
   function start() {
     try { obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data-src'] }); } catch (e) {}
     later(600);
@@ -234,6 +248,8 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
   else start();
   addEventListener('load', () => later(300));
+  // 图片加载完尺寸才知道（DOM 没变）：也重新看
+  document.addEventListener('load', (e) => { if (e.target && e.target.tagName === 'IMG') later(idle ? 5000 : 1000); }, true);
 
   // ---- 交出网页里解密出来的图（App 的阅读模式要的时候调） ----
   // 一张一张来：还没加载的要滚过去等网页加载、解密，几张同时滚会互相抢
@@ -292,5 +308,8 @@
     pump();
   }
 
-  window.__voxManga = { scan, exportImage };
+  window.__voxManga = {
+    scan, exportImage,
+    idle(v) { idle = !!v; if (!idle) later(300); },
+  };
 })();
