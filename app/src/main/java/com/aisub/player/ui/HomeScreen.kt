@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -470,6 +471,7 @@ fun HomeScreen(
                         }
                     } else MediaTab(
                         state, isVideo = localVideo, query, onRequestPermission, lib::refreshMedia, play, entryMenu, selected, toggle,
+                        onRemoveHistory = lib::removeHistory,
                         listState = lib.listState(if (localVideo) "local.video" else "local.audio"),
                         gridState = lib.gridState("local.video"),
                     )
@@ -510,6 +512,7 @@ fun HomeScreen(
                     onLink = if (main.linkDownloader != null) ({ dialog = HomeDialog.Link }) else null,
                     onHistory = { music -> nav.push(Screen.History(music)) },
                     onPlayHistory = { item -> play(listOf(item.entry), 0) },
+                    onRemoveHistory = lib::removeHistory,
                     onPlayMusic = play,
                     onOpenPlaylist = { nav.push(Screen.PlaylistDetail(it.id)) },
                     onPlayPlaylist = { p -> if (p.items.isNotEmpty()) play(p.items, 0) },
@@ -617,6 +620,7 @@ private fun MediaTab(
     menu: (MediaEntry) -> List<MenuAction>,
     selected: Set<String> = emptySet(),
     onToggle: (MediaEntry) -> Unit = {},
+    onRemoveHistory: (String) -> Unit = {},
     listState: androidx.compose.foundation.lazy.LazyListState = androidx.compose.foundation.lazy.rememberLazyListState(),
     gridState: androidx.compose.foundation.lazy.grid.LazyGridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState(),
 ) {
@@ -651,7 +655,9 @@ private fun MediaTab(
 
     if (isVideo && state.videoGrid) {
         LazyVerticalGrid(GridCells.Adaptive(if (LocalTv.current) 200.dp else 160.dp), state = gridState, contentPadding = PaddingValues(start = 10.dp, end = 10.dp, top = 4.dp, bottom = 104.dp)) {
-            if (resume != null) item(span = { GridItemSpan(maxLineSpan) }) { ResumeCard(resume) { play(listOf(resume.entry), 0) } }
+            if (resume != null) item(span = { GridItemSpan(maxLineSpan) }) {
+                ResumeCard(resume, onRemove = { onRemoveHistory(resume.entry.uri) }) { play(listOf(resume.entry), 0) }
+            }
             itemsIndexed(list, key = { _, e -> e.uri }) { i, e ->
                 VideoCard(e, menu(e), selected = if (selecting) e.uri in selected else null, onLongClick = { onToggle(e) }) {
                     if (selecting) onToggle(e) else play(list, i)
@@ -660,7 +666,9 @@ private fun MediaTab(
         }
     } else {
         LazyColumn(state = listState, contentPadding = PaddingValues(top = 4.dp, bottom = 104.dp)) {
-            if (resume != null) item { ResumeCard(resume) { play(listOf(resume.entry), 0) } }
+            if (resume != null) item {
+                ResumeCard(resume, onRemove = { onRemoveHistory(resume.entry.uri) }) { play(listOf(resume.entry), 0) }
+            }
             itemsIndexed(list, key = { _, e -> e.uri }) { i, e ->
                 MediaRow(e, menu(e), selected = if (selecting) e.uri in selected else null, onLongClick = { onToggle(e) }) {
                     if (selecting) onToggle(e) else play(list, i)
@@ -672,7 +680,7 @@ private fun MediaTab(
 
 /** "继续观看"卡片。 */
 @Composable
-private fun ResumeCard(item: HistoryItem, onClick: () -> Unit) {
+private fun ResumeCard(item: HistoryItem, onRemove: () -> Unit, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
         color = Color.Transparent,
@@ -687,7 +695,7 @@ private fun ResumeCard(item: HistoryItem, onClick: () -> Unit) {
                 tint = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
             ),
     ) {
-        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(start = 10.dp, top = 10.dp, bottom = 10.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             MediaThumbnail(item.entry, Modifier.size(width = 96.dp, height = 54.dp).clip(MaterialTheme.shapes.small))
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                 Text("继续${if (item.entry.isVideo) "观看" else "收听"}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
@@ -695,6 +703,7 @@ private fun ResumeCard(item: HistoryItem, onClick: () -> Unit) {
                 Text("看到 ${formatDuration(item.positionMs)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Icon(AppIcons.PlayArrow, "继续播放", tint = MaterialTheme.colorScheme.primary)
+            RemoveRecentButton(onRemove)
         }
     }
 }
@@ -1009,6 +1018,7 @@ private fun HomeTab(
                 // 网页漫画没有记下首图的旧记录不能从章节网址直接取文件，避免误下载网页源码。
                 sourceUrl = r.location.takeUnless { r.web },
                 open = { if (r.web) openWebManga(r.location) else mangaOpenOf(r)?.let(openReading) },
+                remove = { com.aisub.player.manga.MangaStore.removeRecent(r.key) },
             )
         } + bookRecent.map { r ->
             val pct = if (r.total > 0) (r.item + 1) * 100 / r.total else 0
@@ -1017,6 +1027,7 @@ private fun HomeTab(
                 thumbnail = r.coverEntry?.let { com.aisub.player.manga.MangaPage(r.location, entry = it) },
                 sourceUrl = r.location,
                 open = { openReading(MangaOpen.Archive(r.title, r.location)) },
+                remove = { com.aisub.player.book.BookStore.remove(r.key) },
             )
         }).sortedByDescending { it.time }.take(12)
     }
@@ -1037,7 +1048,9 @@ private fun HomeTab(
             item { SectionHeader("继续观看") }
             item {
                 LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items(resume, key = { it.entry.uri }) { h -> ResumeTile(h, settings) { play(listOf(h.entry), 0) } }
+                    items(resume, key = { it.entry.uri }) { h ->
+                        ResumeTile(h, settings, onRemove = { lib.removeHistory(h.entry.uri) }) { play(listOf(h.entry), 0) }
+                    }
                 }
             }
         }
@@ -1046,7 +1059,9 @@ private fun HomeTab(
             item {
                 val songs = recentSongs.map { it.entry }
                 LazyRow(contentPadding = PaddingValues(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    itemsIndexed(recentSongs, key = { _, h -> h.entry.uri }) { i, h -> SongTile(h.entry, h.positionMs) { play(songs, i) } }
+                    itemsIndexed(recentSongs, key = { _, h -> h.entry.uri }) { i, h ->
+                        SongTile(h.entry, h.positionMs, onRemove = { lib.removeHistory(h.entry.uri) }) { play(songs, i) }
+                    }
                 }
             }
         }
@@ -1151,6 +1166,22 @@ private fun RemoveRecentButton(onRemove: () -> Unit) {
     }
 }
 
+/** 首页「继续观看 / 继续收听 / 继续阅读」卡片右上角的删除按钮 */
+@Composable
+private fun TileRemoveButton(onRemove: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier
+            .clip(CircleShape)
+            .clickable(onClick = onRemove)
+            .padding(5.dp)
+            .size(22.dp)
+            .background(Color(0x88000000), CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(AppIcons.Close, "删除这条记录", tint = Color.White, modifier = Modifier.size(14.dp))
+    }
+}
+
 /** 首页「收藏的文件夹」卡片：文件夹名 + 来源（本机或服务器名），「⋮」里取消收藏 */
 @Composable
 private fun FavoriteFolderTile(folder: FavoriteFolder, source: String, server: Server? = null, onRemove: () -> Unit, onClick: () -> Unit) {
@@ -1180,10 +1211,11 @@ private fun FavoriteFolderTile(folder: FavoriteFolder, source: String, server: S
 
 /** 歌曲卡片（首页继续收听、我的 → 最近听过的音乐）：方形封面 + 歌名；positionMs 为没听完时的进度 */
 @Composable
-private fun SongTile(entry: MediaEntry, positionMs: Long = 0, onClick: () -> Unit) {
+private fun SongTile(entry: MediaEntry, positionMs: Long = 0, onRemove: (() -> Unit)? = null, onClick: () -> Unit) {
     Column(Modifier.width(110.dp).tvFocusRing(MaterialTheme.shapes.medium, scale = true).clip(MaterialTheme.shapes.medium).clickable(onClick = onClick)) {
         Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(MaterialTheme.shapes.medium)) {
             MediaThumbnail(entry, Modifier.fillMaxSize())
+            if (onRemove != null) TileRemoveButton(onRemove, Modifier.align(Alignment.TopEnd))
             val d = entry.durationMs
             if (d > 0 && positionMs > 5_000 && positionMs < d - 10_000) {
                 Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color(0x66000000))) {
@@ -1202,7 +1234,8 @@ private fun SongTile(entry: MediaEntry, positionMs: Long = 0, onClick: () -> Uni
 /** 首页「继续阅读」的一项（漫画或电子书） */
 private data class ReadingItem(
     val key: String, val title: String, val progress: String, val time: Long, val book: Boolean,
-    val thumbnail: com.aisub.player.manga.MangaPage? = null, val sourceUrl: String? = null, val open: () -> Unit,
+    val thumbnail: com.aisub.player.manga.MangaPage? = null, val sourceUrl: String? = null,
+    val open: () -> Unit, val remove: () -> Unit,
 )
 
 /** 「继续阅读」卡片：优先用漫画首页或电子书插图；还没有读过的旧记录才显示类型图标。 */
@@ -1214,6 +1247,7 @@ private fun ReadingTile(r: ReadingItem) {
             contentAlignment = Alignment.Center,
         ) {
             ReadingThumbnail(r.thumbnail, r.sourceUrl, r.book, Modifier.fillMaxSize())
+            TileRemoveButton(r.remove, Modifier.align(Alignment.TopEnd))
         }
         Text(
             r.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall,
@@ -1246,7 +1280,7 @@ private fun ReadingThumbnail(page: com.aisub.player.manga.MangaPage?, sourceUrl:
 
 /** 「继续观看」卡片：横版画面（封面图，没有用播放时截的画面）+ 进度条 + 名字 */
 @Composable
-private fun ResumeTile(item: HistoryItem, settings: com.aisub.player.AppSettings, onClick: () -> Unit) {
+private fun ResumeTile(item: HistoryItem, settings: com.aisub.player.AppSettings, onRemove: () -> Unit, onClick: () -> Unit) {
     val context = LocalContext.current
     // 关掉了识别（总开关或这个视频单独关）：不用网上的封面，直接用视频画面
     val online = remember(item.entry.uri, settings.metaOnline, com.aisub.player.meta.MetaRepository.disabledVersion) {
@@ -1266,6 +1300,7 @@ private fun ResumeTile(item: HistoryItem, settings: com.aisub.player.AppSettings
             } else {
                 MediaThumbnail(item.entry, Modifier.fillMaxSize())
             }
+            TileRemoveButton(onRemove, Modifier.align(Alignment.TopEnd))
             val d = item.entry.durationMs
             if (d > 0) {
                 Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color(0x66000000))) {
@@ -1319,6 +1354,7 @@ private fun MeTab(
     /** 参数：true 打开音乐的最近播放，false 打开视频的 */
     onHistory: (Boolean) -> Unit,
     onPlayHistory: (HistoryItem) -> Unit,
+    onRemoveHistory: (String) -> Unit,
     onPlayMusic: (List<MediaEntry>, Int) -> Unit,
     onOpenPlaylist: (Playlist) -> Unit,
     onPlayPlaylist: (Playlist) -> Unit,
@@ -1458,7 +1494,9 @@ private fun MeTab(
         } else {
             LazyRow(contentPadding = PaddingValues(horizontal = 10.dp)) {
                 items(videoHistory.take(10), key = { it.entry.uri }) { h ->
-                    Box(Modifier.width(170.dp)) { VideoCard(h.entry, emptyList()) { onPlayHistory(h) } }
+                    Box(Modifier.width(170.dp)) {
+                        VideoCard(h.entry, listOf(MenuAction("删除记录") { onRemoveHistory(h.entry.uri) })) { onPlayHistory(h) }
+                    }
                 }
             }
         }
@@ -1472,7 +1510,9 @@ private fun MeTab(
         } else {
             val songs = musicHistory.take(20).map { it.entry }
             LazyRow(contentPadding = PaddingValues(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                itemsIndexed(songs, key = { _, e -> e.uri }) { i, e -> SongTile(e) { onPlayMusic(songs, i) } }
+                itemsIndexed(songs, key = { _, e -> e.uri }) { i, e ->
+                    SongTile(e, onRemove = { onRemoveHistory(e.uri) }) { onPlayMusic(songs, i) }
+                }
             }
         }
 

@@ -533,7 +533,11 @@ fun HistoryScreen(lib: LibraryViewModel, music: Boolean, onBack: () -> Unit, pla
             val entries = history.map { it.entry }
             LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
                 itemsIndexed(history, key = { _, h -> h.entry.uri }) { i, h ->
-                    MediaRow(h.entry, emptyList(), subtitle = "${android.text.format.DateUtils.getRelativeTimeSpanString(h.playedAt)}") {
+                    MediaRow(
+                        h.entry,
+                        listOf(MenuAction("删除记录") { lib.removeHistory(h.entry.uri) }),
+                        subtitle = "${android.text.format.DateUtils.getRelativeTimeSpanString(h.playedAt)}",
+                    ) {
                         play(entries, i)
                     }
                 }
@@ -545,7 +549,8 @@ fun HistoryScreen(lib: LibraryViewModel, music: Boolean, onBack: () -> Unit, pla
                 val progress = formatDuration(h.positionMs)
                 val ago = android.text.format.DateUtils.getRelativeTimeSpanString(h.playedAt)
                 MediaRow(
-                    h.entry, emptyList(),
+                    h.entry,
+                    listOf(MenuAction("删除记录") { lib.removeHistory(h.entry.uri) }),
                     subtitle = if (progress.isEmpty()) "$ago" else "看到 $progress · $ago",
                 ) { play(listOf(h.entry), 0) }
             }
