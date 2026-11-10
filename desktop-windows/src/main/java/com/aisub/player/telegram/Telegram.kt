@@ -173,8 +173,12 @@ object Telegram {
             return
         }
         _auth.value = TgAuth.Starting
-        runCatching { Client.execute(TdApi.SetLogVerbosityLevel(1)) }
-        client = Client.create({ onUpdate(it) }, null, null)
+        client = runCatching {
+            Client.execute(TdApi.SetLogVerbosityLevel(1))
+            Client.create({ onUpdate(it) }, null, null)
+        }.onFailure { e ->
+            _auth.value = TgAuth.Unsupported("Windows 桌面版暂未安装 TDLib (tdjni.dll) 组件（${e.message}）")
+        }.getOrNull()
     }
 
     private fun onUpdate(obj: TdApi.Object) {

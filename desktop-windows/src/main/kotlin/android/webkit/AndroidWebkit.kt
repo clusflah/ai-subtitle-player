@@ -6,6 +6,8 @@ import android.net.Uri
 import android.os.Message
 import android.view.View
 import android.view.ViewGroup
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -153,9 +155,9 @@ open class WebView(context: Context = android.content.GlobalDesktopApp) : ViewGr
     private val webSettings = WebSettings()
     var webViewClient: WebViewClient = WebViewClient()
     var webChromeClient: WebChromeClient = WebChromeClient()
-    var url: String? = null
+    var url: String? by androidx.compose.runtime.mutableStateOf(null)
         private set
-    var title: String? = null
+    var title: String? by androidx.compose.runtime.mutableStateOf(null)
         private set
     val hitTestResult: HitTestResult = HitTestResult()
     private val history = mutableListOf<String>()
@@ -198,7 +200,17 @@ open class WebView(context: Context = android.content.GlobalDesktopApp) : ViewGr
 
                 // 自动嗅探页面里的直链视频 (m3u8 / mp4)
                 val mediaUrls = Regex("""https?://[^\s"'<>]+?\.(?:m3u8|mp4)(?:\?[^\s"'<>]*)?""", RegexOption.IGNORE_CASE)
-                    .findAll(html).map { it.value }.distinct().toList()
+                    .findAll(html).map { it.value.replace("\\/", "/") }.distinct().toMutableList()
+                if (mediaUrls.isEmpty()) {
+                    com.aisub.player.desktop.DesktopBinaryFinder.findYtDlp()?.let { ytdlp ->
+                        runCatching {
+                            val proc = ProcessBuilder(ytdlp, "-g", "--no-playlist", "--no-warnings", targetUrl).start()
+                            val lines = proc.inputStream.bufferedReader().readLines().map { it.trim() }.filter { it.startsWith("http") }
+                            proc.waitFor()
+                            mediaUrls.addAll(lines)
+                        }
+                    }
+                }
                 for (mUrl in mediaUrls) {
                     val req = object : WebResourceRequest {
                         override val url: Uri = Uri.parse(mUrl)

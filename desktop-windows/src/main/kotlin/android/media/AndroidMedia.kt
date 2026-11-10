@@ -143,48 +143,81 @@ class MediaPlayer {
 class MediaMetadataRetriever : AutoCloseable {
     private var path: String? = null
     private var headers: Map<String, String> = emptyMap()
+    private var cachedMeta: Map<Int, String>? = null
 
     fun setDataSource(path: String?) {
         this.path = path
+        this.cachedMeta = null
     }
 
     fun setDataSource(uri: String, headers: Map<String, String>) {
         this.path = uri
         this.headers = headers
+        this.cachedMeta = null
     }
 
     fun setDataSource(context: Context, uri: Uri) {
-        this.path = uri.path ?: uri.toString()
+        this.path = android.content.ContentResolver.resolveFile(uri)?.absolutePath ?: uri.path ?: uri.toString()
+        this.cachedMeta = null
     }
 
     fun setDataSource(fd: FileDescriptor) {}
 
-    fun extractMetadata(keyCode: Int): String? {
-        val p = path ?: return null
-        val ffprobe = DesktopBinaryFinder.findFfprobe() ?: return null
-        return runCatching {
-            when (keyCode) {
-                METADATA_KEY_DURATION -> {
-                    val proc = ProcessBuilder(
-                        ffprobe, "-v", "error",
-                        "-show_entries", "format=duration",
-                        "-of", "default=noprint_wrappers=1:nokey=1",
-                        p,
-                    ).redirectErrorStream(true).start()
-                    val text = proc.inputStream.bufferedReader().readText().trim()
-                    proc.waitFor()
-                    val sec = text.toDoubleOrNull() ?: return null
-                    (sec * 1000.0).toLong().toString()
-                }
-                else -> null
+    private fun probeMeta(): Map<Int, String> {
+        cachedMeta?.let { return it }
+        val p = path ?: return emptyMap()
+        val ffprobe = DesktopBinaryFinder.findFfprobe() ?: run {
+            DesktopBinaryFinder.ensureFfmpeg()
+            DesktopBinaryFinder.findFfprobe()
+        } ?: return emptyMap()
+        val map = HashMap<Int, String>()
+        runCatching {
+            val cmd = mutableListOf(
+                ffprobe, "-v", "error",
+                "-show_entries", "format=duration:format_tags=title,artist,album,album_artist,TITLE,ARTIST,ALBUM,ALBUM_ARTIST",
+                "-of", "json",
+            )
+            if (headers.isNotEmpty() && (p.startsWith("http://") || p.startsWith("https://"))) {
+                val hdrStr = headers.entries.joinToString("\r\n") { "${it.key}: ${it.value}" } + "\r\n"
+                cmd.addAll(listOf("-headers", hdrStr))
             }
-        }.getOrNull()
+            cmd.add(p)
+            val proc = ProcessBuilder(cmd).start()
+            val text = proc.inputStream.bufferedReader().readText()
+            proc.waitFor()
+            val fmt = org.json.JSONObject(text).optJSONObject("format") ?: return@runCatching
+            fmt.optString("duration").toDoubleOrNull()?.let { sec ->
+                if (sec > 0) map[METADATA_KEY_DURATION] = (sec * 1000.0).toLong().toString()
+            }
+            val tags = fmt.optJSONObject("tags")
+            if (tags != null) {
+                fun findTag(vararg names: String): String? {
+                    for (k in tags.keys()) {
+                        if (names.any { it.equals(k, ignoreCase = true) }) {
+                            val v = tags.optString(k).trim()
+                            if (v.isNotEmpty()) return v
+                        }
+                    }
+                    return null
+                }
+                findTag("title")?.let { map[METADATA_KEY_TITLE] = it }
+                findTag("artist")?.let { map[METADATA_KEY_ARTIST] = it }
+                findTag("album")?.let { map[METADATA_KEY_ALBUM] = it }
+                findTag("album_artist", "albumartist")?.let { map[METADATA_KEY_ALBUMARTIST] = it }
+            }
+        }
+        cachedMeta = map
+        return map
+    }
+
+    fun extractMetadata(keyCode: Int): String? {
+        return probeMeta()[keyCode]
     }
 
     val embeddedPicture: ByteArray?
         get() {
             val p = path ?: return null
-            val ffmpeg = DesktopBinaryFinder.findFfmpeg() ?: return null
+            val ffmpeg = DesktopBinaryFinder.ensureFfmpeg() ?: return null
             return runCatching {
                 val proc = ProcessBuilder(
                     ffmpeg, "-v", "error",
@@ -204,7 +237,7 @@ class MediaMetadataRetriever : AutoCloseable {
 
     fun getScaledFrameAtTime(timeUs: Long, option: Int, dstWidth: Int, dstHeight: Int): Bitmap? {
         val p = path ?: return null
-        val ffmpeg = DesktopBinaryFinder.findFfmpeg() ?: return null
+        val ffmpeg = DesktopBinaryFinder.ensureFfmpeg() ?: return null
         val sec = (timeUs / 1_000_000.0).coerceAtLeast(0.0)
         return runCatching {
             val cmd = mutableListOf(

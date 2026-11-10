@@ -45,8 +45,6 @@ import java.util.concurrent.CopyOnWriteArraySet
 object ContentUris {
     @JvmStatic
     fun withAppendedId(contentUri: Uri, id: Long): Uri {
-        val file = ContentResolver.fileForId(id)
-        if (file != null) return Uri.fromFile(file)
         return contentUri.buildUpon().appendPath(id.toString()).build()
     }
 
@@ -109,6 +107,37 @@ class ContentResolver(private val context: Context) {
     fun loadThumbnail(uri: Uri, size: Size, signal: Any?): Bitmap? {
         val file = resolveFile(uri) ?: return null
         if (!file.exists()) return null
+        val ext = file.extension.lowercase()
+        if (ext in VIDEO_EXTS) {
+            return android.media.MediaMetadataRetriever().use { r ->
+                r.setDataSource(file.absolutePath)
+                r.getScaledFrameAtTime(
+                    1_000_000L,
+                    android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                    size.width.coerceAtLeast(160),
+                    size.height.coerceAtLeast(90),
+                )
+            }
+        }
+        if (ext in AUDIO_EXTS) {
+            val embedded = android.media.MediaMetadataRetriever().use { r ->
+                r.setDataSource(file.absolutePath)
+                r.embeddedPicture
+            }
+            if (embedded != null && embedded.isNotEmpty()) {
+                BitmapFactory.decodeByteArray(embedded, 0, embedded.size)?.let { return it }
+            }
+            val dir = file.parentFile
+            if (dir != null) {
+                for (coverName in listOf("cover.jpg", "cover.png", "folder.jpg", "folder.png")) {
+                    val coverFile = File(dir, coverName)
+                    if (coverFile.isFile) {
+                        BitmapFactory.decodeFile(coverFile.absolutePath)?.let { return it }
+                    }
+                }
+            }
+            return null
+        }
         return BitmapFactory.decodeFile(file.absolutePath)
     }
 
@@ -125,9 +154,40 @@ class ContentResolver(private val context: Context) {
             MediaStore.MediaColumns.DATA,
         )
         val uriStr = uri.toString()
+        val lastSeg = uri.lastPathSegment
+        val isSingleMediaItem = uriStr.startsWith("content://media/") && lastSeg?.toLongOrNull() != null
 
-        // 1. 系统媒体库扫描（视频 / 音频 / 图片）
-        if (uriStr.startsWith("content://media/")) {
+        // 1. 按相对路径 + 文件名精确查询（用于 SidecarSrt / MusicFeatures 同目录文件查找）
+        if (uriStr.startsWith("content://media/") && !isSingleMediaItem &&
+            selection != null && selection.contains(MediaStore.MediaColumns.RELATIVE_PATH) &&
+            selection.contains(MediaStore.MediaColumns.DISPLAY_NAME) &&
+            selectionArgs != null && selectionArgs.size >= 2
+        ) {
+            val relDir = selectionArgs[0].trim('/', '\\')
+            val displayName = selectionArgs[1]
+            val target = File(File(Environment.getExternalStorageDirectory(), relDir), displayName)
+            if (target.exists() && target.isFile) {
+                val id = registerFileId(target)
+                val rel = relativePathFromHome(target)
+                val row = cols.map { col ->
+                    when (col) {
+                        MediaStore.MediaColumns._ID -> id
+                        MediaStore.MediaColumns.DISPLAY_NAME, OpenableColumns.DISPLAY_NAME -> target.name
+                        MediaStore.MediaColumns.SIZE, OpenableColumns.SIZE -> target.length()
+                        MediaStore.MediaColumns.DATA -> target.absolutePath
+                        MediaStore.MediaColumns.RELATIVE_PATH -> rel
+                        MediaStore.MediaColumns.DATE_ADDED, MediaStore.MediaColumns.DATE_MODIFIED -> target.lastModified() / 1000L
+                        MediaStore.MediaColumns.MIME_TYPE -> guessMimeType(target.name)
+                        else -> null
+                    }
+                }.toTypedArray<Any?>()
+                return MatrixCursor(cols, listOf(row))
+            }
+            return MatrixCursor(cols, emptyList())
+        }
+
+        // 2. 系统媒体库集合扫描（视频 / 音频 / 图片）
+        if (uriStr.startsWith("content://media/") && !isSingleMediaItem) {
             val files = when {
                 uriStr.contains("/video/") -> scanMediaFiles(VIDEO_EXTS, listOf("Videos", "Movies", "Downloads"))
                 uriStr.contains("/audio/") -> scanMediaFiles(AUDIO_EXTS, listOf("Music", "Downloads"))
@@ -136,7 +196,7 @@ class ContentResolver(private val context: Context) {
             }
             val rows = files.map { f ->
                 val id = registerFileId(f)
-                val rel = f.parentFile?.name?.let { "$it/" } ?: ""
+                val rel = relativePathFromHome(f)
                 cols.map { col ->
                     when (col) {
                         MediaStore.MediaColumns._ID -> id
@@ -156,7 +216,7 @@ class ContentResolver(private val context: Context) {
 
         val file = resolveFile(uri) ?: return MatrixCursor(cols, emptyList())
 
-        // 2. 文件夹子项查询（用于漫画文件夹 DocumentsContract）
+        // 3. 文件夹子项查询（用于漫画文件夹 DocumentsContract）
         if (file.isDirectory && cols.any { it == DocumentsContract.Document.COLUMN_DOCUMENT_ID }) {
             val children = file.listFiles()?.sortedBy { it.name.lowercase() }.orEmpty()
             val rows = children.map { child ->
@@ -173,10 +233,10 @@ class ContentResolver(private val context: Context) {
             return MatrixCursor(cols, rows)
         }
 
-        // 3. 鍗曚釜鏂囦欢鏌ヨ
+        // 4. 单个文件查询
         if (!file.exists()) return MatrixCursor(cols, emptyList())
         val id = registerFileId(file)
-        val rel = file.parentFile?.name?.let { "$it/" } ?: ""
+        val rel = relativePathFromHome(file)
         val row = cols.map { col ->
             when (col) {
                 MediaStore.MediaColumns._ID -> id
@@ -204,21 +264,42 @@ class ContentResolver(private val context: Context) {
         val dot = name.lastIndexOf('.')
         val stem = if (dot > 0) name.substring(0, dot) else name
         val ext = if (dot > 0) name.substring(dot) else ""
-        while (target.exists()) {
+        while (target.exists() && target.length() > 0L) {
             target = File(targetDir, "$stem ($counter)$ext")
             counter++
         }
         runCatching { target.createNewFile() }
+        val id = registerFileId(target)
+        if (url.toString().startsWith("content://media/")) {
+            return ContentUris.withAppendedId(url, id)
+        }
         return Uri.fromFile(target)
     }
 
     fun update(uri: Uri, values: ContentValues?, where: String?, selectionArgs: Array<String>?): Int {
         val file = resolveFile(uri) ?: return 0
         if (!file.exists()) return 0
-        val newName = values?.getAsString(MediaStore.MediaColumns.DISPLAY_NAME)
-        if (!newName.isNullOrBlank() && newName != file.name) {
-            val dst = File(file.parentFile, newName)
-            if (file.renameTo(dst)) return 1
+        val newRel = values?.getAsString(MediaStore.MediaColumns.RELATIVE_PATH)?.trim('/', '\\')
+        val newName = values?.getAsString(MediaStore.MediaColumns.DISPLAY_NAME)?.takeIf { it.isNotBlank() } ?: file.name
+        val targetDir = if (!newRel.isNullOrBlank()) {
+            File(Environment.getExternalStorageDirectory(), newRel).apply { mkdirs() }
+        } else {
+            file.parentFile
+        }
+        val dst = File(targetDir, newName)
+        if (dst.absolutePath != file.absolutePath) {
+            if (dst.exists()) return 0
+            val moved = file.renameTo(dst) || runCatching {
+                file.copyTo(dst, overwrite = false)
+                file.delete()
+                true
+            }.getOrDefault(false)
+            if (!moved) return 0
+            val id = fileToId.remove(file.absolutePath) ?: uri.lastPathSegment?.toLongOrNull()
+            if (id != null) {
+                fileToId[dst.absolutePath] = id
+                idToFile[id] = dst
+            }
         }
         return 1
     }
@@ -248,6 +329,18 @@ class ContentResolver(private val context: Context) {
         }
 
         internal fun fileForId(id: Long): File? = idToFile[id]
+
+        internal fun relativePathFromHome(file: File): String {
+            val parent = file.parentFile ?: return ""
+            val homePath = Environment.getExternalStorageDirectory().absolutePath.replace('\\', '/').trimEnd('/')
+            val parentPath = parent.absolutePath.replace('\\', '/').trimEnd('/')
+            val rel = if (parentPath.startsWith("$homePath/", ignoreCase = true)) {
+                parentPath.substring(homePath.length + 1)
+            } else {
+                parent.name
+            }
+            return if (rel.isEmpty()) "" else "$rel/"
+        }
 
         internal fun resolveFile(uri: Uri): File? {
             val str = uri.toString()
@@ -637,7 +730,20 @@ open class Context {
     }
 
     open fun startActivity(intent: Intent) {
-        val uri = intent.data
+        if (intent.action == DownloadManager.ACTION_VIEW_DOWNLOADS) {
+            val home = Environment.getExternalStorageDirectory()
+            val voxDownloads = File(home, "Downloads/Voxtitle")
+            val dir = if (voxDownloads.isDirectory) voxDownloads else File(home, "Downloads").apply { mkdirs() }
+            runCatching {
+                if (Desktop.isDesktopSupported()) {
+                    Desktop.getDesktop().open(dir)
+                } else {
+                    ProcessBuilder("explorer.exe", dir.absolutePath).start()
+                }
+            }
+            return
+        }
+        val uri = intent.data ?: intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
         val text = intent.getStringExtra(Intent.EXTRA_TEXT)
         if (uri != null) {
             val scheme = uri.scheme?.lowercase()
@@ -654,7 +760,9 @@ open class Context {
             val file = ContentResolver.resolveFile(uri)
             if (file != null && file.exists()) {
                 runCatching {
-                    if (Desktop.isDesktopSupported()) {
+                    if (intent.action == Intent.ACTION_SEND || intent.action == Intent.ACTION_SEND_MULTIPLE) {
+                        ProcessBuilder("explorer.exe", "/select,${file.absolutePath}").start()
+                    } else if (Desktop.isDesktopSupported()) {
                         Desktop.getDesktop().open(file)
                     }
                 }

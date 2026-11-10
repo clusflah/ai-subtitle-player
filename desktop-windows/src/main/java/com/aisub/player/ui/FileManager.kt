@@ -97,17 +97,7 @@ class FileManager internal constructor(
     fun delete(entries: List<MediaEntry>) {
         val local = entries.filter(FileOps::isLocal)
         if (local.isEmpty()) return
-        // Android 11+ 由系统弹窗确认；旧系统先自己确认一次
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                FileOps.delete(context, local)
-            } catch (e: FileOps.NeedsPermission) {
-                pending = null
-                launch(IntentSenderRequest.Builder(e.intent).build())
-            }
-        } else {
-            dialog = FileDialog.ConfirmDelete(local)
-        }
+        dialog = FileDialog.ConfirmDelete(local)
     }
 
     internal fun confirmDelete(entries: List<MediaEntry>) = run({ FileOps.delete(context, entries) }, "已删除 ${entries.size} 个文件")

@@ -429,14 +429,18 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     var backConsumed by remember { mutableStateOf(false) }
     // 控制栏、更多菜单开合时把焦点放到看得见的地方，不留在隐藏的按钮上；音乐界面用默认的焦点移动
     LaunchedEffect(tv, controls, locked, showMore, musicMode, problemShown) {
-        if (!tv || musicMode) return@LaunchedEffect
+        if (musicMode) return@LaunchedEffect
         withFrameNanos { }
         runCatching {
-            when {
-                showMore -> moreFocus.requestFocus()
-                problemShown -> errorFocus.requestFocus()
-                controls && !locked -> playFocus.requestFocus()
-                else -> rootFocus.requestFocus()
+            if (!tv) {
+                rootFocus.requestFocus()
+            } else {
+                when {
+                    showMore -> moreFocus.requestFocus()
+                    problemShown -> errorFocus.requestFocus()
+                    controls && !locked -> playFocus.requestFocus()
+                    else -> rootFocus.requestFocus()
+                }
             }
         }
     }
@@ -454,8 +458,49 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     }
     /** 长按方向键时越跳越远：10 秒起，最多一次 60 秒 */
     fun seekStep(e: KeyEvent) = (10_000L * (1 + android.view.KeyEvent.fromNative(e.nativeKeyEvent).repeatCount / 5)).coerceAtMost(60_000L)
+    val anySheetOpen = dialog != null || renaming != null || editing != null ||
+        showOnline || showStyle || showRoles || showMore || showTracks || showCues || showNav || showBookmarks || showSkip || showChannels
+    val onDesktopKey: (KeyEvent) -> Boolean = desktopHandler@{ e ->
+        if (tv || musicMode || anySheetOpen) return@desktopHandler false
+        val down = e.type == KeyEventType.KeyDown
+        val native = android.view.KeyEvent.fromNative(e.nativeKeyEvent)
+        val code = native.keyCode
+        if (!down) return@desktopHandler false
+        interactions++
+        when (code) {
+            android.view.KeyEvent.KEYCODE_SPACE -> {
+                if (native.repeatCount == 0 && !locked) {
+                    vm.togglePlay()
+                    indicator = (if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow) to (if (wantsPlay) "已暂停" else "播放")
+                }
+                true
+            }
+            android.view.KeyEvent.KEYCODE_DPAD_LEFT, android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                if (!locked) seekBy(if (code == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) seekStep(e) else -seekStep(e))
+                true
+            }
+            android.view.KeyEvent.KEYCODE_DPAD_UP, android.view.KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (!locked) {
+                    val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                    val maxVol = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                    val curVol = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
+                    val step = (maxVol / 20).coerceAtLeast(1)
+                    val nextVol = (curVol + if (code == android.view.KeyEvent.KEYCODE_DPAD_UP) step else -step).coerceIn(0, maxVol)
+                    audio.setStreamVolume(AudioManager.STREAM_MUSIC, nextVol, 0)
+                    indicator = AppIcons.Volume to "音量 ${nextVol * 100 / maxVol}%"
+                }
+                true
+            }
+            android.view.KeyEvent.KEYCODE_BACK -> {
+                onBack()
+                true
+            }
+            else -> false
+        }
+    }
     val onTvKey: (KeyEvent) -> Boolean = handler@{ e ->
-        if (!tv || musicMode) return@handler false
+        if (!tv) return@handler onDesktopKey(e)
+        if (musicMode) return@handler false
         val down = e.type == KeyEventType.KeyDown
         val code = android.view.KeyEvent.fromNative(e.nativeKeyEvent).keyCode
         // 返回键：先关更多菜单、再收起控制栏（Compose 默认会把返回键当成「焦点移出」，要按两下才有反应），都没有时才退出
@@ -501,11 +546,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     Box(
         Modifier.fillMaxSize().background(Color.Black)
-            .then(
-                if (tv) Modifier.onPreviewKeyEvent(onTvKey).onFocusChanged { rootFocused = it.isFocused }
-                    .focusRequester(rootFocus).focusProperties { canFocus = !musicMode }.focusable()
-                else Modifier,
-            ),
+            .onPreviewKeyEvent(onTvKey).onFocusChanged { rootFocused = it.isFocused }
+            .focusRequester(rootFocus).focusProperties { canFocus = !musicMode }.focusable(),
     ) {
         // ---- 画面 ----
         AndroidView(

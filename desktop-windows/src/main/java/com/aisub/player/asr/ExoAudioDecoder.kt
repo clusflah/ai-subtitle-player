@@ -60,13 +60,15 @@ class ExoAudioDecoder(
             val link = CloudRegistry.resolve(rawUri)
             inputPath = link.url
             headers.putAll(link.headers)
+        } else if (com.aisub.player.telegram.Telegram.isTelegram(rawUri)) {
+            inputPath = com.aisub.player.media.MediaProxy(dataSourceFactory).register(uri, "video.mp4")
         } else if (rawUri.startsWith("http://") || rawUri.startsWith("https://")) {
             val routed = Endpoints.rewrite(rawUri)
             inputPath = routed
             headers.putAll(AuthRegistry.headersFor(routed))
             headers.putAll(LiveHeaders.headersFor(rawUri))
         } else {
-            val f = uri.toJavaFile() ?: File(uri.path ?: rawUri)
+            val f = android.content.ContentResolver.resolveFile(uri) ?: uri.toJavaFile() ?: File(uri.path ?: rawUri)
             inputPath = f.absolutePath
         }
 

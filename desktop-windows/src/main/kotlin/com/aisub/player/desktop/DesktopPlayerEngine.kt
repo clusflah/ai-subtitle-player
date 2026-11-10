@@ -241,6 +241,10 @@ class DesktopExoPlayer(
     // 后端 1: VLCJ
     private var vlcFactory: MediaPlayerFactory? = null
     private var vlcMp: EmbeddedMediaPlayer? = null
+    private var pendingVlcStart: Pair<String, Array<String>>? = null
+    private var lastPlayableUrl: String? = null
+    private var lastHeaders: Map<String, String> = emptyMap()
+    private var vlcPlayedCurrentItem: Boolean = false
 
     // 后端 2: 纯 Java WAV Clip (用于听书等短音频)
     private var wavClip: Clip? = null
@@ -407,6 +411,18 @@ class DesktopExoPlayer(
     }
 
     private fun applyPlayWhenReady(ready: Boolean) {
+        val pending = pendingVlcStart
+        if (ready && pending != null) {
+            pendingVlcStart = null
+            vlcMp?.let { mp ->
+                val ok = runCatching { mp.media().play(pending.first, *pending.second) }.getOrDefault(false)
+                if (!ok) {
+                    val fallbackUrl = lastPlayableUrl
+                    if (fallbackUrl != null) startWithFfmpeg(fallbackUrl, lastHeaders, positionMsInternal)
+                }
+                return
+            }
+        }
         vlcMp?.let { mp ->
             runCatching {
                 if (ready) mp.controls().play() else mp.controls().setPause(true)
@@ -470,6 +486,10 @@ class DesktopExoPlayer(
         stopInternal()
         val uri = item.localConfiguration?.uri ?: Uri.parse(item.mediaId)
         val localFile = ContentResolver.resolveFile(uri)
+        val ext = (localFile?.extension ?: uri.lastPathSegment?.substringAfterLast('.', "")).orEmpty().lowercase()
+        if (ext in setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma", "ape", "alac", "aiff")) {
+            DesktopPlayerEngine.clearFrame()
+        }
 
         // 1. 本地 WAV 短语音（如听书 BookTts）：直接用 Java Sound Clip 播放，零延迟
         if (localFile != null && localFile.exists() && localFile.extension.equals("wav", ignoreCase = true)) {
@@ -480,6 +500,9 @@ class DesktopExoPlayer(
             onError(PlaybackException(e.message, e, PlaybackException.ERROR_CODE_IO_UNSPECIFIED))
             return
         }
+        lastPlayableUrl = playableUrl
+        lastHeaders = headers
+        vlcPlayedCurrentItem = false
         isCurrentMediaItemLive = playableUrl.contains(".m3u8", ignoreCase = true) ||
             item.localConfiguration?.mimeType == MimeTypes.APPLICATION_M3U8
 
@@ -538,11 +561,13 @@ class DesktopExoPlayer(
 
             updateEffectiveVolume()
             mp.controls().setRate(playbackParameters.speed)
-            val ok = mp.media().startPaused(url, *options.toTypedArray())
-            if (!ok) return false
+            val optArr = options.toTypedArray()
             if (playWhenReady) {
-                mp.controls().play()
+                pendingVlcStart = null
+                val ok = mp.media().play(url, *optArr)
+                if (!ok) return false
             } else {
+                pendingVlcStart = url to optArr
                 playbackState = Player.STATE_READY
             }
             true
@@ -591,11 +616,13 @@ class DesktopExoPlayer(
         }
         val surface = CallbackVideoSurface(bufferFormatCallback, renderCallback, true, adapter)
         mp.videoSurface().set(surface)
+        runCatching { mp.videoSurface().attachVideoSurface() }
     }
 
     private fun setupVlcEvents(mp: EmbeddedMediaPlayer) {
         mp.events().addMediaPlayerEventListener(object : MediaPlayerEventAdapter() {
             override fun playing(mediaPlayer: MediaPlayer) {
+                vlcPlayedCurrentItem = true
                 playbackState = Player.STATE_READY
                 refreshVlcTracks(mediaPlayer)
             }
@@ -613,6 +640,11 @@ class DesktopExoPlayer(
             }
 
             override fun error(mediaPlayer: MediaPlayer) {
+                val fallbackUrl = lastPlayableUrl
+                if (!vlcPlayedCurrentItem && fallbackUrl != null && !ffmpegRunning.get()) {
+                    startWithFfmpeg(fallbackUrl, lastHeaders, positionMsInternal)
+                    return
+                }
                 onError(
                     PlaybackException(
                         "无法播放该媒体流",
@@ -627,6 +659,18 @@ class DesktopExoPlayer(
     private fun refreshVlcTracks(mp: MediaPlayer) {
         runCatching {
             val groups = ArrayList<Tracks.Group>()
+            val vsz = videoSize
+            if (vsz.width > 0 && vsz.height > 0) {
+                val vf = Format.Builder()
+                    .setId("v0")
+                    .setSampleMimeType("video/avc")
+                    .setWidth(vsz.width)
+                    .setHeight(vsz.height)
+                    .setFrameRate(25f)
+                    .build()
+                videoFormat = vf
+                groups.add(Tracks.Group(TrackGroup("v0", vf), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(true)))
+            }
             val currentAudio = mp.audio().track()
             for (d in mp.audio().trackDescriptions().orEmpty()) {
                 if (d.id() < 0) continue
@@ -663,12 +707,14 @@ class DesktopExoPlayer(
             var width = 1280
             var height = 720
             var hasVideo = true
+            var hasAudio = true
             var fps = 25.0
+            val probedGroups = ArrayList<Tracks.Group>()
             DesktopBinaryFinder.findFfprobe()?.let { ffprobe ->
                 runCatching {
                     val cmd = mutableListOf(
                         ffprobe, "-v", "error",
-                        "-show_entries", "format=duration:stream=index,codec_type,codec_name,width,height,r_frame_rate",
+                        "-show_entries", "format=duration:stream=index,codec_type,codec_name,width,height,r_frame_rate,tags",
                         "-of", "json",
                     )
                     if (headers.isNotEmpty() && url.startsWith("http")) {
@@ -686,10 +732,16 @@ class DesktopExoPlayer(
                     }
                     val streams = root.optJSONArray("streams")
                     var foundVideo = false
+                    var foundAudio = false
                     if (streams != null) {
                         for (i in 0 until streams.length()) {
                             val s = streams.getJSONObject(i)
-                            if (s.optString("codec_type") == "video" && !foundVideo) {
+                            val stype = s.optString("codec_type")
+                            val idx = s.optInt("index", i)
+                            val tags = s.optJSONObject("tags")
+                            val lang = tags?.optString("language")?.takeIf { it.isNotBlank() }
+                            val title = tags?.optString("title")?.takeIf { it.isNotBlank() }
+                            if (stype == "video" && !foundVideo) {
                                 val w = s.optInt("width", 0)
                                 val h = s.optInt("height", 0)
                                 if (w > 0 && h > 0) {
@@ -703,29 +755,67 @@ class DesktopExoPlayer(
                                         val den = parts[1].toDoubleOrNull() ?: 1.0
                                         if (den > 0 && num / den in 1.0..120.0) fps = num / den
                                     }
+                                    val vf = Format.Builder()
+                                        .setId("v$idx")
+                                        .setSampleMimeType("video/${s.optString("codec_name", "avc")}")
+                                        .setWidth(w)
+                                        .setHeight(h)
+                                        .setFrameRate(fps.toFloat())
+                                        .build()
+                                    videoFormat = vf
+                                    probedGroups.add(Tracks.Group(TrackGroup("v$idx", vf), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(true)))
                                 }
+                            } else if (stype == "audio") {
+                                val af = Format.Builder()
+                                    .setId("a$idx")
+                                    .setLanguage(lang)
+                                    .setLabel(title ?: lang ?: "音轨 $idx")
+                                    .setSampleMimeType(MimeTypes.AUDIO_UNKNOWN)
+                                    .build()
+                                if (!foundAudio) audioFormat = af
+                                probedGroups.add(Tracks.Group(TrackGroup("a$idx", af), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(!foundAudio)))
+                                foundAudio = true
+                            } else if (stype == "subtitle") {
+                                val sf = Format.Builder()
+                                    .setId("s$idx")
+                                    .setLanguage(lang)
+                                    .setLabel(title ?: lang ?: "字幕 $idx")
+                                    .setSampleMimeType(MimeTypes.TEXT_UNKNOWN)
+                                    .build()
+                                probedGroups.add(Tracks.Group(TrackGroup("s$idx", sf), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(false)))
                             }
                         }
                     }
                     hasVideo = foundVideo
+                    hasAudio = foundAudio
                 }
             }
 
             if (!ffmpegRunning.get()) return@submit
 
+            if (probedGroups.isNotEmpty()) {
+                currentTracks = Tracks(probedGroups)
+                notifyMain { listeners.forEach { it.onTracksChanged(currentTracks) } }
+            }
+
             if (hasVideo) {
                 val sz = VideoSize(width, height)
                 videoSize = sz
+                playbackState = Player.STATE_READY
                 notifyMain {
                     listeners.forEach {
                         it.onVideoSizeChanged(sz)
                         it.onRenderedFirstFrame()
                     }
                 }
-                startFfmpegVideoThread(ffmpeg, url, headers, startPosMs, width, height, fps)
+                startFfmpegVideoThread(ffmpeg, url, headers, startPosMs, width, height, fps, advanceClock = !hasAudio)
             }
 
-            startFfmpegAudioThread(ffmpeg, url, headers, startPosMs)
+            if (hasAudio) {
+                startFfmpegAudioThread(ffmpeg, url, headers, startPosMs, endWhenDone = true)
+            } else if (!hasVideo) {
+                startFfmpegAudioThread(ffmpeg, url, headers, startPosMs, endWhenDone = true)
+            }
         }
     }
 
@@ -737,6 +827,7 @@ class DesktopExoPlayer(
         width: Int,
         height: Int,
         fps: Double,
+        advanceClock: Boolean = false,
     ) {
         ioPool.submit {
             runCatching {
@@ -762,6 +853,7 @@ class DesktopExoPlayer(
                 ffmpegVideoProc = proc
                 val frameBytes = ByteArray(width * height * 3)
                 val ins = proc.inputStream
+                var framesRead = 0L
                 while (ffmpegRunning.get()) {
                     if (!playWhenReady) {
                         Thread.sleep(40)
@@ -785,8 +877,15 @@ class DesktopExoPlayer(
                         bi += 3
                     }
                     DesktopPlayerEngine.updateFrame(img)
+                    framesRead++
+                    if (advanceClock) {
+                        positionMsInternal = startPosMs + (framesRead * 1000.0 / fps.coerceAtLeast(1.0)).toLong()
+                    }
                 }
                 proc.destroy()
+                if (advanceClock && ffmpegRunning.get() && framesRead > 0) {
+                    onItemEnded()
+                }
             }
         }
     }
@@ -796,6 +895,7 @@ class DesktopExoPlayer(
         url: String,
         headers: Map<String, String>,
         startPosMs: Long,
+        endWhenDone: Boolean = true,
     ) {
         ioPool.submit {
             try {
@@ -853,7 +953,7 @@ class DesktopExoPlayer(
                 line?.drain()
                 line?.close()
                 proc.destroy()
-                if (ffmpegRunning.get()) {
+                if (endWhenDone && ffmpegRunning.get() && bytesPlayed > 0L) {
                     onItemEnded()
                 }
             } catch (e: Exception) {
@@ -892,6 +992,7 @@ class DesktopExoPlayer(
     }
 
     private fun stopInternal() {
+        pendingVlcStart = null
         ffmpegRunning.set(false)
         runCatching { ffmpegAudioProc?.destroyForcibly() }
         runCatching { ffmpegVideoProc?.destroyForcibly() }

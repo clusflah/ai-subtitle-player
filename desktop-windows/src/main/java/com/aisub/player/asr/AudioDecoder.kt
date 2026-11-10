@@ -39,12 +39,15 @@ class AudioDecoder(
             val link = CloudRegistry.resolve(rawUri)
             inputPath = link.url
             headers = link.headers
+        } else if (com.aisub.player.telegram.Telegram.isTelegram(rawUri) && fallbackDataSource != null) {
+            inputPath = com.aisub.player.media.MediaProxy(fallbackDataSource).register(uri, "video.mp4")
+            headers = emptyMap()
         } else if (rawUri.startsWith("http://") || rawUri.startsWith("https://")) {
             val routed = Endpoints.rewrite(rawUri)
             inputPath = routed
             headers = AuthRegistry.headersFor(routed)
         } else {
-            val f = uri.toJavaFile() ?: File(uri.path ?: rawUri)
+            val f = android.content.ContentResolver.resolveFile(uri) ?: uri.toJavaFile() ?: File(uri.path ?: rawUri)
             inputPath = f.absolutePath
             headers = emptyMap()
         }

@@ -136,6 +136,7 @@ class AppUpdater(
             .setCancelable(false)
             .setNegativeButton("取消") { _, _ -> cancelled.set(true) }
             .show()
+        Toast.makeText(activity, "正在下载更新 ${rel.fileName}…", Toast.LENGTH_SHORT).show()
         Thread {
             val dir = File(activity.cacheDir, DIR).apply { deleteRecursively(); mkdirs() }
             val file = File(dir, rel.fileName)
@@ -169,9 +170,13 @@ class AppUpdater(
                 } finally {
                     conn.disconnect()
                 }
-                // 核对包名：下错了（别的 App、别的版本线）就不装
-                val info = activity.packageManager.getPackageArchiveInfo(file.path, 0)
-                if (info?.packageName != activity.packageName) throw IllegalStateException("安装包不是这个 App 的（${info?.packageName ?: "无法读取"}）")
+                if (file.extension.lowercase() in setOf("exe", "msi")) {
+                    if (file.length() < 1_000_000L) throw IllegalStateException("下载的安装包不完整")
+                } else {
+                    // 核对包名：下错了（别的 App、别的版本线）就不装
+                    val info = activity.packageManager.getPackageArchiveInfo(file.path, 0)
+                    if (info?.packageName != activity.packageName) throw IllegalStateException("安装包不是这个 App 的（${info?.packageName ?: "无法读取"}）")
+                }
                 file
             }
             main.post {
@@ -191,6 +196,19 @@ class AppUpdater(
     }
 
     private fun install(activity: Activity, file: File) {
+        if (file.extension.lowercase() in setOf("exe", "msi")) {
+            runCatching {
+                if (java.awt.Desktop.isDesktopSupported()) {
+                    java.awt.Desktop.getDesktop().open(file)
+                } else {
+                    ProcessBuilder("cmd", "/c", "start", "", file.absolutePath).start()
+                }
+                Toast.makeText(activity, "已启动安装程序，请按提示完成更新", Toast.LENGTH_LONG).show()
+            }.onFailure {
+                Toast.makeText(activity, "无法打开安装程序：${it.message}", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.packageManager.canRequestPackageInstalls()) {
             AlertDialog.Builder(activity)
                 .setTitle("需要允许安装应用")
@@ -294,10 +312,9 @@ class AppUpdater(
 val appUpdater = AppUpdater(
     repo = "clusflah/ai-subtitle-player",
     pickAsset = { names ->
-        val dl = com.aisub.player.BuildConfig.VERSION_NAME.endsWith("-dl")
-        val prefix = if (dl) "Voxtitle-dl-" else "Voxtitle-"
-        val ours = names.filter { it.startsWith(prefix) && it.endsWith(".apk") && (dl || !it.startsWith("Voxtitle-dl-")) }
-        AppUpdater.abis.firstNotNullOfOrNull { abi -> ours.firstOrNull { it.endsWith("-$abi.apk") } }
-            ?: ours.firstOrNull { it.endsWith("-universal.apk") }
+        names.firstOrNull { it.startsWith("Voxtitle-") && it.endsWith("-windows-x64-Setup.exe") }
+            ?: names.firstOrNull { it.startsWith("Voxtitle-") && it.endsWith("-Setup.exe") }
+            ?: names.firstOrNull { it.startsWith("Voxtitle-") && it.endsWith(".msi") }
+            ?: names.firstOrNull { it.startsWith("Voxtitle-") && it.endsWith(".exe") }
     },
 )

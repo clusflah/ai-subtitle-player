@@ -32,15 +32,12 @@ object FileOps {
         val dateAdded: Long,
     )
 
-    fun isLocal(entry: MediaEntry) = entry.uri.startsWith("content://media/")
+    fun isLocal(entry: MediaEntry) = entry.uri.startsWith("content://media/") || entry.uri.startsWith("file://")
 
-    /** 删除。Android 11+ 一次性弹出系统确认框（会移到回收站或直接删除，由系统决定）。 */
+    /** 删除本地文件。 */
     fun delete(context: Context, entries: List<MediaEntry>) {
         val uris = entries.filter(::isLocal).map { Uri.parse(it.uri) }
         if (uris.isEmpty()) return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            throw NeedsPermission(MediaStore.createDeleteRequest(context.contentResolver, uris))
-        }
         for (uri in uris) {
             try {
                 context.contentResolver.delete(uri, null, null)

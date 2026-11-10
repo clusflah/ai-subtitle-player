@@ -196,3 +196,43 @@ object Process {
     fun myUid(): Int = 1000
 }
 
+/**
+ * 拦截并加载桌面版 JNI 动态库（如 sherpa-onnx-jni.dll 与 onnxruntime.dll）。
+ */
+object LibLd {
+    private val loaded = ConcurrentHashMap.newKeySet<String>()
+
+    @JvmStatic
+    @Synchronized
+    fun loadLibrary(name: String) {
+        if (!loaded.add(name)) return
+        if (name == "sherpa-onnx-jni") {
+            val dir = File(android.content.Context.appDataRoot(), "bin/sherpa-1.13.8").apply { mkdirs() }
+            val onnxDll = extractResource("sherpa-onnx/native/win-x64/onnxruntime.dll", File(dir, "onnxruntime.dll"))
+            val jniDll = extractResource("sherpa-onnx/native/win-x64/sherpa-onnx-jni.dll", File(dir, "sherpa-onnx-jni.dll"))
+            if (onnxDll != null && jniDll != null) {
+                System.load(onnxDll.absolutePath)
+                System.load(jniDll.absolutePath)
+                return
+            }
+        }
+        System.loadLibrary(name)
+    }
+
+    private fun extractResource(resourcePath: String, target: File): File? {
+        if (target.exists() && target.length() > 100_000L) return target
+        val stream = LibLd::class.java.classLoader.getResourceAsStream(resourcePath) ?: return null
+        val tmp = File(target.parentFile, "${target.name}.tmp")
+        stream.use { input ->
+            tmp.outputStream().use { output -> input.copyTo(output) }
+        }
+        if (target.exists()) target.delete()
+        if (!tmp.renameTo(target)) {
+            tmp.copyTo(target, overwrite = true)
+            tmp.delete()
+        }
+        return target
+    }
+}
+
+
