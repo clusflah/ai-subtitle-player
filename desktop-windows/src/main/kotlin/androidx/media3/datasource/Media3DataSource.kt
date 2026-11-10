@@ -145,22 +145,45 @@ class DefaultHttpDataSource private constructor(
 
     override fun open(dataSpec: DataSpec): Long {
         currentUri = dataSpec.uri
-        val c = URL(dataSpec.uri.toString()).openConnection() as HttpURLConnection
-        c.connectTimeout = 15_000
-        c.readTimeout = 30_000
-        c.instanceFollowRedirects = true
-        defaultRequestProperties.forEach { (k, v) -> c.setRequestProperty(k, v) }
-        dataSpec.httpRequestHeaders.forEach { (k, v) -> c.setRequestProperty(k, v) }
-        if (dataSpec.position > 0 || dataSpec.length != C.LENGTH_UNSET.toLong()) {
-            val end = if (dataSpec.length != C.LENGTH_UNSET.toLong()) (dataSpec.position + dataSpec.length - 1).toString() else ""
-            c.setRequestProperty("Range", "bytes=${dataSpec.position}-$end")
+        var targetUrl = URL(dataSpec.uri.toString())
+        val initialHost = targetUrl.host
+        var redirectCount = 0
+        var c: HttpURLConnection
+
+        while (true) {
+            c = (targetUrl.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 12_000
+                readTimeout = 20_000
+                instanceFollowRedirects = false
+                defaultRequestProperties.forEach { (k, v) -> setRequestProperty(k, v) }
+                dataSpec.httpRequestHeaders.forEach { (k, v) ->
+                    if (!k.equals("Authorization", ignoreCase = true) || targetUrl.host.equals(initialHost, ignoreCase = true)) {
+                        setRequestProperty(k, v)
+                    }
+                }
+                if (dataSpec.position > 0 || dataSpec.length != C.LENGTH_UNSET.toLong()) {
+                    val end = if (dataSpec.length != C.LENGTH_UNSET.toLong()) (dataSpec.position + dataSpec.length - 1).toString() else ""
+                    setRequestProperty("Range", "bytes=${dataSpec.position}-$end")
+                }
+            }
+            val code = c.responseCode
+            responseHeadersMap = c.headerFields.filterKeys { it != null }
+            if (code in intArrayOf(301, 302, 303, 307, 308)) {
+                val location = c.getHeaderField("Location")
+                c.disconnect()
+                if (location.isNullOrBlank() || ++redirectCount > 10) {
+                    throw HttpDataSource.InvalidResponseCodeException(code, c.responseMessage, null, responseHeadersMap, dataSpec, ByteArray(0))
+                }
+                targetUrl = URL(targetUrl, location)
+                continue
+            }
+            if (code !in 200..299) {
+                c.disconnect()
+                throw HttpDataSource.InvalidResponseCodeException(code, c.responseMessage, null, responseHeadersMap, dataSpec, ByteArray(0))
+            }
+            break
         }
-        val code = c.responseCode
-        responseHeadersMap = c.headerFields.filterKeys { it != null }
-        if (code !in 200..299) {
-            c.disconnect()
-            throw HttpDataSource.InvalidResponseCodeException(code, c.responseMessage, null, responseHeadersMap, dataSpec, ByteArray(0))
-        }
+
         conn = c
         currentUri = Uri.parse(c.url.toString())
         input = c.inputStream
@@ -185,10 +208,12 @@ class DefaultHttpDataSource private constructor(
     }
 
     override fun close() {
-        runCatching { input?.close() }
-        runCatching { conn?.disconnect() }
-        input = null
+        val c = conn
+        val ins = input
         conn = null
+        input = null
+        runCatching { c?.disconnect() }
+        runCatching { ins?.close() }
     }
 
     class Factory : DataSource.Factory {

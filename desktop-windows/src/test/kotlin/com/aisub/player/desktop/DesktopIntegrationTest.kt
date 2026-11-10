@@ -253,35 +253,97 @@ class DesktopIntegrationTest {
     @Test
     fun test4_DesktopExoPlayerAndVlcPlayerPlayback() {
         val ffmpeg = DesktopBinaryFinder.ensureFfmpeg()!!
-        val videoFile = File(tempHome, "play_test.mp4")
+        val videoFile = File(tempHome, "play_test_1080p.mkv")
         val gen = ProcessBuilder(
             ffmpeg, "-y", "-v", "error",
-            "-f", "lavfi", "-i", "testsrc=duration=3:size=320x180:rate=25",
-            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-f", "lavfi", "-i", "testsrc=duration=4:size=1920x1080:rate=30",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-shortest",
             videoFile.absolutePath,
         ).start()
         assertEquals(0, gen.waitFor())
 
-        val player = DesktopExoPlayer(GlobalDesktopApp, null)
+        val video4kFile = File(tempHome, "play_test_4k.mkv")
+        val gen4k = ProcessBuilder(
+            ffmpeg, "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc=duration=3:size=3840x2160:rate=25",
+            "-f", "lavfi", "-i", "sine=frequency=520:sample_rate=48000:duration=3",
+            "-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest",
+            video4kFile.absolutePath,
+        ).start()
+        assertEquals(0, gen4k.waitFor())
+
+        DesktopPlayerEngine.updateDisplaySize(1280, 720)
+        val player = DesktopExoPlayer(GlobalDesktopApp, androidx.media3.datasource.DefaultDataSource.Factory(GlobalDesktopApp))
         try {
+            // 1. 验证调用线程（UI 线程）绝不阻塞
+            val callStartMs = System.currentTimeMillis()
             player.setMediaItems(listOf(MediaItem.fromUri(Uri.fromFile(videoFile))), 0, 0L)
             player.prepare()
             player.play()
+            val uiCallCostMs = System.currentTimeMillis() - callStartMs
+            println("UI thread call cost for setMediaItems+prepare+play: ${uiCallMs(uiCallCostMs)}ms")
+            assertTrue("setMediaItems+prepare+play must not block UI thread (< 200ms)", uiCallCostMs < 200L)
 
             val deadline = System.currentTimeMillis() + 8_000L
             while (System.currentTimeMillis() < deadline) {
-                if (player.playbackState == Player.STATE_READY && DesktopPlayerEngine.latestFrameBitmap != null) {
+                if (player.playbackState == Player.STATE_READY && DesktopPlayerEngine.currentDrawBitmap != null) {
                     break
                 }
-                Thread.sleep(100)
+                Thread.sleep(50)
             }
             assertEquals(Player.STATE_READY, player.playbackState)
             assertNotNull("Player should render video frame", DesktopPlayerEngine.latestFrameBitmap)
+
+            // 2. 验证静音 (volume = 0f) 时画面依然持续更新（修复静音卡画面 bug）
+            player.volume = 0f
+            val tickBeforeMuteWait = DesktopPlayerEngine.frameTick.longValue
+            val muteDeadline = System.currentTimeMillis() + 3_000L
+            while (System.currentTimeMillis() < muteDeadline && DesktopPlayerEngine.frameTick.longValue <= tickBeforeMuteWait + 3) {
+                Thread.sleep(50)
+            }
+            assertTrue(
+                "Frames must keep rendering when volume == 0f (was $tickBeforeMuteWait, now ${DesktopPlayerEngine.frameTick.longValue})",
+                DesktopPlayerEngine.frameTick.longValue > tickBeforeMuteWait,
+            )
+            player.volume = 1f
+
+            // 3. 验证倍速与拖动进度不阻塞 UI 线程
+            player.playbackParameters = androidx.media3.common.PlaybackParameters(1.5f)
+            val seekStartMs = System.currentTimeMillis()
+            player.seekTo(1000L)
+            assertTrue("seekTo must not block UI thread", (System.currentTimeMillis() - seekStartMs) < 100L)
+
+            // 4. 验证切换 4K HEVC 视频：片源尺寸为 3840x2160，渲染缓冲按窗口尺寸上限缩放
+            val tickBefore4k = DesktopPlayerEngine.frameTick.longValue
+            val switchStartMs = System.currentTimeMillis()
+            player.setMediaItems(listOf(MediaItem.fromUri(Uri.fromFile(video4kFile))), 0, 0L)
+            player.prepare()
+            player.play()
+            val switchCostMs = System.currentTimeMillis() - switchStartMs
+            println("UI thread call cost for switching to 4K video: ${switchCostMs}ms")
+            assertTrue("Switching video must not block UI thread (< 200ms)", switchCostMs < 200L)
+
+            val deadline4k = System.currentTimeMillis() + 8_000L
+            while (System.currentTimeMillis() < deadline4k) {
+                if (player.videoSize.width == 3840 && DesktopPlayerEngine.frameTick.longValue > tickBefore4k + 2) {
+                    break
+                }
+                Thread.sleep(50)
+            }
+            assertEquals(3840, player.videoSize.width)
+            assertEquals(2160, player.videoSize.height)
+            val drawBmp = DesktopPlayerEngine.currentDrawBitmap
+            assertNotNull(drawBmp)
+            assertTrue("4K buffer width should be scaled down to <= 1920 (got ${drawBmp!!.width})", drawBmp.width <= 1920)
+
             player.pause()
             assertFalse(player.playWhenReady)
+            val stopStartMs = System.currentTimeMillis()
             player.stop()
+            assertTrue("stop() must not block UI thread (< 100ms)", (System.currentTimeMillis() - stopStartMs) < 100L)
         } finally {
             player.release()
         }
@@ -304,7 +366,11 @@ class DesktopIntegrationTest {
             compatMp.release()
             libVlc.release()
         }
+
+        assertTrue("Log file should be created and non-empty", android.util.Log.logFile.exists() && android.util.Log.logFile.length() > 0L)
     }
+
+    private fun uiCallMs(ms: Long): Long = ms
 
     @Test
     fun test5_WindowsTextToSpeechSapi() {

@@ -142,16 +142,42 @@ class DesktopLiveTranscriber(private val app: Application) {
         }
 
         val listener: (FloatArray) -> Unit = { samples ->
-            if (!audioQueue.offer(samples)) {
+            while (audioQueue.size >= 25) {
                 audioQueue.poll()
-                audioQueue.offer(samples)
             }
+            audioQueue.offer(samples)
         }
         audioListener = listener
         WasapiLoopbackCapture.addListener(listener)
 
         recognizeJob = scope.launch {
             var engine: SpeechEngine? = null
+            val emptySamples = FloatArray(0)
+            val onCue: (Cue) -> Unit = { rawCue ->
+                val text = rawCue.text.trim()
+                if (text.isNotEmpty()) {
+                    val cue = Cue(
+                        id = nextId++,
+                        startMs = rawCue.startMs.coerceAtLeast(0L),
+                        endMs = maxOf(rawCue.endMs, rawCue.startMs + 1500L),
+                        text = text,
+                        translation = rawCue.translation,
+                    )
+                    _state.update { st ->
+                        val last = st.history.lastOrNull()
+                        val updatedHistory = if (last != null && last.text == cue.text) {
+                            st.history
+                        } else {
+                            (st.history + cue).takeLast(500)
+                        }
+                        st.copy(
+                            status = null,
+                            currentCue = if (last != null && last.text == cue.text) last else cue,
+                            history = updatedHistory,
+                        )
+                    }
+                }
+            }
             try {
                 if (settings.asrEngine == AsrEngine.LOCAL) {
                     val model = ModelCatalog.byId(settings.localModel)
@@ -163,31 +189,68 @@ class DesktopLiveTranscriber(private val app: Application) {
                         }
                     }
                 }
-                engine = createEngine(settings)
-                _state.update { it.copy(status = "正在监听系统声音…（播放任意视频或音频即出字幕）") }
 
-                val sessionStartMs = System.currentTimeMillis()
-                var fedSamples = 0L
                 while (isActive) {
-                    val chunk = audioQueue.poll(200, TimeUnit.MILLISECONDS) ?: continue
-                    fedSamples += chunk.size
-                    engine.accept(chunk) { rawCue ->
-                        val nowRel = System.currentTimeMillis() - sessionStartMs
-                        val cue = Cue(
-                            id = nextId++,
-                            startMs = rawCue.startMs.coerceAtLeast(0L),
-                            endMs = maxOf(rawCue.endMs, rawCue.startMs + 1500L),
-                            text = rawCue.text,
-                            translation = rawCue.translation,
-                        )
+                    try {
+                        engine = createEngine(settings)
                         _state.update { st ->
-                            val updatedHistory = (st.history + cue).takeLast(500)
-                            st.copy(
-                                status = null,
-                                currentCue = cue,
-                                history = updatedHistory,
-                            )
+                            st.copy(status = if (st.currentCue == null) "正在监听系统声音…（播放任意视频或音频即出字幕）" else null)
                         }
+
+                        var hadSpeechSinceFlush = false
+                        var silentSamples = 0L
+                        val preSpeechBuffer = ArrayDeque<FloatArray>(4)
+
+                        while (isActive) {
+                            val chunk = audioQueue.poll(120, TimeUnit.MILLISECONDS)
+                            if (chunk == null) {
+                                engine.accept(emptySamples, onCue)
+                                continue
+                            }
+                            var maxAbs = 0f
+                            for (v in chunk) {
+                                val a = kotlin.math.abs(v)
+                                if (a > maxAbs) maxAbs = a
+                            }
+                            if (maxAbs >= 0.003f) {
+                                if (!hadSpeechSinceFlush) {
+                                    while (preSpeechBuffer.isNotEmpty()) {
+                                        engine.accept(preSpeechBuffer.removeFirst(), onCue)
+                                    }
+                                }
+                                hadSpeechSinceFlush = true
+                                silentSamples = 0L
+                                engine.accept(chunk, onCue)
+                            } else {
+                                if (hadSpeechSinceFlush) {
+                                    silentSamples += chunk.size
+                                    engine.accept(chunk, onCue)
+                                    if (silentSamples >= WasapiLoopbackCapture.SAMPLE_RATE * 2L) {
+                                        hadSpeechSinceFlush = false
+                                        silentSamples = 0L
+                                        engine.finish(onCue)
+                                    }
+                                } else {
+                                    if (preSpeechBuffer.size >= 3) preSpeechBuffer.removeFirst()
+                                    preSpeechBuffer.addLast(chunk)
+                                    engine.accept(emptySamples, onCue)
+                                }
+                            }
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        runCatching { engine?.close() }
+                        engine = null
+                        val msg = e.message.orEmpty()
+                        val isFatal = msg.contains("鉴权失败") || msg.contains("未填写") || msg.contains("API Key")
+                        if (isFatal) {
+                            _state.update { it.copy(status = "识别出错：$msg", running = false) }
+                            break
+                        }
+                        android.util.Log.w("Voxtitle-LiveSub", "实时字幕识别中断，准备自动恢复: $msg")
+                        _state.update { it.copy(status = "识别连接重连中…") }
+                        delay(1200)
                     }
                 }
             } catch (e: CancellationException) {
@@ -445,6 +508,18 @@ fun FloatingSubtitleWindow(
                         maxLines = 2,
                         style = TextStyle(shadow = textShadow),
                     )
+                    val statusHint = state.status?.takeIf { it.isNotBlank() && !it.startsWith("正在监听") }
+                    if (statusHint != null) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = statusHint,
+                            color = Color(0xFFFFB74D),
+                            fontSize = 12.sp,
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            style = TextStyle(shadow = textShadow),
+                        )
+                    }
                 } else {
                     Text(
                         text = state.status ?: "正在监听 Windows 系统声音…",

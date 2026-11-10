@@ -233,7 +233,7 @@ private fun SheetTitle(text: String, modifier: Modifier = Modifier) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Thumb(image: ImageBitmap?, label: String, onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
-    Column(Modifier.clip(RoundedCornerShape(8.dp)).combinedClickable(onClick = onClick, onLongClick = onLongClick)) {
+    Column(Modifier.tvFocusRing(RoundedCornerShape(8.dp)).clip(RoundedCornerShape(8.dp)).tvSecondaryClick(allowDpadRight = false, onSecondaryClick = onLongClick).combinedClickable(onClick = onClick, onLongClick = onLongClick)) {
         Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
             if (image != null) Image(image, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f))
             else Icon(AppIcons.Movie, null, tint = MaterialTheme.colorScheme.outlineVariant)

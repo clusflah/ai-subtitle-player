@@ -139,17 +139,26 @@
   let siteData;   // undefined 还没看过；null 不是这类网站
   let siteResult = null;
 
-  // 看漫画（manhuagui）：打包压缩过的脚本里调 SMH.reader({images, sl, nextId, prevId})。
-  // 把这段脚本再跑一遍，SMH.reader 临时换成只记下参数的（返回什么都不做的对象，网页不会重新初始化）
+  // 看漫画（manhuagui）：手机版调 SMH.reader({images, sl, nextId, prevId})，电脑版调 SMH.imgData({path, files, sl, nextId, prevId})。
+  // 把这段脚本再跑一遍，临时换成只记下参数的（返回什么都不做的对象，网页不会重新初始化）
   function manhuaguiData() {
-    if (!(window.SMH && typeof SMH.reader === 'function')) return null;
+    if (!window.SMH || (typeof SMH.reader !== 'function' && typeof SMH.imgData !== 'function')) return null;
     const s = [...document.scripts].map((x) => x.textContent || '').find((t) => t.length < 300000 && /p,a,c,k,e,d/.test(t));
     if (!s) return null;
     let d = null;
-    const orig = SMH.reader;
+    const origReader = SMH.reader;
+    const origImgData = SMH.imgData;
     const noop = new Proxy(function () {}, { get: () => noop, apply: () => noop });
     SMH.reader = (x) => { d = x; return noop; };
-    try { (0, eval)(s); } catch (e) {} finally { SMH.reader = orig; }
+    SMH.imgData = (x) => { d = x; return noop; };
+    try { (0, eval)(s); } catch (e) {} finally {
+      SMH.reader = origReader;
+      SMH.imgData = origImgData;
+    }
+    if (d && !Array.isArray(d.images) && Array.isArray(d.files)) {
+      const basePath = d.path || '';
+      d.images = d.files.map((f) => basePath + f);
+    }
     return d && Array.isArray(d.images) && d.images.length ? d : null;
   }
 
@@ -161,13 +170,12 @@
     }
     const d = siteData;
     if (!d) return null;
-    // 图片服务器（有好几个）按网页上正在显示的那张定
+    // 图片服务器（有好几个）按网页上正在显示的那张定，还没加载出 img 时默认用 i.hamreus.com
     const set = new Set(d.images);
     const shown = [...document.images].find((i) => {
       try { return set.has(decodeURIComponent(new URL(i.currentSrc || i.src).pathname)); } catch (e) { return false; }
     });
-    if (!shown) return null;
-    const origin = new URL(shown.currentSrc || shown.src).origin;
+    const origin = shown ? new URL(shown.currentSrc || shown.src).origin : 'https://i.hamreus.com';
     const q = d.sl ? '?e=' + d.sl.e + '&m=' + d.sl.m : '';
     const dir = location.pathname.replace(/[^/]*$/, '');
     const chapter = (id) => (id ? new URL(dir + id + '.html', location.href).href : '');

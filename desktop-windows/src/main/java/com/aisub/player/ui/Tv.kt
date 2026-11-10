@@ -4,6 +4,7 @@ import android.app.UiModeManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.ripple.RippleAlpha
@@ -25,6 +26,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.isSpecified
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -71,26 +78,66 @@ internal fun TvRipple(content: @Composable () -> Unit) {
     CompositionLocalProvider(
         LocalRippleConfiguration provides RippleConfiguration(
             color = MaterialTheme.colorScheme.primary,
-            rippleAlpha = RippleAlpha(draggedAlpha = 0.16f, focusedAlpha = 0.30f, hoveredAlpha = 0.08f, pressedAlpha = 0.24f),
+            rippleAlpha = RippleAlpha(draggedAlpha = 0.16f, focusedAlpha = 0.42f, hoveredAlpha = 0.08f, pressedAlpha = 0.28f),
         ),
         content = content,
     )
 }
 
 /**
- * 电视上获得焦点时画一圈橙色描边（可选放大一点），放在 clickable / Surface 的 modifier 前面。
+ * 电视上获得焦点时画一圈橙色描边（可选放大一点、可选填充明显底色），放在 clickable / Surface 的 modifier 前面。
  * 手机上什么都不做。
  */
 fun Modifier.tvFocusRing(
     shape: Shape = RoundedCornerShape(12.dp),
     color: Color = Color.Unspecified,
     scale: Boolean = false,
+    fillBackground: Boolean = false,
 ): Modifier = composed {
     if (!LocalTv.current) return@composed Modifier
     var focused by remember { mutableStateOf(false) }
     val c = if (color.isSpecified) color else MaterialTheme.colorScheme.primary
+    val fillC = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f)
     Modifier
         .onFocusChanged { focused = it.isFocused }
         .then(if (scale && focused) Modifier.graphicsLayer { scaleX = 1.05f; scaleY = 1.05f } else Modifier)
+        .then(if (fillBackground && focused) Modifier.background(fillC, shape) else Modifier)
         .then(if (focused) Modifier.border(3.dp, c, shape) else Modifier)
+}
+
+/**
+ * 为支持长按选中或折叠/次级菜单的组件增加：
+ * 1) 鼠标右键单击（PC / 电视外接鼠标）
+ * 2) 遥控器菜单键（KEYCODE_MENU）
+ * 3) 在单列纵向列表行或可折叠分组标题（[allowDpadRight] = true）上获得焦点时按遥控器右键（KEYCODE_DPAD_RIGHT）
+ */
+fun Modifier.tvSecondaryClick(
+    allowDpadRight: Boolean = false,
+    onSecondaryClick: (() -> Unit)?,
+): Modifier = composed {
+    if (onSecondaryClick == null) return@composed Modifier
+    Modifier
+        .pointerInput(onSecondaryClick) {
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
+                        event.changes.forEach { it.consume() }
+                        onSecondaryClick()
+                    }
+                }
+            }
+        }
+        .onPreviewKeyEvent { e ->
+            if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+            val code = android.view.KeyEvent.fromNative(e.nativeKeyEvent).keyCode
+            if (code == android.view.KeyEvent.KEYCODE_MENU ||
+                (allowDpadRight && code == android.view.KeyEvent.KEYCODE_DPAD_RIGHT)
+            ) {
+                onSecondaryClick()
+                true
+            } else {
+                false
+            }
+        }
 }

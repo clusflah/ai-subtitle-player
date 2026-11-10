@@ -467,35 +467,35 @@ fun MangaReader(
                     .statusBarsPadding().padding(horizontal = 4.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onExit, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "退出阅读", tint = Color.White) }
+                IconButton(onClick = onExit, modifier = Modifier.tvFocusRing(RoundedCornerShape(50), scale = true, fillBackground = true)) { Icon(AppIcons.ArrowBack, "退出阅读", tint = Color.White) }
                 Column(Modifier.weight(1f)) {
                     Text(book.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
                     val percent = if (pages.size > 1) page * 100 / (pages.size - 1) else 100
                     Text("第 ${page + 1} / ${pages.size} 页 · $percent% · ${mode.label}${if (rtl) " · 从右往左" else ""}", color = Color(0xCCFFFFFF), style = MaterialTheme.typography.bodySmall)
                 }
                 // 手机竖屏时底部按钮可能放不下；始终在顶部保留目录与显示方式入口。
-                IconButton(onClick = { panel = ReaderPanel.THUMBS }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) {
+                IconButton(onClick = { panel = ReaderPanel.THUMBS }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50), scale = true, fillBackground = true)) {
                     Icon(AppIcons.ListIcon, "目录", tint = Color.White)
                 }
-                IconButton(onClick = { panel = ReaderPanel.SETTINGS }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) {
+                IconButton(onClick = { panel = ReaderPanel.SETTINGS }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50), scale = true, fillBackground = true)) {
                     Icon(AppIcons.Settings, "阅读设置", tint = Color.White)
                 }
             }
         }
 
         AnimatedVisibility(controls, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
-            val barShape = RoundedCornerShape(28.dp)
+            val barShape = RoundedCornerShape(32.dp)
             Column(
                 Modifier.fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
                     .shadow(
-                        elevation = 16.dp,
+                        elevation = 18.dp,
                         shape = barShape,
                         ambientColor = Color(0x28000000),
                         spotColor = Color(0x36000000),
                     )
-                    .liquidGlass(shape = barShape, style = GlassStyle.Floating, tint = Color(0x88161D2A))
+                    .liquidGlass(shape = barShape, style = GlassStyle.Floating, tint = Color(0xBF181F2C), borderColor = Color(0x52FFFFFF))
                     .padding(horizontal = 10.dp, vertical = 8.dp),
             ) {
                 if (!tv && pages.size > 1) {
@@ -695,7 +695,7 @@ private fun ReaderButton(label: String, modifier: Modifier = Modifier, onClick: 
     TextButton(
         onClick = onClick,
         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp),
-        modifier = modifier.defaultMinSize(minWidth = 1.dp, minHeight = 36.dp).tvFocusRing(RoundedCornerShape(50)),
+        modifier = modifier.defaultMinSize(minWidth = 1.dp, minHeight = 36.dp).tvFocusRing(RoundedCornerShape(50), fillBackground = true),
     ) {
         Text(label, color = Color.White, maxLines = 1, softWrap = false)
     }

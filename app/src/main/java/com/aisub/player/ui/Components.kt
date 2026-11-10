@@ -113,6 +113,11 @@ fun CollapsibleSection(
     val arrow by animateFloatAsState(if (expanded) 180f else 0f, label = "arrow")
     Row(
         Modifier.fillMaxWidth()
+            .tvFocusRing(RoundedCornerShape(10.dp))
+            .tvSecondaryClick(allowDpadRight = true) {
+                expanded = !expanded
+                prefs.edit().apply { if (expanded) remove(prefKey) else putBoolean(prefKey, true) }.apply()
+            }
             .clickable {
                 expanded = !expanded
                 prefs.edit().apply { if (expanded) remove(prefKey) else putBoolean(prefKey, true) }.apply()
@@ -192,7 +197,7 @@ fun CollapsibleCard(
     ) {
         Column {
             Row(
-                Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 16.dp, vertical = 14.dp),
+                Modifier.fillMaxWidth().tvFocusRing(MaterialTheme.shapes.large).tvSecondaryClick(allowDpadRight = true) { expanded = !expanded }.clickable { expanded = !expanded }.padding(horizontal = 16.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconBadge(sectionIcon, size = 36.dp)
@@ -414,6 +419,7 @@ fun VideoCard(
 ) {
     Column(
         Modifier.tvFocusRing(MaterialTheme.shapes.medium, scale = true).clip(MaterialTheme.shapes.medium)
+            .tvSecondaryClick(allowDpadRight = false, onSecondaryClick = onLongClick)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .background(if (selected == true) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
             .padding(6.dp),
@@ -460,6 +466,7 @@ fun MediaRow(
 ) {
     Row(
         Modifier.fillMaxWidth().tvFocusRing(MaterialTheme.shapes.small)
+            .tvSecondaryClick(allowDpadRight = true, onSecondaryClick = onLongClick)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .background(if (selected == true) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
             .padding(start = 16.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),

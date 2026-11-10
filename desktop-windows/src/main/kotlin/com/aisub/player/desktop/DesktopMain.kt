@@ -87,6 +87,13 @@ object DesktopAppRestarter {
     }
 }
 
+object DesktopGlobalSubtitles {
+    var active by mutableStateOf(false)
+    var clickThrough by mutableStateOf(false)
+    var onToggle: () -> Unit = {}
+    var onDisableClickThrough: () -> Unit = {}
+}
+
 private fun createAppIconImage(): BufferedImage {
     val size = 64
     val img = BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
@@ -129,6 +136,8 @@ fun main(args: Array<String>) {
     val voxApp = VoxtitleApp()
     DesktopContextHolder.appContext = voxApp
     voxApp.onCreate()
+    // 后台线程提前预热 VLC NativeDiscovery 与共享 MediaPlayerFactory，消除首次点播卡顿
+    DesktopPlayerEngine.prewarm()
 
     val mainActivity = MainActivity()
     // Windows 桌面版默认已拥有本地媒体库访问权限
@@ -149,6 +158,19 @@ fun main(args: Array<String>) {
         var showMainWindow by remember { mutableStateOf(true) }
         var showFloatingSubtitles by remember { mutableStateOf(false) }
         val floatingState by liveTranscriber.state.collectAsState()
+        DesktopGlobalSubtitles.active = showFloatingSubtitles
+        DesktopGlobalSubtitles.clickThrough = showFloatingSubtitles && floatingState.clickThrough
+        DesktopGlobalSubtitles.onToggle = {
+            if (showFloatingSubtitles) {
+                liveTranscriber.stop()
+                showFloatingSubtitles = false
+            } else {
+                showFloatingSubtitles = true
+            }
+        }
+        DesktopGlobalSubtitles.onDisableClickThrough = {
+            liveTranscriber.setClickThrough(false)
+        }
         val windowState = rememberWindowState(
             size = DpSize(1280.dp, 820.dp),
             position = WindowPosition(Alignment.Center),
@@ -299,78 +321,6 @@ fun main(args: Array<String>) {
                     ) {
                         Box(Modifier.fillMaxSize()) {
                             activeActivity.desktopContent?.invoke()
-
-                        // 右上角快捷胶囊：一键开启/关闭「Windows 桌面全局字幕」或解除鼠标穿透
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(top = 12.dp, end = 16.dp),
-                        ) {
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                if (showFloatingSubtitles && floatingState.clickThrough) {
-                                    Surface(
-                                        shape = RoundedCornerShape(18.dp),
-                                        color = Color(0xFFD84315).copy(alpha = 0.9f),
-                                        modifier = Modifier.clickable {
-                                            liveTranscriber.setClickThrough(false)
-                                        },
-                                    ) {
-                                        Text(
-                                            text = "解除字幕鼠标穿透",
-                                            color = Color.White,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                        )
-                                    }
-                                }
-
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(18.dp))
-                                        .background(
-                                            if (showFloatingSubtitles) {
-                                                Brush.horizontalGradient(listOf(Color(0xFFE65100), Color(0xFFFF8F00)))
-                                            } else {
-                                                Brush.horizontalGradient(listOf(Color(0xAA1E2230), Color(0xCC151822)))
-                                            },
-                                        )
-                                        .border(
-                                            width = 1.dp,
-                                            color = Color.White.copy(alpha = 0.22f),
-                                            shape = RoundedCornerShape(18.dp),
-                                        )
-                                        .clickable {
-                                            if (showFloatingSubtitles) {
-                                                liveTranscriber.stop()
-                                                showFloatingSubtitles = false
-                                            } else {
-                                                showFloatingSubtitles = true
-                                            }
-                                        }
-                                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(
-                                            imageVector = AppIcons.AutoAwesome,
-                                            contentDescription = "桌面全局字幕",
-                                            tint = Color.White,
-                                            modifier = Modifier.size(15.dp),
-                                        )
-                                        Spacer(Modifier.width(5.dp))
-                                        Text(
-                                            text = if (showFloatingSubtitles) "桌面字幕: 运行中" else "桌面全局字幕",
-                                            color = Color.White,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Medium,
-                                        )
-                                    }
-                                }
-                            }
-                        }
 
                         // Toast 提示浮层
                         AnimatedVisibility(

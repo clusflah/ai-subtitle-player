@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
@@ -238,6 +239,59 @@ fun HomeScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        val globalSubActive = com.aisub.player.desktop.DesktopGlobalSubtitles.active
+                        val globalSubClickThrough = com.aisub.player.desktop.DesktopGlobalSubtitles.clickThrough
+                        if (globalSubClickThrough) {
+                            Surface(
+                                shape = RoundedCornerShape(18.dp),
+                                color = Color(0xFFD84315).copy(alpha = 0.9f),
+                                modifier = Modifier.clickable {
+                                    com.aisub.player.desktop.DesktopGlobalSubtitles.onDisableClickThrough()
+                                },
+                            ) {
+                                Text(
+                                    text = "解除字幕鼠标穿透",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                )
+                            }
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(
+                                    if (globalSubActive) {
+                                        androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(Color(0xFFE65100), Color(0xFFFF8F00)))
+                                    } else {
+                                        androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(Color(0xAA1E2230), Color(0xCC151822)))
+                                    },
+                                )
+                                .border(
+                                    width = 1.dp,
+                                    color = Color.White.copy(alpha = 0.22f),
+                                    shape = RoundedCornerShape(18.dp),
+                                )
+                                .clickable { com.aisub.player.desktop.DesktopGlobalSubtitles.onToggle() }
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = AppIcons.AutoAwesome,
+                                    contentDescription = "桌面全局字幕",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                                Spacer(Modifier.width(5.dp))
+                                Text(
+                                    text = if (globalSubActive) "桌面字幕: 运行中" else "桌面全局字幕",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                            }
+                        }
                         val mediaTab = tab == Tab.LOCAL
                         // 浏览页与首页右上角：点击「+」直接弹出液态玻璃来源菜单（仿演示视频与截图）
                         if (tab == Tab.BROWSE || tab == Tab.HOME) {
@@ -1161,7 +1215,7 @@ private fun HomeTab(
 /** 首页「最近浏览」每一条右边的删除按钮 */
 @Composable
 private fun RemoveRecentButton(onRemove: () -> Unit) {
-    IconButton(onClick = onRemove) {
+    IconButton(onClick = onRemove, modifier = Modifier.tvFocusRing(CircleShape, fillBackground = true)) {
         Icon(AppIcons.Close, "删除这条记录", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
     }
 }
@@ -1171,11 +1225,12 @@ private fun RemoveRecentButton(onRemove: () -> Unit) {
 private fun TileRemoveButton(onRemove: () -> Unit, modifier: Modifier = Modifier) {
     Box(
         modifier
-            .clip(CircleShape)
-            .clickable(onClick = onRemove)
             .padding(5.dp)
             .size(22.dp)
-            .background(Color(0x88000000), CircleShape),
+            .background(Color(0x88000000), CircleShape)
+            .tvFocusRing(CircleShape, fillBackground = true, scale = true)
+            .clip(CircleShape)
+            .clickable(onClick = onRemove),
         contentAlignment = Alignment.Center,
     ) {
         Icon(AppIcons.Close, "删除这条记录", tint = Color.White, modifier = Modifier.size(14.dp))

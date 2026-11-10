@@ -53,9 +53,44 @@ object MangaStore {
     val recent: StateFlow<List<MangaRecent>> = _recent
 
     fun init(context: Context) {
-        if (prefs != null) return
         prefs = context.applicationContext.getSharedPreferences("manga", Context.MODE_PRIVATE)
-        _recent.value = loadRecent()
+        var loaded = loadRecent()
+        if (loaded.isEmpty()) {
+            val webHistory = com.aisub.player.web.WebViewModel.savedPages(context, "history")
+            val mangaPages = webHistory.filter { p ->
+                val u = p.url.lowercase()
+                val t = p.title.lowercase()
+                u.contains("manhua") || u.contains("manga") || u.contains("/comic/") || u.contains("dm5.com") || t.contains("漫画")
+            }
+            if (mangaPages.isNotEmpty()) {
+                val seeded = ArrayList<MangaRecent>()
+                val now = System.currentTimeMillis()
+                for ((idx, p) in mangaPages.withIndex()) {
+                    val cleanTitle = p.title.split(" - ", " | ", "_").firstOrNull()?.trim().orEmpty().ifEmpty { p.title }
+                    val cleanUrl = p.url.substringBefore('#')
+                    val pageHint = Regex("""#p=(\d+)""").find(p.url)?.groupValues?.get(1)?.toIntOrNull()?.let { (it - 1).coerceAtLeast(0) } ?: 0
+                    val candidate = MangaRecent(
+                        key = cleanUrl,
+                        title = cleanTitle,
+                        location = cleanUrl,
+                        page = pageHint,
+                        total = 20,
+                        time = now - idx * 60_000L,
+                        web = true,
+                    )
+                    if (seeded.none { it.key == candidate.key || sameSeries(it, candidate) }) {
+                        seeded.add(candidate)
+                    }
+                }
+                if (seeded.isNotEmpty()) {
+                    loaded = seeded
+                    _recent.value = loaded
+                    saveRecent()
+                    return
+                }
+            }
+        }
+        _recent.value = loaded
     }
 
     fun settings(site: String): MangaSettings {

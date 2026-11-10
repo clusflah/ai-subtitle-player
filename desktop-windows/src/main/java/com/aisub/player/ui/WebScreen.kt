@@ -741,6 +741,8 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 }
             }
             vm.captions.userAgent = getSettings().userAgentString
+            onOpenReaderCallback = ::openReader
+            onGoHomeCallback = ::goHome
             if (tv) {
                 isFocusable = true
                 post { requestFocus() }
@@ -769,6 +771,9 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回") }
+                if (tab.url != null) {
+                    IconButton(onClick = ::goHome) { Icon(AppIcons.Home, "回到网页主页") }
+                }
                 // 没在输入时只显示网站名，给右边的按钮留地方；点一下展开完整网址（全选，直接输入就替换）
                 val showingHost = !(editing || tab.url == null)
                 val shown = if (!showingHost) field else TextFieldValue(tab.pageUrl?.let { Uri.parse(it).host?.removePrefix("www.") } ?: address)
@@ -1221,19 +1226,30 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     }
 
     // 漫画首页点了「继续阅读」：在新标签页（当前是空白页就在当前页）打开，识别出漫画后直接进阅读模式
+    var autoOpenedPageUrl by remember(tab.id) { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
         val url = com.aisub.player.web.WebLaunch.pending ?: return@LaunchedEffect
         com.aisub.player.web.WebLaunch.pending = null
-        if (tab.url == null) go(url) else newTab(url)
+        if (tab.url == null) go(url)
+        else if (tab.url == url || tab.pageUrl == url) {
+            autoOpenedPageUrl = null
+            if (tab.manga.manga != null) openReader()
+        } else newTab(url)
         reopenAfter = ""
     }
 
-    // 上一话 / 下一话打开后：新网页识别出漫画（图片数稳定一会儿）就接着用阅读模式看；太久没识别出来就算了
+    // Windows 桌面版：网页识别出漫画后自动进入漫画阅读模式（退出阅读模式后留在当前页概览，换下一话时再次自动进入）
     val foundManga = tab.manga.manga
     LaunchedEffect(reopenAfter, foundManga?.pageUrl, foundManga?.pages?.size) {
+        if (foundManga != null && foundManga.pageUrl != autoOpenedPageUrl) {
+            autoOpenedPageUrl = foundManga.pageUrl
+            reopenAfter = null
+            openReader()
+            return@LaunchedEffect
+        }
         val from = reopenAfter ?: return@LaunchedEffect
         if (foundManga != null && foundManga.pageUrl != from) {
-            delay(1_200)
+            delay(300)
             reopenAfter = null
             openReader()
         }

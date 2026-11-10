@@ -215,6 +215,7 @@ private fun Bubble(
         Column(
             Modifier.then(if (media) Modifier.width(260.dp) else Modifier.widthIn(min = 64.dp, max = 300.dp))
                 .liquidGlass(shape = shape, style = GlassStyle.Card, tint = background.copy(alpha = 0.72f), enableBackdrop = false)
+                .tvFocusRing(shape).tvSecondaryClick(allowDpadRight = true, onSecondaryClick = onLongClick)
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick),
         ) {
             val header = Modifier.padding(horizontal = 10.dp).padding(top = 6.dp)

@@ -50,14 +50,21 @@ object WasapiLoopbackCapture {
         running = true
         captureThread = Thread({
             try {
-                val exe = ensureWasapiExe()
-                if (exe != null && exe.isFile) {
-                    runWasapiProcess(exe)
-                } else {
-                    runJavaSoundFallback()
+                while (running && listeners.isNotEmpty()) {
+                    try {
+                        val exe = ensureWasapiExe()
+                        if (exe != null && exe.isFile) {
+                            runWasapiProcess(exe)
+                        } else {
+                            runJavaSoundFallback()
+                        }
+                    } catch (e: Throwable) {
+                        android.util.Log.w("Voxtitle-WASAPI", "系统声音捕获异常: ${e.message}", e)
+                    }
+                    if (running && listeners.isNotEmpty()) {
+                        runCatching { Thread.sleep(800) }
+                    }
                 }
-            } catch (e: Throwable) {
-                android.util.Log.w("Voxtitle-WASAPI", "系统声音捕获异常: ${e.message}", e)
             } finally {
                 running = false
             }
@@ -137,7 +144,7 @@ object WasapiLoopbackCapture {
 
     @Synchronized
     private fun ensureWasapiExe(): File? {
-        val exeFile = File(DesktopBinaryFinder.binDir, "wasapi-loopback.exe")
+        val exeFile = File(DesktopBinaryFinder.binDir, "wasapi-loopback-v2.exe")
         if (exeFile.isFile && exeFile.length() > 1024) return exeFile
 
         val cscCandidates = listOf(
@@ -145,7 +152,7 @@ object WasapiLoopbackCapture {
             File("C:/Windows/Microsoft.NET/Framework/v4.0.30319/csc.exe"),
         )
         val csc = cscCandidates.firstOrNull { it.isFile } ?: return null
-        val csFile = File(DesktopBinaryFinder.binDir, "wasapi-loopback.cs")
+        val csFile = File(DesktopBinaryFinder.binDir, "wasapi-loopback-v2.cs")
         return runCatching {
             csFile.writeText(WASAPI_CS_SOURCE, Charsets.UTF_8)
             val proc = ProcessBuilder(
@@ -262,6 +269,8 @@ class WasapiLoopback
             int bytesPerSample = bitsPerSample / 8;
             int frameBytes = channels * bytesPerSample;
             byte[] outBuf = new byte[6400];
+            byte[] silenceBuf = new byte[1600]; // 50ms 16kHz 16-bit mono silence
+            int silentLoops = 0;
 
             while (true)
             {
@@ -270,8 +279,16 @@ class WasapiLoopback
                 if (packetLength == 0)
                 {
                     Thread.Sleep(15);
+                    silentLoops++;
+                    if (silentLoops >= 3)
+                    {
+                        silentLoops = 0;
+                        stdout.Write(silenceBuf, 0, silenceBuf.Length);
+                        stdout.Flush();
+                    }
                     continue;
                 }
+                silentLoops = 0;
 
                 while (packetLength > 0)
                 {

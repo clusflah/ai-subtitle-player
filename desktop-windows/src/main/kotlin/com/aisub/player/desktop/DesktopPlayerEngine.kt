@@ -6,7 +6,10 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asComposeImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.media3.common.C
 import androidx.media3.common.Format
@@ -34,9 +37,14 @@ import com.aisub.player.telegram.Telegram
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.jetbrains.skia.Bitmap as SkiaBitmap
+import org.jetbrains.skia.ColorAlphaType
+import org.jetbrains.skia.ColorType
+import org.jetbrains.skia.ImageInfo
 import org.json.JSONObject
 import uk.co.caprica.vlcj.factory.MediaPlayerFactory
 import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
+import uk.co.caprica.vlcj.media.TrackType
 import uk.co.caprica.vlcj.player.base.MediaPlayer
 import uk.co.caprica.vlcj.player.base.MediaPlayerEventAdapter
 import uk.co.caprica.vlcj.player.embedded.EmbeddedMediaPlayer
@@ -50,23 +58,125 @@ import uk.co.caprica.vlcj.player.embedded.videosurface.callback.format.RV32Buffe
 import java.awt.image.BufferedImage
 import java.awt.image.DataBufferInt
 import java.io.File
+import java.io.InputStream
 import java.nio.ByteBuffer
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import javax.sound.sampled.AudioFormat
 import javax.sound.sampled.AudioSystem
 import javax.sound.sampled.Clip
 import javax.sound.sampled.LineEvent
 import javax.sound.sampled.SourceDataLine
+import javax.swing.SwingUtilities
 import kotlin.math.roundToInt
+
+private const val TAG = "DesktopPlayer"
+
+/**
+ * 零分配三缓冲视频帧槽位：
+ * - writeSlot: 解码回调线程独占写入，直接 installPixels 到 Skia
+ * - readySlot: 最新写完待显示的帧
+ * - readSlot:  Compose UI 线程独占读取绘制，无撕裂、无每帧堆分配
+ */
+internal class FrameSlot(val width: Int, val height: Int) {
+    val bytes = ByteArray(width * height * 4)
+    val imageInfo = ImageInfo(width, height, ColorType.BGRA_8888, ColorAlphaType.OPAQUE)
+    val skiaBitmap = SkiaBitmap().apply { allocPixels(imageInfo) }
+    val composeBitmap: ImageBitmap = skiaBitmap.asComposeImageBitmap()
+
+    fun uploadToSkia() {
+        skiaBitmap.installPixels(imageInfo, bytes, width * 4)
+        skiaBitmap.notifyPixelsChanged()
+    }
+}
 
 object DesktopPlayerEngine {
     private val _currentFrameFlow = MutableStateFlow<ImageBitmap?>(null)
     val currentFrameFlow: StateFlow<ImageBitmap?> = _currentFrameFlow.asStateFlow()
 
+    /** 仅供 Canvas 绘制阶段订阅的帧序号，避免触发外层 Composable 重组与布局 */
+    val frameTick = mutableLongStateOf(0L)
+
     @Volatile
-    var latestFrameBitmap: Bitmap? = null
+    var currentDrawBitmap: ImageBitmap? = null
+        private set
+
+    private val swapLock = Any()
+    private var slotWidth = 0
+    private var slotHeight = 0
+    private var writeSlot: FrameSlot? = null
+    private var readySlot: FrameSlot? = null
+    private var readSlot: FrameSlot? = null
+    private var hasReadyFrame = false
+
+    @Volatile
+    private var hasAnyFrame = false
+
+    private val frameCounter = AtomicLong(0L)
+    private val frameNotifyPending = AtomicBoolean(false)
+
+    // 渲染帧率与合并统计
+    private val decodedFramesWindow = AtomicInteger(0)
+    private val drawnFramesWindow = AtomicInteger(0)
+    private val coalescedFramesWindow = AtomicInteger(0)
+    @Volatile
+    private var statsWindowStartMs = System.currentTimeMillis()
+
+    // 截图 / 书签（PixelCopy）按需懒加载缓存，正常播放期间零分配
+    @Volatile
+    private var manualFrameBitmap: Bitmap? = null
+    @Volatile
+    private var cachedSnapshotTick: Long = -1L
+    @Volatile
+    private var cachedSnapshotBitmap: Bitmap? = null
+
+    val latestFrameBitmap: Bitmap?
+        get() {
+            manualFrameBitmap?.let { return it }
+            if (!hasAnyFrame) return null
+            val tick = frameCounter.get()
+            if (cachedSnapshotTick == tick && cachedSnapshotBitmap != null) {
+                return cachedSnapshotBitmap
+            }
+            val (w, h, rawBytes) = synchronized(swapLock) {
+                val slot = readSlot ?: readySlot ?: return null
+                Triple(slot.width, slot.height, slot.bytes.clone())
+            }
+            val img = BufferedImage(w, h, BufferedImage.TYPE_INT_RGB)
+            val pixels = (img.raster.dataBuffer as DataBufferInt).data
+            var bi = 0
+            for (pi in pixels.indices) {
+                val b = rawBytes[bi].toInt() and 0xFF
+                val g = rawBytes[bi + 1].toInt() and 0xFF
+                val r = rawBytes[bi + 2].toInt() and 0xFF
+                pixels[pi] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                bi += 4
+            }
+            val bmp = Bitmap(img)
+            cachedSnapshotBitmap = bmp
+            cachedSnapshotTick = tick
+            return bmp
+        }
+
+    @Volatile
+    var displayWidthPx: Int = 1920
+        private set
+
+    @Volatile
+    var displayHeightPx: Int = 1080
+        private set
+
+    fun updateDisplaySize(widthPx: Int, heightPx: Int) {
+        if (widthPx > 64 && heightPx > 64) {
+            displayWidthPx = widthPx
+            displayHeightPx = heightPx
+        }
+    }
 
     @Volatile
     var masterVolume: Float = 1.0f
@@ -76,8 +186,8 @@ object DesktopPlayerEngine {
     var activePlayer: DesktopExoPlayer? = null
 
     val vlcAvailable: Boolean by lazy {
-        runCatching {
-            // 常见 Windows VLC 64 位安装路径加入到 JNA 搜索路径
+        val t0 = System.currentTimeMillis()
+        val ok = runCatching {
             val vlcDirs = listOf(
                 File("C:/Program Files/VideoLAN/VLC"),
                 File("C:/Program Files (x86)/VideoLAN/VLC"),
@@ -85,24 +195,198 @@ object DesktopPlayerEngine {
             )
             vlcDirs.firstOrNull { File(it, "libvlc.dll").exists() }?.let { dir ->
                 val cur = System.getProperty("jna.library.path").orEmpty()
-                System.setProperty(
-                    "jna.library.path",
-                    if (cur.isEmpty()) dir.absolutePath else "$cur${File.pathSeparator}${dir.absolutePath}",
-                )
+                if (!cur.contains(dir.absolutePath, ignoreCase = true)) {
+                    System.setProperty(
+                        "jna.library.path",
+                        if (cur.isEmpty()) dir.absolutePath else "$cur${File.pathSeparator}${dir.absolutePath}",
+                    )
+                }
             }
             NativeDiscovery().discover()
         }.getOrDefault(false)
+        Log.i(TAG, "VLC NativeDiscovery: available=$ok, 耗时=${System.currentTimeMillis() - t0}ms")
+        ok
+    }
+
+    private val factoryLock = Any()
+
+    @Volatile
+    private var sharedVlcFactory: MediaPlayerFactory? = null
+
+    /** 全局共享单个 libvlc MediaPlayerFactory，避免多实例重复加载插件与卡顿 */
+    fun getSharedVlcFactory(): MediaPlayerFactory? {
+        sharedVlcFactory?.let { return it }
+        if (!vlcAvailable) return null
+        synchronized(factoryLock) {
+            sharedVlcFactory?.let { return it }
+            val t0 = System.currentTimeMillis()
+            return runCatching {
+                MediaPlayerFactory(
+                    "--avcodec-hw=any",
+                    "--http-reconnect",
+                    "--network-caching=1500",
+                    "--file-caching=1000",
+                    "--audio-time-stretch",
+                    "--no-video-title-show",
+                    "--no-osd",
+                    "--no-snapshot-preview",
+                    "--quiet",
+                ).also {
+                    sharedVlcFactory = it
+                    Log.i(TAG, "共享 MediaPlayerFactory 初始化完成, 耗时=${System.currentTimeMillis() - t0}ms")
+                }
+            }.onFailure { e ->
+                Log.e(TAG, "初始化 MediaPlayerFactory 失败", e)
+            }.getOrNull()
+        }
+    }
+
+    /** 应用启动后在后台线程预热 VLC，避免首次点击播放时阻塞等待 */
+    fun prewarm() {
+        DesktopExoPlayer.ioPool.submit {
+            runCatching { getSharedVlcFactory() }
+        }
+    }
+
+    private fun acquireWriteSlot(width: Int, height: Int): FrameSlot {
+        synchronized(swapLock) {
+            if (slotWidth != width || slotHeight != height || writeSlot == null) {
+                slotWidth = width
+                slotHeight = height
+                writeSlot = FrameSlot(width, height)
+                readySlot = FrameSlot(width, height)
+                readSlot = FrameSlot(width, height)
+                hasReadyFrame = false
+            }
+            return writeSlot!!
+        }
+    }
+
+    internal fun submitFrameBgraBuffer(width: Int, height: Int, buf: ByteBuffer) {
+        val slot = acquireWriteSlot(width, height)
+        buf.rewind()
+        val count = minOf(slot.bytes.size, buf.remaining())
+        buf.get(slot.bytes, 0, count)
+        slot.uploadToSkia()
+        publishWrittenSlot(slot)
+    }
+
+    internal fun readFrameBgraStream(
+        width: Int,
+        height: Int,
+        ins: InputStream,
+        shouldContinue: () -> Boolean,
+        renderFrame: Boolean = true,
+    ): Boolean {
+        val slot = acquireWriteSlot(width, height)
+        val target = slot.bytes
+        var off = 0
+        while (off < target.size && shouldContinue()) {
+            val n = ins.read(target, off, target.size - off)
+            if (n < 0) return false
+            off += n
+        }
+        if (off < target.size) return false
+        if (renderFrame) {
+            slot.uploadToSkia()
+            publishWrittenSlot(slot)
+        }
+        return true
+    }
+
+    private fun publishWrittenSlot(slot: FrameSlot) {
+        synchronized(swapLock) {
+            if (slot.width != slotWidth || slot.height != slotHeight) return
+            if (hasReadyFrame) {
+                coalescedFramesWindow.incrementAndGet()
+            }
+            writeSlot = readySlot
+            readySlot = slot
+            hasReadyFrame = true
+            hasAnyFrame = true
+            manualFrameBitmap = null
+        }
+        decodedFramesWindow.incrementAndGet()
+        scheduleUiFrameSwap()
+        logStatsIfNeeded()
+    }
+
+    private fun scheduleUiFrameSwap() {
+        if (frameNotifyPending.compareAndSet(false, true)) {
+            SwingUtilities.invokeLater {
+                frameNotifyPending.set(false)
+                var bmpToPublish: ImageBitmap? = null
+                synchronized(swapLock) {
+                    if (hasReadyFrame && readySlot != null && readSlot != null) {
+                        val prevRead = readSlot
+                        readSlot = readySlot
+                        readySlot = prevRead
+                        hasReadyFrame = false
+                        bmpToPublish = readSlot?.composeBitmap
+                    }
+                }
+                if (bmpToPublish != null) {
+                    currentDrawBitmap = bmpToPublish
+                    _currentFrameFlow.value = bmpToPublish
+                    val tick = frameCounter.incrementAndGet()
+                    frameTick.longValue = tick
+                    drawnFramesWindow.incrementAndGet()
+                }
+            }
+        }
+    }
+
+    private fun logStatsIfNeeded() {
+        val now = System.currentTimeMillis()
+        val elapsed = now - statsWindowStartMs
+        if (elapsed >= 10_000L) {
+            statsWindowStartMs = now
+            val dec = decodedFramesWindow.getAndSet(0)
+            val drw = drawnFramesWindow.getAndSet(0)
+            val coal = coalescedFramesWindow.getAndSet(0)
+            if (dec > 0) {
+                val decFps = (dec * 1000.0 / elapsed)
+                val drwFps = (drw * 1000.0 / elapsed)
+                Log.d(
+                    TAG,
+                    "视频帧率统计: 解码=%.1ffps, 绘制=%.1ffps, 合并帧=%d, 缓冲尺寸=%dx%d".format(
+                        java.util.Locale.US,
+                        decFps,
+                        drwFps,
+                        coal,
+                        slotWidth,
+                        slotHeight,
+                    ),
+                )
+            }
+        }
     }
 
     internal fun updateFrame(bufferedImage: BufferedImage) {
         val bmp = Bitmap(bufferedImage)
-        latestFrameBitmap = bmp
-        _currentFrameFlow.value = bufferedImage.toComposeImageBitmap()
+        manualFrameBitmap = bmp
+        hasAnyFrame = true
+        val composeBmp = bufferedImage.toComposeImageBitmap()
+        SwingUtilities.invokeLater {
+            currentDrawBitmap = composeBmp
+            _currentFrameFlow.value = composeBmp
+            frameTick.longValue = frameCounter.incrementAndGet()
+        }
     }
 
     internal fun clearFrame() {
-        latestFrameBitmap = null
-        _currentFrameFlow.value = null
+        synchronized(swapLock) {
+            hasReadyFrame = false
+            hasAnyFrame = false
+            manualFrameBitmap = null
+            cachedSnapshotBitmap = null
+            cachedSnapshotTick = -1L
+        }
+        SwingUtilities.invokeLater {
+            currentDrawBitmap = null
+            _currentFrameFlow.value = null
+            frameTick.longValue = frameCounter.incrementAndGet()
+        }
     }
 
     fun setMasterVolume(vol: Float) {
@@ -124,12 +408,28 @@ class DesktopExoPlayer(
     private val playlist = ArrayList<MediaItem>()
     private var proxy: MediaProxy? = null
 
+    /** 串行控制队列：所有 VLC / FFmpeg 启动、停止、切轨、跳转都在此后台线程执行，绝不阻塞 UI 线程 */
+    private val vlcExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "Voxtitle-PlayerCtrl").apply { isDaemon = true }
+    }
+    private val mediaGeneration = AtomicInteger(0)
+    private val renderedFirstFrame = AtomicBoolean(false)
+    private val seekTaskScheduled = AtomicBoolean(false)
+
+    @Volatile
+    private var pendingSeekTargetMs: Long = C.TIME_UNSET
+
+    @Volatile
+    private var prepareStartRealtimeMs: Long = 0L
+
     override var currentMediaItemIndex: Int = 0
         private set
 
     override val mediaItemCount: Int get() = playlist.size
     override val currentMediaItem: MediaItem? get() = playlist.getOrNull(currentMediaItemIndex)
     override fun getMediaItemAt(index: Int): MediaItem = playlist[index]
+
+    override var pauseAtEndOfMediaItems: Boolean = false
 
     override var playWhenReady: Boolean = false
         set(value) {
@@ -168,18 +468,25 @@ class DesktopExoPlayer(
     @Volatile
     private var positionMsInternal: Long = 0L
 
+    @Volatile
+    private var positionAnchorNano: Long = System.nanoTime()
+
+    @Volatile
+    private var vlcActivelyPlaying: Boolean = false
+
     override val currentPosition: Long
         get() {
-            vlcMp?.let { mp ->
-                if (playbackState == Player.STATE_READY || playbackState == Player.STATE_BUFFERING) {
-                    val t = runCatching { mp.status().time() }.getOrDefault(-1L)
-                    if (t >= 0) positionMsInternal = t
-                }
-            }
             wavClip?.let { c ->
                 if (c.isOpen) positionMsInternal = c.microsecondPosition / 1000L
+                return positionMsInternal
             }
-            return positionMsInternal
+            val base = positionMsInternal
+            if (isPlaying && vlcActivelyPlaying && !ffmpegRunning.get()) {
+                val elapsedMs = ((System.nanoTime() - positionAnchorNano) / 1_000_000L).coerceIn(0L, 500L)
+                val extrapolated = base + (elapsedMs * playbackParameters.speed).toLong()
+                return if (duration != C.TIME_UNSET && duration > 0) extrapolated.coerceAtMost(duration) else extrapolated
+            }
+            return base
         }
 
     override val bufferedPosition: Long
@@ -197,7 +504,10 @@ class DesktopExoPlayer(
     override var playbackParameters: PlaybackParameters = PlaybackParameters.DEFAULT
         set(value) {
             field = value
-            runCatching { vlcMp?.controls()?.setRate(value.speed) }
+            val speed = value.speed
+            vlcExecutor.execute {
+                runCatching { vlcMp?.controls()?.setRate(speed) }
+            }
         }
 
     override var volume: Float = 1.0f
@@ -238,21 +548,37 @@ class DesktopExoPlayer(
     override val isLoading: Boolean get() = playbackState == Player.STATE_BUFFERING
     override val totalBufferedDuration: Long get() = 5000L
 
-    // 后端 1: VLCJ
-    private var vlcFactory: MediaPlayerFactory? = null
+    // 后端 1: VLCJ（共享全局 Factory，当前 Player 只持有一个 EmbeddedMediaPlayer）
+    @Volatile
     private var vlcMp: EmbeddedMediaPlayer? = null
+    @Volatile
+    private var vlcHasActiveMedia: Boolean = false
+    @Volatile
     private var pendingVlcStart: Pair<String, Array<String>>? = null
+    @Volatile
     private var lastPlayableUrl: String? = null
+    @Volatile
     private var lastHeaders: Map<String, String> = emptyMap()
+    @Volatile
     private var vlcPlayedCurrentItem: Boolean = false
+    @Volatile
+    private var activeRenderGen: Int = 0
+    @Volatile
+    private var surfaceWidth: Int = 0
+    @Volatile
+    private var surfaceHeight: Int = 0
 
     // 后端 2: 纯 Java WAV Clip (用于听书等短音频)
+    @Volatile
     private var wavClip: Clip? = null
 
     // 后端 3: FFmpeg 软解流 (无 VLC 时的全格式兜底)
     private val ffmpegRunning = AtomicBoolean(false)
+    @Volatile
     private var ffmpegAudioProc: Process? = null
+    @Volatile
     private var ffmpegVideoProc: Process? = null
+    @Volatile
     private var ffmpegAudioLine: SourceDataLine? = null
 
     override fun addListener(listener: Player.Listener) {
@@ -278,16 +604,18 @@ class DesktopExoPlayer(
         setMediaItems(mediaItems, 0, C.TIME_UNSET)
 
     override fun setMediaItems(mediaItems: List<MediaItem>, startIndex: Int, startPositionMs: Long) {
-        stopInternal()
+        mediaGeneration.incrementAndGet()
+        stopInternalAsync()
         playlist.clear()
         playlist.addAll(mediaItems)
         currentMediaItemIndex = startIndex.coerceIn(0, (playlist.size - 1).coerceAtLeast(0))
         positionMsInternal = if (startPositionMs != C.TIME_UNSET && startPositionMs > 0) startPositionMs else 0L
+        positionAnchorNano = System.nanoTime()
         duration = C.TIME_UNSET
         currentTracks = Tracks.EMPTY
         playerError = null
         notifyMain {
-            listeners.forEach { it.onMediaItemTransition(currentMediaItem, 0) }
+            listeners.forEach { it.onMediaItemTransition(currentMediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) }
         }
     }
 
@@ -304,17 +632,19 @@ class DesktopExoPlayer(
     }
 
     override fun clearMediaItems() {
-        stopInternal()
+        mediaGeneration.incrementAndGet()
+        stopInternalAsync()
         playlist.clear()
         playbackState = Player.STATE_IDLE
     }
 
     override fun prepare() {
         val item = currentMediaItem ?: return
+        val gen = mediaGeneration.incrementAndGet()
         playerError = null
         playbackState = Player.STATE_BUFFERING
-        if (volume > 0f) DesktopPlayerEngine.activePlayer = this
-        startCurrentItem(item, positionMsInternal)
+        DesktopPlayerEngine.activePlayer = this
+        startCurrentItemAsync(gen, item, positionMsInternal)
     }
 
     override fun play() {
@@ -326,20 +656,26 @@ class DesktopExoPlayer(
     }
 
     override fun stop() {
-        stopInternal()
+        mediaGeneration.incrementAndGet()
+        stopInternalAsync()
         playbackState = Player.STATE_IDLE
     }
 
     override fun release() {
-        stopInternal()
-        runCatching { vlcMp?.release() }
-        runCatching { vlcFactory?.release() }
-        vlcMp = null
-        vlcFactory = null
+        mediaGeneration.incrementAndGet()
         listeners.clear()
         if (DesktopPlayerEngine.activePlayer === this) {
             DesktopPlayerEngine.activePlayer = null
         }
+        vlcExecutor.execute {
+            stopInternalOnExecutor()
+            val mp = vlcMp
+            vlcMp = null
+            if (mp != null) {
+                disposalPool.submit { runCatching { mp.release() } }
+            }
+        }
+        vlcExecutor.shutdown()
     }
 
     override fun seekTo(positionMs: Long) = seekTo(currentMediaItemIndex, positionMs)
@@ -351,30 +687,46 @@ class DesktopExoPlayer(
             val oldPos = Player.PositionInfo(currentMediaItemIndex, currentPosition)
             currentMediaItemIndex = mediaItemIndex
             positionMsInternal = targetPos
+            positionAnchorNano = System.nanoTime()
             val newPos = Player.PositionInfo(currentMediaItemIndex, targetPos)
             notifyMain {
                 listeners.forEach {
                     it.onPositionDiscontinuity(oldPos, newPos, Player.DISCONTINUITY_REASON_SEEK)
-                    it.onMediaItemTransition(currentMediaItem, 0)
+                    it.onMediaItemTransition(currentMediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_SEEK)
                 }
             }
             if (playbackState != Player.STATE_IDLE) {
-                currentMediaItem?.let { startCurrentItem(it, targetPos) }
+                val gen = mediaGeneration.incrementAndGet()
+                playbackState = Player.STATE_BUFFERING
+                currentMediaItem?.let { startCurrentItemAsync(gen, it, targetPos) }
             }
             return
         }
 
         positionMsInternal = targetPos
-        vlcMp?.let { mp ->
-            runCatching { mp.controls().setTime(targetPos) }
-            return
-        }
+        positionAnchorNano = System.nanoTime()
+        val gen = mediaGeneration.get()
+
         wavClip?.let { c ->
             runCatching { c.microsecondPosition = targetPos * 1000L }
             return
         }
         if (ffmpegRunning.get()) {
-            currentMediaItem?.let { startCurrentItem(it, targetPos) }
+            val nextGen = mediaGeneration.incrementAndGet()
+            currentMediaItem?.let { startCurrentItemAsync(nextGen, it, targetPos) }
+            return
+        }
+        // 合并连续拖动进度条时的多次跳转请求，不在 UI 线程调 JNI
+        pendingSeekTargetMs = targetPos
+        if (seekTaskScheduled.compareAndSet(false, true)) {
+            vlcExecutor.execute {
+                seekTaskScheduled.set(false)
+                if (gen != mediaGeneration.get()) return@execute
+                val seekTarget = pendingSeekTargetMs
+                if (seekTarget != C.TIME_UNSET) {
+                    runCatching { vlcMp?.controls()?.setTime(seekTarget) }
+                }
+            }
         }
     }
 
@@ -403,7 +755,10 @@ class DesktopExoPlayer(
 
     internal fun updateEffectiveVolume() {
         val eff = (volume * DesktopPlayerEngine.masterVolume).coerceIn(0f, 1f)
-        runCatching { vlcMp?.audio()?.setVolume((eff * 100).roundToInt()) }
+        val volInt = (eff * 100).roundToInt()
+        vlcExecutor.execute {
+            runCatching { vlcMp?.audio()?.setVolume(volInt) }
+        }
     }
 
     internal fun applyEqualizer(enabled: Boolean, bandLevels: ShortArray) {
@@ -411,45 +766,62 @@ class DesktopExoPlayer(
     }
 
     private fun applyPlayWhenReady(ready: Boolean) {
-        val pending = pendingVlcStart
-        if (ready && pending != null) {
-            pendingVlcStart = null
+        val gen = mediaGeneration.get()
+        if (!ready) {
+            vlcActivelyPlaying = false
+        } else {
+            positionAnchorNano = System.nanoTime()
+        }
+        vlcExecutor.execute {
+            if (gen != mediaGeneration.get()) return@execute
+            val pending = pendingVlcStart
+            if (ready && pending != null) {
+                pendingVlcStart = null
+                startVlcMediaOnExecutor(gen, pending.first, pending.second)
+                return@execute
+            }
             vlcMp?.let { mp ->
-                val ok = runCatching { mp.media().play(pending.first, *pending.second) }.getOrDefault(false)
-                if (!ok) {
-                    val fallbackUrl = lastPlayableUrl
-                    if (fallbackUrl != null) startWithFfmpeg(fallbackUrl, lastHeaders, positionMsInternal)
+                if (vlcHasActiveMedia) {
+                    runCatching {
+                        if (ready) {
+                            mp.controls().play()
+                            vlcActivelyPlaying = true
+                            positionAnchorNano = System.nanoTime()
+                        } else {
+                            mp.controls().setPause(true)
+                            vlcActivelyPlaying = false
+                        }
+                    }
                 }
-                return
             }
-        }
-        vlcMp?.let { mp ->
-            runCatching {
-                if (ready) mp.controls().play() else mp.controls().setPause(true)
-            }
-        }
-        wavClip?.let { c ->
-            runCatching {
-                if (ready) c.start() else c.stop()
+            wavClip?.let { c ->
+                runCatching {
+                    if (ready) c.start() else c.stop()
+                }
             }
         }
     }
 
     private fun applyTrackSelection(params: TrackSelectionParameters) {
-        val mp = vlcMp ?: return
-        val audioOverride = params.overrides.values.firstOrNull { it.type == C.TRACK_TYPE_AUDIO }
-        if (C.TRACK_TYPE_AUDIO in params.disabledTrackTypes) {
-            runCatching { mp.audio().setTrack(-1) }
-        } else if (audioOverride != null) {
-            val id = audioOverride.mediaTrackGroup.id.removePrefix("a").toIntOrNull()
-            if (id != null) runCatching { mp.audio().setTrack(id) }
-        }
-        val textOverride = params.overrides.values.firstOrNull { it.type == C.TRACK_TYPE_TEXT }
-        if (C.TRACK_TYPE_TEXT in params.disabledTrackTypes) {
-            runCatching { mp.subpictures().setTrack(-1) }
-        } else if (textOverride != null) {
-            val id = textOverride.mediaTrackGroup.id.removePrefix("s").toIntOrNull()
-            if (id != null) runCatching { mp.subpictures().setTrack(id) }
+        val gen = mediaGeneration.get()
+        vlcExecutor.execute {
+            if (gen != mediaGeneration.get()) return@execute
+            val mp = vlcMp ?: return@execute
+            val audioOverride = params.overrides.values.firstOrNull { it.type == C.TRACK_TYPE_AUDIO }
+            if (C.TRACK_TYPE_AUDIO in params.disabledTrackTypes) {
+                runCatching { mp.audio().setTrack(-1) }
+            } else if (audioOverride != null) {
+                val id = audioOverride.mediaTrackGroup.id.removePrefix("a").toIntOrNull()
+                if (id != null) runCatching { mp.audio().setTrack(id) }
+            }
+            val textOverride = params.overrides.values.firstOrNull { it.type == C.TRACK_TYPE_TEXT }
+            if (C.TRACK_TYPE_TEXT in params.disabledTrackTypes) {
+                runCatching { mp.subpictures().setTrack(-1) }
+            } else if (textOverride != null) {
+                val id = textOverride.mediaTrackGroup.id.removePrefix("s").toIntOrNull()
+                if (id != null) runCatching { mp.subpictures().setTrack(id) }
+            }
+            refreshVlcTracksOnExecutor(mp)
         }
     }
 
@@ -482,51 +854,76 @@ class DesktopExoPlayer(
         return routed to headers
     }
 
-    private fun startCurrentItem(item: MediaItem, startPosMs: Long) {
-        stopInternal()
+    private fun startCurrentItemAsync(gen: Int, item: MediaItem, startPosMs: Long) {
+        prepareStartRealtimeMs = System.currentTimeMillis()
+        renderedFirstFrame.set(false)
+        vlcPlayedCurrentItem = false
+        vlcActivelyPlaying = false
+
         val uri = item.localConfiguration?.uri ?: Uri.parse(item.mediaId)
         val localFile = ContentResolver.resolveFile(uri)
         val ext = (localFile?.extension ?: uri.lastPathSegment?.substringAfterLast('.', "")).orEmpty().lowercase()
-        if (ext in setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma", "ape", "alac", "aiff")) {
+        if (ext in AUDIO_EXTENSIONS) {
             DesktopPlayerEngine.clearFrame()
         }
 
-        // 1. 本地 WAV 短语音（如听书 BookTts）：直接用 Java Sound Clip 播放，零延迟
-        if (localFile != null && localFile.exists() && localFile.extension.equals("wav", ignoreCase = true)) {
-            if (startWithJavaWavClip(localFile, startPosMs)) return
-        }
+        vlcExecutor.execute {
+            if (gen != mediaGeneration.get()) return@execute
+            stopInternalOnExecutor()
+            if (gen != mediaGeneration.get()) return@execute
 
-        val (playableUrl, headers) = runCatching { resolvePlayableUrlAndHeaders(item) }.getOrElse { e ->
-            onError(PlaybackException(e.message, e, PlaybackException.ERROR_CODE_IO_UNSPECIFIED))
-            return
-        }
-        lastPlayableUrl = playableUrl
-        lastHeaders = headers
-        vlcPlayedCurrentItem = false
-        isCurrentMediaItemLive = playableUrl.contains(".m3u8", ignoreCase = true) ||
-            item.localConfiguration?.mimeType == MimeTypes.APPLICATION_M3U8
+            // 1. 本地 WAV 短语音（如听书 BookTts）：直接用 Java Sound Clip 播放，零延迟
+            if (localFile != null && localFile.exists() && localFile.extension.equals("wav", ignoreCase = true)) {
+                if (startWithJavaWavClipOnExecutor(gen, localFile, startPosMs)) return@execute
+            }
 
-        // 2. 优先使用 VLCJ (若系统装有 VLC)
-        if (DesktopPlayerEngine.vlcAvailable && startWithVlcj(playableUrl, headers, startPosMs)) {
-            return
-        }
+            val tResolve = System.currentTimeMillis()
+            val (playableUrl, headers) = runCatching { resolvePlayableUrlAndHeaders(item) }.getOrElse { e ->
+                Log.e(TAG, "解析播放地址失败: $uri", e)
+                if (gen == mediaGeneration.get()) {
+                    onError(PlaybackException(e.message, e, PlaybackException.ERROR_CODE_IO_UNSPECIFIED))
+                }
+                return@execute
+            }
+            if (gen != mediaGeneration.get()) return@execute
 
-        // 3. 使用内置 FFmpeg + Java Sound 引擎
-        startWithFfmpeg(playableUrl, headers, startPosMs)
+            val resolveCost = System.currentTimeMillis() - tResolve
+            if (resolveCost > 20) {
+                Log.d(TAG, "解析播放地址耗时=${resolveCost}ms -> $playableUrl")
+            }
+
+            lastPlayableUrl = playableUrl
+            lastHeaders = headers
+            vlcPlayedCurrentItem = false
+            isCurrentMediaItemLive = playableUrl.contains(".m3u8", ignoreCase = true) ||
+                item.localConfiguration?.mimeType == MimeTypes.APPLICATION_M3U8
+
+            // 2. 优先使用 VLCJ (共享全局 Factory)
+            if (DesktopPlayerEngine.vlcAvailable && startWithVlcjOnExecutor(gen, playableUrl, headers, startPosMs)) {
+                return@execute
+            }
+
+            // 3. 使用内置 FFmpeg + Java Sound 引擎
+            startWithFfmpeg(gen, playableUrl, headers, startPosMs)
+        }
     }
 
-    private fun startWithJavaWavClip(file: File, startPosMs: Long): Boolean {
+    private fun startWithJavaWavClipOnExecutor(gen: Int, file: File, startPosMs: Long): Boolean {
         return runCatching {
             AudioSystem.getAudioInputStream(file).use { ais ->
                 val clip = AudioSystem.getClip()
                 clip.open(ais)
+                if (gen != mediaGeneration.get()) {
+                    clip.close()
+                    return false
+                }
                 duration = (clip.microsecondLength / 1000L).coerceAtLeast(1L)
                 if (startPosMs > 0) {
                     clip.microsecondPosition = (startPosMs * 1000L).coerceAtMost(clip.microsecondLength)
                 }
                 clip.addLineListener { ev ->
                     if (ev.type == LineEvent.Type.STOP && clip.isOpen && clip.microsecondPosition >= clip.microsecondLength - 20_000L) {
-                        onItemEnded()
+                        if (gen == mediaGeneration.get()) onItemEnded()
                     }
                 }
                 wavClip = clip
@@ -537,17 +934,13 @@ class DesktopExoPlayer(
         }.getOrDefault(false)
     }
 
-    private fun startWithVlcj(url: String, headers: Map<String, String>, startPosMs: Long): Boolean {
+    private fun startWithVlcjOnExecutor(gen: Int, url: String, headers: Map<String, String>, startPosMs: Long): Boolean {
         return runCatching {
-            val factory = vlcFactory ?: MediaPlayerFactory(
-                "--http-reconnect",
-                "--network-caching=2000",
-                "--audio-time-stretch",
-                "--no-video-title-show",
-            ).also { vlcFactory = it }
+            val factory = DesktopPlayerEngine.getSharedVlcFactory() ?: return false
+            if (gen != mediaGeneration.get()) return false
 
             val mp = vlcMp ?: factory.mediaPlayers().newEmbeddedMediaPlayer().also { created ->
-                setupVlcSurface(factory, created)
+                setupVlcSurface(created)
                 setupVlcEvents(created)
                 vlcMp = created
             }
@@ -559,53 +952,119 @@ class DesktopExoPlayer(
             headers["User-Agent"]?.let { options.add(":http-user-agent=$it") }
             headers["Referer"]?.let { options.add(":http-referrer=$it") }
 
-            updateEffectiveVolume()
-            mp.controls().setRate(playbackParameters.speed)
+            val eff = (volume * DesktopPlayerEngine.masterVolume).coerceIn(0f, 1f)
+            runCatching { mp.audio().setVolume((eff * 100).roundToInt()) }
+            runCatching { mp.controls().setRate(playbackParameters.speed) }
+
+            renderedFirstFrame.set(false)
+            activeRenderGen = gen
+
             val optArr = options.toTypedArray()
             if (playWhenReady) {
                 pendingVlcStart = null
-                val ok = mp.media().play(url, *optArr)
-                if (!ok) return false
+                startVlcMediaOnExecutor(gen, url, optArr)
             } else {
                 pendingVlcStart = url to optArr
-                playbackState = Player.STATE_READY
+                // 未调用 play() 前保持 BUFFERING，等待 applyPlayWhenReady(true) 真正启动媒体
+                playbackState = Player.STATE_BUFFERING
+                true
             }
-            true
+        }.onFailure { e ->
+            Log.e(TAG, "VLCJ 启动异常: $url", e)
         }.getOrDefault(false)
     }
 
-    private fun setupVlcSurface(factory: MediaPlayerFactory, mp: EmbeddedMediaPlayer) {
-        var videoWidth = 0
-        var videoHeight = 0
-        var targetImage: BufferedImage? = null
-
-        val bufferFormatCallback = object : BufferFormatCallback {
-            override fun getBufferFormat(sourceWidth: Int, sourceHeight: Int): BufferFormat {
-                videoWidth = sourceWidth.coerceAtLeast(1)
-                videoHeight = sourceHeight.coerceAtLeast(1)
-                targetImage = BufferedImage(videoWidth, videoHeight, BufferedImage.TYPE_INT_RGB)
-                val sz = VideoSize(videoWidth, videoHeight)
-                videoSize = sz
-                notifyMain {
-                    listeners.forEach {
-                        it.onVideoSizeChanged(sz)
-                        it.onRenderedFirstFrame()
+    private fun startVlcMediaOnExecutor(gen: Int, url: String, optArr: Array<String>): Boolean {
+        val mp = vlcMp ?: return false
+        val t0 = System.currentTimeMillis()
+        vlcHasActiveMedia = true
+        val ok = runCatching { mp.media().play(url, *optArr) }.getOrDefault(false)
+        Log.i(TAG, "VLC media().play 调用返回: ok=$ok, 耗时=${System.currentTimeMillis() - t0}ms, url=$url")
+        if (!ok) {
+            vlcHasActiveMedia = false
+            val fallbackUrl = lastPlayableUrl
+            if (fallbackUrl != null && gen == mediaGeneration.get()) {
+                startWithFfmpeg(gen, fallbackUrl, lastHeaders, positionMsInternal)
+            }
+            return false
+        }
+        // 15 秒打开超时守护：若 VLC 既未进入播放也未渲染首帧且未报错，自动切换 FFmpeg 兜底
+        watchdogPool.schedule({
+            if (gen == mediaGeneration.get() && playWhenReady && !vlcPlayedCurrentItem && !renderedFirstFrame.get() && !ffmpegRunning.get()) {
+                Log.w(TAG, "VLC 打开媒体超过 15s 无响应，自动切换 FFmpeg 兜底: $url")
+                vlcExecutor.execute {
+                    if (gen == mediaGeneration.get() && !vlcPlayedCurrentItem && !renderedFirstFrame.get() && !ffmpegRunning.get()) {
+                        stopVlcWithTimeoutOnExecutor()
+                        startWithFfmpeg(gen, url, lastHeaders, positionMsInternal)
                     }
                 }
-                return RV32BufferFormat(videoWidth, videoHeight)
+            }
+        }, 15, TimeUnit.SECONDS)
+        return true
+    }
+
+    private fun setupVlcSurface(mp: EmbeddedMediaPlayer) {
+        val bufferFormatCallback = object : BufferFormatCallback {
+            override fun getBufferFormat(sourceWidth: Int, sourceHeight: Int): BufferFormat {
+                if (vlcMp !== mp) return RV32BufferFormat(16, 16)
+                val rawW = sourceWidth.coerceAtLeast(2)
+                val rawH = sourceHeight.coerceAtLeast(2)
+                // 修正 H.264 / HEVC 宏块对齐带来的 1088/1090 -> 1080、2176 -> 2160 等填充高度
+                val srcW = rawW
+                val srcH = when {
+                    rawW == 1920 && rawH in 1080..1096 -> 1080
+                    rawW == 3840 && rawH in 2160..2184 -> 2160
+                    rawW == 1280 && rawH in 720..736 -> 720
+                    rawW == 2560 && rawH in 1440..1456 -> 1440
+                    else -> rawH
+                }
+                // 按显示窗口尺寸与 1920x1080 封顶计算回调缓冲尺寸，宽度 16 像素对齐以加速 SIMD 与纹理上传
+                val maxW = DesktopPlayerEngine.displayWidthPx.coerceIn(1280, 1920)
+                val maxH = DesktopPlayerEngine.displayHeightPx.coerceIn(720, 1080)
+                val scale = minOf(1.0, maxW.toDouble() / srcW.toDouble(), maxH.toDouble() / srcH.toDouble())
+                val dstW = ((((srcW * scale).roundToInt() + 8) / 16) * 16).coerceAtLeast(16)
+                val dstH = (((srcH * scale).roundToInt() / 2) * 2).coerceAtLeast(2)
+
+                surfaceWidth = dstW
+                surfaceHeight = dstH
+                val sz = VideoSize(srcW, srcH)
+                videoSize = sz
+                Log.i(TAG, "VLC 视频尺寸: 原始=${rawW}x${rawH} (可视=${srcW}x${srcH}), 渲染目标=${dstW}x${dstH}")
+                val gen = activeRenderGen
+                notifyMain {
+                    if (vlcMp === mp && gen == mediaGeneration.get()) {
+                        listeners.forEach { it.onVideoSizeChanged(sz) }
+                    }
+                }
+                return RV32BufferFormat(dstW, dstH)
             }
 
             override fun allocatedBuffers(buffers: Array<out ByteBuffer>) {}
         }
 
         val renderCallback = RenderCallback { _, nativeBuffers, _ ->
-            val img = targetImage ?: return@RenderCallback
+            val gen = activeRenderGen
+            if (vlcMp !== mp || gen != mediaGeneration.get()) return@RenderCallback
+            val w = surfaceWidth
+            val h = surfaceHeight
+            if (w <= 0 || h <= 0) return@RenderCallback
             val buf = nativeBuffers.firstOrNull() ?: return@RenderCallback
-            if (volume > 0f) {
-                val ints = (img.raster.dataBuffer as DataBufferInt).data
-                buf.rewind()
-                buf.asIntBuffer().get(ints, 0, minOf(ints.size, buf.remaining() / 4))
-                DesktopPlayerEngine.updateFrame(img)
+            // 只要当前播放器是活动播放器就输出画面（修复静音或朗读压低音量 volume == 0f 时画面卡死的问题）
+            if (DesktopPlayerEngine.activePlayer === this@DesktopExoPlayer) {
+                DesktopPlayerEngine.submitFrameBgraBuffer(w, h, buf)
+            }
+            if (renderedFirstFrame.compareAndSet(false, true)) {
+                val firstFrameCost = System.currentTimeMillis() - prepareStartRealtimeMs
+                Log.i(TAG, "VLC 首帧已渲染 (${w}x${h}), 总耗时=${firstFrameCost}ms")
+                vlcPlayedCurrentItem = true
+                if (playbackState == Player.STATE_BUFFERING) {
+                    playbackState = Player.STATE_READY
+                }
+                notifyMain {
+                    if (vlcMp === mp && gen == mediaGeneration.get()) {
+                        listeners.forEach { it.onRenderedFirstFrame() }
+                    }
+                }
             }
         }
 
@@ -621,28 +1080,97 @@ class DesktopExoPlayer(
 
     private fun setupVlcEvents(mp: EmbeddedMediaPlayer) {
         mp.events().addMediaPlayerEventListener(object : MediaPlayerEventAdapter() {
+            override fun opening(mediaPlayer: MediaPlayer) {
+                if (vlcMp !== mp) return
+                if (playbackState != Player.STATE_IDLE && !renderedFirstFrame.get()) {
+                    playbackState = Player.STATE_BUFFERING
+                }
+            }
+
+            override fun buffering(mediaPlayer: MediaPlayer, newCache: Float) {
+                if (vlcMp !== mp) return
+                if (newCache >= 100f && vlcPlayedCurrentItem) {
+                    if (playbackState == Player.STATE_BUFFERING) {
+                        playbackState = Player.STATE_READY
+                    }
+                }
+            }
+
             override fun playing(mediaPlayer: MediaPlayer) {
+                if (vlcMp !== mp) return
                 vlcPlayedCurrentItem = true
+                vlcActivelyPlaying = true
+                positionAnchorNano = System.nanoTime()
                 playbackState = Player.STATE_READY
-                refreshVlcTracks(mediaPlayer)
+                val cost = System.currentTimeMillis() - prepareStartRealtimeMs
+                Log.i(TAG, "VLC playing 事件到达, 耗时=${cost}ms")
+                val gen = mediaGeneration.get()
+                vlcExecutor.execute {
+                    if (gen == mediaGeneration.get() && vlcMp === mp) {
+                        refreshVlcTracksOnExecutor(mp)
+                    }
+                }
             }
 
             override fun paused(mediaPlayer: MediaPlayer) {
+                if (vlcMp !== mp) return
+                vlcActivelyPlaying = false
                 if (playbackState == Player.STATE_BUFFERING) playbackState = Player.STATE_READY
             }
 
+            override fun stopped(mediaPlayer: MediaPlayer) {
+                if (vlcMp !== mp) return
+                vlcActivelyPlaying = false
+            }
+
+            override fun timeChanged(mediaPlayer: MediaPlayer, newTime: Long) {
+                if (vlcMp !== mp) return
+                if (newTime >= 0) {
+                    positionMsInternal = newTime
+                    positionAnchorNano = System.nanoTime()
+                    vlcPlayedCurrentItem = true
+                    vlcActivelyPlaying = playWhenReady
+                    if (playbackState == Player.STATE_BUFFERING) {
+                        playbackState = Player.STATE_READY
+                    }
+                }
+            }
+
             override fun lengthChanged(mediaPlayer: MediaPlayer, newLength: Long) {
+                if (vlcMp !== mp) return
                 if (newLength > 0) duration = newLength
             }
 
+            override fun elementaryStreamAdded(mediaPlayer: MediaPlayer, type: TrackType?, id: Int) {
+                if (vlcMp !== mp) return
+                val gen = mediaGeneration.get()
+                vlcExecutor.execute {
+                    if (gen == mediaGeneration.get() && vlcMp === mp) {
+                        refreshVlcTracksOnExecutor(mp)
+                    }
+                }
+            }
+
             override fun finished(mediaPlayer: MediaPlayer) {
+                if (vlcMp !== mp) return
+                vlcActivelyPlaying = false
+                vlcHasActiveMedia = false
                 onItemEnded()
             }
 
             override fun error(mediaPlayer: MediaPlayer) {
+                if (vlcMp !== mp) return
+                vlcActivelyPlaying = false
+                vlcHasActiveMedia = false
+                val gen = mediaGeneration.get()
                 val fallbackUrl = lastPlayableUrl
+                Log.w(TAG, "VLC 播放报错: played=$vlcPlayedCurrentItem, url=$fallbackUrl")
                 if (!vlcPlayedCurrentItem && fallbackUrl != null && !ffmpegRunning.get()) {
-                    startWithFfmpeg(fallbackUrl, lastHeaders, positionMsInternal)
+                    vlcExecutor.execute {
+                        if (gen == mediaGeneration.get() && !ffmpegRunning.get()) {
+                            startWithFfmpeg(gen, fallbackUrl, lastHeaders, positionMsInternal)
+                        }
+                    }
                     return
                 }
                 onError(
@@ -656,7 +1184,7 @@ class DesktopExoPlayer(
         })
     }
 
-    private fun refreshVlcTracks(mp: MediaPlayer) {
+    private fun refreshVlcTracksOnExecutor(mp: MediaPlayer) {
         runCatching {
             val groups = ArrayList<Tracks.Group>()
             val vsz = videoSize
@@ -688,9 +1216,12 @@ class DesktopExoPlayer(
         }
     }
 
-    private fun startWithFfmpeg(url: String, headers: Map<String, String>, startPosMs: Long) {
+    private fun startWithFfmpeg(gen: Int, url: String, headers: Map<String, String>, startPosMs: Long) {
+        if (gen != mediaGeneration.get()) return
         ffmpegRunning.set(true)
+        Log.i(TAG, "启动 FFmpeg 播放引擎: url=$url, startPosMs=$startPosMs")
         ioPool.submit {
+            if (gen != mediaGeneration.get() || !ffmpegRunning.get()) return@submit
             val ffmpeg = DesktopBinaryFinder.ensureFfmpeg()
             if (ffmpeg == null) {
                 onError(
@@ -704,6 +1235,8 @@ class DesktopExoPlayer(
             }
 
             // 探测时长与视频分辨率
+            var srcWidth = 1280
+            var srcHeight = 720
             var width = 1280
             var height = 720
             var hasVideo = true
@@ -724,7 +1257,7 @@ class DesktopExoPlayer(
                     cmd.add(url)
                     val proc = ProcessBuilder(cmd).start()
                     val jsonText = proc.inputStream.bufferedReader().readText()
-                    proc.waitFor()
+                    proc.waitFor(10, TimeUnit.SECONDS)
                     val root = JSONObject(jsonText)
                     val durSec = root.optJSONObject("format")?.optString("duration")?.toDoubleOrNull()
                     if (durSec != null && durSec > 0) {
@@ -745,8 +1278,13 @@ class DesktopExoPlayer(
                                 val w = s.optInt("width", 0)
                                 val h = s.optInt("height", 0)
                                 if (w > 0 && h > 0) {
-                                    width = if (w > 1280) 1280 else (w / 2 * 2).coerceAtLeast(2)
-                                    height = ((h.toDouble() * width / w).toInt() / 2 * 2).coerceAtLeast(2)
+                                    srcWidth = w
+                                    srcHeight = h
+                                    val maxW = DesktopPlayerEngine.displayWidthPx.coerceIn(1280, 1920)
+                                    val maxH = DesktopPlayerEngine.displayHeightPx.coerceIn(720, 1080)
+                                    val scale = minOf(1.0, maxW.toDouble() / w.toDouble(), maxH.toDouble() / h.toDouble())
+                                    width = (((w * scale).roundToInt() / 2) * 2).coerceAtLeast(2)
+                                    height = (((h * scale).roundToInt() / 2) * 2).coerceAtLeast(2)
                                     foundVideo = true
                                     val rateStr = s.optString("r_frame_rate", "25/1")
                                     val parts = rateStr.split('/')
@@ -791,7 +1329,7 @@ class DesktopExoPlayer(
                 }
             }
 
-            if (!ffmpegRunning.get()) return@submit
+            if (gen != mediaGeneration.get() || !ffmpegRunning.get()) return@submit
 
             if (probedGroups.isNotEmpty()) {
                 currentTracks = Tracks(probedGroups)
@@ -799,27 +1337,22 @@ class DesktopExoPlayer(
             }
 
             if (hasVideo) {
-                val sz = VideoSize(width, height)
+                val sz = VideoSize(srcWidth, srcHeight)
                 videoSize = sz
-                playbackState = Player.STATE_READY
                 notifyMain {
-                    listeners.forEach {
-                        it.onVideoSizeChanged(sz)
-                        it.onRenderedFirstFrame()
-                    }
+                    listeners.forEach { it.onVideoSizeChanged(sz) }
                 }
-                startFfmpegVideoThread(ffmpeg, url, headers, startPosMs, width, height, fps, advanceClock = !hasAudio)
+                startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, syncWithAudio = hasAudio)
             }
 
-            if (hasAudio) {
-                startFfmpegAudioThread(ffmpeg, url, headers, startPosMs, endWhenDone = true)
-            } else if (!hasVideo) {
-                startFfmpegAudioThread(ffmpeg, url, headers, startPosMs, endWhenDone = true)
+            if (hasAudio || !hasVideo) {
+                startFfmpegAudioThread(gen, ffmpeg, url, headers, startPosMs, endWhenDone = true)
             }
         }
     }
 
     private fun startFfmpegVideoThread(
+        gen: Int,
         ffmpeg: String,
         url: String,
         headers: Map<String, String>,
@@ -827,11 +1360,11 @@ class DesktopExoPlayer(
         width: Int,
         height: Int,
         fps: Double,
-        advanceClock: Boolean = false,
+        syncWithAudio: Boolean = true,
     ) {
         ioPool.submit {
             runCatching {
-                val cmd = mutableListOf(ffmpeg, "-v", "error")
+                val cmd = mutableListOf(ffmpeg, "-v", "error", "-hwaccel", "auto")
                 if (startPosMs > 0) {
                     cmd.addAll(listOf("-ss", "%.3f".format(java.util.Locale.US, startPosMs / 1000.0)))
                 }
@@ -841,49 +1374,60 @@ class DesktopExoPlayer(
                 }
                 cmd.addAll(
                     listOf(
-                        "-re",
                         "-i", url,
                         "-an", "-sn",
                         "-vf", "scale=$width:$height",
-                        "-pix_fmt", "bgr24",
+                        "-pix_fmt", "bgra",
                         "-f", "rawvideo", "-",
                     ),
                 )
                 val proc = ProcessBuilder(cmd).start()
                 ffmpegVideoProc = proc
-                val frameBytes = ByteArray(width * height * 3)
-                val ins = proc.inputStream
+                val ins = proc.inputStream.buffered(width * height * 4)
                 var framesRead = 0L
-                while (ffmpegRunning.get()) {
+                val safeFps = fps.coerceIn(1.0, 120.0)
+                val wallClockAnchorMs = System.currentTimeMillis()
+                while (ffmpegRunning.get() && gen == mediaGeneration.get()) {
                     if (!playWhenReady) {
-                        Thread.sleep(40)
+                        Thread.sleep(30)
                         continue
                     }
-                    var off = 0
-                    while (off < frameBytes.size && ffmpegRunning.get()) {
-                        val n = ins.read(frameBytes, off, frameBytes.size - off)
-                        if (n < 0) break
-                        off += n
+                    val framePtsMs = startPosMs + (framesRead * 1000.0 / safeFps).toLong()
+                    val refClockMs = if (syncWithAudio) {
+                        positionMsInternal
+                    } else {
+                        startPosMs + (System.currentTimeMillis() - wallClockAnchorMs)
                     }
-                    if (off < frameBytes.size) break
-                    val img = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
-                    val pixels = (img.raster.dataBuffer as DataBufferInt).data
-                    var bi = 0
-                    for (pi in pixels.indices) {
-                        val b = frameBytes[bi].toInt() and 0xFF
-                        val g = frameBytes[bi + 1].toInt() and 0xFF
-                        val r = frameBytes[bi + 2].toInt() and 0xFF
-                        pixels[pi] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-                        bi += 3
-                    }
-                    DesktopPlayerEngine.updateFrame(img)
+                    // 若视频帧明显落后于音频时钟 (> 80ms)，只读取丢帧不上传 Skia，快速追上音频
+                    val isLate = syncWithAudio && framesRead > 0 && (refClockMs - framePtsMs) > 80L
+                    val shouldRender = !isLate && DesktopPlayerEngine.activePlayer === this@DesktopExoPlayer
+                    val ok = DesktopPlayerEngine.readFrameBgraStream(
+                        width = width,
+                        height = height,
+                        ins = ins,
+                        shouldContinue = { ffmpegRunning.get() && gen == mediaGeneration.get() },
+                        renderFrame = shouldRender,
+                    )
+                    if (!ok) break
                     framesRead++
-                    if (advanceClock) {
-                        positionMsInternal = startPosMs + (framesRead * 1000.0 / fps.coerceAtLeast(1.0)).toLong()
+                    if (renderedFirstFrame.compareAndSet(false, true)) {
+                        playbackState = Player.STATE_READY
+                        Log.i(TAG, "FFmpeg 首帧已渲染 (${width}x${height}), 耗时=${System.currentTimeMillis() - prepareStartRealtimeMs}ms")
+                        notifyMain { listeners.forEach { it.onRenderedFirstFrame() } }
+                    }
+                    if (!syncWithAudio) {
+                        positionMsInternal = framePtsMs
+                        positionAnchorNano = System.nanoTime()
+                    }
+                    // 若视频帧超前于参考时钟，按差值休眠对齐
+                    val updatedRef = if (syncWithAudio) positionMsInternal else startPosMs + (System.currentTimeMillis() - wallClockAnchorMs)
+                    val aheadMs = framePtsMs - updatedRef
+                    if (aheadMs > 5L) {
+                        Thread.sleep(aheadMs.coerceAtMost(80L))
                     }
                 }
                 proc.destroy()
-                if (advanceClock && ffmpegRunning.get() && framesRead > 0) {
+                if (!syncWithAudio && ffmpegRunning.get() && gen == mediaGeneration.get() && framesRead > 0) {
                     onItemEnded()
                 }
             }
@@ -891,6 +1435,7 @@ class DesktopExoPlayer(
     }
 
     private fun startFfmpegAudioThread(
+        gen: Int,
         ffmpeg: String,
         url: String,
         headers: Map<String, String>,
@@ -928,7 +1473,7 @@ class DesktopExoPlayer(
                 val buf = ByteArray(4800 * 4) // 100ms
                 val ins = proc.inputStream
                 var bytesPlayed = 0L
-                while (ffmpegRunning.get()) {
+                while (ffmpegRunning.get() && gen == mediaGeneration.get()) {
                     if (!playWhenReady) {
                         Thread.sleep(30)
                         continue
@@ -949,15 +1494,16 @@ class DesktopExoPlayer(
                     line?.write(buf, 0, n - (n % 4))
                     bytesPlayed += n
                     positionMsInternal = startPosMs + (bytesPlayed * 1000L) / (48000L * 4L)
+                    positionAnchorNano = System.nanoTime()
                 }
                 line?.drain()
                 line?.close()
                 proc.destroy()
-                if (endWhenDone && ffmpegRunning.get() && bytesPlayed > 0L) {
+                if (endWhenDone && ffmpegRunning.get() && gen == mediaGeneration.get() && bytesPlayed > 0L) {
                     onItemEnded()
                 }
             } catch (e: Exception) {
-                if (ffmpegRunning.get()) {
+                if (ffmpegRunning.get() && gen == mediaGeneration.get()) {
                     onError(PlaybackException(e.message, e, PlaybackException.ERROR_CODE_IO_UNSPECIFIED))
                 }
             }
@@ -966,12 +1512,28 @@ class DesktopExoPlayer(
 
     private fun onItemEnded() {
         notifyMain {
+            if (pauseAtEndOfMediaItems) {
+                playWhenReady = false
+                playbackState = Player.STATE_ENDED
+                return@notifyMain
+            }
             when {
                 repeatMode == Player.REPEAT_MODE_ONE -> {
                     seekTo(currentMediaItemIndex, 0L)
                 }
                 hasNextMediaItem() -> {
-                    seekTo(currentMediaItemIndex + 1, 0L)
+                    val oldPos = Player.PositionInfo(currentMediaItemIndex, currentPosition)
+                    currentMediaItemIndex += 1
+                    positionMsInternal = 0L
+                    positionAnchorNano = System.nanoTime()
+                    val newPos = Player.PositionInfo(currentMediaItemIndex, 0L)
+                    listeners.forEach {
+                        it.onPositionDiscontinuity(oldPos, newPos, Player.DISCONTINUITY_REASON_AUTO_TRANSITION)
+                        it.onMediaItemTransition(currentMediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_AUTO)
+                    }
+                    val gen = mediaGeneration.incrementAndGet()
+                    playbackState = Player.STATE_BUFFERING
+                    currentMediaItem?.let { startCurrentItemAsync(gen, it, 0L) }
                 }
                 repeatMode == Player.REPEAT_MODE_ALL && playlist.isNotEmpty() -> {
                     seekTo(0, 0L)
@@ -991,8 +1553,18 @@ class DesktopExoPlayer(
         }
     }
 
-    private fun stopInternal() {
+    private fun stopInternalAsync() {
         pendingVlcStart = null
+        vlcActivelyPlaying = false
+        ffmpegRunning.set(false)
+        vlcExecutor.execute {
+            stopInternalOnExecutor()
+        }
+    }
+
+    private fun stopInternalOnExecutor() {
+        pendingVlcStart = null
+        vlcActivelyPlaying = false
         ffmpegRunning.set(false)
         runCatching { ffmpegAudioProc?.destroyForcibly() }
         runCatching { ffmpegVideoProc?.destroyForcibly() }
@@ -1005,7 +1577,35 @@ class DesktopExoPlayer(
         runCatching { wavClip?.close() }
         wavClip = null
 
-        runCatching { vlcMp?.controls()?.stop() }
+        stopVlcWithTimeoutOnExecutor()
+    }
+
+    private fun stopVlcWithTimeoutOnExecutor() {
+        val mp = vlcMp ?: return
+        if (!vlcHasActiveMedia) return
+        vlcHasActiveMedia = false
+        vlcActivelyPlaying = false
+        val t0 = System.currentTimeMillis()
+        val future = disposalPool.submit {
+            runCatching { mp.controls().stop() }
+        }
+        try {
+            future.get(400, TimeUnit.MILLISECONDS)
+            val cost = System.currentTimeMillis() - t0
+            if (cost > 40) {
+                Log.d(TAG, "VLC stop 耗时=${cost}ms")
+            }
+        } catch (_: TimeoutException) {
+            Log.w(TAG, "VLC stop 超过 400ms（网络流可能阻塞），分离旧 MediaPlayer 后台释放")
+            if (vlcMp === mp) {
+                vlcMp = null
+            }
+            disposalPool.submit {
+                runCatching { future.get(30, TimeUnit.SECONDS) }
+                runCatching { mp.release() }
+            }
+        } catch (_: Throwable) {
+        }
     }
 
     private fun notifyMain(block: () -> Unit) {
@@ -1013,8 +1613,18 @@ class DesktopExoPlayer(
     }
 
     companion object {
-        private val ioPool = Executors.newCachedThreadPool { r ->
+        private val AUDIO_EXTENSIONS = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma", "ape", "alac", "aiff")
+
+        internal val ioPool = Executors.newCachedThreadPool { r ->
             Thread(r, "Voxtitle-DesktopPlayer").apply { isDaemon = true }
+        }
+
+        private val disposalPool = Executors.newCachedThreadPool { r ->
+            Thread(r, "Voxtitle-VlcDisposer").apply { isDaemon = true }
+        }
+
+        private val watchdogPool = Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "Voxtitle-PlayerWatchdog").apply { isDaemon = true }
         }
     }
 }

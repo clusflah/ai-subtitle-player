@@ -1161,7 +1161,7 @@ private fun HomeTab(
 /** 首页「最近浏览」每一条右边的删除按钮 */
 @Composable
 private fun RemoveRecentButton(onRemove: () -> Unit) {
-    IconButton(onClick = onRemove) {
+    IconButton(onClick = onRemove, modifier = Modifier.tvFocusRing(CircleShape, fillBackground = true)) {
         Icon(AppIcons.Close, "删除这条记录", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
     }
 }
@@ -1171,11 +1171,12 @@ private fun RemoveRecentButton(onRemove: () -> Unit) {
 private fun TileRemoveButton(onRemove: () -> Unit, modifier: Modifier = Modifier) {
     Box(
         modifier
-            .clip(CircleShape)
-            .clickable(onClick = onRemove)
             .padding(5.dp)
             .size(22.dp)
-            .background(Color(0x88000000), CircleShape),
+            .background(Color(0x88000000), CircleShape)
+            .tvFocusRing(CircleShape, fillBackground = true, scale = true)
+            .clip(CircleShape)
+            .clickable(onClick = onRemove),
         contentAlignment = Alignment.Center,
     ) {
         Icon(AppIcons.Close, "删除这条记录", tint = Color.White, modifier = Modifier.size(14.dp))

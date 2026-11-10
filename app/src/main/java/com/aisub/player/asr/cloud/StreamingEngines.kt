@@ -66,6 +66,8 @@ abstract class StreamingCloudEngine : SpeechEngine {
         /** 这路连接出过结果 */
         @Volatile
         internal var any = false
+        @Volatile
+        internal var hadError = false
         internal val done = CountDownLatch(1)
 
         /** 连上了，或者没连上就结束了 */
@@ -83,6 +85,7 @@ abstract class StreamingCloudEngine : SpeechEngine {
         /** [fatal]：Key 错、服务没开通这类重连也没用的错误 */
         fun failed(message: String, fatal: Boolean = false) {
             log("流式识别出错（${if (fatal) "不再重连" else "会重连"}）：$message")
+            hadError = true
             lastError = message
             if (fatal) fatalError = message
             end()
@@ -145,7 +148,7 @@ abstract class StreamingCloudEngine : SpeechEngine {
         drain(onCue)
         // Key 错、没开通，或者这路连接一句没出就出错：说出来，不要悄悄地没有字幕
         fatalError?.let { throw IOException(it) }
-        if (e != null && !e.any && !cancelled) lastError?.let { throw IOException(it) }
+        if (e != null && e.hadError && !e.any && !cancelled) lastError?.let { throw IOException(it) }
     }
 
     /**
@@ -218,7 +221,7 @@ abstract class StreamingCloudEngine : SpeechEngine {
         if (session == null || e == null || e.ended) {
             session?.close()
             // 接连几路连接都没出结果就断了：多半是配置或网络有问题，别一直重连
-            if (e != null && !e.any && ++failures >= MAX_FAILURES) {
+            if (e != null && e.hadError && !e.any && sessionAudioMs < 5_000L && ++failures >= MAX_FAILURES) {
                 throw IOException(lastError ?: "流式识别连接失败")
             }
             if (e != null) Thread.sleep(minOf(500L * failures, 3_000L))

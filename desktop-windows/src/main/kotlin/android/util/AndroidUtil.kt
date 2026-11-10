@@ -2,65 +2,111 @@ package android.util
 
 import org.xmlpull.v1.StaxXmlPullParser
 import org.xmlpull.v1.XmlPullParser
+import java.io.File
+import java.io.FileOutputStream
+import java.io.PrintWriter
+import java.io.StringWriter
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import java.util.LinkedHashMap
+import java.util.concurrent.LinkedBlockingQueue
 
 object Log {
-    @JvmStatic
-    fun d(tag: String?, msg: String): Int {
-        println("[D/$tag] $msg")
+    private val timeFmt: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
+    private val logQueue = LinkedBlockingQueue<String>(4096)
+
+    val logFile: File by lazy {
+        val base = System.getenv("LOCALAPPDATA")?.takeIf { it.isNotBlank() }?.let(::File)
+            ?: File(System.getProperty("user.home", "."), "AppData/Local")
+        val dir = File(base, "Voxtitle/logs").apply { mkdirs() }
+        File(dir, "voxtitle.log")
+    }
+
+    init {
+        Thread({
+            var writer: PrintWriter? = null
+            var bytesWritten = runCatching { if (logFile.exists()) logFile.length() else 0L }.getOrDefault(0L)
+            val maxBytes = 4L * 1024L * 1024L
+            while (true) {
+                try {
+                    val line = logQueue.take()
+                    if (writer == null || bytesWritten > maxBytes) {
+                        runCatching { writer?.close() }
+                        if (bytesWritten > maxBytes && logFile.exists()) {
+                            val backup = File(logFile.parentFile, "voxtitle.log.1")
+                            runCatching {
+                                if (backup.exists()) backup.delete()
+                                logFile.renameTo(backup)
+                            }
+                            bytesWritten = 0L
+                        }
+                        writer = runCatching {
+                            PrintWriter(FileOutputStream(logFile, true).bufferedWriter(Charsets.UTF_8), false)
+                        }.getOrNull()
+                    }
+                    writer?.println(line)
+                    bytesWritten += line.length + 2
+                    if (logQueue.isEmpty()) {
+                        writer?.flush()
+                    }
+                } catch (_: InterruptedException) {
+                    break
+                } catch (_: Throwable) {
+                }
+            }
+            runCatching { writer?.flush(); writer?.close() }
+        }, "Voxtitle-LogWriter").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun record(level: Char, tag: String?, msg: String, tr: Throwable? = null, toErr: Boolean = false): Int {
+        val now = try { timeFmt.format(LocalDateTime.now()) } catch (_: Throwable) { "" }
+        val tName = Thread.currentThread().name
+        val fullMsg = if (tr != null) {
+            val sw = StringWriter()
+            tr.printStackTrace(PrintWriter(sw))
+            "$msg\n$sw".trimEnd()
+        } else {
+            msg
+        }
+        val formatted = "$now [$level/${tag ?: "App"}] ($tName) $fullMsg"
+        if (toErr) {
+            System.err.println(formatted)
+        } else {
+            println(formatted)
+        }
+        logQueue.offer(formatted)
         return 0
     }
 
     @JvmStatic
-    fun d(tag: String?, msg: String, tr: Throwable?): Int {
-        println("[D/$tag] $msg")
-        tr?.printStackTrace()
-        return 0
-    }
+    fun d(tag: String?, msg: String): Int = record('D', tag, msg)
 
     @JvmStatic
-    fun i(tag: String?, msg: String): Int {
-        println("[I/$tag] $msg")
-        return 0
-    }
+    fun d(tag: String?, msg: String, tr: Throwable?): Int = record('D', tag, msg, tr)
 
     @JvmStatic
-    fun i(tag: String?, msg: String, tr: Throwable?): Int {
-        println("[I/$tag] $msg")
-        tr?.printStackTrace()
-        return 0
-    }
+    fun i(tag: String?, msg: String): Int = record('I', tag, msg)
 
     @JvmStatic
-    fun w(tag: String?, msg: String): Int {
-        println("[W/$tag] $msg")
-        return 0
-    }
+    fun i(tag: String?, msg: String, tr: Throwable?): Int = record('I', tag, msg, tr)
 
     @JvmStatic
-    fun w(tag: String?, msg: String, tr: Throwable?): Int {
-        println("[W/$tag] $msg: ${tr?.message}")
-        return 0
-    }
+    fun w(tag: String?, msg: String): Int = record('W', tag, msg)
 
     @JvmStatic
-    fun w(tag: String?, tr: Throwable?): Int {
-        println("[W/$tag] ${tr?.message}")
-        return 0
-    }
+    fun w(tag: String?, msg: String, tr: Throwable?): Int = record('W', tag, "$msg: ${tr?.message}", tr)
 
     @JvmStatic
-    fun e(tag: String?, msg: String): Int {
-        System.err.println("[E/$tag] $msg")
-        return 0
-    }
+    fun w(tag: String?, tr: Throwable?): Int = record('W', tag, tr?.message ?: "", tr)
 
     @JvmStatic
-    fun e(tag: String?, msg: String, tr: Throwable?): Int {
-        System.err.println("[E/$tag] $msg: ${tr?.message}")
-        tr?.printStackTrace()
-        return 0
-    }
+    fun e(tag: String?, msg: String): Int = record('E', tag, msg, toErr = true)
+
+    @JvmStatic
+    fun e(tag: String?, msg: String, tr: Throwable?): Int = record('E', tag, "$msg: ${tr?.message}", tr, toErr = true)
 }
 
 object Base64 {

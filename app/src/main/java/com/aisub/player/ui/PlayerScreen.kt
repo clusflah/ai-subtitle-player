@@ -104,9 +104,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.focusable
@@ -163,6 +170,8 @@ import com.aisub.player.translate.ChineseScript
 import com.aisub.player.translate.LanguageCheck
 import kotlinx.coroutines.delay
 import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 private val PlayerColors = darkColorScheme(
@@ -690,7 +699,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     .padding(horizontal = 4.dp, vertical = 4.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回", tint = Color.White) }
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier.tvFocusRing(CircleShape, color = Color.White, scale = true, fillBackground = true),
+                    ) { Icon(AppIcons.ArrowBack, "返回", tint = Color.White) }
                     Text(
                         music.tags?.title?.takeIf { isMusic } ?: state.current?.displayTitle ?: "", color = Color.White, fontSize = 20.sp,
                         maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 8.dp),
@@ -699,17 +711,28 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     // 兼容模式下直播也保留频道列表（换台时按各频道记住的内核打开）
                     if (isLive) {
                         if (vm.queueSize > 1) {
-                            TextButton(onClick = { channelSheetTab = 1; showChannels = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                            TextButton(
+                                onClick = { channelSheetTab = 1; showChannels = true },
+                                contentPadding = PaddingValues(horizontal = 8.dp),
+                                modifier = Modifier.tvFocusRing(RoundedCornerShape(50), color = Color.White, scale = true, fillBackground = true),
+                            ) {
                                 Icon(AppIcons.ListIcon, null, tint = Color.White, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(4.dp))
                                 Text("频道", color = Color.White)
                             }
                         }
-                        TextButton(onClick = { channelSheetTab = 2; showChannels = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        TextButton(
+                            onClick = { channelSheetTab = 2; showChannels = true },
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50), color = Color.White, scale = true, fillBackground = true),
+                        ) {
                             Text("节目单", color = Color.White)
                         }
                     } else if (vm.queueSize > 1 && !vm.usingVlc) {
-                        TextButton(onClick = { showChannels = true }) {
+                        TextButton(
+                            onClick = { showChannels = true },
+                            modifier = Modifier.tvFocusRing(RoundedCornerShape(50), color = Color.White, scale = true, fillBackground = true),
+                        ) {
                             Icon(AppIcons.ListIcon, null, tint = Color.White, modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(4.dp))
                             Text("列表", color = Color.White)
@@ -725,7 +748,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             "正在播放：${curEpgProg.title}  ${curEpgProg.timeRangeLabel()}",
                             color = Color(0xFFFF8A65), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.padding(start = 52.dp, end = 12.dp, bottom = 4.dp)
-                                .clickable { channelSheetTab = 2; showChannels = true },
+                                .tvFocusRing(RoundedCornerShape(8.dp), color = Color.White, fillBackground = true)
+                                .clickable { channelSheetTab = 2; showChannels = true }
+                                .padding(horizontal = 4.dp, vertical = 2.dp),
                         )
                     }
                 }
@@ -757,10 +782,19 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             .padding(horizontal = 10.dp, vertical = 3.dp),
                     )
                 } else if (quick != null && idle && (state.current?.isVideo == true || isLive) && !aiChipDismissed) {
+                    var quickFocused by remember { mutableStateOf(false) }
+                    val quickHighlight = tv && quickFocused
                     Row(Modifier.padding(start = 52.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Row(
                             Modifier
-                                .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Orange.copy(alpha = 0.86f))
+                                .onFocusChanged { quickFocused = it.isFocused }
+                                .tvFocusRing(RoundedCornerShape(50), color = Color.White, scale = true)
+                                .liquidGlass(
+                                    shape = RoundedCornerShape(50),
+                                    style = GlassStyle.Pill,
+                                    tint = if (quickHighlight) Color(0xFFFFB74D) else Orange.copy(alpha = 0.86f),
+                                    borderColor = if (quickHighlight) Color.White else Color.Unspecified,
+                                )
                                 .clickable {
                                     when (quick) {
                                         // 先选视频里说的语言（选错会降低准确率），再识别并翻译
@@ -773,12 +807,25 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                                 .padding(start = 10.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Icon(AppIcons.AutoAwesome, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                            Icon(
+                                AppIcons.AutoAwesome, null,
+                                tint = if (quickHighlight) Color(0xFF2B1700) else Color.White,
+                                modifier = Modifier.size(16.dp),
+                            )
                             Spacer(Modifier.width(6.dp))
                             val verb = if (quick == QuickSubtitle.GENERATE) (if (isLive) "实时生成" else "生成") else "翻译成"
-                            Text("$verb${state.settings.targetLanguage}字幕", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            Text(
+                                "$verb${state.settings.targetLanguage}字幕",
+                                color = if (quickHighlight) Color(0xFF2B1700) else Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = if (quickHighlight) FontWeight.Bold else FontWeight.Medium,
+                            )
                         }
-                        IconButton(onClick = { aiChipDismissed = true }, modifier = Modifier.size(28.dp)) {
+                        Spacer(Modifier.width(4.dp))
+                        IconButton(
+                            onClick = { aiChipDismissed = true },
+                            modifier = Modifier.size(28.dp).tvFocusRing(CircleShape, color = Color.White, scale = true, fillBackground = true),
+                        ) {
                             Icon(AppIcons.Close, "不用了", tint = Color(0xCCFFFFFF), modifier = Modifier.size(16.dp))
                         }
                     }
@@ -787,6 +834,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     Text(
                         msg, color = Color.White, fontSize = 12.sp,
                         modifier = Modifier.padding(start = 52.dp, bottom = 4.dp)
+                            .tvFocusRing(RoundedCornerShape(50), color = Color.White, scale = true, fillBackground = true)
                             .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Color(0x5580DEEA))
                             .clickable { showSkip = true }.padding(horizontal = 10.dp, vertical = 3.dp),
                     )
@@ -794,34 +842,74 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             }
         }
 
-        // ---- 底部：时间 + 进度条 + 五个按钮（悬浮圆角液态玻璃胶囊，与主页底部一致） ----
+        // ---- 底部：时间 + 进度条 + 控制栏（悬浮液态玻璃胶囊 + 水滴点击拉伸与回弹动画，与主页底部风格统一） ----
         AnimatedVisibility(controls && !locked && !musicMode, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter)) {
-            val barShape = RoundedCornerShape(28.dp)
+            val duration = player.duration.takeIf { it > 0 } ?: 0L
+            var dragging by remember { mutableStateOf<Float?>(null) }
+
+            // 底部 7 键液态水滴指示器状态：默认停留在中央播放/暂停键（槽位 3），点击任意按钮或 TV 遥控器移动焦点时触发水滴滑动拉伸与微弹
+            var targetSlot by remember { mutableIntStateOf(3) }
+            var focusedSlot by remember { mutableIntStateOf(-1) }
+            var pulseTick by remember { mutableIntStateOf(0) }
+            var pulsing by remember { mutableStateOf(false) }
+
+            LaunchedEffect(pulseTick) {
+                if (pulseTick > 0) {
+                    pulsing = true
+                    delay(95)
+                    pulsing = false
+                    if (targetSlot != 3 && focusedSlot < 0) {
+                        delay(300)
+                        if (focusedSlot < 0) targetSlot = 3
+                    }
+                }
+            }
+
+            val effectiveSlot = if (tv && focusedSlot in 0..6) focusedSlot else targetSlot
+            val fastPos by animateFloatAsState(
+                targetValue = effectiveSlot.toFloat(),
+                animationSpec = spring(dampingRatio = 0.62f, stiffness = 560f),
+                label = "playerDropletFast",
+            )
+            val slowPos by animateFloatAsState(
+                targetValue = effectiveSlot.toFloat(),
+                animationSpec = spring(dampingRatio = 0.55f, stiffness = 135f),
+                label = "playerDropletSlow",
+            )
+            val jellyPos by animateFloatAsState(
+                targetValue = effectiveSlot.toFloat(),
+                animationSpec = spring(dampingRatio = 0.46f, stiffness = 210f),
+                label = "playerDropletJelly",
+            )
+            val dockPress by animateFloatAsState(
+                targetValue = if (pulsing || dragging != null) 1f else 0f,
+                animationSpec = spring(dampingRatio = 0.54f, stiffness = 380f),
+                label = "playerDockPress",
+            )
+
+            val rawStretch = abs(fastPos - slowPos)
+            val wobble = fastPos - jellyPos
+            val lightPhase = fastPos * 0.9f + rawStretch * 1.0f + wobble * 0.65f + dockPress * 0.6f
+            val barScaleX = 1f + (rawStretch * 0.015f).coerceAtMost(0.025f) + dockPress * 0.009f
+            val barScaleY = 1f - (rawStretch * 0.012f).coerceAtMost(0.020f) + dockPress * 0.012f
+
+            val barShape = RoundedCornerShape(50)
+            val barTint = Color(0xBF181F2C)
+            val dropletTint = if (tv && focusedSlot >= 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.88f) else Color(0xE02E3B52)
+            val activeAccent = Color(0xFF4DA3FF)
+
             Column(
                 Modifier
                     .fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                    .shadow(
-                        elevation = 16.dp,
-                        shape = barShape,
-                        ambientColor = Color(0x28000000),
-                        spotColor = Color(0x36000000),
-                    )
-                    .liquidGlass(
-                        shape = barShape,
-                        style = GlassStyle.Floating,
-                        tint = Color(0x78161D2A),
-                    )
-                    .padding(horizontal = 8.dp, vertical = 10.dp),
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
             ) {
-                val duration = player.duration.takeIf { it > 0 } ?: 0L
-                var dragging by remember { mutableStateOf<Float?>(null) }
                 // 暂停时：逐帧、截图、书签
                 if (!wantsPlay && !audioOnly && state.current?.isVideo != false && !isLive) {
                     Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-                        FrameButton(AppIcons.SkipPrevious, "上一帧") { indicator = null to formatTime(vm.extras.stepFrame(false)); interactions++ }
+                        FrameButton(AppIcons.SkipPrevious, "上一帧") { pulseTick++; indicator = null to formatTime(vm.extras.stepFrame(false)); interactions++ }
                         FrameButton(AppIcons.Image, "截图") {
+                            pulseTick++
                             interactions++
                             scope.launch {
                                 val pos = player.currentPosition
@@ -830,34 +918,44 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                                 vm.extras.emit(if (ok) "截图已保存到相册 Pictures/译幕" else "截图失败")
                             }
                         }
-                        FrameButton(AppIcons.Star, "书签") { interactions++; scope.launch { vm.extras.addBookmark(playerView?.videoSurfaceView) } }
-                        FrameButton(AppIcons.SkipNext, "下一帧") { indicator = null to formatTime(vm.extras.stepFrame(true)); interactions++ }
+                        FrameButton(AppIcons.Star, "书签") { pulseTick++; interactions++; scope.launch { vm.extras.addBookmark(playerView?.videoSurfaceView) } }
+                        FrameButton(AppIcons.SkipNext, "下一帧") { pulseTick++; indicator = null to formatTime(vm.extras.stepFrame(true)); interactions++ }
                     }
                 }
-                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (isLive) {
+                if (isLive) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium)
                         Spacer(Modifier.weight(1f))
                         // 实时字幕和画面对不上时手动对齐：字幕早了点「推后」，晚了点「提前」；点中间的数字细调
                         if (state.transcribing || state.cues.isNotEmpty()) {
                             val step = 500L
                             Text("字幕", color = Color.White, fontSize = 13.sp)
-                            TextButton(onClick = { vm.setSubtitleDelay(state.subtitleDelayMs - step); interactions++ }, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                            TextButton(
+                                onClick = { vm.setSubtitleDelay(state.subtitleDelayMs - step); interactions++ },
+                                contentPadding = PaddingValues(horizontal = 6.dp),
+                                modifier = Modifier.tvFocusRing(RoundedCornerShape(8.dp), color = Color.White, fillBackground = true),
+                            ) {
                                 Text("提前", color = Color.White, fontSize = 13.sp)
                             }
                             Text(
                                 "%+.1f 秒".format(state.subtitleDelayMs / 1000f), color = Orange, fontSize = 13.sp,
-                                modifier = Modifier.clickable { dialog = PlayerDialog.DELAY },
+                                modifier = Modifier
+                                    .tvFocusRing(RoundedCornerShape(8.dp), color = Color.White, fillBackground = true)
+                                    .clickable { dialog = PlayerDialog.DELAY }
+                                    .padding(horizontal = 4.dp, vertical = 2.dp),
                             )
-                            TextButton(onClick = { vm.setSubtitleDelay(state.subtitleDelayMs + step); interactions++ }, contentPadding = PaddingValues(horizontal = 6.dp)) {
+                            TextButton(
+                                onClick = { vm.setSubtitleDelay(state.subtitleDelayMs + step); interactions++ },
+                                contentPadding = PaddingValues(horizontal = 6.dp),
+                                modifier = Modifier.tvFocusRing(RoundedCornerShape(8.dp), color = Color.White, fillBackground = true),
+                            ) {
                                 Text("推后", color = Color.White, fontSize = 13.sp)
                             }
                         }
-                    } else {
-                        Text(formatClock(dragging?.toLong() ?: positionMs), color = Color.White, fontSize = 14.sp)
-                        Spacer(Modifier.weight(1f))
-                        state.loopA?.let { Text(if (state.loopB != null) "A-B 循环中  " else "A 点已设置  ", color = Orange, fontSize = 13.sp) }
-                        Text(formatClock(duration), color = Color.White, fontSize = 14.sp)
+                    }
+                } else if (state.loopA != null) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.End) {
+                        Text(if (state.loopB != null) "A-B 循环中" else "A 点已设置", color = Orange, fontSize = 13.sp)
                     }
                 }
                 // 真正的直播流没有时长、不能拖；有些"直播源"其实是点播流，仍然显示进度条
@@ -869,63 +967,213 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         extras.chapters.lastOrNull { it.startMs <= ms }?.title,
                     )
                 }
-                // 电视：进度条可以拿到焦点，左右键快退快进
-                if (seekable) Box(
-                    if (tv) Modifier.tvFocusRing(RoundedCornerShape(16.dp), color = Color.White)
-                        .onKeyEvent { e ->
-                            val code = e.nativeKeyEvent.keyCode
-                            val left = code == android.view.KeyEvent.KEYCODE_DPAD_LEFT
-                            if (!left && code != android.view.KeyEvent.KEYCODE_DPAD_RIGHT) return@onKeyEvent false
-                            if (e.type == KeyEventType.KeyDown) seekBy(if (left) -seekStep(e) else seekStep(e))
-                            true
+                // 进度条独立放置在下方控件胶囊上方，两端显示当前播放时间和总时间
+                if (seekable) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            formatClock(dragging?.toLong() ?: positionMs),
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Box(
+                            if (tv) Modifier.weight(1f)
+                                .tvFocusRing(RoundedCornerShape(16.dp), color = Color.White, fillBackground = true)
+                                .onKeyEvent { e ->
+                                    val code = e.nativeKeyEvent.keyCode
+                                    val left = code == android.view.KeyEvent.KEYCODE_DPAD_LEFT
+                                    if (!left && code != android.view.KeyEvent.KEYCODE_DPAD_RIGHT) return@onKeyEvent false
+                                    if (e.type == KeyEventType.KeyDown) seekBy(if (left) -seekStep(e) else seekStep(e))
+                                    true
+                                }
+                                .focusable().padding(horizontal = 4.dp)
+                            else Modifier.weight(1f),
+                        ) {
+                            SeekBar(
+                                fraction = fraction,
+                                durationMs = duration,
+                                chapters = extras.chapters.map { it.startMs },
+                                skips = extras.skipRanges.map { it.startMs to it.endMs },
+                                bookmarks = extras.bookmarks.map { it.positionMs },
+                                isDragging = dragging != null,
+                                onDrag = { f -> dragging = f * duration; vm.extras.requestThumbnail((f * duration).toLong()); interactions++ },
+                                onDragEnd = { dragging?.let { player.seekTo(it.toLong()) }; dragging = null; vm.extras.clearThumbnail() },
+                            )
                         }
-                        .focusable().padding(horizontal = 6.dp)
-                    else Modifier,
-                ) {
-                    SeekBar(
-                        fraction = fraction,
-                        durationMs = duration,
-                        chapters = extras.chapters.map { it.startMs },
-                        skips = extras.skipRanges.map { it.startMs to it.endMs },
-                        bookmarks = extras.bookmarks.map { it.positionMs },
-                        onDrag = { f -> dragging = f * duration; vm.extras.requestThumbnail((f * duration).toLong()); interactions++ },
-                        onDragEnd = { dragging?.let { player.seekTo(it.toLong()) }; dragging = null; vm.extras.clearThumbnail() },
-                    )
+                        Text(
+                            formatClock(duration),
+                            color = Color(0xFFD5DCE6),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
                 } else Spacer(Modifier.height(4.dp))
                 // 播放键居中，左右各一个上一集/下一集；外侧两组对称：
                 // 手机左=字幕、AI 字幕，右=旋转、更多；电视左=字幕、AI 字幕，右=倍速、更多（电视不能转屏）
                 val canSkip = vm.queueSize > 1 && !vm.usingVlc
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                val pillShape = RoundedCornerShape(50)
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp)
+                        .height(60.dp)
+                        .graphicsLayer {
+                            scaleX = barScaleX
+                            scaleY = barScaleY
+                        }
+                        .shadow(
+                            elevation = 18.dp,
+                            shape = barShape,
+                            ambientColor = Color(0x28000000),
+                            spotColor = Color(0x36000000),
+                        )
+                        .liquidGlass(
+                            shape = barShape,
+                            style = GlassStyle.Floating,
+                            tint = barTint,
+                            borderColor = Color(0x52FFFFFF),
+                            lightShift = lightPhase * 0.5f,
+                        )
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
                 ) {
-                    BarButton(AppIcons.Subtitles, "字幕与音轨", Modifier.weight(1f)) { tracksAi = false; showTracks = true }
-                    BarButton(AppIcons.AutoAwesome, "AI 字幕", Modifier.weight(1f)) { tracksAi = true; showTracks = true }
-                    BarButton(AppIcons.SkipPrevious, "上一集", Modifier.weight(1f), enabled = canSkip) { vm.skipInQueue(false, restartFirst = true); interactions++ }
-                    IconButton(
-                        onClick = { vm.togglePlay(); interactions++ },
-                        modifier = Modifier.padding(horizontal = 4.dp).focusRequester(playFocus).tvFocusRing(CircleShape, color = Color.White).size(56.dp).clip(CircleShape).background(Color.Transparent),
-                    ) {
+                    // 1. 底层主页同款液态玻璃水滴胶囊指示器（点击按钮或遥控器移动焦点时平滑拉伸、挤压与微弹）
+                    BoxWithConstraints(Modifier.fillMaxSize()) {
+                        val count = 7
+                        val safeMaxW = maxWidth.coerceAtLeast(1.dp)
+                        val slotWidth = (safeMaxW / count).coerceIn(1.dp, safeMaxW)
+                        val leftEdgeIndex = min(fastPos, slowPos)
+                        val rightEdgeIndex = max(fastPos, slowPos)
+                        val stretch = (rightEdgeIndex - leftEdgeIndex).coerceIn(0f, count.toFloat())
+                        val extraWidthFactor = (stretch * 1.05f + abs(wobble) * 0.24f + dockPress * 0.08f).coerceIn(0f, count.toFloat())
+                        val centerShift = (extraWidthFactor - stretch) * 0.5f
+                        val dropletWidth = (slotWidth * (1f + extraWidthFactor)).coerceIn(slotWidth, safeMaxW)
+                        val maxLeft = (safeMaxW - dropletWidth).coerceAtLeast(0.dp)
+                        val dropletLeft = (slotWidth * (leftEdgeIndex - centerShift)).coerceIn(0.dp, maxLeft)
+                        val dropletScaleY = (1f - (stretch * 0.12f).coerceAtMost(0.14f) + abs(wobble) * 0.06f - dockPress * 0.04f)
+                            .coerceIn(0.86f, 1.04f)
+
                         Box(
                             Modifier
-                                .size(54.dp)
-                                .liquidGlass(shape = CircleShape, style = GlassStyle.Floating, tint = Color(0x36FFFFFF)),
-                            contentAlignment = Alignment.Center,
+                                .padding(start = dropletLeft)
+                                .size(width = dropletWidth, height = maxHeight)
+                                .graphicsLayer {
+                                    scaleY = dropletScaleY
+                                }
+                                .shadow(
+                                    elevation = 8.dp,
+                                    shape = pillShape,
+                                    ambientColor = activeAccent.copy(alpha = 0.22f),
+                                    spotColor = activeAccent.copy(alpha = 0.32f),
+                                )
+                                .liquidGlass(
+                                    shape = pillShape,
+                                    style = GlassStyle.Floating,
+                                    tint = dropletTint,
+                                    borderColor = if (tv && focusedSlot >= 0) Color.White else Color(0x88FFFFFF),
+                                    lightShift = lightPhase,
+                                ),
+                        )
+                    }
+
+                    // 2. 顶层 7 个控制按钮（带柔和按压回弹与水滴联动，各图标经视觉补偿使大小观感一致）
+                    Row(
+                        Modifier.fillMaxSize(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        BarButton(
+                            icon = AppIcons.Subtitles,
+                            label = "字幕与音轨",
+                            modifier = Modifier.weight(1f),
+                            iconSize = 22.dp,
+                            active = effectiveSlot == 0 && targetSlot != 3,
+                            onFocusChange = { if (it) focusedSlot = 0 else if (focusedSlot == 0) focusedSlot = -1 },
                         ) {
-                            Icon(if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow, if (wantsPlay) "暂停" else "播放", tint = Color.White, modifier = Modifier.size(32.dp))
+                            targetSlot = 0; pulseTick++; tracksAi = false; showTracks = true; interactions++
+                        }
+                        BarButton(
+                            icon = AppIcons.AutoAwesome,
+                            label = "AI 字幕",
+                            modifier = Modifier.weight(1f),
+                            iconSize = 22.dp,
+                            active = effectiveSlot == 1 && targetSlot != 3,
+                            onFocusChange = { if (it) focusedSlot = 1 else if (focusedSlot == 1) focusedSlot = -1 },
+                        ) {
+                            targetSlot = 1; pulseTick++; tracksAi = true; showTracks = true; interactions++
+                        }
+                        BarButton(
+                            icon = AppIcons.SkipPrevious,
+                            label = "上一集",
+                            modifier = Modifier.weight(1f),
+                            iconSize = 27.dp,
+                            enabled = canSkip,
+                            active = effectiveSlot == 2 && targetSlot != 3,
+                            onFocusChange = { if (it) focusedSlot = 2 else if (focusedSlot == 2) focusedSlot = -1 },
+                        ) {
+                            targetSlot = 2; pulseTick++; vm.skipInQueue(false, restartFirst = true); interactions++
+                        }
+                        BarButton(
+                            icon = if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow,
+                            label = if (wantsPlay) "暂停" else "播放",
+                            modifier = Modifier.weight(1f).focusRequester(playFocus),
+                            iconSize = 27.dp,
+                            isCenter = true,
+                            active = effectiveSlot == 3,
+                            onFocusChange = { if (it) focusedSlot = 3 else if (focusedSlot == 3) focusedSlot = -1 },
+                        ) {
+                            targetSlot = 3; pulseTick++; vm.togglePlay(); interactions++
+                        }
+                        BarButton(
+                            icon = AppIcons.SkipNext,
+                            label = "下一集",
+                            modifier = Modifier.weight(1f),
+                            iconSize = 27.dp,
+                            enabled = canSkip,
+                            active = effectiveSlot == 4 && targetSlot != 3,
+                            onFocusChange = { if (it) focusedSlot = 4 else if (focusedSlot == 4) focusedSlot = -1 },
+                        ) {
+                            targetSlot = 4; pulseTick++; vm.skipInQueue(true); interactions++
+                        }
+                        if (tv) {
+                            // 电视没有手势调速，放个倍速按钮；也让播放两边对称
+                            BarButton(
+                                icon = AppIcons.Speed,
+                                label = "倍速",
+                                modifier = Modifier.weight(1f),
+                                iconSize = 22.dp,
+                                active = effectiveSlot == 5 && targetSlot != 3,
+                                onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
+                            ) {
+                                targetSlot = 5; pulseTick++; dialog = PlayerDialog.SPEED; interactions++
+                            }
+                        } else {
+                            BarButton(
+                                icon = AppIcons.ScreenRotation,
+                                label = "旋转屏幕",
+                                modifier = Modifier.weight(1f),
+                                iconSize = 21.dp,
+                                active = effectiveSlot == 5 && targetSlot != 3,
+                                onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
+                            ) {
+                                targetSlot = 5; pulseTick++
+                                activity?.requestedOrientation =
+                                    if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                interactions++
+                            }
+                        }
+                        BarButton(
+                            icon = AppIcons.MoreHoriz,
+                            label = "更多",
+                            modifier = Modifier.weight(1f),
+                            iconSize = 25.dp,
+                            active = effectiveSlot == 6 && targetSlot != 3,
+                            onFocusChange = { if (it) focusedSlot = 6 else if (focusedSlot == 6) focusedSlot = -1 },
+                        ) {
+                            targetSlot = 6; pulseTick++; showMore = true; interactions++
                         }
                     }
-                    BarButton(AppIcons.SkipNext, "下一集", Modifier.weight(1f), enabled = canSkip) { vm.skipInQueue(true); interactions++ }
-                    if (tv) {
-                        // 电视没有手势调速，放个倍速按钮；也让播放两边对称
-                        BarButton(AppIcons.Speed, "倍速", Modifier.weight(1f)) { dialog = PlayerDialog.SPEED }
-                    } else {
-                        BarButton(AppIcons.ScreenRotation, "旋转屏幕", Modifier.weight(1f)) {
-                            activity?.requestedOrientation =
-                                if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                        }
-                    }
-                    BarButton(AppIcons.MoreHoriz, "更多", Modifier.weight(1f)) { showMore = true }
                 }
             }
         }
@@ -1430,8 +1678,45 @@ private fun SeekPreview(fraction: Float, image: android.graphics.Bitmap?, time: 
 
 @Composable
 private fun FrameButton(icon: ImageVector, label: String, onClick: () -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    var clickPulse by remember { mutableStateOf(false) }
+    LaunchedEffect(clickPulse) {
+        if (clickPulse) {
+            delay(85)
+            clickPulse = false
+        }
+    }
+    val activePress = isPressed || clickPulse
+    val scaleX by animateFloatAsState(
+        targetValue = if (activePress) 0.92f else 1f,
+        animationSpec = spring(dampingRatio = 0.52f, stiffness = 360f),
+        label = "frameBtnScaleX",
+    )
+    val scaleY by animateFloatAsState(
+        targetValue = if (activePress) 0.88f else 1f,
+        animationSpec = spring(dampingRatio = 0.50f, stiffness = 320f),
+        label = "frameBtnScaleY",
+    )
     Column(
-        Modifier.tvFocusRing(RoundedCornerShape(8.dp), color = Color.White).clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 4.dp),
+        Modifier
+            .graphicsLayer {
+                this.scaleX = scaleX
+                this.scaleY = scaleY
+            }
+            .tvFocusRing(RoundedCornerShape(10.dp), color = Color.White, scale = true, fillBackground = true)
+            .let {
+                if (activePress) {
+                    it.liquidGlass(shape = RoundedCornerShape(10.dp), style = GlassStyle.Pill, tint = Color(0xB32E3B52), lightShift = 0.8f)
+                } else it
+            }
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = { clickPulse = true; onClick() },
+            )
+            .padding(horizontal = 12.dp, vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Icon(icon, label, tint = Color.White, modifier = Modifier.size(24.dp))
@@ -1440,7 +1725,7 @@ private fun FrameButton(icon: ImageVector, label: String, onClick: () -> Unit) {
 }
 
 /**
- * VLC 风格的细进度条：灰色细线 + 橙色已播放段 + 小圆点；点按或拖动跳转。
+ * 液态玻璃风格的细进度条：半透明流光细线 + 橙色已播放段 + 弹性水滴滑块；点按或拖动跳转。
  * 线上标出章节（白色刻度）、片头片尾等跳过区间（浅色段）和书签（黄点）。
  */
 @Composable
@@ -1450,10 +1735,17 @@ private fun SeekBar(
     chapters: List<Long>,
     skips: List<Pair<Long, Long>>,
     bookmarks: List<Long>,
+    isDragging: Boolean = false,
     onDrag: (Float) -> Unit,
     onDragEnd: () -> Unit,
 ) {
     var widthPx by remember { mutableFloatStateOf(1f) }
+    val thumbScale by animateFloatAsState(
+        targetValue = if (isDragging) 1.18f else 1f,
+        animationSpec = spring(dampingRatio = 0.54f, stiffness = 380f),
+        label = "seekThumbScale",
+    )
+    val trackHeight = if (isDragging) 5.dp else 4.dp
     Box(
         Modifier.fillMaxWidth().padding(horizontal = 8.dp).height(32.dp)
             .onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
@@ -1469,7 +1761,7 @@ private fun SeekBar(
             },
         contentAlignment = Alignment.CenterStart,
     ) {
-        Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color(0x55FFFFFF)))
+        Box(Modifier.fillMaxWidth().height(trackHeight).clip(RoundedCornerShape(50)).background(Color(0x44FFFFFF)))
         if (durationMs > 0) {
             Canvas(Modifier.fillMaxWidth().height(12.dp)) {
                 val cy = size.height / 2
@@ -1488,22 +1780,114 @@ private fun SeekBar(
                 }
             }
         }
-        Box(Modifier.fillMaxWidth(fraction).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Orange))
+        Box(Modifier.fillMaxWidth(fraction).height(trackHeight).clip(RoundedCornerShape(50)).background(Orange))
         Box(
             Modifier.offset {
                 val thumbPx = 16.dp.toPx()
                 val travel = (widthPx - thumbPx).coerceAtLeast(0f)
                 IntOffset((fraction * travel).roundToInt(), 0)
             }
-                .size(16.dp).clip(CircleShape).background(Orange),
+                .size(16.dp)
+                .graphicsLayer {
+                    scaleX = thumbScale
+                    scaleY = thumbScale
+                }
+                .shadow(4.dp, CircleShape, ambientColor = Orange.copy(alpha = 0.45f), spotColor = Orange.copy(alpha = 0.65f))
+                .clip(CircleShape)
+                .background(Orange),
         )
     }
 }
 
 @Composable
-private fun BarButton(icon: ImageVector, label: String, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
-    IconButton(onClick = onClick, enabled = enabled, modifier = modifier.tvFocusRing(CircleShape, color = Color.White).height(48.dp)) {
-        Icon(icon, label, tint = if (enabled) Color.White else Color(0x66FFFFFF), modifier = Modifier.size(26.dp))
+private fun BarButton(
+    icon: ImageVector,
+    label: String,
+    modifier: Modifier = Modifier,
+    iconSize: Dp = 24.dp,
+    enabled: Boolean = true,
+    isCenter: Boolean = false,
+    active: Boolean = false,
+    onFocusChange: (Boolean) -> Unit = {},
+    onClick: () -> Unit,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    var focusedNode by remember { mutableStateOf(false) }
+    var clickPulse by remember { mutableStateOf(false) }
+    val tv = LocalTv.current
+    val focused = tv && (isFocused || focusedNode)
+
+    LaunchedEffect(focused) {
+        onFocusChange(focused)
+    }
+    LaunchedEffect(clickPulse) {
+        if (clickPulse) {
+            delay(85)
+            clickPulse = false
+        }
+    }
+
+    val activePress = isPressed || clickPulse
+    val scaleX by animateFloatAsState(
+        targetValue = when {
+            activePress -> 0.90f
+            focused -> 1.08f
+            active && !isCenter -> 1.04f
+            else -> 1f
+        },
+        animationSpec = spring(dampingRatio = 0.52f, stiffness = 360f),
+        label = "barBtnScaleX",
+    )
+    val scaleY by animateFloatAsState(
+        targetValue = when {
+            activePress -> 0.86f
+            focused -> 1.08f
+            active && !isCenter -> 1.04f
+            else -> 1f
+        },
+        animationSpec = spring(dampingRatio = 0.50f, stiffness = 320f),
+        label = "barBtnScaleY",
+    )
+    val iconColor by animateColorAsState(
+        targetValue = when {
+            !enabled -> Color(0x55FFFFFF)
+            focused -> Color.White
+            active && !isCenter -> Color(0xFF4DA3FF)
+            isCenter -> Color.White
+            else -> Color(0xFFD5DCE6)
+        },
+        animationSpec = tween(durationMillis = 150),
+        label = "barBtnColor",
+    )
+
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            .onFocusChanged { focusedNode = it.isFocused }
+            .graphicsLayer {
+                this.scaleX = scaleX
+                this.scaleY = scaleY
+            }
+            .clip(RoundedCornerShape(50))
+            .let {
+                if (enabled) {
+                    it.clickable(
+                        interactionSource = interactionSource,
+                        indication = null,
+                        onClick = { clickPulse = true; onClick() },
+                    )
+                } else it
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = iconColor,
+            modifier = Modifier.size(iconSize),
+        )
     }
 }
 
@@ -1521,6 +1905,7 @@ private fun TaskChip(state: UiState, onClick: () -> Unit, modifier: Modifier = M
     }
     Row(
         modifier
+            .tvFocusRing(RoundedCornerShape(50), color = Color.White, scale = true, fillBackground = true)
             .liquidGlass(
                 shape = RoundedCornerShape(50),
                 style = GlassStyle.Pill,
@@ -2047,7 +2432,7 @@ private fun GroupLabel(text: String) {
 @Composable
 private fun SheetHeader(title: String, open: Boolean, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 16.dp),
+        Modifier.fillMaxWidth().tvFocusRing(RoundedCornerShape(8.dp)).tvSecondaryClick(allowDpadRight = true, onSecondaryClick = onClick).clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(title, color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, modifier = Modifier.weight(1f))
@@ -2134,7 +2519,9 @@ private fun CueList(
             Box {
                 Row(
                     Modifier.fillMaxWidth().height(IntrinsicSize.Min)
+                        .tvFocusRing(RoundedCornerShape(6.dp))
                         .background(if (active) Color(0x33F28C00) else Color.Transparent)
+                        .tvSecondaryClick(allowDpadRight = true) { menu = true }
                         .combinedClickable(onClick = { onSeek(cue) }, onLongClick = { menu = true }),
                 ) {
                     Box(Modifier.width(3.dp).fillMaxHeight().background(if (active) Orange else Color.Transparent))
