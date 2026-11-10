@@ -72,6 +72,21 @@ import java.awt.image.BufferedImage
 import java.io.File
 import javax.swing.UIManager
 
+object DesktopAppRestarter {
+    @Volatile
+    var onRestart: (() -> Unit)? = null
+
+    fun restart(context: android.content.Context) {
+        val action = onRestart
+        if (action != null) {
+            javax.swing.SwingUtilities.invokeLater {
+                action.invoke()
+                Toast.makeText(context, "已导入备份并重新加载数据", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+}
+
 private fun createAppIconImage(): BufferedImage {
     val size = 64
     val img = BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
@@ -129,6 +144,8 @@ fun main(args: Array<String>) {
     val appIcon = createAppIconImage()
 
     application {
+        var activeActivity by remember { mutableStateOf(mainActivity) }
+        var restartGeneration by remember { mutableStateOf(0) }
         var showMainWindow by remember { mutableStateOf(true) }
         var showFloatingSubtitles by remember { mutableStateOf(false) }
         val floatingState by liveTranscriber.state.collectAsState()
@@ -137,6 +154,28 @@ fun main(args: Array<String>) {
             position = WindowPosition(Alignment.Center),
         )
         val iconPainter = remember { BitmapPainter(appIcon.toComposeImageBitmap()) }
+
+        DisposableEffect(Unit) {
+            DesktopAppRestarter.onRestart = {
+                runCatching { activeActivity.dispatchOnStop() }
+                androidx.lifecycle.DesktopViewModelStore.clearAll()
+                com.aisub.player.SettingsRepository(voxApp).load().let {
+                    com.aisub.player.net.AppProxy.apply(voxApp, it.proxyType, it.proxyHost, it.proxyPort)
+                }
+                val store = com.aisub.player.media.AppStore(voxApp)
+                com.aisub.player.remote.cloud.CloudRegistry.serverLookup = { id -> store.servers().firstOrNull { it.id == id } }
+                com.aisub.player.remote.cloud.CloudRegistry.serverSaver = { server -> store.updateServerCredentials(server) }
+                store.servers().forEach { com.aisub.player.remote.cloud.CloudRegistry.forget(it.id) }
+                val next = MainActivity()
+                next.getSharedPreferences("app", 0).edit().putBoolean("onboarded", true).apply()
+                next.dispatchOnCreate(null)
+                activeActivity = next
+                restartGeneration++
+            }
+            onDispose {
+                DesktopAppRestarter.onRestart = null
+            }
+        }
 
         // Windows 系统托盘图标与快捷菜单
         Tray(
@@ -161,7 +200,7 @@ fun main(args: Array<String>) {
                 Separator()
                 Item("退出译幕") {
                     liveTranscriber.stop()
-                    mainActivity.dispatchOnStop()
+                    activeActivity.dispatchOnStop()
                     exitApplication()
                 }
             },
@@ -183,7 +222,7 @@ fun main(args: Array<String>) {
                         showMainWindow = false
                     } else {
                         liveTranscriber.stop()
-                        mainActivity.dispatchOnStop()
+                        activeActivity.dispatchOnStop()
                         exitApplication()
                     }
                 },
@@ -213,13 +252,13 @@ fun main(args: Array<String>) {
                                             val list = transferable.getTransferData(DataFlavor.javaFileListFlavor) as? List<*>
                                             val firstFile = list?.firstOrNull() as? File
                                             if (firstFile != null) {
-                                                dispatchExternalFileOrUrl(mainActivity, firstFile.absolutePath)
+                                                dispatchExternalFileOrUrl(activeActivity, firstFile.absolutePath)
                                             }
                                         }
                                         transferable.isDataFlavorSupported(DataFlavor.stringFlavor) -> {
                                             val str = transferable.getTransferData(DataFlavor.stringFlavor) as? String
                                             if (!str.isNullOrBlank()) {
-                                                dispatchExternalFileOrUrl(mainActivity, str)
+                                                dispatchExternalFileOrUrl(activeActivity, str)
                                             }
                                         }
                                     }
@@ -252,13 +291,14 @@ fun main(args: Array<String>) {
                     }
                 }
 
-                CompositionLocalProvider(
-                    LocalContext provides mainActivity,
-                    LocalConfiguration provides configuration,
-                    LocalLifecycleOwner provides DesktopLifecycleOwner,
-                ) {
-                    Box(Modifier.fillMaxSize()) {
-                        mainActivity.desktopContent?.invoke()
+                androidx.compose.runtime.key(restartGeneration) {
+                    CompositionLocalProvider(
+                        LocalContext provides activeActivity,
+                        LocalConfiguration provides configuration,
+                        LocalLifecycleOwner provides DesktopLifecycleOwner,
+                    ) {
+                        Box(Modifier.fillMaxSize()) {
+                            activeActivity.desktopContent?.invoke()
 
                         // 右上角快捷胶囊：一键开启/关闭「Windows 桌面全局字幕」或解除鼠标穿透
                         Box(
@@ -359,4 +399,5 @@ fun main(args: Array<String>) {
             }
         }
     }
+}
 }

@@ -305,7 +305,11 @@ private fun ImportDialog(file: BackupFile, onDismiss: () -> Unit) {
                     busy = true
                     scope.launch {
                         runCatching { withContext(Dispatchers.IO) { Backup.import(context, file, picked) } }
-                            .onSuccess { restartApp(context) }
+                            .onSuccess {
+                                busy = false
+                                onDismiss()
+                                restartApp(context)
+                            }
                             .onFailure { error = "导入失败：${it.message}"; busy = false }
                     }
                 },
@@ -317,9 +321,5 @@ private fun ImportDialog(file: BackupFile, onDismiss: () -> Unit) {
 
 /** 重新启动应用：各页面、网盘客户端都重新读取导入的数据 */
 private fun restartApp(context: Context) {
-    val pm = context.packageManager
-    val intent = (pm.getLaunchIntentForPackage(context.packageName) ?: pm.getLeanbackLaunchIntentForPackage(context.packageName))
-        ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK) ?: return
-    context.startActivity(intent)
-    Runtime.getRuntime().exit(0)
+    com.aisub.player.desktop.DesktopAppRestarter.restart(context)
 }

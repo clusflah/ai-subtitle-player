@@ -40,7 +40,8 @@ class PackageManager {
     fun getPackageArchiveInfo(archiveFilePath: String, flags: Int): PackageInfo? = PackageInfo()
     fun canRequestPackageInstalls(): Boolean = true
     fun hasSystemFeature(name: String): Boolean = false
-    fun getLaunchIntentForPackage(packageName: String): Intent? = null
+    fun getLaunchIntentForPackage(packageName: String): Intent? =
+        if (packageName == BuildConfig.APPLICATION_ID) Intent(Intent.ACTION_MAIN).putExtra("desktop_restart", true) else null
     fun getLeanbackLaunchIntentForPackage(packageName: String): Intent? = null
 
     class NameNotFoundException(msg: String = "") : Exception(msg)
