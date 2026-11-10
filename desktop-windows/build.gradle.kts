@@ -164,11 +164,11 @@ compose.desktop {
             targetFormats(TargetFormat.Msi, TargetFormat.Exe)
             packageName = "Voxtitle"
             packageVersion = version.toString()
-            description = "译幕 Voxtitle - AI 字幕播放器与媒体中心 (Windows 桌面版)"
+            description = "Voxtitle - AI Subtitle Player and Media Center"
             vendor = "Voxtitle"
             includeAllModules = true
             windows {
-                menuGroup = "译幕 Voxtitle"
+                menuGroup = "Voxtitle"
                 shortcut = true
                 dirChooser = true
                 perUserInstall = true

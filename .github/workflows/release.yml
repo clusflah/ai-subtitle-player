@@ -81,6 +81,15 @@ jobs:
         run: |
           .\gradlew.bat -p desktop-windows packageDistributionForCurrentOS createDistributable --no-daemon
 
+      - name: Print jpackage Logs on Failure
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-ChildItem "desktop-windows/build/compose/logs" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "=== $($_.FullName) ==="
+            Get-Content $_.FullName
+          }
+
       - name: Collect Windows Binaries
         shell: pwsh
         run: |
