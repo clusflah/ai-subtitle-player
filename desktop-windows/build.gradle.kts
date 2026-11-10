@@ -114,6 +114,13 @@ dependencies {
     implementation(compose.materialIconsExtended)
     implementation("androidx.annotation:annotation:1.9.1")
 
+    // Jetpack Lifecycle & ViewModel (Compose Multiplatform)
+    implementation("org.jetbrains.androidx.lifecycle:lifecycle-common:2.8.4")
+    implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime:2.8.4")
+    implementation("org.jetbrains.androidx.lifecycle:lifecycle-viewmodel:2.8.4")
+    implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.8.4")
+    implementation("org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
+
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.9.0")
 
