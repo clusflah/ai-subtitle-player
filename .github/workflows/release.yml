@@ -1,4 +1,4 @@
-name: Build & Release APK
+name: Build & Release
 
 on:
   push:
@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-android:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -49,7 +49,7 @@ jobs:
       - name: Collect APKs
         run: |
           VERSION=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
-          mkdir dist
+          mkdir -p dist
           # 标准版：四个包；下载版（内置 yt-dlp）：不出通用包，太大
           for abi in arm64-v8a armeabi-v7a x86_64 universal; do
             cp "app/build/outputs/apk/standard/release/app-standard-$abi-release.apk" "dist/Voxtitle-$VERSION-$abi.apk"
@@ -62,17 +62,67 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: apks
+          name: android-apks
           path: dist/*.apk
 
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v5
+
+      - name: Build Windows Packages
+        run: |
+          .\gradlew.bat -p desktop-windows packageDistributionForCurrentOS createDistributable --no-daemon
+
+      - name: Collect Windows Binaries
+        shell: pwsh
+        run: |
+          $ver = (Get-Content app/build.gradle.kts | Select-String 'versionName = "([^"]+)"').Matches.Groups[1].Value
+          New-Item -ItemType Directory -Path dist -Force
+          Copy-Item "desktop-windows/build/compose/binaries/main/exe/Voxtitle-*.exe" "dist/Voxtitle-$ver-windows-x64-Setup.exe" -ErrorAction SilentlyContinue
+          Copy-Item "desktop-windows/build/compose/binaries/main/msi/Voxtitle-*.msi" "dist/Voxtitle-$ver-windows-x64.msi" -ErrorAction SilentlyContinue
+          Compress-Archive -Path "desktop-windows/build/compose/binaries/main/app/Voxtitle/*" -DestinationPath "dist/Voxtitle-$ver-windows-x64-portable.zip" -Force
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: windows-binaries
+          path: dist/*
+
+  publish-release:
+    needs: [build-android, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+
+      - name: Collect All Release Assets
+        run: |
+          VERSION=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          ls -lh dist
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           # 推送 tag 触发时用该 tag；手动运行时按 versionName 在当前提交上新建 tag
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then TAG="$GITHUB_REF_NAME"; else TAG="v$VERSION"; fi
-          gh release create "$TAG" dist/*.apk \
+          gh release create "$TAG" dist/* \
             --target "$GITHUB_SHA" \
             --title "译幕 Voxtitle $TAG" \
-            --notes-file .github/release-notes.md
+            --notes-file .github/release-notes.md || \
+          gh release upload "$TAG" dist/* --clobber

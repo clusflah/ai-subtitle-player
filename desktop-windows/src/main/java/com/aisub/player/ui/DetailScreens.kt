@@ -1,0 +1,554 @@
+package com.aisub.player.ui
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import android.widget.Toast
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.aisub.player.LibraryViewModel
+import com.aisub.player.MainViewModel
+import com.aisub.player.media.LocalBrowser
+import com.aisub.player.media.Downloads
+import com.aisub.player.media.MediaEntry
+import com.aisub.player.media.formatSize
+import com.aisub.player.media.formatDuration
+import com.aisub.player.remote.RemoteItem
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun DetailScaffold(
+    title: String,
+    onBack: () -> Unit,
+    actions: @Composable () -> Unit = {},
+    content: @Composable () -> Unit,
+) {
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
+        topBar = {
+            TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest),
+                navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回") } },
+                title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                actions = { actions() },
+            )
+        },
+    ) { padding ->
+        Box(
+            Modifier
+                .padding(padding)
+                .fillMaxSize(),
+        ) {
+            content()
+        }
+    }
+}
+
+/** 本地目录：子文件夹 + 媒体文件。 */
+@Composable
+fun LocalFolderScreen(
+    lib: LibraryViewModel,
+    path: String,
+    title: String,
+    onBack: () -> Unit,
+    openFolder: (String, String) -> Unit,
+    play: (List<MediaEntry>, Int) -> Unit,
+) {
+    val state by lib.state.collectAsStateWithLifecycle()
+    val all = remember(state.videos, state.audios) { state.videos + state.audios }
+    val (folders, files) = remember(all, path) { LocalBrowser.children(all, path) }
+    var addTo by remember { mutableStateOf<List<MediaEntry>?>(null) }
+    val fm = rememberFileManager(lib) { addTo = it }
+    addTo?.let { entries ->
+        AddToPlaylistDialog(
+            playlists = state.playlists,
+            onDismiss = { addTo = null },
+            onPick = { p -> entries.forEach { lib.addToPlaylist(p.id, it) }; addTo = null },
+            onCreate = { lib.createPlaylistWith(it, entries); addTo = null },
+        )
+    }
+    // 长按文件进入多选
+    var selected by remember(path) { mutableStateOf(emptySet<String>()) }
+    val selectedEntries = files.filter { it.uri in selected }
+    BackHandler(enabled = selected.isNotEmpty()) { selected = emptySet() }
+    val toggle: (MediaEntry) -> Unit = { e -> selected = if (e.uri in selected) selected - e.uri else selected + e.uri }
+    val inFolder: (String) -> List<MediaEntry> = { p -> all.filter { it.folder == p || it.folder.startsWith("$p/") } }
+
+    val favoriteMenu: (String, String) -> MenuAction = { p, name ->
+        if (state.favoriteFolders.any { it.serverId == null && it.path == p }) MenuAction("取消收藏") { lib.toggleFavoriteFolder(null, p, name) }
+        else MenuAction("收藏到首页") { lib.toggleFavoriteFolder(null, p, name) }
+    }
+    val context = LocalContext.current
+    var hiding by remember { mutableStateOf<Pair<String, String>?>(null) }
+    hiding?.let { (p, name) ->
+        HideFolderDialog(lib, name, onDismiss = { hiding = null }) {
+            lib.hideFolder(null, p, name)
+            hiding = null
+            Toast.makeText(context, "已隐藏「$name」", Toast.LENGTH_SHORT).show()
+            if (p == path) onBack()
+        }
+    }
+    val hideMenu: (String, String) -> MenuAction = { p, name ->
+        if (lib.isHiddenFolder(null, p)) MenuAction("取消隐藏") { lib.unhideFolder(null, p) }
+        else MenuAction("隐藏文件夹") { hiding = p to name }
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        DetailScaffold(
+            title, onBack,
+            actions = {
+                if (path.isNotEmpty()) FavoriteFolderButton(lib, null, path, title)
+                if (files.isNotEmpty() || path.isNotEmpty()) {
+                    OverflowMenu(
+                        (if (files.isNotEmpty()) listOf(
+                            MenuAction("全部播放") { play(files, 0) },
+                            MenuAction("选择…") { selected = setOf(files.first().uri) },
+                        ) else emptyList()) +
+                            (if (path.isNotEmpty()) fm.folderMenu(path, inFolder(path)) { play(inFolder(path), 0) }.drop(1) + hideMenu(path, title) else emptyList()),
+                    )
+                }
+            },
+        ) {
+            if (folders.isEmpty() && files.isEmpty()) {
+                EmptyState("这个文件夹里没有媒体文件", icon = AppIcons.Folder)
+                return@DetailScaffold
+            }
+            val selecting = selected.isNotEmpty()
+            LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+                items(folders, key = { "d:" + it.path }) { f ->
+                    val entries = inFolder(f.path)
+                    FolderRow(
+                        f.name, subtitle = countText(f.folderCount, f.fileCount),
+                        menu = if (selecting) emptyList() else listOf(favoriteMenu(f.path, f.name)) + fm.folderMenu(f.path, entries) { play(entries, 0) } + hideMenu(f.path, f.name),
+                    ) { openFolder(f.path, f.name) }
+                }
+                itemsIndexed(files, key = { _, e -> e.uri }) { i, e ->
+                    MediaRow(e, fm.menu(e), selected = if (selecting) e.uri in selected else null, onLongClick = { toggle(e) }) {
+                        if (selecting) toggle(e) else play(files, i)
+                    }
+                }
+            }
+        }
+        if (selected.isNotEmpty()) {
+            SelectionBar(
+                count = selected.size,
+                onClose = { selected = emptySet() },
+                onSelectAll = { selected = files.map { it.uri }.toSet() },
+                onShare = { fm.share(selectedEntries) },
+                onAddToPlaylist = { addTo = selectedEntries },
+                onMove = { fm.move(selectedEntries); selected = emptySet() },
+                onCopy = { fm.copy(selectedEntries); selected = emptySet() },
+                onDelete = { fm.delete(selectedEntries); selected = emptySet() },
+            )
+        }
+    }
+}
+
+/** 网络目录（WebDAV / OpenList）。 */
+@Composable
+fun RemoteFolderScreen(
+    lib: LibraryViewModel,
+    serverId: String,
+    path: String,
+    title: String,
+    onBack: () -> Unit,
+    openFolder: (RemoteItem) -> Unit,
+    play: (List<MediaEntry>, Int) -> Unit,
+    /** 参数：文件、播放队列、在队列里的位置、同目录的全部条目 */
+    openDetail: (RemoteItem, List<MediaEntry>, Int, List<RemoteItem>) -> Unit,
+    openImages: (List<RemoteItem>, Int) -> Unit,
+    /** 用漫画阅读打开（压缩包 / PDF、图片文件夹） */
+    openManga: (MangaOpen) -> Unit,
+    /** 上一级文件夹的路径（页面栈里的前一个同服务器目录）；用漫画模式看这个文件夹时，同级的文件夹当上一话、下一话 */
+    parentPath: String? = null,
+    /** 海报墙缺海报时到网上找要用（TMDB Key、是否用豆瓣） */
+    settings: com.aisub.player.AppSettings,
+) {
+    val server = lib.server(serverId)
+    val appContext = LocalContext.current.applicationContext
+    val viewPrefs = remember { com.aisub.player.media.ViewPrefs(appContext) }
+    var posterWall by remember { mutableStateOf(viewPrefs.grid("remote")) }
+    val state by lib.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var loaded by remember { mutableStateOf<List<RemoteItem>?>(null) }
+    // 隐藏的子文件夹不列出来
+    val items = remember(loaded, state.hiddenFolders, state.showHidden) { loaded?.filterNot { it.isDir && lib.isHidden(serverId, it.path) } }
+    var error by remember { mutableStateOf<String?>(null) }
+    var reload by remember { mutableIntStateOf(0) }
+    var busy by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf<RemoteItem?>(null) }
+    var deleting by remember { mutableStateOf<RemoteItem?>(null) }
+    var creatingFolder by remember { mutableStateOf(false) }
+    var addTo by remember { mutableStateOf<List<MediaEntry>?>(null) }
+    var downloadPlan by remember { mutableStateOf<Downloads.Plan?>(null) }
+
+    LaunchedEffect(serverId, path, reload) {
+        if (server == null) return@LaunchedEffect
+        loaded = null
+        error = null
+        try {
+            loaded = lib.client(server).list(path)
+            lib.recordServerVisit(serverId, ok = true)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            lib.recordServerVisit(serverId, ok = false)
+            error = e.message ?: e.toString()
+        }
+    }
+
+    /** 执行一个写操作：完成后提示并刷新目录。 */
+    fun operate(done: String, op: suspend (com.aisub.player.remote.RemoteClient) -> Unit) {
+        if (server == null || busy) return
+        busy = true
+        scope.launch {
+            try {
+                op(lib.client(server))
+                Toast.makeText(context, done, Toast.LENGTH_SHORT).show()
+                reload++
+            } catch (e: Exception) {
+                Toast.makeText(context, "操作失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
+            }
+            busy = false
+        }
+    }
+
+    fun download(jobs: List<Downloads.Job>) {
+        scope.launch {
+            try {
+                val n = Downloads.enqueue(context, jobs)
+                Toast.makeText(context, "已加入下载 $n 个文件，保存到 Download/${Downloads.ROOT}，进度见通知栏", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(context, "下载失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    /** 文件夹先统计文件数和大小，确认后再下载。 */
+    fun downloadFolder(folder: RemoteItem) {
+        if (server == null || busy) return
+        busy = true
+        scope.launch {
+            try {
+                downloadPlan = Downloads.planFolder(lib.client(server), folder)
+            } catch (e: Exception) {
+                Toast.makeText(context, "读取文件夹失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
+            }
+            busy = false
+        }
+    }
+
+    /** 同一目录里的媒体文件，作为详情页「播放」时的队列。 */
+    fun showDetail(item: RemoteItem) {
+        val mediaFiles = items.orEmpty().filter { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }
+        val i = mediaFiles.indexOf(item)
+        val all = items.orEmpty()
+        if (i >= 0) openDetail(item, mediaFiles.map { it.toMediaEntry() }, i, all) else openDetail(item, emptyList(), 0, all)
+    }
+
+    /** 点击：文件夹进入，图片看图，音频直接播放，视频和其他文件进详情页。 */
+    fun open(item: RemoteItem) {
+        val all = items.orEmpty()
+        when {
+            item.isDir -> openFolder(item)
+            MediaEntry.isImageName(item.name) -> {
+                val images = all.filter { !it.isDir && it.playUrl != null && MediaEntry.isImageName(it.name) }
+                openImages(images, images.indexOf(item).coerceAtLeast(0))
+            }
+            item.playUrl != null && com.aisub.player.manga.MangaArchive.isArchiveName(item.name) -> {
+                // 同一个文件夹里的其他漫画文件当上一话、下一话
+                val chapters = all.filter { !it.isDir && it.playUrl != null && com.aisub.player.manga.MangaArchive.isArchiveName(it.name) }
+                    .sortedWith { a, b -> com.aisub.player.manga.NaturalOrder.compare(a.name, b.name) }
+                    .map { MangaOpen.Archive(it.name.substringBeforeLast('.'), it.playUrl!!) }
+                openManga(MangaOpen.Archive(item.name.substringBeforeLast('.'), item.playUrl, chapters))
+            }
+            // TXT 电子书
+            item.playUrl != null && com.aisub.player.book.Ebooks.isTextName(item.name) ->
+                openManga(MangaOpen.Archive(item.name.substringBeforeLast('.'), item.playUrl))
+            MediaEntry.isAudioName(item.name) -> {
+                val media = all.filter { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }
+                play(media.map { it.toMediaEntry() }, media.indexOf(item).coerceAtLeast(0))
+            }
+            else -> showDetail(item)
+        }
+    }
+
+    var hiding by remember { mutableStateOf<RemoteItem?>(null) }
+    hiding?.let { dir ->
+        HideFolderDialog(lib, dir.name, onDismiss = { hiding = null }) {
+            lib.hideFolder(serverId, dir.path, dir.name)
+            hiding = null
+            Toast.makeText(context, "已隐藏「${dir.name}」", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun itemMenu(item: RemoteItem): List<MenuAction> = listOfNotNull(
+        item.takeIf { it.isDir }?.let { dir -> MenuAction("用漫画模式看") { openManga(MangaOpen.RemoteFolder(serverId, dir.path, dir.name, path)) } },
+        item.takeIf { it.isDir }?.let { dir ->
+            val fav = state.favoriteFolders.any { it.serverId == serverId && it.path == dir.path }
+            MenuAction(if (fav) "取消收藏" else "收藏到首页") { lib.toggleFavoriteFolder(serverId, dir.path, dir.name) }
+        },
+        item.takeIf { it.isDir }?.let { dir ->
+            if (lib.isHiddenFolder(serverId, dir.path)) MenuAction("取消隐藏") { lib.unhideFolder(serverId, dir.path) }
+            else MenuAction("隐藏文件夹") { hiding = dir }
+        },
+        MenuAction("详情") { showDetail(item) }.takeIf { !item.isDir || item.meta != null },
+        item.takeIf { !it.isDir && it.playUrl != null && MediaEntry.isMediaName(it.name) }?.toMediaEntry()
+            ?.let { MenuAction("加入播放列表") { addTo = listOf(it) } },
+        item.takeIf { !it.isDir && it.playUrl != null && MediaEntry.isVideoName(it.name) }?.toMediaEntry()
+            ?.let { watchLaterAction(context, lib, it) },
+        item.takeIf { !it.isDir && it.playUrl != null && MediaEntry.isVideoName(it.name) }?.toMediaEntry()
+            ?.let { favoriteVideoAction(context, lib, it) },
+        if (item.isDir) MenuAction("下载文件夹") { downloadFolder(item) }
+        else MenuAction("下载") { download(listOf(Downloads.Job(item, ""))) },
+        MenuAction("重命名") { renaming = item },
+        MenuAction("删除") { deleting = item },
+    )
+
+    DetailScaffold(
+        title, onBack,
+        actions = {
+            if (busy) CircularProgressIndicator(Modifier.size(24.dp).padding(end = 4.dp), strokeWidth = 2.dp)
+            if (items.orEmpty().any { it.meta != null }) {
+                IconButton(onClick = { posterWall = !posterWall; viewPrefs.setGrid("remote", posterWall) }) {
+                    Icon(if (posterWall) AppIcons.ListIcon else AppIcons.GridView, if (posterWall) "列表" else "海报墙")
+                }
+            }
+            // 文件夹里是一张张漫画图：直接用漫画模式看
+            if (items.orEmpty().count { !it.isDir && MediaEntry.isImageName(it.name) } >= 2) {
+                IconButton(onClick = { openManga(MangaOpen.RemoteFolder(serverId, path, title, parentPath)) }) { Icon(AppIcons.MenuBook, "漫画模式") }
+            }
+            if (server != null) FavoriteFolderButton(lib, serverId, path, title)
+            IconButton(onClick = { reload++ }) { Icon(AppIcons.Refresh, "刷新") }
+            OverflowMenu(
+                listOf(
+                    MenuAction("新建文件夹") { creatingFolder = true },
+                    MenuAction("下载整个文件夹") { downloadFolder(RemoteItem(title, path, isDir = true)) },
+                    MenuAction("查看下载") {
+                        context.startActivity(android.content.Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS))
+                    },
+                ),
+            )
+        },
+    ) {
+        val list = items
+        when {
+            server == null -> EmptyState("服务器不存在", icon = AppIcons.Cloud)
+            error != null -> EmptyState("加载失败：$error", "重试", icon = AppIcons.Cloud) { reload++ }
+            list == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            else -> {
+                val shown = list.filter { it.isDir } + list.filter { !it.isDir && it.playUrl != null }
+                when {
+                    shown.isEmpty() -> EmptyState("这个文件夹是空的", icon = AppIcons.Folder)
+                    posterWall && shown.any { it.meta != null } -> PosterWall(shown, settings, ::itemMenu, ::open)
+                    else -> LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+                        items(shown, key = { (if (it.isDir) "d:" else "f:") + it.path }) { item ->
+                            when {
+                                item.isDir -> FolderRow(item.name, menu = itemMenu(item)) { open(item) }
+                                MediaEntry.isMediaName(item.name) -> MediaRow(item.toMediaEntry(), itemMenu(item)) { open(item) }
+                                else -> FileRow(item, itemMenu(item)) { open(item) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    renaming?.let { item ->
+        val ext = if (item.isDir) "" else item.name.substringAfterLast('.', "")
+        TextInputDialog(
+            title = if (item.isDir) "重命名文件夹" else "重命名",
+            label = if (ext.isEmpty()) "新名字" else "新名字（扩展名会保留）",
+            initial = if (ext.isEmpty()) item.name else item.name.substringBeforeLast('.'),
+            onDismiss = { renaming = null },
+        ) { input ->
+            renaming = null
+            val name = input.trim().let { if (ext.isNotEmpty() && !it.endsWith(".$ext", ignoreCase = true)) "$it.$ext" else it }
+            if (name != item.name) operate("已重命名") { it.rename(path, item, name) }
+        }
+    }
+    deleting?.let { item ->
+        val cloud = server?.type?.isCloud == true
+        AppDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("删除「${item.name}」？") },
+            text = {
+                Text(
+                    if (cloud) "会移到网盘的回收站，可以在网盘 App 里恢复。"
+                    else "会直接从服务器上删除${if (item.isDir) "整个文件夹" else ""}，不能恢复。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { deleting = null; operate("已删除") { it.delete(path, listOf(item)) } }) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { deleting = null }) { Text("取消") } },
+        )
+    }
+    downloadPlan?.let { plan ->
+        AppDialog(
+            onDismissRequest = { downloadPlan = null },
+            title = { Text("下载 ${plan.jobs.size} 个文件？") },
+            text = {
+                Text(
+                    buildString {
+                        append("共 ${formatSize(plan.totalBytes)}，保存到 Download/${Downloads.ROOT}，保留原有的文件夹结构。")
+                        if (plan.truncated) append("\n文件太多，只下载前 ${Downloads.MAX_FILES} 个。")
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { downloadPlan = null; download(plan.jobs) }, enabled = plan.jobs.isNotEmpty()) { Text("下载") }
+            },
+            dismissButton = { TextButton(onClick = { downloadPlan = null }) { Text("取消") } },
+        )
+    }
+    if (creatingFolder) {
+        TextInputDialog(title = "新建文件夹", label = "文件夹名", onDismiss = { creatingFolder = false }) { name ->
+            creatingFolder = false
+            operate("已新建文件夹") { it.mkdir(path, name) }
+        }
+    }
+    addTo?.let { entries ->
+        AddToPlaylistDialog(
+            playlists = state.playlists,
+            onDismiss = { addTo = null },
+            onPick = { p -> entries.forEach { lib.addToPlaylist(p.id, it) }; addTo = null },
+            onCreate = { lib.createPlaylistWith(it, entries); addTo = null },
+        )
+    }
+}
+
+@Composable
+fun PlaylistDetailScreen(
+    lib: LibraryViewModel,
+    id: String,
+    onBack: () -> Unit,
+    play: (List<MediaEntry>, Int) -> Unit,
+) {
+    val state by lib.state.collectAsStateWithLifecycle()
+    val playlist = state.playlists.firstOrNull { it.id == id }
+    var renaming by remember { mutableStateOf(false) }
+    DetailScaffold(
+        playlist?.name ?: "播放列表", onBack,
+        actions = {
+            if (playlist != null) {
+                TextButton(onClick = { play(playlist.items, 0) }, enabled = playlist.items.isNotEmpty()) { Text("播放全部") }
+                OverflowMenu(listOf(MenuAction("重命名") { renaming = true }))
+            }
+        },
+    ) {
+        if (playlist == null || playlist.items.isEmpty()) {
+            EmptyState("播放列表是空的", icon = AppIcons.QueueMusic)
+            return@DetailScaffold
+        }
+        LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+            itemsIndexed(playlist.items, key = { _, e -> e.uri }) { i, e ->
+                MediaRow(
+                    e,
+                    listOf(
+                        MenuAction("上移", enabled = i > 0) { lib.moveInPlaylist(id, e.uri, -1) },
+                        MenuAction("下移", enabled = i < playlist.items.lastIndex) { lib.moveInPlaylist(id, e.uri, 1) },
+                        MenuAction("从列表移除") { lib.removeFromPlaylist(id, e.uri) },
+                    ),
+                ) { play(playlist.items, i) }
+            }
+        }
+    }
+    if (renaming && playlist != null) {
+        TextInputDialog(
+            "重命名", "名称", initial = playlist.name,
+            onDismiss = { renaming = false },
+            onConfirm = { lib.renamePlaylist(id, it); renaming = false },
+        )
+    }
+}
+
+/** 文件夹页标题栏上的收藏星标：收藏后显示在首页 */
+@Composable
+internal fun FavoriteFolderButton(lib: LibraryViewModel, serverId: String?, path: String, title: String) {
+    val state by lib.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val fav = state.favoriteFolders.any { it.serverId == serverId && it.path == path }
+    IconButton(onClick = {
+        val now = lib.toggleFavoriteFolder(serverId, path, title)
+        Toast.makeText(context, if (now) "已收藏，在首页可以直接打开" else "已取消收藏", Toast.LENGTH_SHORT).show()
+    }) {
+        Icon(
+            if (fav) AppIcons.Star else AppIcons.StarBorder, if (fav) "取消收藏" else "收藏到首页",
+            tint = if (fav) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+        )
+    }
+}
+
+/** 最近播放：music 为 true 时只列音乐，否则只列视频（含直播） */
+@Composable
+fun HistoryScreen(lib: LibraryViewModel, music: Boolean, onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
+    val state by lib.state.collectAsStateWithLifecycle()
+    val history = remember(state.history, music) { state.history.filter { it.entry.isMusic == music } }
+    DetailScaffold(
+        if (music) "最近听过的音乐" else "最近看过的视频", onBack,
+        actions = { TextButton(onClick = { lib.clearHistory(music) }, enabled = history.isNotEmpty()) { Text("清空") } },
+    ) {
+        if (history.isEmpty()) {
+            EmptyState(if (music) "还没有听过的音乐" else "还没有看过的视频", icon = AppIcons.History)
+            return@DetailScaffold
+        }
+        if (music) {
+            // 音乐：点一首从这首开始连着放整个列表
+            val entries = history.map { it.entry }
+            LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+                itemsIndexed(history, key = { _, h -> h.entry.uri }) { i, h ->
+                    MediaRow(h.entry, emptyList(), subtitle = "${android.text.format.DateUtils.getRelativeTimeSpanString(h.playedAt)}") {
+                        play(entries, i)
+                    }
+                }
+            }
+            return@DetailScaffold
+        }
+        LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+            items(history, key = { it.entry.uri }) { h ->
+                val progress = formatDuration(h.positionMs)
+                val ago = android.text.format.DateUtils.getRelativeTimeSpanString(h.playedAt)
+                MediaRow(
+                    h.entry, emptyList(),
+                    subtitle = if (progress.isEmpty()) "$ago" else "看到 $progress · $ago",
+                ) { play(listOf(h.entry), 0) }
+            }
+        }
+    }
+}

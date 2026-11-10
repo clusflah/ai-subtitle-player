@@ -1,0 +1,362 @@
+package com.aisub.player.desktop
+
+import android.content.DesktopContextHolder
+import android.content.Intent
+import android.content.res.Configuration
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.DesktopBackDispatcher
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Tray
+import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.WindowPosition
+import androidx.compose.ui.window.application
+import androidx.compose.ui.window.rememberWindowState
+import androidx.lifecycle.DesktopLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.aisub.player.MainActivity
+import com.aisub.player.SettingsStore
+import com.aisub.player.VoxtitleApp
+import com.aisub.player.ui.AppIcons
+import kotlinx.coroutines.delay
+import java.awt.RenderingHints
+import java.awt.datatransfer.DataFlavor
+import java.awt.dnd.DnDConstants
+import java.awt.dnd.DropTarget
+import java.awt.dnd.DropTargetAdapter
+import java.awt.dnd.DropTargetDropEvent
+import java.awt.image.BufferedImage
+import java.io.File
+import javax.swing.UIManager
+
+private fun createAppIconImage(): BufferedImage {
+    val size = 64
+    val img = BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
+    val g = img.createGraphics()
+    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+    g.color = java.awt.Color(0x16, 0x18, 0x24)
+    g.fillRoundRect(0, 0, size, size, 16, 16)
+    g.color = java.awt.Color(0xFF, 0x98, 0x00)
+    val xPoints = intArrayOf(22, 22, 46)
+    val yPoints = intArrayOf(16, 48, 32)
+    g.fillPolygon(xPoints, yPoints, 3)
+    g.dispose()
+    return img
+}
+
+private fun dispatchExternalFileOrUrl(activity: MainActivity, target: String) {
+    val trimmed = target.trim()
+    if (trimmed.isEmpty()) return
+    if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, trimmed)
+        }
+        activity.dispatchOnNewIntent(sendIntent)
+        return
+    }
+    val file = File(trimmed)
+    if (file.exists()) {
+        val viewIntent = Intent(Intent.ACTION_VIEW, Uri.fromFile(file))
+        activity.dispatchOnNewIntent(viewIntent)
+    }
+}
+
+fun main(args: Array<String>) {
+    runCatching {
+        System.setProperty("skiko.renderApi", "OPENGL")
+        UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName())
+    }
+
+    val voxApp = VoxtitleApp()
+    DesktopContextHolder.appContext = voxApp
+    voxApp.onCreate()
+
+    val mainActivity = MainActivity()
+    // Windows 桌面版默认已拥有本地媒体库访问权限
+    mainActivity.getSharedPreferences("app", 0).edit().putBoolean("onboarded", true).apply()
+    mainActivity.dispatchOnCreate(null)
+
+    if (args.isNotEmpty()) {
+        dispatchExternalFileOrUrl(mainActivity, args[0])
+    }
+
+    val liveTranscriber = DesktopLiveTranscriber(voxApp)
+    val settingsStore = SettingsStore(voxApp)
+    val appIcon = createAppIconImage()
+
+    application {
+        var showMainWindow by remember { mutableStateOf(true) }
+        var showFloatingSubtitles by remember { mutableStateOf(false) }
+        val floatingState by liveTranscriber.state.collectAsState()
+        val windowState = rememberWindowState(
+            size = DpSize(1280.dp, 820.dp),
+            position = WindowPosition(Alignment.Center),
+        )
+        val iconPainter = remember { BitmapPainter(appIcon.toComposeImageBitmap()) }
+
+        // Windows 系统托盘图标与快捷菜单
+        Tray(
+            icon = iconPainter,
+            tooltip = "译幕 Voxtitle (Windows)",
+            onAction = { showMainWindow = true },
+            menu = {
+                Item("显示主窗口") { showMainWindow = true }
+                Item(if (showFloatingSubtitles) "关闭桌面全局字幕" else "开启桌面全局字幕") {
+                    if (showFloatingSubtitles) {
+                        liveTranscriber.stop()
+                        showFloatingSubtitles = false
+                    } else {
+                        showFloatingSubtitles = true
+                    }
+                }
+                if (showFloatingSubtitles && floatingState.clickThrough) {
+                    Item("解除字幕鼠标穿透") {
+                        liveTranscriber.setClickThrough(false)
+                    }
+                }
+                Separator()
+                Item("退出译幕") {
+                    liveTranscriber.stop()
+                    mainActivity.dispatchOnStop()
+                    exitApplication()
+                }
+            },
+        )
+
+        if (showFloatingSubtitles) {
+            FloatingSubtitleWindow(
+                transcriber = liveTranscriber,
+                settingsStore = settingsStore,
+                onClose = { showFloatingSubtitles = false },
+            )
+        }
+
+        if (showMainWindow) {
+            Window(
+                onCloseRequest = {
+                    if (showFloatingSubtitles) {
+                        // 如果开着桌面全局字幕，关主窗口时最小化到托盘继续运行
+                        showMainWindow = false
+                    } else {
+                        liveTranscriber.stop()
+                        mainActivity.dispatchOnStop()
+                        exitApplication()
+                    }
+                },
+                state = windowState,
+                title = "译幕 Voxtitle",
+                icon = iconPainter,
+                onPreviewKeyEvent = { keyEvent ->
+                    if (keyEvent.type == KeyEventType.KeyDown && keyEvent.key == Key.Escape) {
+                        if (DesktopBackDispatcher.hasEnabledCallback()) {
+                            DesktopBackDispatcher.dispatchBack()
+                        } else false
+                    } else false
+                },
+            ) {
+                // 支持把本地视频、音频、漫画压缩包、PDF、电子书或视频网址直接拖进窗口打开
+                DisposableEffect(window) {
+                    val dropTarget = DropTarget(
+                        window,
+                        DnDConstants.ACTION_COPY,
+                        object : DropTargetAdapter() {
+                            override fun drop(dtde: DropTargetDropEvent) {
+                                runCatching {
+                                    dtde.acceptDrop(DnDConstants.ACTION_COPY)
+                                    val transferable = dtde.transferable
+                                    when {
+                                        transferable.isDataFlavorSupported(DataFlavor.javaFileListFlavor) -> {
+                                            val list = transferable.getTransferData(DataFlavor.javaFileListFlavor) as? List<*>
+                                            val firstFile = list?.firstOrNull() as? File
+                                            if (firstFile != null) {
+                                                dispatchExternalFileOrUrl(mainActivity, firstFile.absolutePath)
+                                            }
+                                        }
+                                        transferable.isDataFlavorSupported(DataFlavor.stringFlavor) -> {
+                                            val str = transferable.getTransferData(DataFlavor.stringFlavor) as? String
+                                            if (!str.isNullOrBlank()) {
+                                                dispatchExternalFileOrUrl(mainActivity, str)
+                                            }
+                                        }
+                                    }
+                                    dtde.dropComplete(true)
+                                }
+                            }
+                        },
+                    )
+                    window.dropTarget = dropTarget
+                    onDispose { window.dropTarget = null }
+                }
+
+                val density = LocalDensity.current
+                val winWidthDp = windowState.size.width.value.toInt().coerceAtLeast(360)
+                val winHeightDp = windowState.size.height.value.toInt().coerceAtLeast(360)
+                val configuration = remember(winWidthDp, winHeightDp, density.density) {
+                    Configuration(
+                        screenWidthDp = winWidthDp,
+                        screenHeightDp = winHeightDp,
+                        smallestScreenWidthDp = minOf(winWidthDp, winHeightDp),
+                        densityDpi = (density.density * 160f).toInt(),
+                    )
+                }
+
+                var toastMessage by remember { mutableStateOf<String?>(null) }
+                LaunchedEffect(Unit) {
+                    while (true) {
+                        toastMessage = Toast.currentMessage
+                        delay(150)
+                    }
+                }
+
+                CompositionLocalProvider(
+                    LocalContext provides mainActivity,
+                    LocalConfiguration provides configuration,
+                    LocalLifecycleOwner provides DesktopLifecycleOwner,
+                ) {
+                    Box(Modifier.fillMaxSize()) {
+                        mainActivity.desktopContent?.invoke()
+
+                        // 右上角快捷胶囊：一键开启/关闭「Windows 桌面全局字幕」或解除鼠标穿透
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(top = 12.dp, end = 16.dp),
+                        ) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                if (showFloatingSubtitles && floatingState.clickThrough) {
+                                    Surface(
+                                        shape = RoundedCornerShape(18.dp),
+                                        color = Color(0xFFD84315).copy(alpha = 0.9f),
+                                        modifier = Modifier.clickable {
+                                            liveTranscriber.setClickThrough(false)
+                                        },
+                                    ) {
+                                        Text(
+                                            text = "解除字幕鼠标穿透",
+                                            color = Color.White,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                        )
+                                    }
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(18.dp))
+                                        .background(
+                                            if (showFloatingSubtitles) {
+                                                Brush.horizontalGradient(listOf(Color(0xFFE65100), Color(0xFFFF8F00)))
+                                            } else {
+                                                Brush.horizontalGradient(listOf(Color(0xAA1E2230), Color(0xCC151822)))
+                                            },
+                                        )
+                                        .border(
+                                            width = 1.dp,
+                                            color = Color.White.copy(alpha = 0.22f),
+                                            shape = RoundedCornerShape(18.dp),
+                                        )
+                                        .clickable {
+                                            if (showFloatingSubtitles) {
+                                                liveTranscriber.stop()
+                                                showFloatingSubtitles = false
+                                            } else {
+                                                showFloatingSubtitles = true
+                                            }
+                                        }
+                                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = AppIcons.AutoAwesome,
+                                            contentDescription = "桌面全局字幕",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(15.dp),
+                                        )
+                                        Spacer(Modifier.width(5.dp))
+                                        Text(
+                                            text = if (showFloatingSubtitles) "桌面字幕: 运行中" else "桌面全局字幕",
+                                            color = Color.White,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Toast 提示浮层
+                        AnimatedVisibility(
+                            visible = toastMessage != null,
+                            enter = fadeIn(),
+                            exit = fadeOut(),
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 84.dp),
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = Color(0xE6222530),
+                                tonalElevation = 6.dp,
+                            ) {
+                                Text(
+                                    text = toastMessage.orEmpty(),
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

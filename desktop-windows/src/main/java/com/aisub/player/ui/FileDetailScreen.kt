@@ -1,0 +1,596 @@
+package com.aisub.player.ui
+
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.aisub.player.LibraryViewModel
+import com.aisub.player.MainViewModel
+import com.aisub.player.media.Downloads
+import com.aisub.player.media.MediaEntry
+import com.aisub.player.media.RemoteFiles
+import com.aisub.player.media.formatSize
+import com.aisub.player.meta.DetailMeta
+import com.aisub.player.meta.MetaPipeline
+import com.aisub.player.meta.RatingInfo
+import com.aisub.player.meta.FolderContext
+import com.aisub.player.meta.LocalMeta
+import com.aisub.player.meta.LocalMetaLoader
+import com.aisub.player.meta.MediaInfo
+import com.aisub.player.meta.MetaQuery
+import com.aisub.player.meta.MetaRepository
+import com.aisub.player.meta.NameParser
+import com.aisub.player.remote.RemoteItem
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+internal fun RemoteItem.toMediaEntry() =
+    MediaEntry(playUrl!!, name, isVideo = MediaEntry.isVideoName(name), sizeBytes = size)
+
+/** 本地媒体也用详情页：包装成 RemoteItem，path 和 playUrl 都是 content:// 地址。 */
+internal fun MediaEntry.toRemoteItem() = RemoteItem(title, uri, isDir = false, size = sizeBytes, playUrl = uri)
+
+/** 异步查询的状态。 */
+private sealed interface Lookup<out T> {
+    data object Idle : Lookup<Nothing>
+    data object Loading : Lookup<Nothing>
+    data class Done<T>(val value: T?) : Lookup<T>
+    data class Failed(val message: String) : Lookup<Nothing>
+}
+
+private val DOUBAN_GREEN = Color(0xFF00B51D)
+private val TMDB_BLUE = Color(0xFF01B4E4)
+private val BANGUMI_PINK = Color(0xFFF09199)
+private val IMDB_YELLOW = Color(0xFFC59A00)
+
+/**
+ * 文件详情：海报 / 背景图、TMDB 简介与演职员、豆瓣评分、文件信息；文本文件显示内容预览。
+ * 媒体服务器（Emby / Plex）的条目先显示服务器自带的信息，TMDB 结果回来后再补全。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun FileDetailScreen(
+    main: MainViewModel,
+    lib: LibraryViewModel,
+    serverId: String?,
+    item: RemoteItem,
+    queue: List<MediaEntry>,
+    index: Int,
+    folder: FolderContext?,
+    onBack: () -> Unit,
+    play: (List<MediaEntry>, Int) -> Unit,
+    openImages: (List<RemoteItem>, Int) -> Unit,
+    openFolder: (RemoteItem) -> Unit,
+    openSettings: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val ui by main.state.collectAsStateWithLifecycle()
+    val settings = ui.settings
+    val server = serverId?.let { lib.server(it) }
+    val meta = item.meta
+    val name = item.name
+    val isVideo = MediaEntry.isVideoName(name) || meta?.kind in setOf("movie", "tv", "season", "episode")
+    val isAudio = !item.isDir && MediaEntry.isAudioName(name)
+    val isImage = !item.isDir && MediaEntry.isImageName(name)
+    val isText = !item.isDir && MediaEntry.isTextName(name)
+    val fileKey = item.playUrl ?: "$serverId:${item.path}"
+
+    var reload by remember { mutableIntStateOf(0) }
+    var rematching by remember { mutableStateOf(false) }
+    // 这个视频单独关掉了识别（不是电影电视剧，匹配出来的是错的）
+    var metaOff by remember(fileKey) { mutableStateOf(MetaRepository.isDisabled(context, fileKey)) }
+    val online = isVideo && settings.metaOnline && !metaOff
+    val query = remember(item, reload) {
+        MetaRepository.override(context, fileKey)?.let { (t, y) -> MetaQuery.manual(t, y) } ?: MetaQuery.of(item)
+    }
+    // 本地 NFO、各在线来源合并后的影片信息和评分
+    var detail by remember { mutableStateOf(DetailMeta()) }
+    var preview by remember { mutableStateOf<Lookup<String>>(Lookup.Idle) }
+    var local by remember { mutableStateOf<LocalMeta?>(null) }
+
+    LaunchedEffect(query, settings, online) {
+        if (!online) {
+            // 关掉识别：不读 NFO、不联网，界面只显示文件本身和视频画面
+            detail = DetailMeta()
+            local = null
+            return@LaunchedEffect
+        }
+        if (!isVideo) return@LaunchedEffect
+        // 1. 先读本地：视频旁边的 NFO、海报、背景图，以及目录名里的 {tmdb-xxx}（媒体服务器条目自带信息，不需要）
+        val loc = if (local != null) local else if (server != null && folder != null && meta == null) {
+            detail = DetailMeta(loading = true)
+            runCatching { LocalMetaLoader.load(context, lib.client(server), item, folder) }.getOrNull()
+        } else null
+        local = loc
+        // 手动重新匹配过就不用本地的编号和 NFO 文字（多半是它们错了），本地图片照用
+        val overridden = MetaRepository.override(context, fileKey) != null
+        val localInfo = loc?.info?.takeIf { !overridden }
+        val q = if (loc == null || overridden) query else query.copy(
+            titles = (listOfNotNull(localInfo?.title?.ifEmpty { null }, localInfo?.originalTitle?.ifEmpty { null }) + query.titles).distinct(),
+            year = localInfo?.year?.toIntOrNull() ?: query.year,
+            kind = query.kind ?: loc.kind,
+            tmdbId = query.tmdbId ?: loc.tmdbId,
+            imdbId = query.imdbId ?: loc.imdbId,
+        )
+        // 2. 本地缺的再按设置里的来源顺序从网上补
+        MetaPipeline.run(
+            settings, q, localInfo,
+            hasLocalPoster = loc?.posterUrl != null || (meta?.posterUrl != null && meta.posterRatio < 1f),
+            hasLocalBackdrop = loc?.backdropUrl != null || meta?.backdropUrl != null,
+        ) { detail = it }
+    }
+    LaunchedEffect(item) {
+        if (!isText || item.playUrl == null) return@LaunchedEffect
+        preview = Lookup.Loading
+        preview = try {
+            val bytes = withContext(Dispatchers.IO) { RemoteFiles.read(context, item.playUrl, PREVIEW_BYTES, truncate = true) }
+            Lookup.Done(RemoteFiles.decodeText(bytes))
+        } catch (e: Exception) {
+            Lookup.Failed(e.message ?: e.toString())
+        }
+    }
+
+    val info = detail.info
+    val parsed = remember(name) { NameParser.parse(name) }
+    val title = info?.title?.takeIf { it.isNotEmpty() } ?: meta?.seriesName ?: meta?.title ?: when {
+        // 关掉识别：文件名解析出来的片名多半也不对，直接用文件名
+        isVideo && !online -> name.substringBeforeLast('.').ifEmpty { name }
+        isVideo -> parsed.title
+        else -> name
+    }
+    val backdrop = local?.backdropUrl ?: info?.backdropUrl ?: meta?.backdropUrl
+    val poster = when {
+        isImage -> item.playUrl
+        meta?.posterUrl != null && meta.posterRatio < 1f -> meta.posterUrl
+        else -> local?.posterUrl ?: info?.posterUrl ?: meta?.posterUrl
+    }
+    // 搜字幕用的片名：射手网用中文名；OpenSubtitles 用英文名（原名不是拉丁字母的，比如日文，就用文件名里的）。剧集带上季集
+    val subtitleQueries = remember(info, parsed) {
+        val season = meta?.season ?: parsed.season
+        val episode = meta?.episode ?: parsed.episode
+        val ep = if (episode != null) " S%02dE%02d".format(season ?: 1, episode) else ""
+        fun latin(s: String?) = !s.isNullOrBlank() && s.count { it in 'A'..'Z' || it in 'a'..'z' } * 2 >= s.count { it.isLetter() }
+        val zh = info?.title?.ifBlank { null } ?: parsed.title
+        val en = listOf(info?.originalTitle, parsed.title, info?.title).firstOrNull(::latin) ?: zh
+        mapOf(com.aisub.player.subtitle.OnlineSubtitleSource.ASSRT to zh + ep, com.aisub.player.subtitle.OnlineSubtitleSource.OPENSUBTITLES to en + ep)
+    }
+    // 播放时打开「在线下载字幕」也用这些（没识别出来的也比原始标题好搜）
+    LaunchedEffect(subtitleQueries) {
+        if (isVideo) item.playUrl?.let { main.rememberSubtitleQueries(it, subtitleQueries) }
+    }
+    var subtitles by remember { mutableStateOf(false) }
+    val isTelegram = item.playUrl?.let(com.aisub.player.telegram.Telegram::isTelegram) == true
+    // 首页「继续观看」用这张做封面；关掉识别时忘掉以前记下的（多半是错的），首页改用视频画面
+    LaunchedEffect(backdrop, poster, online) {
+        if (!isVideo || item.playUrl == null) return@LaunchedEffect
+        if (online) com.aisub.player.meta.VideoCovers.remember(context, item.playUrl, backdrop ?: poster)
+        else com.aisub.player.meta.VideoCovers.forget(context, item.playUrl)
+    }
+
+    fun setMetaOff(off: Boolean) {
+        MetaRepository.setDisabled(context, fileKey, off)
+        metaOff = off
+    }
+
+    fun download() {
+        scope.launch {
+            try {
+                Downloads.enqueue(context, listOf(Downloads.Job(item, "")))
+                Toast.makeText(context, "已加入下载，保存到 Download/${Downloads.ROOT}", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(context, "下载失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun openUrl(url: String) {
+        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+    }
+
+    DetailScaffold(
+        title = if (item.isDir) item.name else name.substringBeforeLast('.').ifEmpty { name },
+        onBack = onBack,
+        actions = {
+            OverflowMenu(
+                listOfNotNull(
+                    MenuAction("重新匹配影片…") { rematching = true }.takeIf { online },
+                    MenuAction("关闭在线识别（不是影视剧）") { setMetaOff(true) }.takeIf { isVideo && settings.metaOnline && !metaOff },
+                    MenuAction("重新开启在线识别") { setMetaOff(false) }.takeIf { isVideo && settings.metaOnline && metaOff },
+                    MenuAction("下载") { download() }.takeIf { server != null && !item.isDir && item.playUrl != null },
+                ) + detail.links.map { (label, url) -> MenuAction(label) { openUrl(url) } },
+            )
+        },
+    ) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 32.dp)) {
+            // ---------- 背景图 + 海报 + 标题 ----------
+            if (backdrop != null && !isImage) {
+                Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
+                    NetImage(backdrop, Modifier.fillMaxSize(), maxSize = 1280, fallback = null)
+                    Box(
+                        Modifier.fillMaxSize().background(
+                            Brush.verticalGradient(0.5f to Color.Transparent, 1f to MaterialTheme.colorScheme.surfaceContainerLowest),
+                        ),
+                    )
+                    // Fanart.tv 的透明标题图
+                    info?.logoUrl?.let { logo ->
+                        NetImage(
+                            logo, Modifier.align(Alignment.BottomStart).padding(16.dp).fillMaxWidth(0.5f).aspectRatio(2.6f),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Fit, maxSize = 800, fallback = null, background = false,
+                        )
+                    }
+                }
+            }
+            if (isImage) {
+                NetImage(
+                    poster, Modifier.fillMaxWidth().heightIn(max = 420.dp).aspectRatio(4f / 3f)
+                        .clickable { openImages(listOf(item), 0) },
+                    contentScale = androidx.compose.ui.layout.ContentScale.Fit, maxSize = 1600, fallback = AppIcons.Image,
+                )
+            }
+            Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.Top) {
+                if (isVideo && !online && poster == null) {
+                    // 关掉识别、也没有服务器给的海报：用视频自己的画面（本机视频的缩略图、网络视频播放时截的图）
+                    MediaThumbnail(
+                        item.toMediaEntry(),
+                        Modifier.width(160.dp).aspectRatio(16f / 9f).clip(MaterialTheme.shapes.medium),
+                    )
+                    Spacer(Modifier.width(16.dp))
+                } else if (!isImage && (poster != null || isVideo)) {
+                    NetImage(
+                        poster,
+                        Modifier.width(112.dp).aspectRatio(2f / 3f).clip(MaterialTheme.shapes.medium),
+                        maxSize = 500,
+                        fallback = if (item.isDir) AppIcons.Folder else AppIcons.Movie,
+                    )
+                    Spacer(Modifier.width(16.dp))
+                } else if (!isImage) {
+                    IconBadge(fileIcon(item), size = 56.dp, muted = true)
+                    Spacer(Modifier.width(16.dp))
+                }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                    val sub = listOf(
+                        info?.originalTitle?.takeIf { it != info.title }.orEmpty(),
+                        info?.year ?: meta?.year?.toString() ?: parsed.year?.toString().takeIf { isVideo }.orEmpty(),
+                    ).filter { it.isNotEmpty() }.joinToString(" · ")
+                    if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val tags = listOf(
+                        (info?.genres ?: meta?.genres).orEmpty().take(3).joinToString(" / "),
+                        info?.length.orEmpty(),
+                        info?.countries.orEmpty().take(2).joinToString(" / "),
+                    ).filter { it.isNotEmpty() }.joinToString(" · ")
+                    if (tags.isNotEmpty()) Text(tags, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    episodeLine(meta, parsed, info)?.let {
+                        Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                    }
+                    if (isVideo) {
+                        Spacer(Modifier.height(4.dp))
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            detail.ratings.forEach { RatingChip(it) }
+                            meta?.rating?.let { r -> RatingChip(RatingInfo(server?.type?.label ?: "评分", r, null)) }
+                        }
+                    }
+                }
+            }
+
+            // ---------- 操作 ----------
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                when {
+                    item.isDir -> Button(onClick = { openFolder(item) }) { Icon(AppIcons.Folder, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("打开") }
+                    (isVideo || isAudio) && item.playUrl != null -> Button(onClick = {
+                        if (queue.isNotEmpty()) play(queue, index.coerceIn(0, queue.lastIndex)) else play(listOf(item.toMediaEntry()), 0)
+                    }) { Icon(AppIcons.PlayArrow, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("播放") }
+                    isImage -> Button(onClick = { openImages(listOf(item), 0) }) { Icon(AppIcons.Image, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("查看图片") }
+                }
+                if (server != null && !item.isDir && item.playUrl != null) {
+                    OutlinedButton(onClick = ::download) { Icon(AppIcons.Download, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("下载") }
+                }
+                if (isVideo && item.playUrl != null) OutlinedButton(onClick = { subtitles = true }) {
+                    Icon(AppIcons.Subtitles, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("下载字幕")
+                }
+                if (online) FilledTonalButton(onClick = { rematching = true }) { Text("重新匹配") }
+            }
+
+            if (isVideo && !online) {
+                Spacer(Modifier.height(12.dp))
+                SurfaceCard {
+                    ListRow(
+                        title = "在线识别已关闭",
+                        subtitle = if (!settings.metaOnline) "设置里关掉了影视信息的在线识别，视频用自己的画面"
+                        else "这个视频不再匹配影片信息和封面，用视频自己的画面",
+                        icon = AppIcons.Info,
+                        trailing = {
+                            if (settings.metaOnline) TextButton(onClick = { setMetaOff(false) }) { Text("重新开启") }
+                            else TextButton(onClick = openSettings) { Text("去设置") }
+                        },
+                    )
+                }
+            }
+
+            if (online && !detail.loading && settings.tmdbKey.isBlank() && info?.backdropUrl == null && local?.backdropUrl == null) {
+                Spacer(Modifier.height(12.dp))
+                SurfaceCard {
+                    ListRow(
+                        title = "显示背景图和更完整的信息",
+                        subtitle = "在设置里填写 TMDB API Key（免费申请），也可以换主数据源",
+                        icon = AppIcons.Info,
+                        trailing = { TextButton(onClick = openSettings) { Text("去设置") } },
+                        onClick = openSettings,
+                    )
+                }
+            }
+            if (detail.loading && info == null) {
+                Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text("正在查询影片信息…", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 8.dp))
+                }
+            }
+            detail.errors.forEach { Hint("查询失败 · $it") }
+            info?.let { Hint("信息来源：${it.source}") }
+            if (detail.notFound) Hint("没有找到「${query.titles.firstOrNull().orEmpty()}」，可以点「重新匹配」修改片名")
+
+            // ---------- 简介 ----------
+            val overview = info?.overview?.takeIf { it.isNotBlank() } ?: meta?.overview.orEmpty()
+            if (overview.isNotBlank()) {
+                SectionHeader("简介")
+                ExpandableText(overview, Modifier.padding(horizontal = 16.dp))
+            }
+            if (info?.episodeTitle != null) {
+                SectionHeader("本集")
+                if (local?.stillUrl != null || info.episodeStill != null) {
+                    NetImage(
+                        local?.stillUrl ?: info.episodeStill,
+                        Modifier.padding(horizontal = 16.dp).fillMaxWidth().aspectRatio(16f / 9f).clip(MaterialTheme.shapes.medium),
+                        maxSize = 800, fallback = null,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+                Text(info.episodeTitle, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(horizontal = 16.dp))
+                if (!info.episodeOverview.isNullOrBlank()) ExpandableText(info.episodeOverview, Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+            }
+            if (info != null && (info.directors.isNotEmpty() || info.cast.isNotEmpty())) {
+                SectionHeader("演职员")
+                Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (info.directors.isNotEmpty()) LabeledText(if (info.kind == "movie") "导演" else "主创", info.directors.joinToString(" / "))
+                    if (info.cast.isNotEmpty()) LabeledText("主演", info.cast.joinToString(" / "))
+                }
+            }
+
+            // ---------- 文件信息 ----------
+            SectionHeader("文件信息")
+            SurfaceCard {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    LabeledText("名称", name)
+                    LabeledText("类型", kindLabel(item))
+                    if (item.size > 0) LabeledText("大小", "${formatSize(item.size)}（${"%,d".format(item.size)} 字节）")
+                    LabeledText("来源", server?.let { "${it.name}（${it.type.label}）" } ?: if (isTelegram) "Telegram" else "本机")
+                    if ((server == null || !server.type.isCloud) && !isTelegram) LabeledText("位置", Uri.decode(item.path))
+                }
+            }
+
+            // ---------- 文本预览 ----------
+            if (isText) {
+                SectionHeader("内容预览")
+                when (val p = preview) {
+                    Lookup.Loading, Lookup.Idle -> Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                    is Lookup.Failed -> Hint("读取失败：${p.message}")
+                    is Lookup.Done -> SurfaceCard {
+                        SelectionContainer {
+                            Text(
+                                p.value.orEmpty().ifEmpty { "（空文件）" } + if (item.size > PREVIEW_BYTES) "\n……（只显示前 ${formatSize(PREVIEW_BYTES.toLong())}）" else "",
+                                fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 17.sp,
+                                modifier = Modifier.padding(12.dp).horizontalScroll(rememberScrollState()),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (subtitles) item.playUrl?.let { url ->
+        OnlineSubtitleSheet(
+            main, onDismiss = { subtitles = false }, onOpenSettings = { subtitles = false; openSettings() },
+            video = Uri.parse(url),
+        )
+    }
+    if (rematching) {
+        val current = MetaRepository.override(context, fileKey)
+        RematchDialog(
+            initialTitle = current?.first ?: query.titles.firstOrNull().orEmpty(),
+            initialYear = (current?.second ?: query.year)?.toString().orEmpty(),
+            onDismiss = { rematching = false },
+            onReset = {
+                MetaRepository.setOverride(context, fileKey, "", null)
+                rematching = false
+                reload++
+            },
+        ) { t, y ->
+            MetaRepository.setOverride(context, fileKey, t, y)
+            rematching = false
+            reload++
+        }
+    }
+}
+
+private const val PREVIEW_BYTES = 256 * 1024
+
+private fun episodeLine(meta: com.aisub.player.remote.ItemMeta?, parsed: com.aisub.player.meta.ParsedName, info: MediaInfo?): String? {
+    if (info?.episodeTitle != null) return null
+    val season = meta?.season ?: parsed.season
+    val episode = meta?.episode ?: parsed.episode
+    return when {
+        episode != null && season != null -> "第 $season 季 第 $episode 集"
+        episode != null -> "第 $episode 集"
+        season != null -> "第 $season 季"
+        else -> null
+    }?.let { if (meta?.kind == "episode" && meta.title != null) "$it · ${meta.title}" else it }
+}
+
+private fun fileIcon(item: RemoteItem) = when {
+    item.isDir -> AppIcons.Folder
+    MediaEntry.isVideoName(item.name) -> AppIcons.Movie
+    MediaEntry.isAudioName(item.name) -> AppIcons.MusicNote
+    MediaEntry.isImageName(item.name) -> AppIcons.Image
+    MediaEntry.isTextName(item.name) -> AppIcons.Description
+    else -> AppIcons.File
+}
+
+private fun kindLabel(item: RemoteItem): String {
+    if (item.isDir) return "文件夹"
+    val ext = item.name.substringAfterLast('.', "").uppercase()
+    val kind = when {
+        MediaEntry.isVideoName(item.name) -> "视频"
+        MediaEntry.isAudioName(item.name) -> "音频"
+        MediaEntry.isImageName(item.name) -> "图片"
+        MediaEntry.isTextName(item.name) -> "文本"
+        else -> "文件"
+    }
+    return if (ext.isEmpty()) kind else "$kind（$ext）"
+}
+
+/** 评分标签：来源色块 + 分数；查询中显示转圈，没查到显示「暂无」。 */
+@Composable
+private fun RatingChip(r: RatingInfo) {
+    val color = when (r.label) {
+        "豆瓣" -> DOUBAN_GREEN
+        "TMDB" -> TMDB_BLUE
+        "Bangumi" -> BANGUMI_PINK
+        "IMDb" -> IMDB_YELLOW
+        else -> MaterialTheme.colorScheme.outline
+    }
+    Row(
+        Modifier.clip(RoundedCornerShape(6.dp)).background(color.copy(alpha = 0.12f)).padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(r.label, color = color, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.width(6.dp))
+        when {
+            r.loading -> CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = color)
+            r.failed -> Text("失败", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            r.value == null -> Text("暂无", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else -> {
+                Icon(AppIcons.Star, null, tint = color, modifier = Modifier.size(12.dp))
+                Text(" %.1f".format(r.value), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                val votes = r.votes
+                if (votes != null && votes > 0) {
+                    Text(" · ${if (votes >= 10_000) "%.1f万".format(votes / 10_000.0) else votes.toString()}人",
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LabeledText(label: String, value: String) {
+    Row {
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(48.dp))
+        SelectionContainer(Modifier.weight(1f)) { Text(value, style = MaterialTheme.typography.bodyMedium) }
+    }
+}
+
+@Composable
+private fun Hint(text: String) {
+    Text(
+        text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+    )
+}
+
+/** 长简介默认显示 5 行，点一下展开。 */
+@Composable
+private fun ExpandableText(text: String, modifier: Modifier = Modifier) {
+    var expanded by remember(text) { mutableStateOf(false) }
+    var overflow by remember(text) { mutableStateOf(false) }
+    Column(modifier.clickable(enabled = overflow || expanded) { expanded = !expanded }) {
+        Text(
+            text, style = MaterialTheme.typography.bodyMedium, lineHeight = 22.sp,
+            maxLines = if (expanded) Int.MAX_VALUE else 5, overflow = TextOverflow.Ellipsis,
+            onTextLayout = { if (!expanded) overflow = it.hasVisualOverflow },
+        )
+        if (overflow || expanded) Text(if (expanded) "收起" else "展开", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
+    }
+}
+
+@Composable
+private fun RematchDialog(
+    initialTitle: String,
+    initialYear: String,
+    onDismiss: () -> Unit,
+    onReset: () -> Unit,
+    onConfirm: (String, Int?) -> Unit,
+) {
+    var title by remember { mutableStateOf(initialTitle) }
+    var year by remember { mutableStateOf(initialYear) }
+    AppDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重新匹配影片") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("填写正确的片名（中文或原名都可以），剧集可以带上 S01E02", style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(title, { title = it }, label = { Text("片名") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    year, { v -> year = v.filter { it.isDigit() }.take(4) },
+                    label = { Text("年份（可不填）") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                )
+                HorizontalDivider()
+                TextButton(onClick = onReset) { Text("恢复自动识别") }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(title, year.toIntOrNull()) }, enabled = title.isNotBlank()) { Text("搜索") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}

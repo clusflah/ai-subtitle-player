@@ -1,0 +1,79 @@
+package com.aisub.player.ui
+
+import androidx.compose.runtime.mutableStateListOf
+
+sealed interface Screen {
+    data object Home : Screen
+    data object Player : Screen
+    /** 最近播放：音乐和视频分开 */
+    data class History(val music: Boolean = false) : Screen
+    data object Settings : Screen
+    /** 隐藏的文件夹：列表、暂时显示、密码 */
+    data object HiddenFolders : Screen
+    /** 直播：M3U / TXT 直播源的频道列表 */
+    data object Live : Screen
+    /** 网页：内置浏览器里看视频，边播边生成 AI 字幕 */
+    data object Web : Screen
+    /** Telegram：登录、加入的频道和群 */
+    data object Telegram : Screen
+    /** Telegram 一个频道 / 群里的视频 */
+    data class TelegramChat(val chatId: Long, val title: String) : Screen
+    /** Telegram 视频收藏夹 */
+    data object TelegramSaved : Screen
+    /** 下载版：分享链接后的下载进度页 */
+    data object Link : Screen
+    data class LocalFolder(val path: String, val title: String) : Screen
+    /** path：WebDAV/OpenList 是目录路径，网盘是目录 ID；title 用于标题栏 */
+    data class Remote(val serverId: String, val path: String, val title: String) : Screen
+    data class PlaylistDetail(val id: String) : Screen
+    /** 媒体服务器（Plex、Emby / Jellyfin）官方客户端风格：服务器首页、媒体库、条目详情 */
+    data class ServerHome(val serverId: String, val title: String) : Screen
+    data class ServerLibrary(val serverId: String, val sectionKey: String, val title: String) : Screen
+    data class ServerDetail(val serverId: String, val ratingKey: String) : Screen
+    /**
+     * 文件详情：文件信息 + TMDB 简介 + 豆瓣评分。serverId 为 null 表示本地文件；
+     * queue / index 是点「播放」时的播放队列（同一文件夹里的媒体，方便连播下一集）。
+     */
+    data class FileDetail(
+        val serverId: String?,
+        val item: com.aisub.player.remote.RemoteItem,
+        val queue: List<com.aisub.player.media.MediaEntry> = emptyList(),
+        val index: Int = 0,
+        /** 所在目录，用于读取旁边的 NFO、海报；null 表示不读本地元数据 */
+        val folder: com.aisub.player.meta.FolderContext? = null,
+    ) : Screen
+    /** 漫画：继续阅读、打开本地漫画 */
+    data object Manga : Screen
+    /** 读一本本地 / 网盘漫画（网页漫画在网页里直接进阅读模式） */
+    data class MangaRead(val open: MangaOpen) : Screen
+    /** 电子书：正在朗读、继续阅读、打开电子书文件（书本身也用 [MangaRead] 打开，认出是文字书就用电子书阅读） */
+    data object Books : Screen
+    /** 看图：同一文件夹里的图片左右滑动切换。 */
+    data class ImageViewer(val serverId: String?, val images: List<com.aisub.player.remote.RemoteItem>, val index: Int) : Screen
+}
+
+/** 极简页面栈：首页在栈底，返回键逐层弹出。 */
+class Navigator {
+    val stack = mutableStateListOf<Screen>(Screen.Home)
+    val current: Screen get() = stack.last()
+
+    fun push(screen: Screen) {
+        // 播放页只保留一个，重复打开时回到它
+        if (screen == Screen.Player) stack.remove(Screen.Player)
+        stack.add(screen)
+    }
+
+    fun pop(): Boolean {
+        if (stack.size <= 1) return false
+        stack.removeAt(stack.lastIndex)
+        return true
+    }
+}
+
+/** 本地文件的「影视信息」菜单打开详情页；由 MainActivity 提供。 */
+val LocalOpenDetail = androidx.compose.runtime.staticCompositionLocalOf<(com.aisub.player.media.MediaEntry) -> Unit> { {} }
+
+/** 打开一个条目的详情页（影视识别、下载字幕），带上点「播放」时的播放队列；由 MainActivity 提供。 */
+val LocalOpenItemDetail = androidx.compose.runtime.staticCompositionLocalOf<
+    (com.aisub.player.remote.RemoteItem, List<com.aisub.player.media.MediaEntry>, Int) -> Unit,
+> { { _, _, _ -> } }
