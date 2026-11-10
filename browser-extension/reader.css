@@ -1,0 +1,18 @@
+#vox-manga-entry { position: fixed; right: 18px; bottom: 18px; z-index: 2147483646; border: 0; border-radius: 999px; padding: 11px 16px; color: #fff; background: #526dff; box-shadow: 0 4px 18px #0008; font: 600 14px/1 system-ui, sans-serif; cursor: pointer; }
+#vox-manga-reader { position: fixed; inset: 0; z-index: 2147483647; overflow: auto; color: #fff; background: #080808; font-family: system-ui, "Microsoft YaHei", sans-serif; }
+#vox-manga-reader * { box-sizing: border-box; }
+.vox-toolbar { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 8px 14px; background: linear-gradient(#111f, #111d); backdrop-filter: blur(10px); }
+.vox-toolbar button { border: 0; border-radius: 7px; padding: 7px 10px; color: #fff; background: #333; cursor: pointer; font: inherit; }
+.vox-toolbar button:hover, .vox-toolbar button[aria-pressed="true"] { background: #526dff; }
+.vox-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd; font-size: 13px; }
+.vox-progress { color: #aaa; font-size: 12px; white-space: nowrap; }
+.vox-pages { min-height: calc(100% - 52px); }
+.vox-page { display: flex; align-items: center; justify-content: center; min-height: calc(100vh - 52px); padding: 10px; }
+.vox-page img { display: block; max-width: 100%; max-height: calc(100vh - 72px); object-fit: contain; }
+.vox-pages.width .vox-page { min-height: auto; padding: 0; }
+.vox-pages.width .vox-page img, .vox-pages.strip .vox-page img { width: min(100%, 1100px); max-height: none; }
+.vox-pages.strip .vox-page { min-height: auto; padding: 0; }
+.vox-pages.double { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; min-height: calc(100vh - 52px); }
+.vox-pages.double .vox-page { min-height: auto; padding: 3px; }
+.vox-pages.double .vox-page img { max-height: calc(100vh - 68px); }
+@media (max-width: 720px) { .vox-pages.double { grid-template-columns: 1fr; } .vox-toolbar { gap: 5px; padding: 7px; } .vox-toolbar button { padding: 7px; } }

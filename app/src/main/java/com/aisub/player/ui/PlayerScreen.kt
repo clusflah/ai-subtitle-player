@@ -866,37 +866,6 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             }
 
             val effectiveSlot = if (tv && focusedSlot in 0..6) focusedSlot else targetSlot
-            val fastPos by animateFloatAsState(
-                targetValue = effectiveSlot.toFloat(),
-                animationSpec = spring(dampingRatio = 0.62f, stiffness = 560f),
-                label = "playerDropletFast",
-            )
-            val slowPos by animateFloatAsState(
-                targetValue = effectiveSlot.toFloat(),
-                animationSpec = spring(dampingRatio = 0.55f, stiffness = 135f),
-                label = "playerDropletSlow",
-            )
-            val jellyPos by animateFloatAsState(
-                targetValue = effectiveSlot.toFloat(),
-                animationSpec = spring(dampingRatio = 0.46f, stiffness = 210f),
-                label = "playerDropletJelly",
-            )
-            val dockPress by animateFloatAsState(
-                targetValue = if (pulsing || dragging != null) 1f else 0f,
-                animationSpec = spring(dampingRatio = 0.54f, stiffness = 380f),
-                label = "playerDockPress",
-            )
-
-            val rawStretch = abs(fastPos - slowPos)
-            val wobble = fastPos - jellyPos
-            val lightPhase = fastPos * 0.9f + rawStretch * 1.0f + wobble * 0.65f + dockPress * 0.6f
-            val barScaleX = 1f + (rawStretch * 0.015f).coerceAtMost(0.025f) + dockPress * 0.009f
-            val barScaleY = 1f - (rawStretch * 0.012f).coerceAtMost(0.020f) + dockPress * 0.012f
-
-            val barShape = RoundedCornerShape(50)
-            val barTint = Color(0xBF181F2C)
-            val dropletTint = if (tv && focusedSlot >= 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.88f) else Color(0xE02E3B52)
-            val activeAccent = Color(0xFF4DA3FF)
 
             Column(
                 Modifier
@@ -1014,165 +983,101 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 // 播放键居中，左右各一个上一集/下一集；外侧两组对称：
                 // 手机左=字幕、AI 字幕，右=旋转、更多；电视左=字幕、AI 字幕，右=倍速、更多（电视不能转屏）
                 val canSkip = vm.queueSize > 1 && !vm.usingVlc
-                val pillShape = RoundedCornerShape(50)
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(top = 4.dp)
-                        .height(60.dp)
-                        .graphicsLayer {
-                            scaleX = barScaleX
-                            scaleY = barScaleY
-                        }
-                        .shadow(
-                            elevation = 18.dp,
-                            shape = barShape,
-                            ambientColor = Color(0x28000000),
-                            spotColor = Color(0x36000000),
-                        )
-                        .liquidGlass(
-                            shape = barShape,
-                            style = GlassStyle.Floating,
-                            tint = barTint,
-                            borderColor = Color(0x52FFFFFF),
-                            lightShift = lightPhase * 0.5f,
-                        )
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                LiquidDock(
+                    count = 7,
+                    activeSlot = targetSlot,
+                    focusedSlot = focusedSlot,
+                    pulsing = pulsing || dragging != null,
                 ) {
-                    // 1. 底层主页同款液态玻璃水滴胶囊指示器（点击按钮或遥控器移动焦点时平滑拉伸、挤压与微弹）
-                    BoxWithConstraints(Modifier.fillMaxSize()) {
-                        val count = 7
-                        val safeMaxW = maxWidth.coerceAtLeast(1.dp)
-                        val slotWidth = (safeMaxW / count).coerceIn(1.dp, safeMaxW)
-                        val leftEdgeIndex = min(fastPos, slowPos)
-                        val rightEdgeIndex = max(fastPos, slowPos)
-                        val stretch = (rightEdgeIndex - leftEdgeIndex).coerceIn(0f, count.toFloat())
-                        val extraWidthFactor = (stretch * 1.05f + abs(wobble) * 0.24f + dockPress * 0.08f).coerceIn(0f, count.toFloat())
-                        val centerShift = (extraWidthFactor - stretch) * 0.5f
-                        val dropletWidth = (slotWidth * (1f + extraWidthFactor)).coerceIn(slotWidth, safeMaxW)
-                        val maxLeft = (safeMaxW - dropletWidth).coerceAtLeast(0.dp)
-                        val dropletLeft = (slotWidth * (leftEdgeIndex - centerShift)).coerceIn(0.dp, maxLeft)
-                        val dropletScaleY = (1f - (stretch * 0.12f).coerceAtMost(0.14f) + abs(wobble) * 0.06f - dockPress * 0.04f)
-                            .coerceIn(0.86f, 1.04f)
-
-                        Box(
-                            Modifier
-                                .padding(start = dropletLeft)
-                                .size(width = dropletWidth, height = maxHeight)
-                                .graphicsLayer {
-                                    scaleY = dropletScaleY
-                                }
-                                .shadow(
-                                    elevation = 8.dp,
-                                    shape = pillShape,
-                                    ambientColor = activeAccent.copy(alpha = 0.22f),
-                                    spotColor = activeAccent.copy(alpha = 0.32f),
-                                )
-                                .liquidGlass(
-                                    shape = pillShape,
-                                    style = GlassStyle.Floating,
-                                    tint = dropletTint,
-                                    borderColor = if (tv && focusedSlot >= 0) Color.White else Color(0x88FFFFFF),
-                                    lightShift = lightPhase,
-                                ),
-                        )
-                    }
-
-                    // 2. 顶层 7 个控制按钮（带柔和按压回弹与水滴联动，各图标经视觉补偿使大小观感一致）
-                    Row(
-                        Modifier.fillMaxSize(),
-                        verticalAlignment = Alignment.CenterVertically,
+                    DockButton(
+                        icon = AppIcons.Subtitles,
+                        label = "字幕与音轨",
+                        modifier = Modifier.weight(1f),
+                        iconSize = 22.dp,
+                        active = effectiveSlot == 0 && targetSlot != 3,
+                        onFocusChange = { if (it) focusedSlot = 0 else if (focusedSlot == 0) focusedSlot = -1 },
                     ) {
-                        BarButton(
-                            icon = AppIcons.Subtitles,
-                            label = "字幕与音轨",
+                        targetSlot = 0; pulseTick++; tracksAi = false; showTracks = true; interactions++
+                    }
+                    DockButton(
+                        icon = AppIcons.AutoAwesome,
+                        label = "AI 字幕",
+                        modifier = Modifier.weight(1f),
+                        iconSize = 22.dp,
+                        active = effectiveSlot == 1 && targetSlot != 3,
+                        onFocusChange = { if (it) focusedSlot = 1 else if (focusedSlot == 1) focusedSlot = -1 },
+                    ) {
+                        targetSlot = 1; pulseTick++; tracksAi = true; showTracks = true; interactions++
+                    }
+                    DockButton(
+                        icon = AppIcons.SkipPrevious,
+                        label = "上一集",
+                        modifier = Modifier.weight(1f),
+                        iconSize = 27.dp,
+                        enabled = canSkip,
+                        active = effectiveSlot == 2 && targetSlot != 3,
+                        onFocusChange = { if (it) focusedSlot = 2 else if (focusedSlot == 2) focusedSlot = -1 },
+                    ) {
+                        targetSlot = 2; pulseTick++; vm.skipInQueue(false, restartFirst = true); interactions++
+                    }
+                    DockButton(
+                        icon = if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow,
+                        label = if (wantsPlay) "暂停" else "播放",
+                        modifier = Modifier.weight(1f).focusRequester(playFocus),
+                        iconSize = 27.dp,
+                        isCenter = true,
+                        active = effectiveSlot == 3,
+                        onFocusChange = { if (it) focusedSlot = 3 else if (focusedSlot == 3) focusedSlot = -1 },
+                    ) {
+                        targetSlot = 3; pulseTick++; vm.togglePlay(); interactions++
+                    }
+                    DockButton(
+                        icon = AppIcons.SkipNext,
+                        label = "下一集",
+                        modifier = Modifier.weight(1f),
+                        iconSize = 27.dp,
+                        enabled = canSkip,
+                        active = effectiveSlot == 4 && targetSlot != 3,
+                        onFocusChange = { if (it) focusedSlot = 4 else if (focusedSlot == 4) focusedSlot = -1 },
+                    ) {
+                        targetSlot = 4; pulseTick++; vm.skipInQueue(true); interactions++
+                    }
+                    if (tv) {
+                        // 电视没有手势调速，放个倍速按钮；也让播放两边对称
+                        DockButton(
+                            icon = AppIcons.Speed,
+                            label = "倍速",
                             modifier = Modifier.weight(1f),
                             iconSize = 22.dp,
-                            active = effectiveSlot == 0 && targetSlot != 3,
-                            onFocusChange = { if (it) focusedSlot = 0 else if (focusedSlot == 0) focusedSlot = -1 },
+                            active = effectiveSlot == 5 && targetSlot != 3,
+                            onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
                         ) {
-                            targetSlot = 0; pulseTick++; tracksAi = false; showTracks = true; interactions++
+                            targetSlot = 5; pulseTick++; dialog = PlayerDialog.SPEED; interactions++
                         }
-                        BarButton(
-                            icon = AppIcons.AutoAwesome,
-                            label = "AI 字幕",
+                    } else {
+                        DockButton(
+                            icon = AppIcons.ScreenRotation,
+                            label = "旋转屏幕",
                             modifier = Modifier.weight(1f),
-                            iconSize = 22.dp,
-                            active = effectiveSlot == 1 && targetSlot != 3,
-                            onFocusChange = { if (it) focusedSlot = 1 else if (focusedSlot == 1) focusedSlot = -1 },
+                            iconSize = 21.dp,
+                            active = effectiveSlot == 5 && targetSlot != 3,
+                            onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
                         ) {
-                            targetSlot = 1; pulseTick++; tracksAi = true; showTracks = true; interactions++
+                            targetSlot = 5; pulseTick++
+                            activity?.requestedOrientation =
+                                if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                            interactions++
                         }
-                        BarButton(
-                            icon = AppIcons.SkipPrevious,
-                            label = "上一集",
-                            modifier = Modifier.weight(1f),
-                            iconSize = 27.dp,
-                            enabled = canSkip,
-                            active = effectiveSlot == 2 && targetSlot != 3,
-                            onFocusChange = { if (it) focusedSlot = 2 else if (focusedSlot == 2) focusedSlot = -1 },
-                        ) {
-                            targetSlot = 2; pulseTick++; vm.skipInQueue(false, restartFirst = true); interactions++
-                        }
-                        BarButton(
-                            icon = if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow,
-                            label = if (wantsPlay) "暂停" else "播放",
-                            modifier = Modifier.weight(1f).focusRequester(playFocus),
-                            iconSize = 27.dp,
-                            isCenter = true,
-                            active = effectiveSlot == 3,
-                            onFocusChange = { if (it) focusedSlot = 3 else if (focusedSlot == 3) focusedSlot = -1 },
-                        ) {
-                            targetSlot = 3; pulseTick++; vm.togglePlay(); interactions++
-                        }
-                        BarButton(
-                            icon = AppIcons.SkipNext,
-                            label = "下一集",
-                            modifier = Modifier.weight(1f),
-                            iconSize = 27.dp,
-                            enabled = canSkip,
-                            active = effectiveSlot == 4 && targetSlot != 3,
-                            onFocusChange = { if (it) focusedSlot = 4 else if (focusedSlot == 4) focusedSlot = -1 },
-                        ) {
-                            targetSlot = 4; pulseTick++; vm.skipInQueue(true); interactions++
-                        }
-                        if (tv) {
-                            // 电视没有手势调速，放个倍速按钮；也让播放两边对称
-                            BarButton(
-                                icon = AppIcons.Speed,
-                                label = "倍速",
-                                modifier = Modifier.weight(1f),
-                                iconSize = 22.dp,
-                                active = effectiveSlot == 5 && targetSlot != 3,
-                                onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
-                            ) {
-                                targetSlot = 5; pulseTick++; dialog = PlayerDialog.SPEED; interactions++
-                            }
-                        } else {
-                            BarButton(
-                                icon = AppIcons.ScreenRotation,
-                                label = "旋转屏幕",
-                                modifier = Modifier.weight(1f),
-                                iconSize = 21.dp,
-                                active = effectiveSlot == 5 && targetSlot != 3,
-                                onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
-                            ) {
-                                targetSlot = 5; pulseTick++
-                                activity?.requestedOrientation =
-                                    if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                                interactions++
-                            }
-                        }
-                        BarButton(
-                            icon = AppIcons.MoreHoriz,
-                            label = "更多",
-                            modifier = Modifier.weight(1f),
-                            iconSize = 25.dp,
-                            active = effectiveSlot == 6 && targetSlot != 3,
-                            onFocusChange = { if (it) focusedSlot = 6 else if (focusedSlot == 6) focusedSlot = -1 },
-                        ) {
-                            targetSlot = 6; pulseTick++; showMore = true; interactions++
-                        }
+                    }
+                    DockButton(
+                        icon = AppIcons.MoreHoriz,
+                        label = "更多",
+                        modifier = Modifier.weight(1f),
+                        iconSize = 25.dp,
+                        active = effectiveSlot == 6 && targetSlot != 3,
+                        onFocusChange = { if (it) focusedSlot = 6 else if (focusedSlot == 6) focusedSlot = -1 },
+                    ) {
+                        targetSlot = 6; pulseTick++; showMore = true; interactions++
                     }
                 }
             }
@@ -1739,29 +1644,12 @@ private fun SeekBar(
     onDrag: (Float) -> Unit,
     onDragEnd: () -> Unit,
 ) {
-    var widthPx by remember { mutableFloatStateOf(1f) }
-    val thumbScale by animateFloatAsState(
-        targetValue = if (isDragging) 1.18f else 1f,
-        animationSpec = spring(dampingRatio = 0.54f, stiffness = 380f),
-        label = "seekThumbScale",
-    )
-    val trackHeight = if (isDragging) 5.dp else 4.dp
-    Box(
-        Modifier.fillMaxWidth().padding(horizontal = 8.dp).height(32.dp)
-            .onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
-            .pointerInput(Unit) {
-                detectTapGestures { o -> onDrag((o.x / widthPx).coerceIn(0f, 1f)); onDragEnd() }
-            }
-            .pointerInput(Unit) {
-                detectHorizontalDragGestures(
-                    onDragStart = { o -> onDrag((o.x / widthPx).coerceIn(0f, 1f)) },
-                    onDragEnd = onDragEnd,
-                    onDragCancel = onDragEnd,
-                ) { change, _ -> change.consume(); onDrag((change.position.x / widthPx).coerceIn(0f, 1f)) }
-            },
-        contentAlignment = Alignment.CenterStart,
+    ThinSeekBar(
+        fraction = fraction,
+        isDragging = isDragging,
+        onDrag = onDrag,
+        onDragEnd = onDragEnd,
     ) {
-        Box(Modifier.fillMaxWidth().height(trackHeight).clip(RoundedCornerShape(50)).background(Color(0x44FFFFFF)))
         if (durationMs > 0) {
             Canvas(Modifier.fillMaxWidth().height(12.dp)) {
                 val cy = size.height / 2
@@ -1780,114 +1668,6 @@ private fun SeekBar(
                 }
             }
         }
-        Box(Modifier.fillMaxWidth(fraction).height(trackHeight).clip(RoundedCornerShape(50)).background(Orange))
-        Box(
-            Modifier.offset {
-                val thumbPx = 16.dp.toPx()
-                val travel = (widthPx - thumbPx).coerceAtLeast(0f)
-                IntOffset((fraction * travel).roundToInt(), 0)
-            }
-                .size(16.dp)
-                .graphicsLayer {
-                    scaleX = thumbScale
-                    scaleY = thumbScale
-                }
-                .shadow(4.dp, CircleShape, ambientColor = Orange.copy(alpha = 0.45f), spotColor = Orange.copy(alpha = 0.65f))
-                .clip(CircleShape)
-                .background(Orange),
-        )
-    }
-}
-
-@Composable
-private fun BarButton(
-    icon: ImageVector,
-    label: String,
-    modifier: Modifier = Modifier,
-    iconSize: Dp = 24.dp,
-    enabled: Boolean = true,
-    isCenter: Boolean = false,
-    active: Boolean = false,
-    onFocusChange: (Boolean) -> Unit = {},
-    onClick: () -> Unit,
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isPressed by interactionSource.collectIsPressedAsState()
-    val isFocused by interactionSource.collectIsFocusedAsState()
-    var focusedNode by remember { mutableStateOf(false) }
-    var clickPulse by remember { mutableStateOf(false) }
-    val tv = LocalTv.current
-    val focused = tv && (isFocused || focusedNode)
-
-    LaunchedEffect(focused) {
-        onFocusChange(focused)
-    }
-    LaunchedEffect(clickPulse) {
-        if (clickPulse) {
-            delay(85)
-            clickPulse = false
-        }
-    }
-
-    val activePress = isPressed || clickPulse
-    val scaleX by animateFloatAsState(
-        targetValue = when {
-            activePress -> 0.90f
-            focused -> 1.08f
-            active && !isCenter -> 1.04f
-            else -> 1f
-        },
-        animationSpec = spring(dampingRatio = 0.52f, stiffness = 360f),
-        label = "barBtnScaleX",
-    )
-    val scaleY by animateFloatAsState(
-        targetValue = when {
-            activePress -> 0.86f
-            focused -> 1.08f
-            active && !isCenter -> 1.04f
-            else -> 1f
-        },
-        animationSpec = spring(dampingRatio = 0.50f, stiffness = 320f),
-        label = "barBtnScaleY",
-    )
-    val iconColor by animateColorAsState(
-        targetValue = when {
-            !enabled -> Color(0x55FFFFFF)
-            focused -> Color.White
-            active && !isCenter -> Color(0xFF4DA3FF)
-            isCenter -> Color.White
-            else -> Color(0xFFD5DCE6)
-        },
-        animationSpec = tween(durationMillis = 150),
-        label = "barBtnColor",
-    )
-
-    Box(
-        modifier = modifier
-            .fillMaxHeight()
-            .onFocusChanged { focusedNode = it.isFocused }
-            .graphicsLayer {
-                this.scaleX = scaleX
-                this.scaleY = scaleY
-            }
-            .clip(RoundedCornerShape(50))
-            .let {
-                if (enabled) {
-                    it.clickable(
-                        interactionSource = interactionSource,
-                        indication = null,
-                        onClick = { clickPulse = true; onClick() },
-                    )
-                } else it
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = iconColor,
-            modifier = Modifier.size(iconSize),
-        )
     }
 }
 

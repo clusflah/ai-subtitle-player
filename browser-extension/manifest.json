@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "译幕漫画阅读模式",
+  "version": "0.1.0",
+  "description": "把网页中连续的漫画图片切换为沉浸式阅读模式。",
+  "permissions": ["storage", "activeTab"],
+  "action": {
+    "default_title": "漫画阅读模式",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "css": ["reader.css"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}

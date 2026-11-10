@@ -20,11 +20,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -53,7 +51,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -80,7 +77,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
@@ -89,9 +89,11 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -105,6 +107,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 private val ZOOMS = listOf(1f, 1.5f, 2f, 3f)
 
@@ -484,62 +487,218 @@ fun MangaReader(
         }
 
         AnimatedVisibility(controls, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
-            val barShape = RoundedCornerShape(32.dp)
+            var dragging by remember { mutableStateOf<Float?>(null) }
+            var targetSlot by remember { mutableIntStateOf(-1) }
+            var focusedSlot by remember { mutableIntStateOf(-1) }
+            var pulseTick by remember { mutableIntStateOf(0) }
+            var pulsing by remember { mutableStateOf(false) }
+
+            LaunchedEffect(pulseTick) {
+                if (pulseTick > 0) {
+                    pulsing = true
+                    delay(95)
+                    pulsing = false
+                    delay(950)
+                    if (focusedSlot < 0) targetSlot = -1
+                }
+            }
+
+            val showZoom = tv && mode != MangaMode.WIDTH
+            val slotCount = if (!tv) 5 else if (showZoom) 8 else 6
+            val effectiveSlot = if (tv && focusedSlot in 0 until slotCount) focusedSlot else targetSlot
+            val canPrevChapter = onOpenUrl != null && book.prev != null
+            val canNextChapter = onOpenUrl != null && book.next != null
+
+            fun clickSlot(slot: Int, action: () -> Unit) {
+                targetSlot = slot
+                pulseTick++
+                lastInteraction = System.currentTimeMillis()
+                action()
+            }
+
             Column(
                 Modifier.fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .shadow(
-                        elevation = 18.dp,
-                        shape = barShape,
-                        ambientColor = Color(0x28000000),
-                        spotColor = Color(0x36000000),
-                    )
-                    .liquidGlass(shape = barShape, style = GlassStyle.Floating, tint = Color(0xBF181F2C), borderColor = Color(0x52FFFFFF))
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
             ) {
-                if (!tv && pages.size > 1) {
-                    // 手机：拖动跳页（日漫从右往左时滑块也反过来）
-                    var dragging by remember { mutableStateOf<Float?>(null) }
-                    val v = dragging ?: page.toFloat()
-                    Slider(
-                        value = if (rtl) (pages.size - 1) - v else v,
-                        onValueChange = { dragging = if (rtl) (pages.size - 1) - it else it; lastInteraction = System.currentTimeMillis() },
-                        onValueChangeFinished = { dragging?.let { jumpTo(it.toInt()) }; dragging = null },
-                        valueRange = 0f..(pages.size - 1).toFloat(),
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-                    )
+                if (pages.size > 1) {
+                    val lastIdx = (pages.size - 1).coerceAtLeast(1)
+                    val rawPage = (dragging ?: page.toFloat()).coerceIn(0f, lastIdx.toFloat())
+                    val shownPage = rawPage.roundToInt().coerceIn(0, pages.size - 1)
+                    val pageFraction = (rawPage / lastIdx.toFloat()).coerceIn(0f, 1f)
+                    val barFraction = if (rtl) 1f - pageFraction else pageFraction
+
+                    if (dragging != null) {
+                        Box(
+                            Modifier.align(Alignment.CenterHorizontally)
+                                .padding(bottom = 4.dp)
+                                .liquidGlass(
+                                    shape = RoundedCornerShape(50),
+                                    style = GlassStyle.Pill,
+                                    tint = Color(0xD8181F2C),
+                                    borderColor = Color(0x52FFFFFF),
+                                )
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                        ) {
+                            Text(
+                                "第 ${shownPage + 1} / ${pages.size} 页",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                    }
+
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "${shownPage + 1}",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Box(
+                            if (tv) Modifier.weight(1f)
+                                .tvFocusRing(RoundedCornerShape(16.dp), color = Color.White, fillBackground = true)
+                                .onKeyEvent { e ->
+                                    val code = e.nativeKeyEvent.keyCode
+                                    val left = code == KeyEvent.KEYCODE_DPAD_LEFT
+                                    if (!left && code != KeyEvent.KEYCODE_DPAD_RIGHT) return@onKeyEvent false
+                                    if (e.type == KeyEventType.KeyDown) {
+                                        lastInteraction = System.currentTimeMillis()
+                                        turn(if (left) rtl else !rtl)
+                                    }
+                                    true
+                                }
+                                .focusable().padding(horizontal = 4.dp)
+                            else Modifier.weight(1f),
+                        ) {
+                            ThinSeekBar(
+                                fraction = barFraction,
+                                isDragging = dragging != null,
+                                onDrag = { f ->
+                                    val pf = if (rtl) 1f - f else f
+                                    dragging = pf * lastIdx
+                                    lastInteraction = System.currentTimeMillis()
+                                },
+                                onDragEnd = {
+                                    dragging?.let { jumpTo(it.roundToInt()) }
+                                    dragging = null
+                                },
+                            )
+                        }
+                        Text(
+                            "${pages.size}",
+                            color = Color(0xFFD5DCE6),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
+                } else {
+                    Spacer(Modifier.height(4.dp))
                 }
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = if (tv) Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally) else Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically,
+
+                LiquidDock(
+                    count = slotCount,
+                    activeSlot = targetSlot,
+                    focusedSlot = focusedSlot,
+                    pulsing = pulsing || dragging != null,
                 ) {
-                    val chapterNav = onOpenUrl != null
-                    val btnMod = if (tv) Modifier else Modifier.weight(1f)
-                    if (chapterNav && book.prev != null) ReaderButton("上一话", btnMod) { openChapter(book.prev) }
-                    // 上一页 / 下一页按钮按屏幕方向摆：从右往左读时「下一页」在左边
-                    val back = @Composable { ReaderButton(if (rtl) "下一页" else "上一页", btnMod) { turn(rtl) } }
-                    val fwd = @Composable { ReaderButton(if (rtl) "上一页" else "下一页", btnMod.focusRequester(controlsFocus)) { turn(!rtl) } }
-                    back()
-                    Text("${page + 1} / ${pages.size}", color = Color.White, maxLines = 1, softWrap = false, modifier = Modifier.padding(horizontal = 4.dp))
-                    fwd()
-                    if (chapterNav && book.next != null) ReaderButton("下一话", btnMod) { openChapter(book.next) }
-                    if (tv || !chapterNav) {
-                        ReaderButton("目录", btnMod) { panel = ReaderPanel.THUMBS }
+                    DockButton(
+                        icon = AppIcons.SkipPrevious,
+                        label = "上一话",
+                        modifier = Modifier.weight(1f),
+                        iconSize = 27.dp,
+                        enabled = canPrevChapter,
+                        active = effectiveSlot == 0,
+                        onFocusChange = { if (it) focusedSlot = 0 else if (focusedSlot == 0) focusedSlot = -1 },
+                    ) {
+                        clickSlot(0) { openChapter(book.prev) }
                     }
-                    if (tv && mode != MangaMode.WIDTH) {
-                        ReaderButton("缩小") { setZoom(ZOOMS.lastOrNull { it < zoom - 0.01f } ?: 1f) }
-                        ReaderButton("放大") { setZoom(ZOOMS.firstOrNull { it > zoom + 0.01f } ?: 3f) }
+                    DockButton(
+                        icon = AppIcons.ArrowBack,
+                        label = if (rtl) "下一页" else "上一页",
+                        modifier = Modifier.weight(1f),
+                        iconSize = 23.dp,
+                        active = effectiveSlot == 1,
+                        onFocusChange = { if (it) focusedSlot = 1 else if (focusedSlot == 1) focusedSlot = -1 },
+                    ) {
+                        clickSlot(1) { turn(rtl) }
                     }
-                    if (tv || !chapterNav) {
-                        ReaderButton("设置", btnMod) { panel = ReaderPanel.SETTINGS }
+                    DockButton(
+                        icon = AppIcons.MenuBook,
+                        label = "目录",
+                        modifier = Modifier.weight(1f),
+                        iconSize = 22.dp,
+                        active = effectiveSlot == 2,
+                        onFocusChange = { if (it) focusedSlot = 2 else if (focusedSlot == 2) focusedSlot = -1 },
+                    ) {
+                        clickSlot(2) { panel = ReaderPanel.THUMBS }
+                    }
+                    DockButton(
+                        icon = AppIcons.ArrowForward,
+                        label = if (rtl) "上一页" else "下一页",
+                        modifier = Modifier.weight(1f).focusRequester(controlsFocus),
+                        iconSize = 23.dp,
+                        active = effectiveSlot == 3,
+                        onFocusChange = { if (it) focusedSlot = 3 else if (focusedSlot == 3) focusedSlot = -1 },
+                    ) {
+                        clickSlot(3) { turn(!rtl) }
+                    }
+                    DockButton(
+                        icon = AppIcons.SkipNext,
+                        label = "下一话",
+                        modifier = Modifier.weight(1f),
+                        iconSize = 27.dp,
+                        enabled = canNextChapter,
+                        active = effectiveSlot == 4,
+                        onFocusChange = { if (it) focusedSlot = 4 else if (focusedSlot == 4) focusedSlot = -1 },
+                    ) {
+                        clickSlot(4) { openChapter(book.next) }
+                    }
+                    if (tv) {
+                        if (showZoom) {
+                            DockButton(
+                                icon = AppIcons.Remove,
+                                label = "缩小",
+                                modifier = Modifier.weight(1f),
+                                iconSize = 23.dp,
+                                active = effectiveSlot == 5,
+                                onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
+                            ) {
+                                clickSlot(5) { setZoom(ZOOMS.lastOrNull { it < zoom - 0.01f } ?: 1f) }
+                            }
+                            DockButton(
+                                icon = AppIcons.Add,
+                                label = "放大",
+                                modifier = Modifier.weight(1f),
+                                iconSize = 23.dp,
+                                active = effectiveSlot == 6,
+                                onFocusChange = { if (it) focusedSlot = 6 else if (focusedSlot == 6) focusedSlot = -1 },
+                            ) {
+                                clickSlot(6) { setZoom(ZOOMS.firstOrNull { it > zoom + 0.01f } ?: 3f) }
+                            }
+                        }
+                        val settingsSlot = if (showZoom) 7 else 5
+                        DockButton(
+                            icon = AppIcons.Settings,
+                            label = "阅读设置",
+                            modifier = Modifier.weight(1f),
+                            iconSize = 22.dp,
+                            active = effectiveSlot == settingsSlot,
+                            onFocusChange = { if (it) focusedSlot = settingsSlot else if (focusedSlot == settingsSlot) focusedSlot = -1 },
+                        ) {
+                            clickSlot(settingsSlot) { panel = ReaderPanel.SETTINGS }
+                        }
                     }
                 }
+
                 if (tv) Text(
                     "←→ 翻页 · 放大后方向键移动 · 确认键显示控制栏 · 长按确认 / 菜单键：阅读设置 · 返回退出",
                     color = Color(0x99FFFFFF), style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 2.dp),
+                    modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 4.dp),
                 )
             }
         }
@@ -687,17 +846,6 @@ private fun ChapterEnd(book: MangaBook, onOpenUrl: ((String, Boolean) -> Unit)?,
                 Button(onClick = { onOpenUrl(next, true) }, modifier = Modifier.padding(top = 12.dp)) { Text("下一话") }
             }
         }
-    }
-}
-
-@Composable
-private fun ReaderButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    TextButton(
-        onClick = onClick,
-        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp),
-        modifier = modifier.defaultMinSize(minWidth = 1.dp, minHeight = 36.dp).tvFocusRing(RoundedCornerShape(50), fillBackground = true),
-    ) {
-        Text(label, color = Color.White, maxLines = 1, softWrap = false)
     }
 }
 
