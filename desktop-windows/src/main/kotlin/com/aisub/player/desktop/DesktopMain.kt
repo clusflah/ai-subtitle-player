@@ -60,12 +60,21 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.aisub.player.MainActivity
 import com.aisub.player.SettingsStore
 import com.aisub.player.VoxtitleApp
+import com.aisub.player.AppDarkMode
 import com.aisub.player.ui.AppIcons
 import com.aisub.player.ui.GlassStyle
 import com.aisub.player.ui.GlassTokens
+import com.aisub.player.ui.LocalSystemDarkOverride
 import com.aisub.player.ui.PopupTheme
 import com.aisub.player.ui.glassShadow
+import com.aisub.player.ui.isDarkResolved
 import com.aisub.player.ui.liquidGlass
+import com.sun.jna.Library
+import com.sun.jna.Native
+import com.sun.jna.Pointer
+import com.sun.jna.platform.win32.Advapi32Util
+import com.sun.jna.platform.win32.WinReg
+import com.sun.jna.ptr.IntByReference
 import kotlinx.coroutines.delay
 import java.awt.RenderingHints
 import java.awt.datatransfer.DataFlavor
@@ -129,6 +138,34 @@ private fun dispatchExternalFileOrUrl(activity: MainActivity, target: String) {
     if (file.exists()) {
         val viewIntent = Intent(Intent.ACTION_VIEW, Uri.fromFile(file))
         activity.dispatchOnNewIntent(viewIntent)
+    }
+}
+
+private interface DesktopDwmapi : Library {
+    fun DwmSetWindowAttribute(hwnd: Pointer, dwAttribute: Int, pvAttribute: IntByReference, cbAttribute: Int): Int
+
+    companion object {
+        val INSTANCE: DesktopDwmapi? = runCatching {
+            Native.load("dwmapi", DesktopDwmapi::class.java)
+        }.getOrNull()
+    }
+}
+
+private fun queryWindowsDarkTheme(): Boolean = runCatching {
+    Advapi32Util.registryGetIntValue(
+        WinReg.HKEY_CURRENT_USER,
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        "AppsUseLightTheme",
+    ) == 0
+}.getOrDefault(false)
+
+private fun applyWindowDarkTitleBar(window: java.awt.Window, dark: Boolean) {
+    runCatching {
+        val ptr = Native.getComponentPointer(window) ?: return
+        val ref = IntByReference(if (dark) 1 else 0)
+        // DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Win10 2004+ / Win11), 19 为旧版回退
+        val res = DesktopDwmapi.INSTANCE?.DwmSetWindowAttribute(ptr, 20, ref, 4) ?: -1
+        if (res != 0) DesktopDwmapi.INSTANCE?.DwmSetWindowAttribute(ptr, 19, ref, 4)
     }
 }
 
@@ -314,11 +351,34 @@ fun main(args: Array<String>) {
                 }
 
                 var toastMessage by remember { mutableStateOf<String?>(null) }
+                var winSystemDark by remember { mutableStateOf(queryWindowsDarkTheme()) }
+                val settingsPrefs = remember { voxApp.getSharedPreferences("settings", 0) }
+                var savedDarkMode by remember {
+                    mutableStateOf(
+                        runCatching {
+                            AppDarkMode.valueOf(settingsPrefs.getString("appDarkMode", AppDarkMode.SYSTEM.name)!!)
+                        }.getOrDefault(AppDarkMode.SYSTEM),
+                    )
+                }
                 LaunchedEffect(Unit) {
+                    var tick = 0
                     while (true) {
                         toastMessage = Toast.currentMessage
+                        val rawMode = settingsPrefs.getString("appDarkMode", null)
+                        savedDarkMode = when {
+                            rawMode != null -> runCatching { AppDarkMode.valueOf(rawMode) }.getOrDefault(AppDarkMode.SYSTEM)
+                            settingsPrefs.getString("appBackground", null) == "DARK" -> AppDarkMode.DARK
+                            else -> AppDarkMode.SYSTEM
+                        }
+                        if (tick++ % 6 == 0) {
+                            winSystemDark = queryWindowsDarkTheme()
+                        }
                         delay(150)
                     }
+                }
+                val windowDark = savedDarkMode.isDarkResolved(winSystemDark)
+                LaunchedEffect(window, windowDark) {
+                    applyWindowDarkTitleBar(window, windowDark)
                 }
 
                 androidx.compose.runtime.key(restartGeneration) {
@@ -326,6 +386,7 @@ fun main(args: Array<String>) {
                         LocalContext provides activeActivity,
                         LocalConfiguration provides configuration,
                         LocalLifecycleOwner provides DesktopLifecycleOwner,
+                        LocalSystemDarkOverride provides winSystemDark,
                     ) {
                         Box(Modifier.fillMaxSize()) {
                             activeActivity.desktopContent?.invoke()

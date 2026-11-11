@@ -136,6 +136,31 @@ private val GlacierGradientPopupColors = LightPopupColors.copy(
     disabled = Color(0xFFC0C3D4),
 )
 
+private val AuroraGradientPopupColors = LightPopupColors.copy(
+    page = Color(0xFFF2F3F6),
+    surface = Color(0xE4F6F8FB),
+    card = Color(0xD4ECF0F5),
+    button = Color(0xDEE0E6EE),
+    textPrimary = Color(0xFF1F232A),
+    textSecondary = Color(0xFF5B626E),
+    divider = Color(0x221F232A),
+    disabled = Color(0xFFC0C6CF),
+)
+
+private val ChampagneGradientPopupColors = LightPopupColors.copy(
+    page = Color(0xFFF5F2EE),
+    surface = Color(0xE5FAF8F4),
+    card = Color(0xD6F0ECE5),
+    button = Color(0xDEE7E1D8),
+    textPrimary = Color(0xFF26221D),
+    textSecondary = Color(0xFF675F56),
+    divider = Color(0x2226221D),
+    accent = Color(0xFFB5691D),
+    disabled = Color(0xFFC8C2BA),
+    selectedBg = Color(0xE0F9E9D4),
+    selectedText = Color(0xFFA35B14),
+)
+
 val DarkPopupColors = PopupColors(
     page = Color(0xFF12161F),
     surface = GlassTokens.DarkSheetTint,
@@ -153,23 +178,68 @@ val DarkPopupColors = PopupColors(
     dark = true,
 )
 
+private val DarkWarmPopupColors = DarkPopupColors.copy(
+    page = Color(0xFF191613),
+    surface = Color(0xD6221E1A),
+    card = Color(0xAB302A24),
+    button = Color(0xC23D352D),
+    textSecondary = Color(0xFFC8BFB4),
+    selectedBg = Color(0xBA4E3A24),
+)
+
+private val DarkCyanPopupColors = DarkPopupColors.copy(
+    page = Color(0xFF121816),
+    surface = Color(0xD418221F),
+    card = Color(0xA824332F),
+    button = Color(0xBF2E403B),
+    textSecondary = Color(0xFFB4C6C0),
+)
+
+private val DarkGlacierPopupColors = DarkPopupColors.copy(
+    page = Color(0xFF151621),
+    surface = Color(0xD41B1D2C),
+    card = Color(0xA8282B40),
+    button = Color(0xBF343852),
+    textSecondary = Color(0xFFB9BCD2),
+)
+
+private val DarkAuroraPopupColors = DarkPopupColors.copy(
+    page = Color(0xFF15171B),
+    surface = Color(0xD41A1F26),
+    card = Color(0xA8272E38),
+    button = Color(0xBF323B48),
+    textSecondary = Color(0xFFB8C1CE),
+)
+
 val LocalPopupColors = staticCompositionLocalOf { DarkPopupColors }
 
 @Composable
 fun popupColors(): PopupColors {
     val bg = LocalAppBackground.current
-    val systemDark = isSystemInDarkTheme()
-    if (bg.isDarkResolved(systemDark)) return DarkPopupColors
+    if (isAppDarkTheme()) {
+        return when (bg) {
+            AppBackground.WARM_BEIGE_GRAY,
+            AppBackground.WARM_CHAMPAGNE_GRADIENT,
+            -> DarkWarmPopupColors
+            AppBackground.PALE_CYAN_GRAY,
+            AppBackground.MINT_GREEN_GRADIENT,
+            -> DarkCyanPopupColors
+            AppBackground.GLACIER_BLUE_PURPLE_GRADIENT -> DarkGlacierPopupColors
+            AppBackground.AURORA_GRAY_WHITE_GRADIENT -> DarkAuroraPopupColors
+            AppBackground.NEUTRAL_GRAY,
+            AppBackground.VERY_LIGHT_GRAY,
+            -> DarkPopupColors
+        }
+    }
     return when (bg) {
         AppBackground.NEUTRAL_GRAY -> NeutralGrayPopupColors
         AppBackground.WARM_BEIGE_GRAY -> WarmBeigePopupColors
         AppBackground.PALE_CYAN_GRAY -> PaleCyanPopupColors
         AppBackground.MINT_GREEN_GRADIENT -> MintGradientPopupColors
         AppBackground.GLACIER_BLUE_PURPLE_GRADIENT -> GlacierGradientPopupColors
-        AppBackground.VERY_LIGHT_GRAY,
-        AppBackground.SYSTEM,
-        AppBackground.DARK,
-        -> LightPopupColors
+        AppBackground.AURORA_GRAY_WHITE_GRADIENT -> AuroraGradientPopupColors
+        AppBackground.WARM_CHAMPAGNE_GRADIENT -> ChampagneGradientPopupColors
+        AppBackground.VERY_LIGHT_GRAY -> LightPopupColors
     }
 }
 

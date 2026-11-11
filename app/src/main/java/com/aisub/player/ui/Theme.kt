@@ -45,6 +45,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aisub.player.AppBackground
+import com.aisub.player.AppDarkMode
 
 /**
  * 设计基线：品牌橙只用于主要操作、选中状态和分组标题前的短条；
@@ -52,10 +53,26 @@ import com.aisub.player.AppBackground
  */
 val Orange = Color(0xFFF28C00)
 
-val LocalAppBackground = compositionLocalOf { AppBackground.SYSTEM }
+val LocalAppBackground = compositionLocalOf { AppBackground.VERY_LIGHT_GRAY }
+val LocalAppDarkMode = compositionLocalOf { AppDarkMode.SYSTEM }
+
+/** 桌面端可注入实时监听的 Windows 系统深色状态；Android 端为 null 时直接使用系统 isSystemInDarkTheme() */
+val LocalSystemDarkOverride = compositionLocalOf<Boolean?> { null }
+
+@Composable
+fun isAppSystemInDarkTheme(): Boolean = LocalSystemDarkOverride.current ?: isSystemInDarkTheme()
+
+fun AppDarkMode.isDarkResolved(systemDark: Boolean): Boolean = when (this) {
+    AppDarkMode.SYSTEM -> systemDark
+    AppDarkMode.LIGHT -> false
+    AppDarkMode.DARK -> true
+}
+
+@Composable
+fun isAppDarkTheme(): Boolean = LocalAppDarkMode.current.isDarkResolved(isAppSystemInDarkTheme())
 
 /**
- * 与每套 [AppBackground] 美学配套的液态玻璃、导航水滴、卡片通透度与边缘折射色板。
+ * 与每套 [AppBackground] 浅色 / 深色双态美学配套的液态玻璃、导航水滴、卡片通透度与边缘折射色板。
  */
 @Immutable
 data class AppVisualPalette(
@@ -89,24 +106,7 @@ data class AppVisualPalette(
     val chatBubbleTint: Color,
 )
 
-private val DarkVisualPalette = AppVisualPalette(
-    isDark = true,
-    glassBase = Color(0xFF1A222D),
-    cardTint = Color(0xC71B2029),
-    fieldContainerTint = Color(0xA61E2430),
-    iconButtonTint = Color(0xCC222A38),
-    dockTint = Color(0xBF181F2C),
-    dropletTint = Color(0xE02E3B52),
-    navActiveColor = Color(0xFF4DA3FF),
-    navInactiveColor = Color(0xFFD5DCE6),
-    segmentedTrackTint = Color(0xCC1A212E),
-    segmentedThumbTint = Color(0xEC32405A),
-    segmentedInactiveText = Color(0xFFB0BAC9),
-    rimMidPrimary = Color(0xFFA8D8FF),
-    rimMidSecondary = Color(0xFFDCC4FF),
-    backdropFadeColor = Color(0xFF121212),
-    chatBubbleTint = Color(0xCC222938),
-)
+// ---------------- 浅色视觉色板（8 套） ----------------
 
 private val VeryLightVisualPalette = AppVisualPalette(
     isDark = false,
@@ -222,30 +222,213 @@ private val GlacierGradientVisualPalette = AppVisualPalette(
     chatBubbleTint = Color(0xDEFFFFFF),
 )
 
-fun AppBackground.visualPalette(systemDark: Boolean, forceDark: Boolean = false): AppVisualPalette {
-    if (forceDark || isDarkResolved(systemDark)) return DarkVisualPalette
-    return when (this) {
+private val AuroraGradientVisualPalette = AppVisualPalette(
+    isDark = false,
+    glassBase = Color(0xFFFAFBFD),
+    cardTint = Color(0xCCFFFFFF),
+    fieldContainerTint = Color(0xB8FFFFFF),
+    iconButtonTint = Color(0xE8FAFCFD),
+    dockTint = Color(0xDEF4F6F9),
+    dropletTint = Color(0xF0E2EAF2),
+    navActiveColor = Color(0xFF2468C4),
+    navInactiveColor = Color(0xFF252A32),
+    segmentedTrackTint = Color(0xFFE1E6EC),
+    segmentedThumbTint = Color(0xFAFFFFFF),
+    segmentedInactiveText = Color(0xFF464D58),
+    rimMidPrimary = Color(0xFFB4E4EA),
+    rimMidSecondary = Color(0xFFD9CEF0),
+    backdropFadeColor = Color(0xFFF2F2F5),
+    chatBubbleTint = Color(0xE0FFFFFF),
+)
+
+private val ChampagneGradientVisualPalette = AppVisualPalette(
+    isDark = false,
+    glassBase = Color(0xFFFFFEFC),
+    cardTint = Color(0xCCFFFEFD),
+    fieldContainerTint = Color(0xB8FFFEFD),
+    iconButtonTint = Color(0xEAFFFDFA),
+    dockTint = Color(0xDEF8F5F0),
+    dropletTint = Color(0xF0EDE6DC),
+    navActiveColor = Color(0xFFA66321),
+    navInactiveColor = Color(0xFF332E29),
+    segmentedTrackTint = Color(0xFFE7E2DA),
+    segmentedThumbTint = Color(0xFAFFFEFC),
+    segmentedInactiveText = Color(0xFF524B43),
+    rimMidPrimary = Color(0xFFF7DEC0),
+    rimMidSecondary = Color(0xFFDCE2EE),
+    backdropFadeColor = Color(0xFFF5F3F0),
+    chatBubbleTint = Color(0xE0FFFEFC),
+)
+
+// ---------------- 深色视觉色板（8 套对应夜间色温） ----------------
+
+private val DarkVeryLightVisualPalette = AppVisualPalette(
+    isDark = true,
+    glassBase = Color(0xFF1A2029),
+    cardTint = Color(0xC71B2029),
+    fieldContainerTint = Color(0xA61E242E),
+    iconButtonTint = Color(0xCC222936),
+    dockTint = Color(0xBF181E28),
+    dropletTint = Color(0xE02D394E),
+    navActiveColor = Color(0xFF4DA3FF),
+    navInactiveColor = Color(0xFFD5DCE6),
+    segmentedTrackTint = Color(0xCC1A202B),
+    segmentedThumbTint = Color(0xEC303D54),
+    segmentedInactiveText = Color(0xFFB0BAC8),
+    rimMidPrimary = Color(0xFFA8D8FF),
+    rimMidSecondary = Color(0xFFDCC4FF),
+    backdropFadeColor = Color(0xFF121212),
+    chatBubbleTint = Color(0xCC212734),
+)
+
+private val DarkNeutralGrayVisualPalette = DarkVeryLightVisualPalette.copy(
+    glassBase = Color(0xFF1B212C),
+    cardTint = Color(0xC91D222C),
+    fieldContainerTint = Color(0xAB202631),
+    iconButtonTint = Color(0xCF242B39),
+    dockTint = Color(0xC219202B),
+    dropletTint = Color(0xE22D3B52),
+    navActiveColor = Color(0xFF5C9DFF),
+    segmentedTrackTint = Color(0xCC1C222E),
+    segmentedThumbTint = Color(0xEE313F57),
+    backdropFadeColor = Color(0xFF14161A),
+    chatBubbleTint = Color(0xCE222936),
+)
+
+private val DarkWarmBeigeVisualPalette = DarkVeryLightVisualPalette.copy(
+    glassBase = Color(0xFF24201C),
+    cardTint = Color(0xC924201C),
+    fieldContainerTint = Color(0xAB28241F),
+    iconButtonTint = Color(0xCF2C2722),
+    dockTint = Color(0xC4201C18),
+    dropletTint = Color(0xE33B332A),
+    navActiveColor = Color(0xFFE89A48),
+    navInactiveColor = Color(0xFFE4DDD4),
+    segmentedTrackTint = Color(0xCC24201B),
+    segmentedThumbTint = Color(0xEE3D342B),
+    segmentedInactiveText = Color(0xFFBEB5AA),
+    rimMidPrimary = Color(0xFFFFD8AB),
+    rimMidSecondary = Color(0xFFF0C4B8),
+    backdropFadeColor = Color(0xFF181613),
+    chatBubbleTint = Color(0xCE28231E),
+)
+
+private val DarkPaleCyanVisualPalette = DarkVeryLightVisualPalette.copy(
+    glassBase = Color(0xFF192320),
+    cardTint = Color(0xC91A2421),
+    fieldContainerTint = Color(0xAB1E2926),
+    iconButtonTint = Color(0xCF212E2A),
+    dockTint = Color(0xC217201E),
+    dropletTint = Color(0xE2283C37),
+    navActiveColor = Color(0xFF45C2AF),
+    navInactiveColor = Color(0xFFD3E2DD),
+    segmentedTrackTint = Color(0xCC192320),
+    segmentedThumbTint = Color(0xEE2B403A),
+    segmentedInactiveText = Color(0xFFAABDB7),
+    rimMidPrimary = Color(0xFF98E5D0),
+    rimMidSecondary = Color(0xFFAAD6F5),
+    backdropFadeColor = Color(0xFF131816),
+    chatBubbleTint = Color(0xCE1E2926),
+)
+
+private val DarkMintGradientVisualPalette = DarkPaleCyanVisualPalette.copy(
+    cardTint = Color(0xBD1B2622),
+    fieldContainerTint = Color(0xA31F2B27),
+    dockTint = Color(0xBD16211E),
+    dropletTint = Color(0xE2273F38),
+    navActiveColor = Color(0xFF42C9AE),
+    rimMidPrimary = Color(0xFF8EE6C8),
+    rimMidSecondary = Color(0xFFA2D2F8),
+    backdropFadeColor = Color(0xFF131919),
+    chatBubbleTint = Color(0xC41F2B27),
+)
+
+private val DarkGlacierGradientVisualPalette = DarkVeryLightVisualPalette.copy(
+    glassBase = Color(0xFF1D2030),
+    cardTint = Color(0xBD1E2130),
+    fieldContainerTint = Color(0xA3222536),
+    iconButtonTint = Color(0xCC26293D),
+    dockTint = Color(0xBD1A1C2B),
+    dropletTint = Color(0xE22E3350),
+    navActiveColor = Color(0xFF8792FA),
+    navInactiveColor = Color(0xFFD9DCF0),
+    segmentedTrackTint = Color(0xCC1D1F30),
+    segmentedThumbTint = Color(0xEE323757),
+    segmentedInactiveText = Color(0xFFB3B7D0),
+    rimMidPrimary = Color(0xFFA8CAFF),
+    rimMidSecondary = Color(0xFFE0BEFF),
+    backdropFadeColor = Color(0xFF171620),
+    chatBubbleTint = Color(0xC4232638),
+)
+
+private val DarkAuroraGradientVisualPalette = DarkVeryLightVisualPalette.copy(
+    glassBase = Color(0xFF1C2128),
+    cardTint = Color(0xBD1D2229),
+    fieldContainerTint = Color(0xA321272F),
+    iconButtonTint = Color(0xCC252B35),
+    dockTint = Color(0xBD181D24),
+    dropletTint = Color(0xE22B3747),
+    navActiveColor = Color(0xFF5CA6F8),
+    navInactiveColor = Color(0xFFD7DEE8),
+    segmentedTrackTint = Color(0xCC1B2028),
+    segmentedThumbTint = Color(0xEE2F3B4D),
+    segmentedInactiveText = Color(0xFFB2BAC7),
+    rimMidPrimary = Color(0xFFA6E0E8),
+    rimMidSecondary = Color(0xFFD4C6EE),
+    backdropFadeColor = Color(0xFF16171A),
+    chatBubbleTint = Color(0xC4222730),
+)
+
+private val DarkChampagneGradientVisualPalette = DarkWarmBeigeVisualPalette.copy(
+    glassBase = Color(0xFF231F1C),
+    cardTint = Color(0xBD231F1C),
+    fieldContainerTint = Color(0xA3272320),
+    iconButtonTint = Color(0xCC2B2724),
+    dockTint = Color(0xBD1E1B18),
+    dropletTint = Color(0xE238312A),
+    navActiveColor = Color(0xFFE0A45C),
+    rimMidPrimary = Color(0xFFF5D8B5),
+    rimMidSecondary = Color(0xFFCBD4E6),
+    backdropFadeColor = Color(0xFF171616),
+    chatBubbleTint = Color(0xC4272320),
+)
+
+fun AppBackground.visualPalette(dark: Boolean): AppVisualPalette = if (dark) {
+    when (this) {
+        AppBackground.NEUTRAL_GRAY -> DarkNeutralGrayVisualPalette
+        AppBackground.WARM_BEIGE_GRAY -> DarkWarmBeigeVisualPalette
+        AppBackground.PALE_CYAN_GRAY -> DarkPaleCyanVisualPalette
+        AppBackground.MINT_GREEN_GRADIENT -> DarkMintGradientVisualPalette
+        AppBackground.GLACIER_BLUE_PURPLE_GRADIENT -> DarkGlacierGradientVisualPalette
+        AppBackground.AURORA_GRAY_WHITE_GRADIENT -> DarkAuroraGradientVisualPalette
+        AppBackground.WARM_CHAMPAGNE_GRADIENT -> DarkChampagneGradientVisualPalette
+        AppBackground.VERY_LIGHT_GRAY -> DarkVeryLightVisualPalette
+    }
+} else {
+    when (this) {
         AppBackground.NEUTRAL_GRAY -> NeutralGrayVisualPalette
         AppBackground.WARM_BEIGE_GRAY -> WarmBeigeVisualPalette
         AppBackground.PALE_CYAN_GRAY -> PaleCyanVisualPalette
         AppBackground.MINT_GREEN_GRADIENT -> MintGradientVisualPalette
         AppBackground.GLACIER_BLUE_PURPLE_GRADIENT -> GlacierGradientVisualPalette
-        AppBackground.VERY_LIGHT_GRAY,
-        AppBackground.SYSTEM,
-        AppBackground.DARK,
-        -> VeryLightVisualPalette
+        AppBackground.AURORA_GRAY_WHITE_GRADIENT -> AuroraGradientVisualPalette
+        AppBackground.WARM_CHAMPAGNE_GRADIENT -> ChampagneGradientVisualPalette
+        AppBackground.VERY_LIGHT_GRAY -> VeryLightVisualPalette
     }
 }
 
 /**
- * 读取当前上下文的视觉色板：若处于播放器等深色局部主题（`background.luminance() < 0.5f`），自动切换深色玻璃色板。
+ * 读取当前上下文的视觉色板：
+ * - 常规界面按当前配色方案与深色模式状态（跟随系统 / 浅色 / 深色）返回对应色板；
+ * - 若处于播放器等局部强制深色画布（`background.luminance() < 0.5f` 且全局并非深色），返回中性暗色播放玻璃色板。
  */
 @Composable
 fun currentVisualPalette(): AppVisualPalette {
     val bg = LocalAppBackground.current
-    val systemDark = isSystemInDarkTheme()
+    val appDark = isAppDarkTheme()
     val schemeDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    return bg.visualPalette(systemDark = systemDark, forceDark = schemeDark)
+    if (schemeDark && !appDark) return DarkVeryLightVisualPalette
+    return bg.visualPalette(dark = appDark || schemeDark)
 }
 
 private val Light = lightColorScheme(
@@ -298,26 +481,125 @@ private val Dark = darkColorScheme(
     outlineVariant = Color(0xFF2F3642),
 )
 
-fun AppBackground.isDarkResolved(systemDark: Boolean): Boolean = when (this) {
-    AppBackground.SYSTEM -> systemDark
-    AppBackground.DARK -> true
-    else -> false
-}
-
-val AppBackground.previewColors: List<Color>
-    get() = when (this) {
-        AppBackground.SYSTEM -> listOf(Color(0xFFF7F7F7), Color(0xFF1B1F27))
+/** 每套方案在浅色 / 深色模式下的实际背景色（单元素为纯色，三元素为左上至右下斜向渐变） */
+fun AppBackground.resolveColors(dark: Boolean): List<Color> = if (dark) {
+    when (this) {
+        AppBackground.NEUTRAL_GRAY -> listOf(Color(0xFF14161A))
+        AppBackground.WARM_BEIGE_GRAY -> listOf(Color(0xFF181613))
+        AppBackground.PALE_CYAN_GRAY -> listOf(Color(0xFF131816))
+        AppBackground.VERY_LIGHT_GRAY -> listOf(Color(0xFF121212))
+        AppBackground.MINT_GREEN_GRADIENT -> listOf(Color(0xFF111B17), Color(0xFF141918), Color(0xFF13191D))
+        AppBackground.GLACIER_BLUE_PURPLE_GRADIENT -> listOf(Color(0xFF131722), Color(0xFF171620), Color(0xFF1B1521))
+        AppBackground.AURORA_GRAY_WHITE_GRADIENT -> listOf(Color(0xFF13191B), Color(0xFF16171A), Color(0xFF19161F))
+        AppBackground.WARM_CHAMPAGNE_GRADIENT -> listOf(Color(0xFF1B1713), Color(0xFF171615), Color(0xFF15161A))
+    }
+} else {
+    when (this) {
         AppBackground.NEUTRAL_GRAY -> listOf(Color(0xFFF2F3F5))
         AppBackground.WARM_BEIGE_GRAY -> listOf(Color(0xFFF5F3EF))
         AppBackground.PALE_CYAN_GRAY -> listOf(Color(0xFFEEF2F0))
         AppBackground.VERY_LIGHT_GRAY -> listOf(Color(0xFFF7F7F7))
         AppBackground.MINT_GREEN_GRADIENT -> listOf(Color(0xFFE4F1EA), Color(0xFFF3F6F3), Color(0xFFE8EFF3))
         AppBackground.GLACIER_BLUE_PURPLE_GRADIENT -> listOf(Color(0xFFE8EDF8), Color(0xFFF4F3F8), Color(0xFFF1EBF4))
-        AppBackground.DARK -> listOf(Color(0xFF121212))
+        AppBackground.AURORA_GRAY_WHITE_GRADIENT -> listOf(Color(0xFFE9F1F2), Color(0xFFF5F5F6), Color(0xFFF0EDF5))
+        AppBackground.WARM_CHAMPAGNE_GRADIENT -> listOf(Color(0xFFF4EEE7), Color(0xFFFAF8F5), Color(0xFFEEEFF2))
     }
+}
 
-private fun colorSchemeFor(bg: AppBackground, systemDark: Boolean): ColorScheme {
-    if (bg.isDarkResolved(systemDark)) return Dark
+private fun colorSchemeFor(bg: AppBackground, dark: Boolean): ColorScheme {
+    if (dark) {
+        return when (bg) {
+            AppBackground.NEUTRAL_GRAY -> Dark.copy(
+                background = Color(0xFF14161A),
+                surface = Color(0xFF14161A),
+                surfaceContainerLowest = Color(0xFF1C2027),
+                surfaceContainerLow = Color(0xFF1F242C),
+                surfaceContainer = Color(0xFF232831),
+                surfaceVariant = Color(0xFF282E38),
+                surfaceContainerHigh = Color(0xFF2A303B),
+                surfaceContainerHighest = Color(0xFF323946),
+                outlineVariant = Color(0xFF303744),
+            )
+            AppBackground.WARM_BEIGE_GRAY -> Dark.copy(
+                background = Color(0xFF181613),
+                surface = Color(0xFF181613),
+                onBackground = Color(0xFFEDE7DF),
+                onSurface = Color(0xFFEDE7DF),
+                surfaceContainerLowest = Color(0xFF221E1A),
+                surfaceContainerLow = Color(0xFF26221D),
+                surfaceContainer = Color(0xFF2A2520),
+                surfaceVariant = Color(0xFF322C26),
+                onSurfaceVariant = Color(0xFFC2B9AE),
+                surfaceContainerHigh = Color(0xFF342E28),
+                surfaceContainerHighest = Color(0xFF3E3730),
+                outline = Color(0xFF968D82),
+                outlineVariant = Color(0xFF3B342D),
+            )
+            AppBackground.PALE_CYAN_GRAY,
+            AppBackground.MINT_GREEN_GRADIENT,
+            -> Dark.copy(
+                background = Color(0xFF131816),
+                surface = Color(0xFF131816),
+                onBackground = Color(0xFFE4EEEA),
+                onSurface = Color(0xFFE4EEEA),
+                surfaceContainerLowest = Color(0xFF1A2320),
+                surfaceContainerLow = Color(0xFF1D2724),
+                surfaceContainer = Color(0xFF212C28),
+                surfaceVariant = Color(0xFF26332F),
+                onSurfaceVariant = Color(0xFFADC0BA),
+                surfaceContainerHigh = Color(0xFF283631),
+                surfaceContainerHighest = Color(0xFF31413C),
+                outline = Color(0xFF80968F),
+                outlineVariant = Color(0xFF2E3D38),
+            )
+            AppBackground.GLACIER_BLUE_PURPLE_GRADIENT -> Dark.copy(
+                background = Color(0xFF161620),
+                surface = Color(0xFF161620),
+                onBackground = Color(0xFFE8E9F4),
+                onSurface = Color(0xFFE8E9F4),
+                surfaceContainerLowest = Color(0xFF1E202E),
+                surfaceContainerLow = Color(0xFF222433),
+                surfaceContainer = Color(0xFF262839),
+                surfaceVariant = Color(0xFF2C2F42),
+                onSurfaceVariant = Color(0xFFB5B8CE),
+                surfaceContainerHigh = Color(0xFF2E3145),
+                surfaceContainerHighest = Color(0xFF373B52),
+                outline = Color(0xFF888CA4),
+                outlineVariant = Color(0xFF34384E),
+            )
+            AppBackground.AURORA_GRAY_WHITE_GRADIENT -> Dark.copy(
+                background = Color(0xFF16171A),
+                surface = Color(0xFF16171A),
+                onBackground = Color(0xFFE6ECF2),
+                onSurface = Color(0xFFE6ECF2),
+                surfaceContainerLowest = Color(0xFF1D2228),
+                surfaceContainerLow = Color(0xFF20262D),
+                surfaceContainer = Color(0xFF242A32),
+                surfaceVariant = Color(0xFF2A313A),
+                onSurfaceVariant = Color(0xFFB4BDC9),
+                surfaceContainerHigh = Color(0xFF2C333D),
+                surfaceContainerHighest = Color(0xFF343C48),
+                outline = Color(0xFF86909D),
+                outlineVariant = Color(0xFF323945),
+            )
+            AppBackground.WARM_CHAMPAGNE_GRADIENT -> Dark.copy(
+                background = Color(0xFF171615),
+                surface = Color(0xFF171615),
+                onBackground = Color(0xFFECE7E1),
+                onSurface = Color(0xFFECE7E1),
+                surfaceContainerLowest = Color(0xFF221F1C),
+                surfaceContainerLow = Color(0xFF26221F),
+                surfaceContainer = Color(0xFF2A2623),
+                surfaceVariant = Color(0xFF312D29),
+                onSurfaceVariant = Color(0xFFC0B8B0),
+                surfaceContainerHigh = Color(0xFF332F2B),
+                surfaceContainerHighest = Color(0xFF3D3833),
+                outline = Color(0xFF948C84),
+                outlineVariant = Color(0xFF3A3530),
+            )
+            AppBackground.VERY_LIGHT_GRAY -> Dark
+        }
+    }
     return when (bg) {
         AppBackground.NEUTRAL_GRAY -> Light.copy(
             background = Color(0xFFF2F3F5),
@@ -410,45 +692,66 @@ private fun colorSchemeFor(bg: AppBackground, systemDark: Boolean): ColorScheme 
             outline = Color(0xFF83879C),
             outlineVariant = Color(0xFFD8DBEC),
         )
-        AppBackground.VERY_LIGHT_GRAY,
-        AppBackground.SYSTEM,
-        AppBackground.DARK,
-        -> Light
+        AppBackground.AURORA_GRAY_WHITE_GRADIENT -> Light.copy(
+            primaryContainer = Color(0xFFFCEDDD),
+            onPrimaryContainer = Color(0xFF5A3404),
+            secondaryContainer = Color(0xFFFCEDDD),
+            onSecondaryContainer = Color(0xFF5A3404),
+            background = Color(0xFFF2F3F5),
+            surface = Color(0xFFF2F3F5),
+            onBackground = Color(0xFF20242B),
+            onSurface = Color(0xFF20242B),
+            surfaceContainerLowest = Color.White,
+            surfaceContainerLow = Color(0xFFFCFDFF),
+            surfaceContainer = Color(0xFFF7F8FA),
+            surfaceVariant = Color(0xFFE5E9EF),
+            onSurfaceVariant = Color(0xFF5B626E),
+            surfaceContainerHigh = Color(0xFFEAEEF3),
+            surfaceContainerHighest = Color(0xFFE0E5EC),
+            outline = Color(0xFF848C98),
+            outlineVariant = Color(0xFFDCE1E8),
+        )
+        AppBackground.WARM_CHAMPAGNE_GRADIENT -> Light.copy(
+            primaryContainer = Color(0xFFFCEDD9),
+            onPrimaryContainer = Color(0xFF5D3505),
+            secondaryContainer = Color(0xFFFCEDD9),
+            onSecondaryContainer = Color(0xFF5D3505),
+            background = Color(0xFFF5F3F0),
+            surface = Color(0xFFF5F3F0),
+            onBackground = Color(0xFF27231F),
+            onSurface = Color(0xFF27231F),
+            surfaceContainerLowest = Color(0xFFFFFEFC),
+            surfaceContainerLow = Color(0xFFFCFAF7),
+            surfaceContainer = Color(0xFFF8F6F2),
+            surfaceVariant = Color(0xFFEAE5DE),
+            onSurfaceVariant = Color(0xFF645D55),
+            surfaceContainerHigh = Color(0xFFEEEAE4),
+            surfaceContainerHighest = Color(0xFFE4DFD7),
+            outline = Color(0xFF8C857C),
+            outlineVariant = Color(0xFFE0DCD4),
+        )
+        AppBackground.VERY_LIGHT_GRAY -> Light
     }
 }
 
 /**
- * 绘制应用背景（支持柔和中性灰、暖米灰、淡青灰、极浅灰等纯色方案，以及薄荷青绿、冰川蓝紫斜向三色渐变方案）。
+ * 绘制应用背景：根据当前配色方案与深色模式状态自动绘制对应纯色或左上至右下三色渐变。
  */
 fun Modifier.appMainBackground(): Modifier = composed {
     val bg = LocalAppBackground.current
-    val systemDark = isSystemInDarkTheme()
-    val fallbackSolid = MaterialTheme.colorScheme.background
+    val dark = isAppDarkTheme()
     this.drawWithCache {
-        val gradientColors = when (bg) {
-            AppBackground.MINT_GREEN_GRADIENT,
-            AppBackground.GLACIER_BLUE_PURPLE_GRADIENT,
-            -> bg.previewColors
-            else -> null
-        }
-        val brush = if (gradientColors != null) {
+        val colors = bg.resolveColors(dark)
+        val brush = if (colors.size > 1) {
             Brush.linearGradient(
-                colors = gradientColors,
+                colors = colors,
                 start = Offset.Zero,
                 end = Offset(size.width.coerceAtLeast(1f), size.height.coerceAtLeast(1f)),
             )
         } else {
             null
         }
-        val solidColor = when (bg) {
-            AppBackground.SYSTEM -> if (systemDark) Color(0xFF121212) else Color(0xFFF7F7F7)
-            AppBackground.DARK -> Color(0xFF121212)
-            AppBackground.NEUTRAL_GRAY -> Color(0xFFF2F3F5)
-            AppBackground.WARM_BEIGE_GRAY -> Color(0xFFF5F3EF)
-            AppBackground.PALE_CYAN_GRAY -> Color(0xFFEEF2F0)
-            AppBackground.VERY_LIGHT_GRAY -> Color(0xFFF7F7F7)
-            else -> fallbackSolid
-        }
+        val solidColor = colors.first()
         onDrawBehind {
             if (brush != null) {
                 drawRect(brush = brush)
@@ -482,12 +785,17 @@ private val AppTypography = Typography().let { t ->
 @Composable
 fun AppTheme(
     background: AppBackground = LocalAppBackground.current,
+    darkMode: AppDarkMode = LocalAppDarkMode.current,
     content: @Composable () -> Unit,
 ) {
-    val systemDark = isSystemInDarkTheme()
-    CompositionLocalProvider(LocalAppBackground provides background) {
+    val systemDark = isAppSystemInDarkTheme()
+    val dark = darkMode.isDarkResolved(systemDark)
+    CompositionLocalProvider(
+        LocalAppBackground provides background,
+        LocalAppDarkMode provides darkMode,
+    ) {
         MaterialTheme(
-            colorScheme = colorSchemeFor(background, systemDark),
+            colorScheme = colorSchemeFor(background, dark),
             shapes = AppShapes,
             typography = AppTypography,
         ) { TvRipple(content) }
@@ -495,16 +803,56 @@ fun AppTheme(
 }
 
 /**
- * 主界面背景方案选择器：带真实色彩/三色斜向渐变缩略样张、迷你卡片与导航水滴层次预览、色值标注。
+ * 主界面背景方案选择器：
+ * 顶部提供深色模式切换（跟随系统 / 浅色 / 深色），下方列出全部配色方案并实时联动预览当前浅色或深色形态。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AppBackgroundPicker(
     selected: AppBackground,
+    darkMode: AppDarkMode,
     onSelect: (AppBackground) -> Unit,
+    onDarkModeChange: (AppDarkMode) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val systemDark = isAppSystemInDarkTheme()
+    val resolvedDark = darkMode.isDarkResolved(systemDark)
     Column(modifier = modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "深色模式",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = if (darkMode == AppDarkMode.SYSTEM) {
+                        "当前系统：${if (systemDark) "深色" else "浅色"}"
+                    } else {
+                        "已固定为${darkMode.label}"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            LiquidGlassSegmentedControl(
+                options = AppDarkMode.entries.map { it.label },
+                selectedIndex = darkMode.ordinal,
+                onSelect = { idx -> onDarkModeChange(AppDarkMode.entries[idx]) },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        CardDivider(inset = 16.dp)
         AppBackground.entries.forEachIndexed { index, bg ->
             if (index > 0) CardDivider(inset = 82.dp)
             val isSelected = bg == selected
@@ -516,7 +864,7 @@ fun AppBackgroundPicker(
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                BackgroundSwatch(bg = bg, selected = isSelected)
+                BackgroundSwatch(bg = bg, dark = resolvedDark, selected = isSelected)
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
                     FlowRow(
@@ -530,7 +878,7 @@ fun AppBackgroundPicker(
                             color = MaterialTheme.colorScheme.onSurface,
                         )
                         Text(
-                            text = bg.colorCode,
+                            text = bg.colorCode(resolvedDark),
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
                             color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -561,11 +909,10 @@ fun AppBackgroundPicker(
 }
 
 @Composable
-private fun BackgroundSwatch(bg: AppBackground, selected: Boolean) {
+private fun BackgroundSwatch(bg: AppBackground, dark: Boolean, selected: Boolean) {
     val swatchShape = RoundedCornerShape(10.dp)
-    val colors = bg.previewColors
-    val systemDark = isSystemInDarkTheme()
-    val swatchPalette = bg.visualPalette(systemDark = systemDark)
+    val colors = bg.resolveColors(dark)
+    val swatchPalette = bg.visualPalette(dark = dark)
     val borderColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
     val borderWidth = if (selected) 2.dp else 1.dp
     Box(
@@ -600,7 +947,11 @@ private fun BackgroundSwatch(bg: AppBackground, selected: Boolean) {
                     .size(width = 34.dp, height = 14.dp)
                     .clip(RoundedCornerShape(4.dp))
                     .background(swatchPalette.cardTint)
-                    .border(0.5.dp, Color.Black.copy(alpha = if (swatchPalette.isDark) 0.22f else 0.07f), RoundedCornerShape(4.dp))
+                    .border(
+                        0.5.dp,
+                        if (swatchPalette.isDark) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.07f),
+                        RoundedCornerShape(4.dp),
+                    )
                     .padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(3.dp),
@@ -617,7 +968,7 @@ private fun BackgroundSwatch(bg: AppBackground, selected: Boolean) {
                         .weight(1f)
                         .clip(RoundedCornerShape(2.dp))
                         .background(
-                            if (swatchPalette.isDark) Color.White.copy(alpha = 0.45f)
+                            if (swatchPalette.isDark) Color.White.copy(alpha = 0.50f)
                             else Color.Black.copy(alpha = 0.22f),
                         ),
                 )
@@ -634,7 +985,7 @@ private fun BackgroundSwatch(bg: AppBackground, selected: Boolean) {
                     Modifier
                         .size(width = 10.dp, height = 5.dp)
                         .clip(CircleShape)
-                        .background(swatchPalette.navActiveColor.copy(alpha = 0.85f)),
+                        .background(swatchPalette.navActiveColor.copy(alpha = 0.88f)),
                 )
             }
         }

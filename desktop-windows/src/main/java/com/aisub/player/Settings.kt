@@ -70,20 +70,31 @@ enum class VideoLeaveAction(val label: String) {
     PIP("悬浮窗（画中画）"),
 }
 
-/** 主界面背景配色方案 */
+/** 外观深浅模式：所有主界面配色方案均可跟随系统深色模式，或手动切换为浅色 / 深色 */
+enum class AppDarkMode(val label: String) {
+    SYSTEM("跟随系统"),
+    LIGHT("浅色"),
+    DARK("深色"),
+}
+
+/** 主界面背景配色方案（每套方案均具备浅色与深色双态色板，支持跟随深色模式切换） */
 enum class AppBackground(
     val label: String,
-    val colorCode: String,
+    val lightColorCode: String,
+    val darkColorCode: String,
     val description: String,
 ) {
-    SYSTEM("跟随系统", "默认", "浅色使用极浅灰，系统深色模式时自动切换夜间深色"),
-    NEUTRAL_GRAY("柔和中性灰", "#F2F3F5", "干净、现代，能够突出各种颜色的封面，适合长期使用"),
-    WARM_BEIGE_GRAY("暖米灰", "#F5F3EF", "更温润，有高级感，适合阅读、音乐和媒体管理类应用"),
-    PALE_CYAN_GRAY("淡青灰", "#EEF2F0", "略带绿色倾向，与播放器、媒体库的视觉氛围比较协调"),
-    VERY_LIGHT_GRAY("极浅灰", "#F7F7F7", "保持现在的简洁风格，只是比纯白柔和一些"),
-    MINT_GREEN_GRADIENT("薄荷青绿渐变", "#E4F1EA → #F3F6F3 → #E8EFF3", "更有媒体播放器的特色，与视频封面绿色协调柔和"),
-    GLACIER_BLUE_PURPLE_GRADIENT("冰川蓝紫渐变", "#E8EDF8 → #F4F3F8 → #F1EBF4", "更偏现代数字产品风格，视觉上比较轻盈"),
-    DARK("深色夜间", "#121212", "深色低眩光背景，适合暗光或夜间环境观看"),
+    NEUTRAL_GRAY("柔和中性灰", "#F2F3F5", "#14161A", "干净、现代，能够突出各种颜色的封面，适合长期使用"),
+    WARM_BEIGE_GRAY("暖米灰", "#F5F3EF", "#181613", "更温润，有高级感，适合阅读、音乐和媒体管理类应用"),
+    PALE_CYAN_GRAY("淡青灰", "#EEF2F0", "#131816", "略带绿色倾向，与播放器、媒体库的视觉氛围比较协调"),
+    VERY_LIGHT_GRAY("极浅灰", "#F7F7F7", "#121212", "保持现在的简洁风格，比纯白柔和，深色下为经典纯正暗灰"),
+    MINT_GREEN_GRADIENT("薄荷青绿渐变", "#E4F1EA → #F3F6F3 → #E8EFF3", "#111B17 → #141918 → #13191D", "更有媒体播放器的特色，与视频封面绿色协调柔和"),
+    GLACIER_BLUE_PURPLE_GRADIENT("冰川蓝紫渐变", "#E8EDF8 → #F4F3F8 → #F1EBF4", "#131722 → #171620 → #1B1521", "更偏现代数字产品风格，视觉上比较轻盈"),
+    AURORA_GRAY_WHITE_GRADIENT("极光灰白渐变", "#E9F1F2 → #F5F5F6 → #F0EDF5", "#13191B → #16171A → #19161F", "左上淡青灰、右下淡紫灰，清爽现代，不影响各种颜色的媒体封面"),
+    WARM_CHAMPAGNE_GRADIENT("暖白香槟渐变", "#F4EEE7 → #FAF8F5 → #EEEFF2", "#1B1713 → #171615 → #15161A", "温润、柔和，有一点高级家居产品的质感");
+
+    val colorCode: String get() = lightColorCode
+    fun colorCode(dark: Boolean): String = if (dark) darkColorCode else lightColorCode
 }
 
 data class AppSettings(
@@ -184,8 +195,9 @@ data class AppSettings(
     val tvdbPin: String = "",
     /** Fanart.tv 个人 API Key：透明标题图、高清背景图 */
     val fanartKey: String = "",
-    /** 主界面背景方案 */
-    val appBackground: AppBackground = AppBackground.SYSTEM,
+    /** 主界面背景方案与深色模式策略 */
+    val appBackground: AppBackground = AppBackground.VERY_LIGHT_GRAY,
+    val appDarkMode: AppDarkMode = AppDarkMode.SYSTEM,
 ) {
     /** 某个服务商的配置，未填的字段用默认值补齐。 */
     fun configOf(p: Provider): ProviderConfig {
@@ -374,8 +386,19 @@ class SettingsRepository(context: Context) {
             tvdbKey = prefs.getString("tvdbKey", "")!!,
             tvdbPin = prefs.getString("tvdbPin", "")!!,
             fanartKey = prefs.getString("fanartKey", "")!!,
-            appBackground = runCatching { AppBackground.valueOf(prefs.getString("appBackground", d.appBackground.name)!!) }
-                .getOrDefault(d.appBackground),
+            appBackground = prefs.getString("appBackground", null).let { raw ->
+                when (raw) {
+                    null, "SYSTEM", "DARK" -> d.appBackground
+                    else -> runCatching { AppBackground.valueOf(raw) }.getOrDefault(d.appBackground)
+                }
+            },
+            appDarkMode = prefs.getString("appDarkMode", null).let { raw ->
+                when {
+                    raw != null -> runCatching { AppDarkMode.valueOf(raw) }.getOrDefault(d.appDarkMode)
+                    prefs.getString("appBackground", null) == "DARK" -> AppDarkMode.DARK
+                    else -> d.appDarkMode
+                }
+            },
         )
     }
 
@@ -437,6 +460,7 @@ class SettingsRepository(context: Context) {
             .putString("tvdbPin", s.tvdbPin)
             .putString("fanartKey", s.fanartKey)
             .putString("appBackground", s.appBackground.name)
+            .putString("appDarkMode", s.appDarkMode.name)
         for (e in TtsEngineType.entries) editor.putString("ttsVoice.${e.name}", s.ttsVoices[e].orEmpty())
         for ((p, c) in s.providerConfigs) {
             editor.putString("${p.name}.apiKey", c.apiKey)

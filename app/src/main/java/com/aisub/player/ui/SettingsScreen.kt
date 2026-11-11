@@ -197,14 +197,21 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
         Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 4.dp, bottom = 32.dp)) {
 
             // ---------------- 主界面背景 ----------------
+            val activeDark = isAppDarkTheme()
             CollapsibleCard(
                 "主界面背景",
-                "${s.appBackground.label} · ${s.appBackground.colorCode}",
+                "${s.appBackground.label} · ${s.appDarkMode.label} · ${s.appBackground.colorCode(activeDark)}",
             ) {
                 AppBackgroundPicker(
                     selected = s.appBackground,
+                    darkMode = s.appDarkMode,
                     onSelect = { bg ->
                         val next = s.copy(appBackground = bg)
+                        s = next
+                        vm.updateSettings(next)
+                    },
+                    onDarkModeChange = { dm ->
+                        val next = s.copy(appDarkMode = dm)
                         s = next
                         vm.updateSettings(next)
                     },

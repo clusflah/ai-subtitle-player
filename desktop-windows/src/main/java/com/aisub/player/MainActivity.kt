@@ -118,7 +118,7 @@ class MainActivity : ComponentActivity() {
                 if (ContextCompat.checkSelfPermission(this@MainActivity, imagePermission) == PackageManager.PERMISSION_GRANTED) lib.onImagePermission(true)
             }
             if (onboarding) {
-                AppTheme(ui.settings.appBackground) {
+                AppTheme(ui.settings.appBackground, ui.settings.appDarkMode) {
                     OnboardingScreen(
                         onStart = {
                             appPrefs.edit().putBoolean("onboarded", true).apply()
@@ -145,7 +145,7 @@ class MainActivity : ComponentActivity() {
             BackHandler(enabled = nav.stack.size > 1, onBack = back)
 
             val openDetail: (MediaEntry) -> Unit = { e -> nav.push(Screen.FileDetail(null, e.toRemoteItem(), listOf(e), 0)) }
-            AppTheme(ui.settings.appBackground) {
+            AppTheme(ui.settings.appBackground, ui.settings.appDarkMode) {
                 val view = LocalView.current
                 val isDark = androidx.compose.material3.MaterialTheme.colorScheme.background.luminance() < 0.5f
                 val darkCanvas = nav.current == Screen.Player || nav.current is Screen.MangaRead || nav.current is Screen.ImageViewer
