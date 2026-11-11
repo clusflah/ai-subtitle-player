@@ -70,6 +70,22 @@ enum class VideoLeaveAction(val label: String) {
     PIP("悬浮窗（画中画）"),
 }
 
+/** 主界面背景配色方案 */
+enum class AppBackground(
+    val label: String,
+    val colorCode: String,
+    val description: String,
+) {
+    SYSTEM("跟随系统", "默认", "浅色使用极浅灰，系统深色模式时自动切换夜间深色"),
+    NEUTRAL_GRAY("柔和中性灰", "#F2F3F5", "干净、现代，能够突出各种颜色的封面，适合长期使用"),
+    WARM_BEIGE_GRAY("暖米灰", "#F5F3EF", "更温润，有高级感，适合阅读、音乐和媒体管理类应用"),
+    PALE_CYAN_GRAY("淡青灰", "#EEF2F0", "略带绿色倾向，与播放器、媒体库的视觉氛围比较协调"),
+    VERY_LIGHT_GRAY("极浅灰", "#F7F7F7", "保持现在的简洁风格，只是比纯白柔和一些"),
+    MINT_GREEN_GRADIENT("薄荷青绿渐变", "#E4F1EA → #F3F6F3 → #E8EFF3", "更有媒体播放器的特色，与视频封面绿色协调柔和"),
+    GLACIER_BLUE_PURPLE_GRADIENT("冰川蓝紫渐变", "#E8EDF8 → #F4F3F8 → #F1EBF4", "更偏现代数字产品风格，视觉上比较轻盈"),
+    DARK("深色夜间", "#121212", "深色低眩光背景，适合暗光或夜间环境观看"),
+}
+
 data class AppSettings(
     // 识别和翻译默认都在本地：字幕不出手机、不花钱（本地模型要先选好模型，没设置好时会提示）
     val provider: Provider = Provider.LOCAL,
@@ -168,6 +184,8 @@ data class AppSettings(
     val tvdbPin: String = "",
     /** Fanart.tv 个人 API Key：透明标题图、高清背景图 */
     val fanartKey: String = "",
+    /** 主界面背景方案 */
+    val appBackground: AppBackground = AppBackground.SYSTEM,
 ) {
     /** 某个服务商的配置，未填的字段用默认值补齐。 */
     fun configOf(p: Provider): ProviderConfig {
@@ -356,6 +374,8 @@ class SettingsRepository(context: Context) {
             tvdbKey = prefs.getString("tvdbKey", "")!!,
             tvdbPin = prefs.getString("tvdbPin", "")!!,
             fanartKey = prefs.getString("fanartKey", "")!!,
+            appBackground = runCatching { AppBackground.valueOf(prefs.getString("appBackground", d.appBackground.name)!!) }
+                .getOrDefault(d.appBackground),
         )
     }
 
@@ -416,6 +436,7 @@ class SettingsRepository(context: Context) {
             .putString("tvdbKey", s.tvdbKey)
             .putString("tvdbPin", s.tvdbPin)
             .putString("fanartKey", s.fanartKey)
+            .putString("appBackground", s.appBackground.name)
         for (e in TtsEngineType.entries) editor.putString("ttsVoice.${e.name}", s.ttsVoices[e].orEmpty())
         for ((p, c) in s.providerConfigs) {
             editor.putString("${p.name}.apiKey", c.apiKey)

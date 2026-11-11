@@ -755,9 +755,13 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
         }
     }
 
-    // Surface 提供文字颜色（深色模式下标题不会变成黑字）
-    androidx.compose.material3.Surface(color = MaterialTheme.colorScheme.surfaceContainerLowest) {
-    Box(Modifier.fillMaxSize()) {
+    val palette = currentVisualPalette()
+    // Surface 提供文字颜色（深色模式下标题不会变成黑字），背景透明透出主界面选定色调/渐变
+    androidx.compose.material3.Surface(
+        color = Color.Transparent,
+        contentColor = MaterialTheme.colorScheme.onBackground,
+    ) {
+    Box(Modifier.fillMaxSize().appMainBackground()) {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
             // 地址栏
             Row(
@@ -780,7 +784,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 // 电视：地址栏是个按钮，焦点经过时不弹输入法；按确认键用手机输入
                 if (tv) Box(
                     Modifier.weight(1f).height(40.dp)
-                        .liquidGlass(shape = RoundedCornerShape(20.dp), style = GlassStyle.Pill, enableBackdrop = false)
+                        .liquidGlass(shape = RoundedCornerShape(20.dp), style = GlassStyle.Pill, tint = palette.fieldContainerTint, enableBackdrop = false)
                         .focusRequester(toolbarFocus)
                         .clickable { dialog = WebDialog.ADDRESS }
                         .padding(horizontal = 14.dp),
@@ -808,7 +812,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
                     keyboardActions = KeyboardActions(onGo = { focusManager.clearFocus(); go(field.text) }),
                     modifier = Modifier.weight(1f).height(40.dp)
-                        .liquidGlass(shape = RoundedCornerShape(20.dp), style = GlassStyle.Pill, enableBackdrop = false)
+                        .liquidGlass(shape = RoundedCornerShape(20.dp), style = GlassStyle.Pill, tint = palette.fieldContainerTint, enableBackdrop = false)
                         // 实体键盘、电视遥控器的确认键：输入法的「前往」管不到
                         .onPreviewKeyEvent { e ->
                             val enter = e.key == androidx.compose.ui.input.key.Key.Enter || e.key == androidx.compose.ui.input.key.Key.NumPadEnter
@@ -1518,7 +1522,7 @@ private fun PickerBar(
             .padding(horizontal = 16.dp, vertical = 8.dp)
             .fillMaxWidth()
             .glassShadow(barShape, GlassStyle.Floating)
-            .liquidGlass(shape = barShape, style = GlassStyle.Floating, enableBackdrop = false),
+            .liquidGlass(shape = barShape, style = GlassStyle.Floating, tint = currentVisualPalette().dockTint, enableBackdrop = false),
         shape = barShape,
         color = Color.Transparent,
     ) {

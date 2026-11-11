@@ -92,9 +92,10 @@ internal fun TgChatMessages(
     /** 点了正文里的 #标签：按它筛选 */
     onTag: (String) -> Unit,
 ) {
-    val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    val palette = currentVisualPalette()
+    val dark = palette.isDark
     val names = if (dark) NAME_COLORS_DARK else NAME_COLORS
-    val bubble = if (dark) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainerLowest
+    val bubble = palette.chatBubbleTint
     val dayFormat = remember { java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.getDefault()) }
     fun day(v: TgVideo) = dayFormat.format(java.util.Date(v.date * 1000L))
     fun sameRun(older: TgVideo, newer: TgVideo): Boolean {
@@ -108,8 +109,7 @@ internal fun TgChatMessages(
     LazyColumn(
         state = state, reverseLayout = true,
         contentPadding = PaddingValues(vertical = 6.dp),
-        modifier = Modifier.fillMaxSize()
-            .background(if (dark) MaterialTheme.colorScheme.surfaceContainerLowest else MaterialTheme.colorScheme.surfaceContainerHigh),
+        modifier = Modifier.fillMaxSize(),
     ) {
         itemsIndexed(messages, key = { _, v -> v.messageId }) { i, v ->
             if (i >= messages.size - 3) LaunchedEffect(messages.size) { loadMore() }
@@ -132,6 +132,8 @@ internal fun TgChatMessages(
     }
     if (awayFromLatest) SmallFloatingActionButton(
         onClick = { scope.launch { state.animateScrollToItem(0) } },
+        containerColor = palette.dockTint,
+        contentColor = MaterialTheme.colorScheme.onSurface,
         modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
     ) { Icon(AppIcons.ExpandMore, "回到最新") }
     }
@@ -214,7 +216,7 @@ private fun Bubble(
         }
         Column(
             Modifier.then(if (media) Modifier.width(260.dp) else Modifier.widthIn(min = 64.dp, max = 300.dp))
-                .liquidGlass(shape = shape, style = GlassStyle.Card, tint = background.copy(alpha = 0.72f), enableBackdrop = false)
+                .liquidGlass(shape = shape, style = GlassStyle.Card, tint = background, enableBackdrop = false)
                 .tvFocusRing(shape).tvSecondaryClick(allowDpadRight = true, onSecondaryClick = onLongClick)
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick),
         ) {

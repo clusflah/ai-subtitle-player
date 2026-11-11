@@ -40,6 +40,11 @@ import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.MediaLibrary
 import com.aisub.player.meta.FolderContext
 import com.aisub.player.ui.AppTheme
+import com.aisub.player.ui.appMainBackground
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import com.aisub.player.ui.HistoryScreen
 import com.aisub.player.ui.HomeScreen
 import com.aisub.player.ui.LinkScreen
@@ -113,7 +118,7 @@ class MainActivity : ComponentActivity() {
                 if (ContextCompat.checkSelfPermission(this@MainActivity, imagePermission) == PackageManager.PERMISSION_GRANTED) lib.onImagePermission(true)
             }
             if (onboarding) {
-                AppTheme {
+                AppTheme(ui.settings.appBackground) {
                     OnboardingScreen(
                         onStart = {
                             appPrefs.edit().putBoolean("onboarded", true).apply()
@@ -140,13 +145,25 @@ class MainActivity : ComponentActivity() {
             BackHandler(enabled = nav.stack.size > 1, onBack = back)
 
             val openDetail: (MediaEntry) -> Unit = { e -> nav.push(Screen.FileDetail(null, e.toRemoteItem(), listOf(e), 0)) }
-            AppTheme {
+            AppTheme(ui.settings.appBackground) {
+                val view = LocalView.current
+                val isDark = androidx.compose.material3.MaterialTheme.colorScheme.background.luminance() < 0.5f
+                val darkCanvas = nav.current == Screen.Player || nav.current is Screen.MangaRead || nav.current is Screen.ImageViewer
+                SideEffect {
+                    val lightBars = !darkCanvas && !isDark
+                    runCatching {
+                        WindowCompat.getInsetsController(window, view).apply {
+                            isAppearanceLightStatusBars = lightBars
+                            isAppearanceLightNavigationBars = lightBars
+                        }
+                    }
+                }
                 CompositionLocalProvider(
                     LocalOpenDetail provides openDetail,
                     com.aisub.player.ui.LocalOpenItemDetail provides { item, queue, i -> nav.push(Screen.FileDetail(null, item, queue, i)) },
                 ) {
                   // 全面屏下 adjustResize 不会自动给键盘让位：最外层统一留出键盘高度，输入框（搜索、链接、设置里的 Key 等）不会被键盘盖住
-                  Column(Modifier.fillMaxSize().background(androidx.compose.material3.MaterialTheme.colorScheme.background).imePadding()) {
+                  Column(Modifier.fillMaxSize().appMainBackground().imePadding()) {
                    // 电视：播放页以外留出安全边距（部分电视有过扫描，贴边的内容会被切掉）
                    val tvSafe = if (LocalTv.current && nav.current != Screen.Player) Modifier.padding(horizontal = 40.dp, vertical = 20.dp) else Modifier
                    Box(Modifier.weight(1f).then(tvSafe)) {

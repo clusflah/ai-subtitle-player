@@ -119,6 +119,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 /** 首页里需要弹出的对话框。 */
 private sealed interface HomeDialog {
     data object About : HomeDialog
+    data object Background : HomeDialog
     data object Stream : HomeDialog
     data object Link : HomeDialog
     data object NewPlaylist : HomeDialog
@@ -140,6 +141,7 @@ fun HomeScreen(
     onRequestImagePermission: () -> Unit,
 ) {
     val state by lib.state.collectAsStateWithLifecycle()
+    val mainUi by main.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     // 标签和本机页的视频 / 音乐存在 ViewModel 里，进播放页再回来不会跳回第一个标签
     val tab = Tab.entries[lib.homeTab.coerceIn(Tab.entries.indices)]
@@ -201,7 +203,7 @@ fun HomeScreen(
 
     GlassBackdropBox { backdrop ->
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = Color.Transparent,
         topBar = {
             if (selected.isNotEmpty()) {
                 SelectionBar(
@@ -242,7 +244,8 @@ fun HomeScreen(
                     ) {
                         val globalSubActive = com.aisub.player.desktop.DesktopGlobalSubtitles.active
                         val globalSubClickThrough = com.aisub.player.desktop.DesktopGlobalSubtitles.clickThrough
-                        val isDarkHeader = MaterialTheme.colorScheme.background.red < 0.5f
+                        val headerPalette = currentVisualPalette()
+                        val isDarkHeader = headerPalette.isDark
                         val pillShape = RoundedCornerShape(50)
                         if (globalSubClickThrough) {
                             GlassBox(
@@ -266,8 +269,7 @@ fun HomeScreen(
                         }
                         val subBtnTint = when {
                             globalSubActive -> Orange.copy(alpha = 0.90f)
-                            isDarkHeader -> Color(0xCC222A38)
-                            else -> Color(0xE6FFFFFF)
+                            else -> headerPalette.iconButtonTint
                         }
                         val subBtnFg = if (globalSubActive) Color.White else MaterialTheme.colorScheme.onSurface
                         GlassBox(
@@ -364,6 +366,7 @@ fun HomeScreen(
                                 DropdownMenuItem(text = { Text("刷新媒体库") }, onClick = { menu = false; lib.refreshMedia() })
                                 DropdownMenuItem(text = { Text("打开文件…") }, onClick = { menu = false; pickFile.launch(arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream")) })
                                 DropdownMenuItem(text = { Text("隐藏的文件夹") }, onClick = { menu = false; nav.push(Screen.HiddenFolders) })
+                                DropdownMenuItem(text = { Text("主界面背景") }, onClick = { menu = false; dialog = HomeDialog.Background })
                                 DropdownMenuItem(text = { Text("设置") }, onClick = { menu = false; openSettings() })
                             }
                         }
@@ -482,7 +485,7 @@ fun HomeScreen(
             }
             when (tab) {
                 Tab.HOME -> HomeTab(
-                    lib, state, main.state.collectAsStateWithLifecycle().value.settings, play,
+                    lib, state, mainUi.settings, play,
                     openServer = openServer,
                     openServerItem = { s, item -> nav.push(Screen.ServerDetail(s.id, item.ratingKey)) },
                     openFavorite = { f ->
@@ -569,6 +572,8 @@ fun HomeScreen(
                 Tab.ME -> MeTab(
                     state = state,
                     onSettings = openSettings,
+                    currentBackground = mainUi.settings.appBackground,
+                    onBackground = { dialog = HomeDialog.Background },
                     onAbout = { dialog = HomeDialog.About },
                     onLink = if (main.linkDownloader != null) ({ dialog = HomeDialog.Link }) else null,
                     onHistory = { music -> nav.push(Screen.History(music)) },
@@ -601,6 +606,25 @@ fun HomeScreen(
     when (val d = dialog) {
         null -> {}
         HomeDialog.About -> AboutDialog { dialog = null }
+        HomeDialog.Background -> AppSheet(
+            onDismissRequest = { dialog = null },
+            sheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        ) {
+            Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 12.dp)) {
+                Text(
+                    text = "主界面背景",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+                )
+                AppBackgroundPicker(
+                    selected = mainUi.settings.appBackground,
+                    onSelect = { bg ->
+                        main.updateSettings(mainUi.settings.copy(appBackground = bg))
+                    },
+                )
+            }
+        }
         HomeDialog.Link -> TextInputDialog(
             title = "从链接下载", label = "视频网页链接（YouTube、B 站等）", confirm = "下载",
             onDismiss = { dialog = null },
@@ -1411,6 +1435,8 @@ private fun ServerContinueRow(
 private fun MeTab(
     state: LibraryState,
     onSettings: () -> Unit,
+    currentBackground: com.aisub.player.AppBackground,
+    onBackground: () -> Unit,
     onAbout: () -> Unit,
     onLink: (() -> Unit)?,
     /** 参数：true 打开音乐的最近播放，false 打开视频的 */
@@ -1610,6 +1636,8 @@ private fun MeTab(
 
         SectionHeader("设置与帮助")
         SurfaceCard {
+            ListRow("主界面背景", "${currentBackground.label} · ${currentBackground.colorCode}", AppIcons.Palette, onClick = onBackground)
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             ListRow("设置", "语音识别、字幕翻译、播放、朗读", AppIcons.Settings, onClick = onSettings)
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
@@ -1635,7 +1663,7 @@ internal fun SelectionBar(
     onDelete: () -> Unit,
 ) {
     TopAppBar(
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.90f)),
         navigationIcon = { IconButton(onClick = onClose) { Icon(AppIcons.Close, "退出多选") } },
         title = { Text("已选 $count 项", style = MaterialTheme.typography.titleMedium) },
         actions = {

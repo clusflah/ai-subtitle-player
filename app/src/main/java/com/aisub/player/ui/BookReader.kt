@@ -202,7 +202,7 @@ private val THEMES = listOf(
     BookTheme(Color(0xFFF4ECD8), Color(0xFF3B3024), Color(0xFF8C7B63), Color(0x66E0A84A)),
     BookTheme(Color(0xFF141414), Color(0xFFB9B9B9), Color(0xFF6E6E6E), Color(0x55C08A2E)),
 )
-private val THEME_NAMES = listOf("白天", "护眼", "夜间")
+private val THEME_NAMES = listOf("白天", "护眼", "夜间", "跟随")
 private val SPEEDS = listOf(0.8f, 1f, 1.25f, 1.5f, 1.75f, 2f)
 
 /** 一块在整本书里的位置：第几章，章里第几块已经连起来数成 [index]（和朗读用的一样） */
@@ -221,7 +221,35 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
     val prefs by BookStore.settings.collectAsStateWithLifecycle()
     val bookmarks by BookStore.bookmarks.collectAsStateWithLifecycle()
     val tts by BookTts.status.collectAsStateWithLifecycle()
-    val theme = THEMES[prefs.theme.coerceIn(0, THEMES.lastIndex)]
+    val palette = currentVisualPalette()
+    val themeIdx = prefs.theme.coerceIn(0, THEME_NAMES.lastIndex)
+    val followAppBg = themeIdx == 3
+    val theme = if (followAppBg) {
+        BookTheme(
+            background = MaterialTheme.colorScheme.background,
+            text = MaterialTheme.colorScheme.onBackground,
+            muted = MaterialTheme.colorScheme.onSurfaceVariant,
+            highlight = if (palette.isDark) Color(0x55C08A2E) else Color(0x55FFC94D),
+        )
+    } else THEMES[themeIdx]
+    val barTint = when (themeIdx) {
+        0 -> GlassTokens.LightDockTint
+        1 -> Color(0xE3FAF4E6)
+        2 -> GlassTokens.DarkDockTint
+        else -> palette.dockTint
+    }
+    val barContent = when (themeIdx) {
+        0 -> Color(0xFF1C1C1E)
+        1 -> Color(0xFF3B3024)
+        2 -> Color(0xFFEBEBF0)
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+    val barMuted = when (themeIdx) {
+        0 -> Color(0xFF636366)
+        1 -> Color(0xFF75654E)
+        2 -> Color(0xFF9E9EA6)
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
     val rows = remember(book) {
         val out = ArrayList<BookRow>()
         book.chapters.forEachIndexed { ci, ch -> ch.blocks.forEach { b -> out.add(BookRow(out.size, ci, b)) } }
@@ -325,7 +353,10 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
                 }
             },
     ) {
-        Box(Modifier.fillMaxSize().glassBackdropSource(backdrop).background(theme.background)) {
+        Box(
+            Modifier.fillMaxSize().glassBackdropSource(backdrop)
+                .then(if (followAppBg) Modifier.appMainBackground() else Modifier.background(theme.background)),
+        ) {
             LazyColumn(
                 state = list,
                 modifier = Modifier.fillMaxSize().then(tapModifier),
@@ -376,10 +407,11 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
             val topBarShape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp)
             Surface(
                 color = Color.Transparent,
+                contentColor = barContent,
                 shape = topBarShape,
                 modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
                     .glassShadow(topBarShape, GlassStyle.Bar)
-                    .liquidGlass(shape = topBarShape, style = GlassStyle.Bar, sampleBackdrop = true),
+                    .liquidGlass(shape = topBarShape, style = GlassStyle.Bar, tint = barTint, sampleBackdrop = true),
             ) {
                 Row(Modifier.statusBarsPadding().padding(horizontal = 4.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onBack, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "返回") }
@@ -393,19 +425,20 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
             val barShape = RoundedCornerShape(28.dp)
             Surface(
                 color = Color.Transparent,
+                contentColor = barContent,
                 shape = barShape,
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .navigationBarsPadding()
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .fillMaxWidth()
                     .glassShadow(barShape, GlassStyle.Floating)
-                    .liquidGlass(shape = barShape, style = GlassStyle.Floating, sampleBackdrop = true),
+                    .liquidGlass(shape = barShape, style = GlassStyle.Floating, tint = barTint, sampleBackdrop = true),
             ) {
                 Column(Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
                     val pct = if (rows.isEmpty()) 0 else (list.firstVisibleItemIndex + 1) * 100 / rows.size
                     Text(
                         "${book.chapters.getOrNull(current)?.title.orEmpty()} · $pct%",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall, color = barMuted,
                         maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 8.dp),
                     )
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -415,12 +448,12 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
                                 onClick = onClick,
                                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 8.dp),
                                 modifier = Modifier.weight(1f).defaultMinSize(minWidth = 1.dp, minHeight = 36.dp).tvFocusRing(RoundedCornerShape(50)),
-                            ) { Text(label, maxLines = 1, softWrap = false) }
+                            ) { Text(label, color = if (followAppBg) MaterialTheme.colorScheme.primary else barContent, maxLines = 1, softWrap = false) }
                         }
                         toolbarButton("A-") { BookStore.update { it.copy(fontSize = (it.fontSize - 1).coerceAtLeast(12)) } }
                         toolbarButton("A+") { BookStore.update { it.copy(fontSize = (it.fontSize + 1).coerceAtMost(36)) } }
                         toolbarButton("行距") { BookStore.update { it.copy(lineSpacing = if (it.lineSpacing >= 2.1f) 1.4f else it.lineSpacing + 0.35f) } }
-                        toolbarButton(THEME_NAMES[prefs.theme.coerceIn(0, 2)]) { BookStore.update { it.copy(theme = (it.theme + 1) % THEMES.size) } }
+                        toolbarButton(THEME_NAMES[themeIdx]) { BookStore.update { it.copy(theme = (themeIdx + 1) % THEME_NAMES.size) } }
                         val marked = bookmarks.any { it.key == url && it.item == list.firstVisibleItemIndex }
                         toolbarButton(if (marked) "取消书签" else "书签") { toggleCurrentBookmark() }
                         toolbarButton("朗读") {
@@ -436,13 +469,13 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
         if (reading && !controls) {
             val ttsShape = RoundedCornerShape(26.dp)
             Surface(
-                color = Color.Transparent, shape = ttsShape,
+                color = Color.Transparent, contentColor = barContent, shape = ttsShape,
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .navigationBarsPadding()
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .fillMaxWidth()
                     .glassShadow(ttsShape, GlassStyle.Floating)
-                    .liquidGlass(shape = ttsShape, style = GlassStyle.Floating, sampleBackdrop = true),
+                    .liquidGlass(shape = ttsShape, style = GlassStyle.Floating, tint = barTint, sampleBackdrop = true),
             ) {
                 Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
                     val err = tts.error

@@ -38,7 +38,7 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun OnboardingScreen(onStart: () -> Unit, onLater: () -> Unit) {
     Column(
-        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding().navigationBarsPadding()
+        Modifier.fillMaxSize().appMainBackground().statusBarsPadding().navigationBarsPadding()
             .verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 24.dp),
     ) {
         Text("欢迎使用译幕", fontSize = 28.sp, fontWeight = FontWeight.Bold)

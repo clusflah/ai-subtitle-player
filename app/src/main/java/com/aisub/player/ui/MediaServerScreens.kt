@@ -391,7 +391,7 @@ fun ServerDetailScreen(
 private fun Header(item: ServerItem) {
     Box(Modifier.fillMaxWidth().height(260.dp)) {
         NetImage(item.art, Modifier.fillMaxSize(), maxSize = 1280, fallback = null)
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0x33000000), MaterialTheme.colorScheme.surfaceContainerLowest))))
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0x33000000), currentVisualPalette().backdropFadeColor))))
         Row(Modifier.align(Alignment.BottomStart).padding(horizontal = 16.dp), verticalAlignment = Alignment.Bottom) {
             val poster = if (item.type == "episode") item.showThumb else item.thumb
             NetImage(poster, Modifier.width(110.dp).aspectRatio(2f / 3f).clip(RoundedCornerShape(6.dp)), maxSize = 400)

@@ -73,7 +73,7 @@ fun NowPlayingBar(
     }
     if (entry == null || !main.playingMusic || dismissed || player.mediaItemCount == 0 || state.playbackError != null) return
     val cover: ImageBitmap? = remember(music.cover) { music.cover?.asImageBitmap() }
-    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val palette = currentVisualPalette()
     val shape = RoundedCornerShape(24.dp)
     val hasBackdrop = LocalGlassBackdrop.current != null
     val horizPad = if (navigationBarInset) 12.dp else 16.dp
@@ -85,7 +85,7 @@ fun NowPlayingBar(
             .liquidGlass(
                 shape = shape,
                 style = GlassStyle.Floating,
-                tint = if (isDark) GlassTokens.DarkDockTint else GlassTokens.LightDockTint,
+                tint = palette.dockTint,
                 sampleBackdrop = hasBackdrop,
             ),
         shape = shape,

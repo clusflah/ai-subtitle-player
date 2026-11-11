@@ -144,7 +144,7 @@ fun OnlineSubtitleSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp),
                 )
             }
-            error?.let { Text(it, color = Color(0xFFFF6B5E), fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp)) }
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp)) }
 
             Box(Modifier.weight(1f).fillMaxWidth().padding(top = 8.dp)) {
                 when {
@@ -182,7 +182,7 @@ private fun ResultRow(sub: OnlineSubtitle, downloading: Boolean, onClick: () -> 
                     Spacer(Modifier.width(8.dp))
                 }
                 if (sub.language.isNotEmpty()) {
-                    Text(sub.language, color = Color(0xFFDDDDDD), fontSize = 12.sp)
+                    Text(sub.language, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                     Spacer(Modifier.width(8.dp))
                 }
             }

@@ -153,7 +153,7 @@ fun SurfaceCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.
             .liquidGlass(
                 shape = MaterialTheme.shapes.large,
                 style = GlassStyle.Card,
-                tint = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.78f),
+                tint = currentVisualPalette().cardTint,
             ),
     ) { Column(content = content) }
 }
@@ -174,6 +174,7 @@ fun CollapsibleCard(
     var expanded by rememberSaveable(title) { mutableStateOf(initiallyExpanded) }
     val arrow by animateFloatAsState(if (expanded) 180f else 0f, label = "arrow")
     val sectionIcon = when {
+        "背景" in title || "外观" in title -> AppIcons.Palette
         "识别" in title -> AppIcons.AutoAwesome
         "翻译" in title -> AppIcons.Translate
         "样式" in title || "字幕" in title -> AppIcons.Subtitles
@@ -192,7 +193,7 @@ fun CollapsibleCard(
             .liquidGlass(
                 shape = MaterialTheme.shapes.large,
                 style = GlassStyle.Card,
-                tint = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.82f),
+                tint = currentVisualPalette().cardTint,
             ),
     ) {
         Column {
@@ -227,6 +228,8 @@ fun CollapsibleCard(
 /** 输入框：细而浅的边框、12dp 圆角，长地址和 Key 仍然看得清边界 */
 @Composable
 fun appFieldColors() = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+    focusedContainerColor = currentVisualPalette().cardTint,
+    unfocusedContainerColor = currentVisualPalette().fieldContainerTint,
     unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
     disabledBorderColor = MaterialTheme.colorScheme.outlineVariant,
 )
@@ -260,6 +263,7 @@ fun IconBadge(icon: ImageVector, size: Dp = 38.dp, muted: Boolean = false) {
         return
     }
     val badgeColor = when (icon) {
+        AppIcons.Palette -> Color(0xFF00ACC1)
         AppIcons.AutoAwesome -> Color(0xFF9C27B0)
         AppIcons.Translate -> Color(0xFF2979FF)
         AppIcons.Subtitles -> Color(0xFFFF8F00)
@@ -369,7 +373,7 @@ fun SourceCard(icon: ImageVector, title: String, subtitle: String, modifier: Mod
             .liquidGlass(
                 shape = MaterialTheme.shapes.large,
                 style = GlassStyle.Card,
-                tint = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.78f),
+                tint = currentVisualPalette().cardTint,
             ),
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {

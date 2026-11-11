@@ -342,13 +342,16 @@ fun Modifier.liquidGlass(
     sampleBackdrop: Boolean = false,
     lightShift: Float = 0f,
 ): Modifier = composed {
-    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    val defaultBase = if (isDark) Color(0xFF1A222D) else Color(0xFFF7F9FC)
+    val palette = currentVisualPalette()
+    val defaultBase = palette.glassBase
     val resolvedTint = if (tint != Color.Unspecified) {
         tint
     } else {
-        defaultBase.copy(alpha = if (isDark) style.darkAlpha else style.lightAlpha)
+        defaultBase.copy(alpha = if (palette.isDark) style.darkAlpha else style.lightAlpha)
     }
+    val isDark = palette.isDark || resolvedTint.copy(alpha = 1f).luminance() < 0.35f
+    val rimPrimary = if (isDark && !palette.isDark) Color(0xFFA8D8FF) else palette.rimMidPrimary
+    val rimSecondary = if (isDark && !palette.isDark) Color(0xFFDCC4FF) else palette.rimMidSecondary
 
     val density = LocalDensity.current
     val bevelPx = with(density) { style.bevelWidth.toPx() }
@@ -514,8 +517,8 @@ fun Modifier.liquidGlass(
             } else {
                 Brush.linearGradient(
                     0f to Color.White.copy(alpha = topRimAlpha.coerceIn(0f, 1f)),
-                    0.35f to Color(0xFFA8D8FF).copy(alpha = midRimAlpha.coerceIn(0f, 1f)),
-                    0.65f to Color(0xFFDCC4FF).copy(alpha = midRimAlpha.coerceIn(0f, 1f)),
+                    0.35f to rimPrimary.copy(alpha = midRimAlpha.coerceIn(0f, 1f)),
+                    0.65f to rimSecondary.copy(alpha = midRimAlpha.coerceIn(0f, 1f)),
                     1f to Color.White.copy(alpha = bottomRimAlpha.coerceIn(0f, 1f)),
                     start = sheenStart,
                     end = sheenEnd,
@@ -720,8 +723,9 @@ fun LiquidGlassIconButton(
         animationSpec = spring(dampingRatio = 0.52f, stiffness = 260f),
         label = "glassBtnLight",
     )
-    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    val baseGlassTint = if (isDark) Color(0xCC222A38) else Color(0xE6FFFFFF)
+    val palette = currentVisualPalette()
+    val isDark = palette.isDark
+    val baseGlassTint = palette.iconButtonTint
     val glassTint by animateColorAsState(
         targetValue = if (focused) MaterialTheme.colorScheme.primary.copy(alpha = 0.90f) else baseGlassTint,
         animationSpec = tween(durationMillis = 150),
@@ -825,10 +829,11 @@ fun <T> LiquidGlassBottomBar(
     val barScaleY = 1f - (rawStretch * 0.014f).coerceAtMost(0.022f) + touchPress * 0.014f
 
     val pillShape = RoundedCornerShape(50)
-    val barTint = if (isDark) GlassTokens.DarkDockTint else GlassTokens.LightDockTint
-    val dropletTint = if (isDark) GlassTokens.DarkDropletTint else GlassTokens.LightDropletTint
-    val activeColor = if (isDark) GlassTokens.DarkActiveBlue else GlassTokens.LightActiveBlue
-    val inactiveColor = if (isDark) Color(0xFFD5DCE6) else Color(0xFF1C1C1E)
+    val palette = currentVisualPalette()
+    val barTint = palette.dockTint
+    val dropletTint = palette.dropletTint
+    val activeColor = palette.navActiveColor
+    val inactiveColor = palette.navInactiveColor
 
     Box(
         modifier = modifier
@@ -1022,15 +1027,12 @@ fun <T> LiquidGlassNavigationRail(
 
     val pillShape = RoundedCornerShape(38.dp)
     val slotShape = RoundedCornerShape(32.dp)
-    val railTint = if (isDark) GlassTokens.DarkDockTint else GlassTokens.LightDockTint
+    val palette = currentVisualPalette()
+    val railTint = palette.dockTint
     val tvFocused = tv && focusedIndex in items.indices
-    val dropletTint = when {
-        tvFocused -> MaterialTheme.colorScheme.primary.copy(alpha = 0.88f)
-        isDark -> GlassTokens.DarkDropletTint
-        else -> GlassTokens.LightDropletTint
-    }
-    val activeColor = if (isDark) GlassTokens.DarkActiveBlue else GlassTokens.LightActiveBlue
-    val inactiveColor = if (isDark) Color(0xFFD5DCE6) else Color(0xFF1C1C1E)
+    val dropletTint = if (tvFocused) MaterialTheme.colorScheme.primary.copy(alpha = 0.88f) else palette.dropletTint
+    val activeColor = palette.navActiveColor
+    val inactiveColor = palette.navInactiveColor
     val slotHeight = 66.dp
     val count = items.size.coerceAtLeast(1)
 
@@ -1237,10 +1239,11 @@ fun LiquidGlassSegmentedControl(
     val lightPhase = fastPos * 0.95f + rawStretch * 1.05f + wobble * 0.7f
 
     val trackShape = RoundedCornerShape(50)
-    val trackBg = if (isDark) Color(0xCC1A212E) else Color(0xFFEAECEF)
-    val thumbTint = if (isDark) Color(0xEC32405A) else Color(0xFAFFFFFF)
-    val activeText = if (isDark) Color(0xFF4DA3FF) else Color(0xFF007AFF)
-    val inactiveText = if (isDark) Color(0xFFB0BAC9) else Color(0xFF3C3C43)
+    val palette = currentVisualPalette()
+    val trackBg = palette.segmentedTrackTint
+    val thumbTint = palette.segmentedThumbTint
+    val activeText = palette.navActiveColor
+    val inactiveText = palette.segmentedInactiveText
 
     Box(
         modifier = modifier

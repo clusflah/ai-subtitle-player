@@ -34,9 +34,9 @@ data class BookBookmark(
     val time: Long,
 )
 
-/** 阅读设置：字号（sp）、行距倍数、主题（0 白底 1 护眼 2 夜间）、朗读速度 */
+/** 阅读设置：字号（sp）、行距倍数、主题（0 白底 1 护眼 2 夜间 3 跟随主界面背景）、朗读速度 */
 data class BookPrefs(
-    val fontSize: Int = 19, val lineSpacing: Float = 1.7f, val theme: Int = 0, val ttsSpeed: Float = 1f,
+    val fontSize: Int = 19, val lineSpacing: Float = 1.7f, val theme: Int = 3, val ttsSpeed: Float = 1f,
     /** 目录、版权、封面等导航内容不进入朗读队列。 */
     val skipFrontMatter: Boolean = true,
     /** 听书默认统一使用一个旁白语音，不做角色推断。 */
@@ -74,7 +74,7 @@ object BookStore {
             }
         }.getOrDefault(emptyList())
         _prefs.value = BookPrefs(
-            p.getInt("fontSize", 19), p.getFloat("lineSpacing", 1.7f), p.getInt("theme", 0), p.getFloat("ttsSpeed", 1f),
+            p.getInt("fontSize", 19), p.getFloat("lineSpacing", 1.7f), p.getInt("theme", 3), p.getFloat("ttsSpeed", 1f),
             p.getBoolean("skipFrontMatter", true), p.getBoolean("unifiedNarrator", true), p.getString("ttsVoice", null),
         )
         _bookmarks.value = runCatching {

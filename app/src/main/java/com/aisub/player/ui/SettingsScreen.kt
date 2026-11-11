@@ -182,16 +182,34 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
     }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color.Transparent,
+                    scrolledContainerColor = Color.Transparent,
+                ),
                 navigationIcon = { IconButton(onClick = leave) { Icon(AppIcons.ArrowBack, "返回") } },
                 title = { Text("设置") },
             )
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 4.dp, bottom = 32.dp)) {
+
+            // ---------------- 主界面背景 ----------------
+            CollapsibleCard(
+                "主界面背景",
+                "${s.appBackground.label} · ${s.appBackground.colorCode}",
+            ) {
+                AppBackgroundPicker(
+                    selected = s.appBackground,
+                    onSelect = { bg ->
+                        val next = s.copy(appBackground = bg)
+                        s = next
+                        vm.updateSettings(next)
+                    },
+                )
+            }
 
             // ---------------- 语音识别 ----------------
             val asrProblem = s.asrProblem()

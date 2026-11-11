@@ -260,7 +260,7 @@ fun FileDetailScreen(
                     NetImage(backdrop, Modifier.fillMaxSize(), maxSize = 1280, fallback = null)
                     Box(
                         Modifier.fillMaxSize().background(
-                            Brush.verticalGradient(0.5f to Color.Transparent, 1f to MaterialTheme.colorScheme.surfaceContainerLowest),
+                            Brush.verticalGradient(0.45f to Color.Transparent, 1f to currentVisualPalette().backdropFadeColor),
                         ),
                     )
                     // Fanart.tv 的透明标题图
