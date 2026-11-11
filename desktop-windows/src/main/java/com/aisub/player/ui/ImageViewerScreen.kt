@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -36,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -63,41 +65,52 @@ fun ImageViewerScreen(
     val scope = rememberCoroutineScope()
     val pager = rememberPagerState(start.coerceIn(0, (images.size - 1).coerceAtLeast(0))) { images.size }
     var bars by remember { mutableStateOf(true) }
-    GlassBackdropBox(Modifier.fillMaxSize()) { backdrop ->
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
-            HorizontalPager(pager, Modifier.fillMaxSize().glassBackdropSource(backdrop), beyondViewportPageCount = 1, key = { images[it].path }) { page ->
-                ZoomableImage(images[page].playUrl) { bars = !bars }
-            }
-            AnimatedVisibility(bars, enter = fadeIn(), exit = fadeOut()) {
-                val current = images.getOrNull(pager.currentPage)
-                Row(
-                    Modifier.fillMaxWidth()
-                        .background(Color(0x99000000))
-                        .statusBarsPadding(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回", tint = Color.White) }
-                    Column(Modifier.weight(1f)) {
-                        Text(current?.name.orEmpty(), color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
-                        if (images.size > 1) Text("${pager.currentPage + 1} / ${images.size}", color = Color(0xCCFFFFFF), style = MaterialTheme.typography.bodySmall)
-                    }
-                    if (images.size > 1) IconButton(onClick = { openManga(images, pager.currentPage) }) {
-                        Icon(AppIcons.MenuBook, "漫画模式", tint = Color.White)
-                    }
-                    if (current != null) {
-                        IconButton(onClick = { openDetail(current) }) { Icon(AppIcons.Info, "详情", tint = Color.White) }
-                        if (serverId != null) {
-                            IconButton(onClick = {
-                                scope.launch {
-                                    try {
-                                        Downloads.enqueue(context, listOf(Downloads.Job(current, "")))
-                                        Toast.makeText(context, "已加入下载，保存到 Download/${Downloads.ROOT}", Toast.LENGTH_SHORT).show()
-                                    } catch (e: Exception) {
-                                        Toast.makeText(context, "下载失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
-                                    }
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        HorizontalPager(pager, Modifier.fillMaxSize(), beyondViewportPageCount = 1, key = { images[it].path }) { page ->
+            ZoomableImage(images[page].playUrl) { bars = !bars }
+        }
+        if (!bars && images.size > 1) {
+            Text(
+                "${pager.currentPage + 1} / ${images.size}",
+                color = Color(0xD9FFFFFF),
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.align(Alignment.BottomEnd)
+                    .navigationBarsPadding()
+                    .padding(10.dp)
+                    .liquidGlass(shape = RoundedCornerShape(8.dp), style = GlassStyle.Pill, tint = GlassTokens.DarkBadgeTint, enableBackdrop = false)
+                    .padding(horizontal = 7.dp, vertical = 2.dp),
+            )
+        }
+        AnimatedVisibility(bars, enter = fadeIn(), exit = fadeOut()) {
+            val current = images.getOrNull(pager.currentPage)
+            Row(
+                Modifier.fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color(0xB3000000), Color.Transparent)))
+                    .statusBarsPadding()
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onBack) { Icon(AppIcons.ArrowBack, "返回", tint = Color.White) }
+                Column(Modifier.weight(1f)) {
+                    Text(current?.name.orEmpty(), color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
+                    if (images.size > 1) Text("${pager.currentPage + 1} / ${images.size}", color = Color(0xCCFFFFFF), style = MaterialTheme.typography.bodySmall)
+                }
+                if (images.size > 1) IconButton(onClick = { openManga(images, pager.currentPage) }) {
+                    Icon(AppIcons.MenuBook, "漫画模式", tint = Color.White)
+                }
+                if (current != null) {
+                    IconButton(onClick = { openDetail(current) }) { Icon(AppIcons.Info, "详情", tint = Color.White) }
+                    if (serverId != null) {
+                        IconButton(onClick = {
+                            scope.launch {
+                                try {
+                                    Downloads.enqueue(context, listOf(Downloads.Job(current, "")))
+                                    Toast.makeText(context, "已加入下载，保存到 Download/${Downloads.ROOT}", Toast.LENGTH_SHORT).show()
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "下载失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
                                 }
-                            }) { Icon(AppIcons.Download, "下载", tint = Color.White) }
-                        }
+                            }
+                        }) { Icon(AppIcons.Download, "下载", tint = Color.White) }
                     }
                 }
             }

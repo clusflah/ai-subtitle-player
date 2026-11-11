@@ -211,7 +211,7 @@ private fun BoxScope.WatchBadge(item: ServerItem) {
         )
         item.watched -> Box(
             Modifier.align(Alignment.TopEnd).padding(4.dp).size(18.dp)
-                .liquidGlass(shape = CircleShape, style = GlassStyle.Pill, tint = Color(0x880D1117), enableBackdrop = false),
+                .liquidGlass(shape = CircleShape, style = GlassStyle.Pill, tint = GlassTokens.DarkBadgeTint, enableBackdrop = false),
             contentAlignment = Alignment.Center,
         ) { Icon(AppIcons.Check, "已看", tint = Orange, modifier = Modifier.size(13.dp)) }
         !item.isFolder && item.viewOffsetMs == 0L && item.type in setOf("movie", "episode") -> Box(

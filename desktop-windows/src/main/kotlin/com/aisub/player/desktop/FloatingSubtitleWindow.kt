@@ -73,6 +73,11 @@ import com.aisub.player.subtitle.Cue
 import com.aisub.player.translate.ChineseScript
 import com.aisub.player.translate.LanguageCheck
 import com.aisub.player.ui.AppIcons
+import com.aisub.player.ui.AppMenu
+import com.aisub.player.ui.GlassStyle
+import com.aisub.player.ui.GlassTokens
+import com.aisub.player.ui.glassShadow
+import com.aisub.player.ui.liquidGlass
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.platform.win32.User32
@@ -438,10 +443,12 @@ fun FloatingSubtitleWindow(
             blurRadius = 8f,
         )
 
+        MaterialTheme(colorScheme = androidx.compose.material3.darkColorScheme()) {
+        val windowShape = RoundedCornerShape(24.dp)
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(6.dp)
+                .padding(8.dp)
                 .onPointerEvent(PointerEventType.Enter) { hovered = true }
                 .onPointerEvent(PointerEventType.Exit) { if (!langMenuOpen) hovered = false }
                 .pointerInput(state.clickThrough) {
@@ -456,24 +463,15 @@ fun FloatingSubtitleWindow(
                         }
                     }
                 }
-                .clip(RoundedCornerShape(22.dp))
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            Color(0xCC161822),
-                            Color(0xE60E1017),
-                        ),
-                    ),
-                )
-                .border(
-                    width = 1.dp,
-                    brush = Brush.verticalGradient(
-                        colors = listOf(
-                            Color.White.copy(alpha = if (state.clickThrough) 0.12f else 0.32f),
-                            Color.White.copy(alpha = 0.08f),
-                        ),
-                    ),
-                    shape = RoundedCornerShape(22.dp),
+                .let { mod ->
+                    if (state.clickThrough) mod else mod.glassShadow(windowShape, GlassStyle.Floating, 14.dp)
+                }
+                .liquidGlass(
+                    shape = windowShape,
+                    style = GlassStyle.Floating,
+                    tint = if (state.clickThrough) Color(0x99121722) else GlassTokens.DarkDockTint,
+                    borderColor = if (state.clickThrough) Color.White.copy(alpha = 0.14f) else Color.Unspecified,
+                    enableBackdrop = false,
                 ),
         ) {
             // 字幕主显示区域
@@ -541,8 +539,8 @@ fun FloatingSubtitleWindow(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(Color.Black.copy(alpha = 0.55f))
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                        .background(Brush.verticalGradient(listOf(Color(0x990C1018), Color.Transparent)))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
@@ -550,19 +548,23 @@ fun FloatingSubtitleWindow(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
+                        val chipShape = RoundedCornerShape(50)
                         // 开始 / 暂停按钮
-                        Surface(
-                            shape = CircleShape,
-                            color = if (state.running) Color(0xFF2E7D32) else Color(0xFF424242),
-                            modifier = Modifier.clickable {
-                                settings = settingsStore.load()
-                                if (state.running) transcriber.stop() else transcriber.start(settings)
-                            },
+                        Box(
+                            modifier = Modifier
+                                .liquidGlass(
+                                    shape = chipShape,
+                                    style = GlassStyle.Pill,
+                                    tint = if (state.running) Color(0xCC2E7D32) else GlassTokens.DarkDropletTint,
+                                    enableBackdrop = false,
+                                )
+                                .clickable {
+                                    settings = settingsStore.load()
+                                    if (state.running) transcriber.stop() else transcriber.start(settings)
+                                }
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
                         ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(
                                     imageVector = if (state.running) AppIcons.Pause else AppIcons.PlayArrow,
                                     contentDescription = if (state.running) "暂停识别" else "开始识别",
@@ -582,19 +584,24 @@ fun FloatingSubtitleWindow(
                         Box {
                             val currentLangLabel = AsrLanguages.COMMON.firstOrNull { it.first == settings.asrLanguage }?.second
                                 ?: settings.asrLanguage
-                            Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = Color.White.copy(alpha = 0.14f),
-                                modifier = Modifier.clickable { langMenuOpen = true },
+                            Box(
+                                modifier = Modifier
+                                    .liquidGlass(
+                                        shape = chipShape,
+                                        style = GlassStyle.Pill,
+                                        tint = GlassTokens.DarkDropletTint,
+                                        enableBackdrop = false,
+                                    )
+                                    .clickable { langMenuOpen = true }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp),
                             ) {
                                 Text(
                                     text = "源语言: $currentLangLabel",
                                     color = Color.White,
                                     fontSize = 12.sp,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                                 )
                             }
-                            DropdownMenu(
+                            AppMenu(
                                 expanded = langMenuOpen,
                                 onDismissRequest = { langMenuOpen = false },
                             ) {
@@ -614,21 +621,26 @@ fun FloatingSubtitleWindow(
                         }
 
                         // 自动翻译开关
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = if (settings.autoTranslate) Color(0xFF1565C0) else Color.White.copy(alpha = 0.14f),
-                            modifier = Modifier.clickable {
-                                val updated = settingsStore.load().let { it.copy(autoTranslate = !it.autoTranslate) }
-                                settings = updated
-                                settingsStore.save(updated)
-                                transcriber.restart(updated)
-                            },
+                        Box(
+                            modifier = Modifier
+                                .liquidGlass(
+                                    shape = chipShape,
+                                    style = GlassStyle.Pill,
+                                    tint = if (settings.autoTranslate) GlassTokens.DarkActiveBlue.copy(alpha = 0.72f) else GlassTokens.DarkDropletTint,
+                                    enableBackdrop = false,
+                                )
+                                .clickable {
+                                    val updated = settingsStore.load().let { it.copy(autoTranslate = !it.autoTranslate) }
+                                    settings = updated
+                                    settingsStore.save(updated)
+                                    transcriber.restart(updated)
+                                }
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
                         ) {
                             Text(
                                 text = if (settings.autoTranslate) "译: ${settings.targetLanguage}" else "仅原文",
                                 color = Color.White,
                                 fontSize = 12.sp,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                             )
                         }
                     }
@@ -725,6 +737,7 @@ fun FloatingSubtitleWindow(
                     }
                 }
             }
+        }
         }
     }
 }

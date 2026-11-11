@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -232,6 +233,68 @@ data class GlassStyle(
             darkAlpha = 0.58f,
             specularIntensity = 0.92f,
             chromaticAberration = 1.4f,
+        )
+    }
+}
+
+/**
+ * 全局统一的液态玻璃语义色板与柔和弥散阴影 Token，消除各页面散落的硬编码半透明色差。
+ */
+object GlassTokens {
+    /** 悬浮胶囊底栏、侧边栏、播放控制坞、迷你播放条基底色 */
+    val DarkDockTint = Color(0xBF181F2C)
+    val LightDockTint = Color(0xDCF7F9FC)
+
+    /** 导航栏/控制坞内滑动水滴指示器色 */
+    val DarkDropletTint = Color(0xE02E3B52)
+    val LightDropletTint = Color(0xF0E6EEF8)
+
+    /** 底部抽屉、对话框、下拉菜单、侧滑面板基底色 */
+    val DarkSheetTint = Color(0xD4181F2C)
+    val LightSheetTint = Color(0xDCF7F9FC)
+
+    /** 悬浮提示框、进度预览窗、片头跳过、状态气泡（深色沉浸场景） */
+    val DarkOverlayTint = Color(0xB8181F2C)
+
+    /** 视频/全屏画面上的半透明独立圆形控制按钮（锁屏、退出全屏、播放圆钮） */
+    val DarkControlTint = Color(0x78181F2C)
+
+    /** 缩略图/海报/漫画右下角的小角标（时长、评分、页码、日期） */
+    val DarkBadgeTint = Color(0x8C121824)
+
+    /** 导航选中态与水滴高光强调色 */
+    val DarkActiveBlue = Color(0xFF4DA3FF)
+    val LightActiveBlue = Color(0xFF007AFF)
+}
+
+/**
+ * 与 [liquidGlass] 配套的统一柔和弥散阴影修饰符，根据 [GlassStyle] 自动匹配高度与环境光透明度。
+ */
+fun Modifier.glassShadow(
+    shape: Shape,
+    style: GlassStyle = GlassStyle.Floating,
+    elevation: Dp = Dp.Unspecified,
+): Modifier = composed {
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val resolvedElevation = if (elevation != Dp.Unspecified) {
+        elevation
+    } else {
+        when (style) {
+            GlassStyle.Sheet -> if (isDark) 20.dp else 16.dp
+            GlassStyle.Floating -> if (isDark) 16.dp else 12.dp
+            GlassStyle.Bar -> if (isDark) 10.dp else 8.dp
+            GlassStyle.Card -> if (isDark) 4.dp else 3.dp
+            else -> if (isDark) 4.dp else 3.dp
+        }
+    }
+    if (resolvedElevation <= 0.dp) {
+        this
+    } else {
+        this.shadow(
+            elevation = resolvedElevation,
+            shape = shape,
+            ambientColor = if (isDark) Color(0x28000000) else Color(0x16000000),
+            spotColor = if (isDark) Color(0x38000000) else Color(0x22000000),
         )
     }
 }
@@ -762,9 +825,9 @@ fun <T> LiquidGlassBottomBar(
     val barScaleY = 1f - (rawStretch * 0.014f).coerceAtMost(0.022f) + touchPress * 0.014f
 
     val pillShape = RoundedCornerShape(50)
-    val barTint = if (isDark) Color(0xBF181F2C) else Color(0xD8F7F9FC)
-    val dropletTint = if (isDark) Color(0xE02E3B52) else Color(0xF0E6EEF8)
-    val activeColor = if (isDark) Color(0xFF4DA3FF) else Color(0xFF007AFF)
+    val barTint = if (isDark) GlassTokens.DarkDockTint else GlassTokens.LightDockTint
+    val dropletTint = if (isDark) GlassTokens.DarkDropletTint else GlassTokens.LightDropletTint
+    val activeColor = if (isDark) GlassTokens.DarkActiveBlue else GlassTokens.LightActiveBlue
     val inactiveColor = if (isDark) Color(0xFFD5DCE6) else Color(0xFF1C1C1E)
 
     Box(
@@ -900,6 +963,228 @@ fun <T> LiquidGlassBottomBar(
                         fontSize = 11.sp,
                         lineHeight = 13.sp,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 宽屏 / 平板横屏 / 电视 / Windows 桌面端专用：悬浮胶囊液态玻璃纵向侧边导航栏。
+ * 与 [LiquidGlassBottomBar] 保持完全一致的材质色温、Fresnel 棱镜折射描边与三弹簧纵向水滴拉伸回弹物理，
+ * 并同时支持触摸/鼠标滑动切换与 TV 遥控器上下方向键焦点高亮。
+ */
+@Composable
+fun <T> LiquidGlassNavigationRail(
+    items: List<LiquidNavTabItem<T>>,
+    selected: T,
+    onSelect: (T) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val tv = LocalTv.current
+    val selectedIndex = items.indexOfFirst { it.value == selected }.coerceAtLeast(0)
+    val currentSelected by rememberUpdatedState(selected)
+    val currentOnSelect by rememberUpdatedState(onSelect)
+    var touching by remember { mutableStateOf(false) }
+    var focusedIndex by remember { mutableStateOf(-1) }
+
+    val activeTarget = if (tv && focusedIndex in items.indices) focusedIndex else selectedIndex
+    val fastPos by animateFloatAsState(
+        targetValue = activeTarget.toFloat(),
+        animationSpec = spring(dampingRatio = 0.62f, stiffness = 560f),
+        label = "railDropletFast",
+    )
+    val slowPos by animateFloatAsState(
+        targetValue = activeTarget.toFloat(),
+        animationSpec = spring(dampingRatio = 0.55f, stiffness = 135f),
+        label = "railDropletSlow",
+    )
+    val jellyPos by animateFloatAsState(
+        targetValue = activeTarget.toFloat(),
+        animationSpec = spring(dampingRatio = 0.46f, stiffness = 210f),
+        label = "railDropletJelly",
+    )
+    val touchPress by animateFloatAsState(
+        targetValue = if (touching) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.54f, stiffness = 380f),
+        label = "railTouchPress",
+    )
+
+    val rawStretch = abs(fastPos - slowPos)
+    val wobble = fastPos - jellyPos
+    val lightPhase = fastPos * 0.9f + rawStretch * 1.0f + wobble * 0.65f
+    val railScaleY = 1f + (rawStretch * 0.016f).coerceAtMost(0.028f) + touchPress * 0.010f
+    val railScaleX = 1f - (rawStretch * 0.012f).coerceAtMost(0.020f) + touchPress * 0.012f
+
+    val pillShape = RoundedCornerShape(38.dp)
+    val slotShape = RoundedCornerShape(32.dp)
+    val railTint = if (isDark) GlassTokens.DarkDockTint else GlassTokens.LightDockTint
+    val tvFocused = tv && focusedIndex in items.indices
+    val dropletTint = when {
+        tvFocused -> MaterialTheme.colorScheme.primary.copy(alpha = 0.88f)
+        isDark -> GlassTokens.DarkDropletTint
+        else -> GlassTokens.LightDropletTint
+    }
+    val activeColor = if (isDark) GlassTokens.DarkActiveBlue else GlassTokens.LightActiveBlue
+    val inactiveColor = if (isDark) Color(0xFFD5DCE6) else Color(0xFF1C1C1E)
+    val slotHeight = 66.dp
+    val count = items.size.coerceAtLeast(1)
+
+    Box(
+        modifier = modifier
+            .width(76.dp)
+            .height(slotHeight * count + 12.dp)
+            .graphicsLayer {
+                scaleX = railScaleX
+                scaleY = railScaleY
+            }
+            .glassShadow(shape = pillShape, style = GlassStyle.Floating)
+            .liquidGlass(
+                shape = pillShape,
+                style = GlassStyle.Floating,
+                tint = railTint,
+                lightShift = lightPhase * 0.5f,
+            )
+            .padding(horizontal = 6.dp, vertical = 6.dp),
+    ) {
+        androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+            val safeMaxH = maxHeight.coerceAtLeast(1.dp)
+            val itemH = (safeMaxH / count).coerceIn(1.dp, safeMaxH)
+            val topEdgeIndex = min(fastPos, slowPos)
+            val bottomEdgeIndex = max(fastPos, slowPos)
+            val stretch = (bottomEdgeIndex - topEdgeIndex).coerceIn(0f, count.toFloat())
+            val extraHeightFactor = (stretch * 1.04f + abs(wobble) * 0.22f + touchPress * 0.05f).coerceIn(0f, count.toFloat())
+            val centerShift = (extraHeightFactor - stretch) * 0.5f
+            val dropletHeight = (itemH * (1f + extraHeightFactor)).coerceIn(itemH, safeMaxH)
+            val maxTop = (safeMaxH - dropletHeight).coerceAtLeast(0.dp)
+            val dropletTop = (itemH * (topEdgeIndex - centerShift)).coerceIn(0.dp, maxTop)
+            val dropletScaleX = (1f - (stretch * 0.10f).coerceAtMost(0.13f) + abs(wobble) * 0.05f + touchPress * 0.025f)
+                .coerceIn(0.87f, 1.04f)
+
+            Box(
+                Modifier
+                    .padding(top = dropletTop)
+                    .size(width = maxWidth, height = dropletHeight)
+                    .graphicsLayer {
+                        this.scaleX = dropletScaleX
+                    }
+                    .shadow(
+                        elevation = if (isDark) 8.dp else 6.dp,
+                        shape = slotShape,
+                        ambientColor = activeColor.copy(alpha = 0.22f),
+                        spotColor = activeColor.copy(alpha = 0.32f),
+                    )
+                    .liquidGlass(
+                        shape = slotShape,
+                        style = GlassStyle.Floating,
+                        tint = dropletTint,
+                        borderColor = if (tvFocused) Color.White else if (isDark) Color(0x88FFFFFF) else Color(0xEEFFFFFF),
+                        lightShift = lightPhase,
+                    ),
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .let { mod ->
+                    if (!tv) {
+                        mod.pointerInput(items) {
+                            if (items.isEmpty()) return@pointerInput
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                touching = true
+                                try {
+                                    val maxIdx = (items.size - 1).coerceAtLeast(0)
+                                    val slotH = (size.height / count.toFloat()).coerceAtLeast(1f)
+                                    var lastSlot = (down.position.y / slotH).toInt().coerceIn(0, maxIdx)
+                                    currentOnSelect(items[lastSlot].value)
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                        if (!change.pressed) break
+                                        val curSlot = (change.position.y / slotH).toInt().coerceIn(0, maxIdx)
+                                        if (curSlot != lastSlot && items[curSlot].value != currentSelected) {
+                                            lastSlot = curSlot
+                                            currentOnSelect(items[curSlot].value)
+                                        }
+                                    }
+                                } finally {
+                                    touching = false
+                                }
+                            }
+                        }
+                    } else mod
+                },
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            items.forEachIndexed { index, item ->
+                val isSelected = index == selectedIndex
+                val interactionSource = remember { MutableInteractionSource() }
+                val isFocused by interactionSource.collectIsFocusedAsState()
+                var nodeFocused by remember { mutableStateOf(false) }
+                val itemFocused = tv && (isFocused || nodeFocused)
+
+                val bounceScale by animateFloatAsState(
+                    targetValue = when {
+                        itemFocused -> 1.07f
+                        isSelected -> 1.03f
+                        else -> 0.98f
+                    },
+                    animationSpec = spring(dampingRatio = 0.54f, stiffness = 360f),
+                    label = "railItemBounce",
+                )
+                val color by animateColorAsState(
+                    targetValue = when {
+                        itemFocused -> Color.White
+                        isSelected -> activeColor
+                        else -> inactiveColor
+                    },
+                    animationSpec = tween(durationMillis = 160),
+                    label = "railItemColor",
+                )
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .onFocusChanged {
+                            nodeFocused = it.isFocused
+                            if (it.isFocused) focusedIndex = index
+                            else if (focusedIndex == index) focusedIndex = -1
+                        }
+                        .let {
+                            if (tv) {
+                                it.clickable(
+                                    interactionSource = interactionSource,
+                                    indication = null,
+                                    onClick = { currentOnSelect(item.value) },
+                                )
+                            } else it
+                        }
+                        .graphicsLayer {
+                            scaleX = bounceScale
+                            scaleY = bounceScale
+                        },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Icon(
+                        imageVector = item.icon,
+                        contentDescription = item.label,
+                        tint = color,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        text = item.label,
+                        color = color,
+                        fontSize = 11.sp,
+                        lineHeight = 13.sp,
+                        fontWeight = if (isSelected || itemFocused) FontWeight.Bold else FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )

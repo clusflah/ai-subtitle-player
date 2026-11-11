@@ -136,11 +136,15 @@ private fun ColoredVectorBadge(
             ),
         contentAlignment = Alignment.Center,
     ) {
-        Canvas(Modifier.fillMaxSize()) {
-            drawRoundRect(
-                brush = Brush.linearGradient(colors),
-                cornerRadius = CornerRadius(size.toPx() * 0.28f, size.toPx() * 0.28f),
-            )
+        if (colors.size > 1) {
+            Canvas(Modifier.fillMaxSize()) {
+                drawRoundRect(
+                    brush = Brush.linearGradient(
+                        listOf(Color.Transparent, colors.last().copy(alpha = 0.42f)),
+                    ),
+                    cornerRadius = CornerRadius(size.toPx() * 0.28f, size.toPx() * 0.28f),
+                )
+            }
         }
         Icon(
             imageVector = icon,

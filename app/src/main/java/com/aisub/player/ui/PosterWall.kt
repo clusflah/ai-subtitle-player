@@ -97,7 +97,7 @@ private fun PosterCard(item: RemoteItem, wide: Boolean, settings: AppSettings, m
             meta?.rating?.let { r ->
                 Row(
                     Modifier.align(Alignment.BottomStart).padding(5.dp)
-                        .liquidGlass(shape = RoundedCornerShape(6.dp), style = GlassStyle.Pill, tint = Color(0x880D1117), enableBackdrop = false)
+                        .liquidGlass(shape = RoundedCornerShape(6.dp), style = GlassStyle.Pill, tint = GlassTokens.DarkBadgeTint, enableBackdrop = false)
                         .padding(horizontal = 5.dp, vertical = 1.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {

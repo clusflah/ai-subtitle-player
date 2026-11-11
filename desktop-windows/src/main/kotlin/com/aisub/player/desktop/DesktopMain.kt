@@ -61,6 +61,11 @@ import com.aisub.player.MainActivity
 import com.aisub.player.SettingsStore
 import com.aisub.player.VoxtitleApp
 import com.aisub.player.ui.AppIcons
+import com.aisub.player.ui.GlassStyle
+import com.aisub.player.ui.GlassTokens
+import com.aisub.player.ui.PopupTheme
+import com.aisub.player.ui.glassShadow
+import com.aisub.player.ui.liquidGlass
 import kotlinx.coroutines.delay
 import java.awt.RenderingHints
 import java.awt.datatransfer.DataFlavor
@@ -129,15 +134,18 @@ private fun dispatchExternalFileOrUrl(activity: MainActivity, target: String) {
 
 fun main(args: Array<String>) {
     runCatching {
-        System.setProperty("skiko.renderApi", "OPENGL")
+        System.setProperty("jna.encoding", "UTF-8")
+        if (System.getProperty("skiko.renderApi").isNullOrBlank()) {
+            System.setProperty("skiko.renderApi", "OPENGL")
+        }
         UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName())
     }
 
     val voxApp = VoxtitleApp()
     DesktopContextHolder.appContext = voxApp
     voxApp.onCreate()
-    // 后台线程提前预热 VLC NativeDiscovery 与共享 MediaPlayerFactory，消除首次点播卡顿
-    DesktopPlayerEngine.prewarm()
+    // 后台线程提前预热 VLC NativeDiscovery、共享 MediaPlayerFactory 及双地址服务器可达性探测，消除首次点播卡顿
+    DesktopPlayerEngine.prewarm(voxApp)
 
     val mainActivity = MainActivity()
     // Windows 桌面版默认已拥有本地媒体库访问权限
@@ -331,17 +339,25 @@ fun main(args: Array<String>) {
                                 .align(Alignment.BottomCenter)
                                 .padding(bottom = 84.dp),
                         ) {
-                            Surface(
-                                shape = RoundedCornerShape(20.dp),
-                                color = Color(0xE6222530),
-                                tonalElevation = 6.dp,
-                            ) {
-                                Text(
-                                    text = toastMessage.orEmpty(),
-                                    color = Color.White,
-                                    fontSize = 14.sp,
-                                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
-                                )
+                            PopupTheme {
+                                val toastShape = RoundedCornerShape(50)
+                                Box(
+                                    modifier = Modifier
+                                        .glassShadow(toastShape, GlassStyle.Floating, 14.dp)
+                                        .liquidGlass(
+                                            shape = toastShape,
+                                            style = GlassStyle.Floating,
+                                            tint = GlassTokens.DarkOverlayTint,
+                                            enableBackdrop = false,
+                                        )
+                                        .padding(horizontal = 18.dp, vertical = 10.dp),
+                                ) {
+                                    Text(
+                                        text = toastMessage.orEmpty(),
+                                        color = Color.White,
+                                        fontSize = 14.sp,
+                                    )
+                                }
                             }
                         }
                     }

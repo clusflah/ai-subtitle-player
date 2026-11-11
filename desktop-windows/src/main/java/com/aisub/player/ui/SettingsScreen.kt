@@ -181,7 +181,6 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
         }
     }
 
-    GlassBackdropBox { backdrop ->
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -192,7 +191,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             )
         },
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize().glassBackdropSource(backdrop).verticalScroll(rememberScrollState()).padding(top = 4.dp, bottom = 32.dp)) {
+        Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 4.dp, bottom = 32.dp)) {
 
             // ---------------- 语音识别 ----------------
             val asrProblem = s.asrProblem()
@@ -709,7 +708,6 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             // ---------------- 备份与迁移 ----------------
             BackupCard(flush = { if (s != vm.state.value.settings) vm.updateSettings(s) })
         }
-    }
     }
 }
 

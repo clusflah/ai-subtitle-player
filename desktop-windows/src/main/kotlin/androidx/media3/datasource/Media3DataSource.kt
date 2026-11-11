@@ -5,12 +5,18 @@ import android.content.Context
 import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.common.DataReader
+import com.aisub.player.net.AppProxy
+import okhttp3.Call
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.RandomAccessFile
-import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.TimeUnit
 
 interface TransferListener
 
@@ -134,7 +140,8 @@ class FileDataSource : BaseDataSource(false) {
 class DefaultHttpDataSource private constructor(
     private val defaultRequestProperties: Map<String, String>,
 ) : BaseDataSource(true) {
-    private var conn: HttpURLConnection? = null
+    private var activeCall: Call? = null
+    private var activeResponse: Response? = null
     private var input: InputStream? = null
     private var currentUri: Uri? = null
     private var bytesRemaining: Long = C.LENGTH_UNSET.toLong()
@@ -144,52 +151,62 @@ class DefaultHttpDataSource private constructor(
     override fun getUri(): Uri? = currentUri
 
     override fun open(dataSpec: DataSpec): Long {
+        close()
         currentUri = dataSpec.uri
         var targetUrl = URL(dataSpec.uri.toString())
         val initialHost = targetUrl.host
         var redirectCount = 0
-        var c: HttpURLConnection
+        var resp: Response
 
         while (true) {
-            c = (targetUrl.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 12_000
-                readTimeout = 20_000
-                instanceFollowRedirects = false
-                defaultRequestProperties.forEach { (k, v) -> setRequestProperty(k, v) }
-                dataSpec.httpRequestHeaders.forEach { (k, v) ->
-                    if (!k.equals("Authorization", ignoreCase = true) || targetUrl.host.equals(initialHost, ignoreCase = true)) {
-                        setRequestProperty(k, v)
-                    }
-                }
-                if (dataSpec.position > 0 || dataSpec.length != C.LENGTH_UNSET.toLong()) {
-                    val end = if (dataSpec.length != C.LENGTH_UNSET.toLong()) (dataSpec.position + dataSpec.length - 1).toString() else ""
-                    setRequestProperty("Range", "bytes=${dataSpec.position}-$end")
+            val httpUrl = targetUrl.toString().toHttpUrlOrNull()
+                ?: throw IOException("无效的 HTTP URL: $targetUrl")
+            val reqBuilder = Request.Builder()
+                .url(httpUrl)
+                .header("Accept-Encoding", "identity")
+            defaultRequestProperties.forEach { (k, v) -> reqBuilder.header(k, v) }
+            dataSpec.httpRequestHeaders.forEach { (k, v) ->
+                if (!k.equals("Authorization", ignoreCase = true) || targetUrl.host.equals(initialHost, ignoreCase = true)) {
+                    reqBuilder.header(k, v)
                 }
             }
-            val code = c.responseCode
-            responseHeadersMap = c.headerFields.filterKeys { it != null }
+            if (dataSpec.position > 0 || dataSpec.length != C.LENGTH_UNSET.toLong()) {
+                val end = if (dataSpec.length != C.LENGTH_UNSET.toLong()) (dataSpec.position + dataSpec.length - 1).toString() else ""
+                reqBuilder.header("Range", "bytes=${dataSpec.position}-$end")
+            }
+
+            val call = sharedHttpClient.newCall(reqBuilder.build())
+            activeCall = call
+            resp = call.execute()
+            val code = resp.code
+            responseHeadersMap = resp.headers.toMultimap()
+
             if (code in intArrayOf(301, 302, 303, 307, 308)) {
-                val location = c.getHeaderField("Location")
-                c.disconnect()
+                val location = resp.header("Location")
+                resp.close()
+                activeCall = null
                 if (location.isNullOrBlank() || ++redirectCount > 10) {
-                    throw HttpDataSource.InvalidResponseCodeException(code, c.responseMessage, null, responseHeadersMap, dataSpec, ByteArray(0))
+                    throw HttpDataSource.InvalidResponseCodeException(code, resp.message, null, responseHeadersMap, dataSpec, ByteArray(0))
                 }
                 targetUrl = URL(targetUrl, location)
                 continue
             }
             if (code !in 200..299) {
-                c.disconnect()
-                throw HttpDataSource.InvalidResponseCodeException(code, c.responseMessage, null, responseHeadersMap, dataSpec, ByteArray(0))
+                val msg = resp.message
+                resp.close()
+                activeCall = null
+                throw HttpDataSource.InvalidResponseCodeException(code, msg, null, responseHeadersMap, dataSpec, ByteArray(0))
             }
             break
         }
 
-        conn = c
-        currentUri = Uri.parse(c.url.toString())
-        input = c.inputStream
-        val contentLen = c.contentLengthLong
+        activeResponse = resp
+        currentUri = Uri.parse(resp.request.url.toString())
+        val body = resp.body ?: throw IOException("空 HTTP 响应体")
+        input = body.byteStream()
+        val contentLen = body.contentLength()
         bytesRemaining = when {
-            dataSpec.length != C.LENGTH_UNSET.toLong() -> dataSpec.length
+            dataSpec.length != C.LENGTH_UNSET.toLong() -> if (contentLen >= 0) minOf(dataSpec.length, contentLen) else dataSpec.length
             contentLen >= 0 -> contentLen
             else -> C.LENGTH_UNSET.toLong()
         }
@@ -208,12 +225,18 @@ class DefaultHttpDataSource private constructor(
     }
 
     override fun close() {
-        val c = conn
+        val call = activeCall
+        val resp = activeResponse
         val ins = input
-        conn = null
+        activeCall = null
+        activeResponse = null
         input = null
-        runCatching { c?.disconnect() }
+        // 若尚未读完就被上游关闭（例如 VLC Range 跳转），主动 cancel 以免阻塞等待读完大文件；若已读完，close() 会归还连接至连接池
+        if (bytesRemaining == C.LENGTH_UNSET.toLong() || bytesRemaining > 65_536L) {
+            runCatching { call?.cancel() }
+        }
         runCatching { ins?.close() }
+        runCatching { resp?.close() }
     }
 
     class Factory : DataSource.Factory {
@@ -226,6 +249,17 @@ class DefaultHttpDataSource private constructor(
             headers.putAll(props)
         }
         override fun createDataSource(): DataSource = DefaultHttpDataSource(HashMap(headers))
+    }
+
+    companion object {
+        private val sharedHttpClient: OkHttpClient by lazy {
+            AppProxy.builder()
+                .connectTimeout(12, TimeUnit.SECONDS)
+                .readTimeout(25, TimeUnit.SECONDS)
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .build()
+        }
     }
 }
 

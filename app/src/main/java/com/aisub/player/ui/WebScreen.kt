@@ -981,12 +981,14 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     // 拦下的跳转：底部提示，误拦了可以仍然打开
                     blockedNav?.let { url ->
                         LaunchedEffect(url) { delay(6_000); if (blockedNav == url) blockedNav = null }
+                        val blockedShape = RoundedCornerShape(16.dp)
                         androidx.compose.material3.Surface(
-                            shape = RoundedCornerShape(14.dp),
+                            shape = blockedShape,
                             color = Color.Transparent,
                             contentColor = Color.White,
                             modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).fillMaxWidth()
-                                .liquidGlass(shape = RoundedCornerShape(14.dp), style = GlassStyle.Floating, tint = Color(0x8810141C), enableBackdrop = false),
+                                .glassShadow(blockedShape, GlassStyle.Floating)
+                                .liquidGlass(shape = blockedShape, style = GlassStyle.Floating, tint = GlassTokens.DarkOverlayTint, enableBackdrop = false),
                         ) {
                             Row(Modifier.padding(start = 14.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text(
@@ -1007,15 +1009,17 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     var chipClosed by remember(tab.id, found?.pageUrl) { mutableStateOf(false) }
                     if (found != null && !picking && !chipClosed && fullscreen == null && !tv) {
                         LaunchedEffect(found.pageUrl) { delay(12_000); chipClosed = true }
+                        val chipShape = RoundedCornerShape(50)
                         androidx.compose.material3.Surface(
                             onClick = ::openReader,
-                            shape = RoundedCornerShape(24.dp),
+                            shape = chipShape,
                             color = Color.Transparent,
                             modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp)
+                                .glassShadow(chipShape, GlassStyle.Floating)
                                 .liquidGlass(
-                                    shape = RoundedCornerShape(24.dp),
+                                    shape = chipShape,
                                     style = GlassStyle.Floating,
-                                    tint = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
+                                    tint = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f),
                                     enableBackdrop = false,
                                 ),
                         ) {
@@ -1160,14 +1164,19 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 }
                 if (showControls) Row(Modifier.align(Alignment.TopEnd).padding(12.dp)) {
                     // 横着的视频转成竖屏时 WebView 会直接退出全屏：只有竖视频才给切换横竖屏
+                    val fsBtnShape = RoundedCornerShape(50)
                     if (videoAspect?.let { it < 1f } == true) IconButton(
                         onClick = { fullscreenLandscape = !fullscreenLandscape },
-                        modifier = Modifier.liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Floating, tint = Color(0x660E121A), enableBackdrop = false),
+                        modifier = Modifier
+                            .glassShadow(fsBtnShape, GlassStyle.Floating, 8.dp)
+                            .liquidGlass(shape = fsBtnShape, style = GlassStyle.Floating, tint = GlassTokens.DarkControlTint, enableBackdrop = false),
                     ) { Icon(AppIcons.ScreenRotation, if (fullscreenLandscape) "切换到竖屏" else "切换到横屏", tint = Color.White) }
                     Spacer(Modifier.size(8.dp))
                     IconButton(
                         onClick = ::exitFullscreen,
-                        modifier = Modifier.liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Floating, tint = Color(0x660E121A), enableBackdrop = false),
+                        modifier = Modifier
+                            .glassShadow(fsBtnShape, GlassStyle.Floating, 8.dp)
+                            .liquidGlass(shape = fsBtnShape, style = GlassStyle.Floating, tint = GlassTokens.DarkControlTint, enableBackdrop = false),
                     ) { Icon(AppIcons.FullscreenExit, "退出全屏", tint = Color.White) }
                 }
             }
@@ -1399,10 +1408,12 @@ private fun androidx.compose.foundation.layout.BoxScope.WebSubtitles(
             }
         } else StyledSubtitleLines(lines, style, bottom)
     } else if (state.status != null && showStatus) {
+        val statusShape = RoundedCornerShape(14.dp)
         Column(
             (if (below != null) Modifier.align(Alignment.TopCenter).padding(top = below + 8.dp, start = 24.dp, end = 24.dp)
             else Modifier.align(Alignment.BottomCenter).padding(bottom = bottom, start = 24.dp, end = 24.dp)).widthIn(max = 520.dp)
-                .liquidGlass(shape = RoundedCornerShape(12.dp), style = GlassStyle.Floating, tint = Color(0x8810141C), enableBackdrop = false)
+                .glassShadow(statusShape, GlassStyle.Floating, 10.dp)
+                .liquidGlass(shape = statusShape, style = GlassStyle.Floating, tint = GlassTokens.DarkOverlayTint, enableBackdrop = false)
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
             Text(state.status, color = Color.White, fontSize = 13.sp)
@@ -1490,6 +1501,7 @@ private fun PickerBar(
             .navigationBarsPadding()
             .padding(horizontal = 16.dp, vertical = 8.dp)
             .fillMaxWidth()
+            .glassShadow(barShape, GlassStyle.Floating)
             .liquidGlass(shape = barShape, style = GlassStyle.Floating, enableBackdrop = false),
         shape = barShape,
         color = Color.Transparent,

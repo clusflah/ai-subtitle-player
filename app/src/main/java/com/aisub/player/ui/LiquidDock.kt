@@ -114,9 +114,9 @@ internal fun LiquidDock(
     val barScaleY = 1f - (rawStretch * 0.012f).coerceAtMost(0.020f) + dockPress * 0.012f
 
     val barShape = RoundedCornerShape(50)
-    val barTint = Color(0xBF181F2C)
-    val dropletTint = if (tv && focusedSlot >= 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.88f) else Color(0xE02E3B52)
-    val activeAccent = Color(0xFF4DA3FF)
+    val barTint = GlassTokens.DarkDockTint
+    val dropletTint = if (tv && focusedSlot >= 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.88f) else GlassTokens.DarkDropletTint
+    val activeAccent = GlassTokens.DarkActiveBlue
 
     Box(
         modifier
@@ -137,7 +137,6 @@ internal fun LiquidDock(
                 shape = barShape,
                 style = GlassStyle.Floating,
                 tint = barTint,
-                borderColor = Color(0x52FFFFFF),
                 lightShift = lightPhase * 0.5f,
             )
             .padding(horizontal = 8.dp, vertical = 6.dp),

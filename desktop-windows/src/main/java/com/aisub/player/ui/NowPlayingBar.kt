@@ -32,6 +32,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -72,15 +73,20 @@ fun NowPlayingBar(
     }
     if (entry == null || !main.playingMusic || dismissed || player.mediaItemCount == 0 || state.playbackError != null) return
     val cover: ImageBitmap? = remember(music.cover) { music.cover?.asImageBitmap() }
-    val shape = RoundedCornerShape(18.dp)
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val shape = RoundedCornerShape(24.dp)
+    val hasBackdrop = LocalGlassBackdrop.current != null
+    val horizPad = if (navigationBarInset) 12.dp else 16.dp
     Surface(
         modifier = (if (navigationBarInset) modifier.navigationBarsPadding() else modifier)
-            .padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = bottomPadding)
+            .padding(start = horizPad, end = horizPad, top = 6.dp, bottom = bottomPadding)
             .fillMaxWidth()
+            .glassShadow(shape, GlassStyle.Floating)
             .liquidGlass(
                 shape = shape,
                 style = GlassStyle.Floating,
-                tint = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.68f),
+                tint = if (isDark) GlassTokens.DarkDockTint else GlassTokens.LightDockTint,
+                sampleBackdrop = hasBackdrop,
             ),
         shape = shape,
         tonalElevation = 0.dp,
@@ -88,9 +94,9 @@ fun NowPlayingBar(
         color = Color.Transparent,
     ) {
         Column {
-            Row(Modifier.clickable(onClick = onOpen).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)), contentAlignment = Alignment.Center) {
-                    if (cover != null) Image(cover, null, contentScale = ContentScale.Crop, modifier = Modifier.size(44.dp))
+            Row(Modifier.clickable(onClick = onOpen).padding(start = 10.dp, end = 6.dp, top = 8.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(42.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
+                    if (cover != null) Image(cover, null, contentScale = ContentScale.Crop, modifier = Modifier.size(42.dp))
                     else Icon(AppIcons.MusicNote, null, tint = MaterialTheme.colorScheme.outline)
                 }
                 Spacer(Modifier.width(10.dp))

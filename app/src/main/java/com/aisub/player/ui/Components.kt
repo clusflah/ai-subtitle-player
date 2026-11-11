@@ -394,7 +394,7 @@ private fun SelectionBadge(selected: Boolean, modifier: Modifier = Modifier) {
             .liquidGlass(
                 shape = CircleShape,
                 style = GlassStyle.Pill,
-                tint = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.88f) else Color(0x66000000),
+                tint = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.90f) else GlassTokens.DarkBadgeTint,
                 borderColor = Color.White.copy(alpha = 0.88f),
                 enableBackdrop = false,
             ),
@@ -435,7 +435,7 @@ fun VideoCard(
                         .liquidGlass(
                             shape = RoundedCornerShape(6.dp),
                             style = GlassStyle.Pill,
-                            tint = Color(0x78000000),
+                            tint = GlassTokens.DarkBadgeTint,
                             enableBackdrop = false,
                         )
                         .padding(horizontal = 5.dp, vertical = 1.dp),

@@ -243,21 +243,33 @@ class Uri private constructor(private val raw: String) : Comparable<Uri> {
         fun fromFile(file: File): Uri {
             val abs = file.absolutePath.replace('\\', '/')
             val p = if (abs.startsWith("/")) abs else "/$abs"
-            return Uri("file://$p")
+            return Uri("file://${encode(p, "/:")}")
         }
+
+        private fun isUnreservedAscii(ch: Char, allow: String?): Boolean =
+            (ch in 'a'..'z') || (ch in 'A'..'Z') || (ch in '0'..'9') || ch in "-_.~" || (allow != null && ch in allow)
 
         @JvmStatic
         fun encode(s: String?, allow: String? = null): String {
-            if (s == null) return ""
-            val sb = StringBuilder()
-            for (ch in s) {
-                if (ch.isLetterOrDigit() || ch in "-_.~" || (allow != null && ch in allow)) {
+            if (s.isNullOrEmpty()) return ""
+            val sb = StringBuilder(s.length + 16)
+            var i = 0
+            while (i < s.length) {
+                val ch = s[i]
+                if (isUnreservedAscii(ch, allow)) {
                     sb.append(ch)
+                    i++
                 } else {
-                    val bytes = ch.toString().toByteArray(Charsets.UTF_8)
+                    val start = i
+                    while (i < s.length && !isUnreservedAscii(s[i], allow)) {
+                        i++
+                    }
+                    val bytes = s.substring(start, i).toByteArray(Charsets.UTF_8)
                     for (b in bytes) {
                         sb.append('%')
-                        sb.append("%02X".format(b.toInt() and 0xFF))
+                        val v = b.toInt() and 0xFF
+                        sb.append("0123456789ABCDEF"[v ushr 4])
+                        sb.append("0123456789ABCDEF"[v and 0x0F])
                     }
                 }
             }

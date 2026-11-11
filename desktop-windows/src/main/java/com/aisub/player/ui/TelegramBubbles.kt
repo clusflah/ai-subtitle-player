@@ -169,7 +169,7 @@ private fun DateChip(date: Int) {
         Text(
             text, style = MaterialTheme.typography.labelMedium, color = Color.White,
             modifier = Modifier
-                .liquidGlass(shape = RoundedCornerShape(12.dp), style = GlassStyle.Pill, tint = Color(0x660D1117), enableBackdrop = false)
+                .liquidGlass(shape = RoundedCornerShape(12.dp), style = GlassStyle.Pill, tint = GlassTokens.DarkBadgeTint, enableBackdrop = false)
                 .padding(horizontal = 10.dp, vertical = 3.dp),
         )
     }
@@ -245,7 +245,7 @@ private fun Bubble(
                     if (text.isEmpty()) Footer(
                         footer, Color.White,
                         Modifier.align(Alignment.BottomEnd).padding(6.dp)
-                            .liquidGlass(shape = RoundedCornerShape(8.dp), style = GlassStyle.Pill, tint = Color(0x660D1117), enableBackdrop = false)
+                            .liquidGlass(shape = RoundedCornerShape(8.dp), style = GlassStyle.Pill, tint = GlassTokens.DarkBadgeTint, enableBackdrop = false)
                             .padding(horizontal = 6.dp, vertical = 1.dp),
                     )
                 }
@@ -312,7 +312,8 @@ private fun MediaThumb(v: TgVideo, width: Int, height: Int, watched: Pair<Long, 
         if (v.isVideo) {
             Box(
                 Modifier.align(Alignment.Center).size(48.dp)
-                    .liquidGlass(shape = CircleShape, style = GlassStyle.Floating, tint = Color(0x660D1117), enableBackdrop = false),
+                    .glassShadow(CircleShape, GlassStyle.Floating, 8.dp)
+                    .liquidGlass(shape = CircleShape, style = GlassStyle.Floating, tint = GlassTokens.DarkControlTint, enableBackdrop = false),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(AppIcons.PlayArrow, "播放", tint = Color.White, modifier = Modifier.size(30.dp))
@@ -321,7 +322,7 @@ private fun MediaThumb(v: TgVideo, width: Int, height: Int, watched: Pair<Long, 
             if (label.isNotEmpty()) Text(
                 label, style = MaterialTheme.typography.labelSmall, color = Color.White,
                 modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
-                    .liquidGlass(shape = RoundedCornerShape(8.dp), style = GlassStyle.Pill, tint = Color(0x660D1117), enableBackdrop = false)
+                    .liquidGlass(shape = RoundedCornerShape(8.dp), style = GlassStyle.Pill, tint = GlassTokens.DarkBadgeTint, enableBackdrop = false)
                     .padding(horizontal = 6.dp, vertical = 1.dp),
             )
             val duration = watched?.second?.takeIf { it > 0 } ?: (v.durationSec * 1000L)

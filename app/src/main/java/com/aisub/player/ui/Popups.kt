@@ -69,36 +69,36 @@ data class PopupColors(
 )
 
 val LightPopupColors = PopupColors(
-    page = Color(0xFFF3F2EF),
-    surface = Color(0xCCFFFFFF),
-    card = Color(0xB8F4F5F8),
-    button = Color(0xCCE6E8EE),
-    textPrimary = Color(0xFF1F2226),
-    textSecondary = Color(0xFF6E737B),
-    divider = Color(0x331F2226),
+    page = Color(0xFFF4F6F9),
+    surface = GlassTokens.LightSheetTint,
+    card = Color(0xCCF0F4FA),
+    button = Color(0xD8E4EAF3),
+    textPrimary = Color(0xFF1C2026),
+    textSecondary = Color(0xFF636B78),
+    divider = Color(0x261C2026),
     accent = Color(0xFFC47B20),
-    disabled = Color(0xFFC8C6C1),
-    selectedBg = Color(0xCCFBEBD6),
+    disabled = Color(0xFFC2C7D0),
+    selectedBg = Color(0xD8FBEBD6),
     selectedText = Color(0xFFB0661A),
-    scrim = 0.24f,
-    shadow = 0.dp,
+    scrim = 0.26f,
+    shadow = 16.dp,
     dark = false,
 )
 
 val DarkPopupColors = PopupColors(
-    page = Color(0xFF171819),
-    surface = Color(0xB822262E),
-    card = Color(0x99353B45),
-    button = Color(0xB348505C),
+    page = Color(0xFF12161F),
+    surface = GlassTokens.DarkSheetTint,
+    card = Color(0xA6263042),
+    button = Color(0xBF323F54),
     textPrimary = Color(0xFFFFFFFF),
-    textSecondary = Color(0xFFB4BCC8),
-    divider = Color(0x38FFFFFF),
+    textSecondary = Color(0xFFB8C2D0),
+    divider = Color(0x32FFFFFF),
     accent = Color(0xFFE49A36),
-    disabled = Color(0xFF666666),
-    selectedBg = Color(0xB34A3B2A),
+    disabled = Color(0xFF68707D),
+    selectedBg = Color(0xB84A3824),
     selectedText = Color(0xFFF2AA4A),
-    scrim = 0.42f,
-    shadow = 0.dp,
+    scrim = 0.44f,
+    shadow = 20.dp,
     dark = true,
 )
 
@@ -183,7 +183,7 @@ fun AppSheet(
                     this.scaleX = scaleX
                     this.scaleY = scaleY
                 }
-                .shadow(c.shadow, shape)
+                .glassShadow(shape, GlassStyle.Sheet, c.shadow)
                 .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface, lightShift = lightShift),
         ) {
             Box(Modifier.align(Alignment.CenterHorizontally)) { BottomSheetDefaults.DragHandle() }
@@ -202,17 +202,22 @@ fun AppMenu(
     content: @Composable ColumnScope.() -> Unit,
 ) = PopupTheme {
     val c = LocalPopupColors.current
-    val shape = RoundedCornerShape(18.dp)
+    val shape = RoundedCornerShape(20.dp)
+    val lightShift by animateFloatAsState(
+        targetValue = if (expanded) 1.2f else 0f,
+        animationSpec = spring(dampingRatio = 0.58f, stiffness = 240f),
+        label = "menuLight",
+    )
     DropdownMenu(
         expanded = expanded,
         onDismissRequest = onDismissRequest,
-        modifier = modifier.liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface),
+        modifier = modifier.liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface, lightShift = lightShift),
         offset = offset,
         scrollState = scrollState,
         shape = shape,
         containerColor = Color.Transparent,
         tonalElevation = 0.dp,
-        shadowElevation = c.shadow,
+        shadowElevation = 14.dp,
         content = {
             WindowBlurEffect(blurBehindRadius = 40, backgroundBlurRadius = 56)
             content()
@@ -233,6 +238,18 @@ fun AppDialog(
 ) = PopupTheme {
     val c = LocalPopupColors.current
     val shape = RoundedCornerShape(28.dp)
+    var entered by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { entered = true }
+    val scale by animateFloatAsState(
+        targetValue = if (entered) 1f else 0.94f,
+        animationSpec = spring(dampingRatio = 0.54f, stiffness = 360f),
+        label = "dialogScale",
+    )
+    val lightShift by animateFloatAsState(
+        targetValue = if (entered) 1.3f else 0f,
+        animationSpec = spring(dampingRatio = 0.58f, stiffness = 220f),
+        label = "dialogLight",
+    )
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismissRequest,
         confirmButton = {
@@ -240,8 +257,12 @@ fun AppDialog(
             confirmButton()
         },
         modifier = modifier
-            .shadow(c.shadow, shape)
-            .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface),
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .glassShadow(shape, GlassStyle.Sheet, c.shadow)
+            .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface, lightShift = lightShift),
         dismissButton = dismissButton,
         icon = icon,
         title = title,

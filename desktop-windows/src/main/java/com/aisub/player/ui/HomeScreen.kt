@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -241,53 +242,59 @@ fun HomeScreen(
                     ) {
                         val globalSubActive = com.aisub.player.desktop.DesktopGlobalSubtitles.active
                         val globalSubClickThrough = com.aisub.player.desktop.DesktopGlobalSubtitles.clickThrough
+                        val isDarkHeader = MaterialTheme.colorScheme.background.red < 0.5f
+                        val pillShape = RoundedCornerShape(50)
                         if (globalSubClickThrough) {
-                            Surface(
-                                shape = RoundedCornerShape(18.dp),
-                                color = Color(0xFFD84315).copy(alpha = 0.9f),
-                                modifier = Modifier.clickable {
-                                    com.aisub.player.desktop.DesktopGlobalSubtitles.onDisableClickThrough()
-                                },
+                            GlassBox(
+                                modifier = Modifier
+                                    .height(42.dp)
+                                    .glassShadow(pillShape, GlassStyle.Floating, 6.dp),
+                                shape = pillShape,
+                                style = GlassStyle.Floating,
+                                tint = Color(0xFFD84315).copy(alpha = 0.88f),
+                                onClick = { com.aisub.player.desktop.DesktopGlobalSubtitles.onDisableClickThrough() },
+                                contentAlignment = Alignment.Center,
                             ) {
                                 Text(
                                     text = "解除字幕鼠标穿透",
                                     color = Color.White,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Medium,
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                    modifier = Modifier.padding(horizontal = 14.dp),
                                 )
                             }
                         }
-                        Box(
+                        val subBtnTint = when {
+                            globalSubActive -> Orange.copy(alpha = 0.90f)
+                            isDarkHeader -> Color(0xCC222A38)
+                            else -> Color(0xE6FFFFFF)
+                        }
+                        val subBtnFg = if (globalSubActive) Color.White else MaterialTheme.colorScheme.onSurface
+                        GlassBox(
                             modifier = Modifier
-                                .clip(RoundedCornerShape(18.dp))
-                                .background(
-                                    if (globalSubActive) {
-                                        androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(Color(0xFFE65100), Color(0xFFFF8F00)))
-                                    } else {
-                                        androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(Color(0xAA1E2230), Color(0xCC151822)))
-                                    },
-                                )
-                                .border(
-                                    width = 1.dp,
-                                    color = Color.White.copy(alpha = 0.22f),
-                                    shape = RoundedCornerShape(18.dp),
-                                )
-                                .clickable { com.aisub.player.desktop.DesktopGlobalSubtitles.onToggle() }
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                                .height(42.dp)
+                                .glassShadow(pillShape, GlassStyle.Floating, if (isDarkHeader) 6.dp else 4.dp),
+                            shape = pillShape,
+                            style = GlassStyle.Floating,
+                            tint = subBtnTint,
+                            onClick = { com.aisub.player.desktop.DesktopGlobalSubtitles.onToggle() },
+                            contentAlignment = Alignment.Center,
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
                                 Icon(
                                     imageVector = AppIcons.AutoAwesome,
                                     contentDescription = "桌面全局字幕",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(15.dp),
+                                    tint = if (globalSubActive) Color.White else Orange,
+                                    modifier = Modifier.size(16.dp),
                                 )
-                                Spacer(Modifier.width(5.dp))
+                                Spacer(Modifier.width(6.dp))
                                 Text(
                                     text = if (globalSubActive) "桌面字幕: 运行中" else "桌面全局字幕",
-                                    color = Color.White,
-                                    fontSize = 12.sp,
+                                    color = subBtnFg,
+                                    fontSize = 13.sp,
                                     fontWeight = FontWeight.Medium,
                                 )
                             }
@@ -368,6 +375,7 @@ fun HomeScreen(
                         Modifier
                             .padding(top = 10.dp)
                             .fillMaxWidth()
+                            .glassShadow(searchPillShape, GlassStyle.Pill)
                             .liquidGlass(shape = searchPillShape, style = GlassStyle.Pill)
                             .padding(start = 14.dp, end = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -428,27 +436,26 @@ fun HomeScreen(
     ) { padding ->
       Row(Modifier.padding(top = padding.calculateTopPadding()).fillMaxSize()) {
         if (wide) {
-            NavigationRail(
-                containerColor = Color.Transparent,
-                modifier = Modifier
-                    .padding(start = 6.dp, top = 6.dp, bottom = 6.dp, end = 8.dp)
-                    .liquidGlass(shape = RoundedCornerShape(24.dp), style = GlassStyle.Bar),
+            Box(
+                Modifier
+                    .fillMaxHeight()
+                    .navigationBarsPadding()
+                    .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                contentAlignment = Alignment.Center,
             ) {
-                Spacer(Modifier.weight(1f))
-                Tab.entries.forEach { t ->
-                    NavigationRailItem(
-                        selected = tab == t,
-                        onClick = { selectTab(t) },
-                        icon = { Icon(t.icon, null) },
-                        label = { Text(t.label) },
-                        colors = NavigationRailItemDefaults.colors(
-                            selectedIconColor = MaterialTheme.colorScheme.primary,
-                            selectedTextColor = MaterialTheme.colorScheme.primary,
-                            indicatorColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f),
-                        ),
-                    )
-                }
-                Spacer(Modifier.weight(1f))
+                LiquidGlassNavigationRail(
+                    items = remember {
+                        Tab.entries.map { t ->
+                            LiquidNavTabItem(
+                                value = t,
+                                label = if (t == Tab.BROWSE) "资源库" else t.label,
+                                icon = t.icon,
+                            )
+                        }
+                    },
+                    selected = tab,
+                    onSelect = selectTab,
+                )
             }
         }
         Box(

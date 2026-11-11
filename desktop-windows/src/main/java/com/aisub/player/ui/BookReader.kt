@@ -373,9 +373,13 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
         )
 
         if (controls) {
+            val topBarShape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp)
             Surface(
-                color = MaterialTheme.colorScheme.surface,
-                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
+                color = Color.Transparent,
+                shape = topBarShape,
+                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
+                    .glassShadow(topBarShape, GlassStyle.Bar)
+                    .liquidGlass(shape = topBarShape, style = GlassStyle.Bar, sampleBackdrop = true),
             ) {
                 Row(Modifier.statusBarsPadding().padding(horizontal = 4.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onBack, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "返回") }
@@ -392,8 +396,9 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
                 shape = barShape,
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .navigationBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
                     .fillMaxWidth()
+                    .glassShadow(barShape, GlassStyle.Floating)
                     .liquidGlass(shape = barShape, style = GlassStyle.Floating, sampleBackdrop = true),
             ) {
                 Column(Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
@@ -429,10 +434,15 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
 
         // 朗读条
         if (reading && !controls) {
+            val ttsShape = RoundedCornerShape(26.dp)
             Surface(
-                color = Color.Transparent, shape = RoundedCornerShape(22.dp),
-                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(12.dp).fillMaxWidth()
-                    .liquidGlass(shape = RoundedCornerShape(22.dp), style = GlassStyle.Floating),
+                color = Color.Transparent, shape = ttsShape,
+                modifier = Modifier.align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .fillMaxWidth()
+                    .glassShadow(ttsShape, GlassStyle.Floating)
+                    .liquidGlass(shape = ttsShape, style = GlassStyle.Floating, sampleBackdrop = true),
             ) {
                 Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
                     val err = tts.error

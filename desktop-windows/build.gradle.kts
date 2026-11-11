@@ -13,7 +13,7 @@ plugins {
 }
 
 group = "com.aisub.player"
-version = "2.9.75"
+version = "2.9.76"
 
 // 复用或准备 TDLib Java 源码与 sherpa-onnx Java 接口
 val tdlibTag = "tdlib-1.8.69-4c6377aa73"
@@ -228,6 +228,7 @@ compose.desktop {
         mainClass = "com.aisub.player.desktop.DesktopMainKt"
         jvmArgs += listOf(
             "-Dfile.encoding=UTF-8",
+            "-Djna.encoding=UTF-8",
             "-Dsun.java2d.uiScale.enabled=true",
         )
         nativeDistributions {

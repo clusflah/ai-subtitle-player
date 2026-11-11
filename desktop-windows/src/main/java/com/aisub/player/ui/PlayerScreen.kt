@@ -617,12 +617,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         )
         // 直播实时字幕一直出不来：在字幕的位置说明原因（控制栏收起时也看得到）
         if (!musicMode && current == null && state.liveHint != null) {
+            val hintShape = RoundedCornerShape(12.dp)
             Text(
                 state.liveHint!!,
                 color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center,
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .padding(start = 24.dp, end = 24.dp, bottom = (if (controls && !PipState.inPip) 150 else 24).dp + state.settings.subtitleOffset.dp)
-                    .liquidGlass(shape = RoundedCornerShape(10.dp), style = GlassStyle.Pill, tint = Color(0x88141820))
+                    .glassShadow(hintShape, GlassStyle.Pill, 8.dp)
+                    .liquidGlass(shape = hintShape, style = GlassStyle.Pill, tint = GlassTokens.DarkOverlayTint)
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             )
         }
@@ -661,9 +663,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         state.playbackError?.let { error ->
             val (summary, detail) = error.split(PLAYBACK_ERROR_DETAIL, limit = 2).let { it[0] to it.getOrNull(1) }
             var showDetail by remember(error) { mutableStateOf(false) }
+            val errShape = RoundedCornerShape(24.dp)
             Column(
                 Modifier.align(Alignment.Center).padding(24.dp)
-                    .liquidGlass(shape = RoundedCornerShape(18.dp), style = GlassStyle.Sheet, tint = Color(0xB8181C24))
+                    .glassShadow(errShape, GlassStyle.Sheet)
+                    .liquidGlass(shape = errShape, style = GlassStyle.Sheet, tint = GlassTokens.DarkSheetTint)
                     .padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -685,9 +689,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
         // ---- 画面出不来（手机解不了这种格式）：说明原因，给出办法 ----
         state.videoProblem?.let { msg ->
+            val probShape = RoundedCornerShape(24.dp)
             Column(
                 Modifier.align(Alignment.Center).padding(24.dp)
-                    .liquidGlass(shape = RoundedCornerShape(18.dp), style = GlassStyle.Sheet, tint = Color(0xB8181C24))
+                    .glassShadow(probShape, GlassStyle.Sheet)
+                    .liquidGlass(shape = probShape, style = GlassStyle.Sheet, tint = GlassTokens.DarkSheetTint)
                     .padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -820,7 +826,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     Text(
                         MainViewModel.VLC_NO_SUBTITLES, color = Color.White, fontSize = 12.sp,
                         modifier = Modifier.padding(start = 52.dp, bottom = 4.dp)
-                            .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Color(0x66000000))
+                            .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = GlassTokens.DarkBadgeTint)
                             .padding(horizontal = 10.dp, vertical = 3.dp),
                     )
                 } else if (quick != null && idle && (state.current?.isVideo == true || isLive) && !aiChipDismissed) {
@@ -1176,37 +1182,45 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     else { locked = true; controls = true; indicator = AppIcons.Lock to "已锁定屏幕" }
                     interactions++
                 },
-                modifier = Modifier.liquidGlass(shape = CircleShape, style = GlassStyle.Floating, tint = Color(0x66141820)),
+                modifier = Modifier
+                    .glassShadow(CircleShape, GlassStyle.Floating, 8.dp)
+                    .liquidGlass(shape = CircleShape, style = GlassStyle.Floating, tint = GlassTokens.DarkControlTint),
             ) { Icon(if (locked) AppIcons.Lock else AppIcons.LockOpen, if (locked) "解锁" else "锁定", tint = Color.White) }
         }
 
         // ---- 横滑拖动进度时的画面预览 ----
         if (gesturePreview != null) {
             extras.thumbnail?.second?.let { bmp ->
+                val thumbShape = RoundedCornerShape(12.dp)
                 Image(
                     bmp.asImageBitmap(), null, contentScale = ContentScale.Fit,
                     modifier = Modifier.align(Alignment.Center).offset(y = (-80).dp).width(200.dp).aspectRatio(16f / 9f)
-                        .liquidGlass(shape = RoundedCornerShape(10.dp), style = GlassStyle.Floating, tint = Color(0xCC000000)),
+                        .glassShadow(thumbShape, GlassStyle.Floating)
+                        .liquidGlass(shape = thumbShape, style = GlassStyle.Floating, tint = GlassTokens.DarkOverlayTint),
                 )
             }
         }
 
         // ---- 片头片尾：没开自动跳过、或往回拖进区间时显示跳过按钮 ----
         extras.activeSkip?.let { r ->
+            val skipShape = RoundedCornerShape(14.dp)
             TextButton(
                 onClick = vm.extras::skipActive,
                 modifier = Modifier.align(Alignment.BottomEnd)
                     .padding(end = 24.dp, bottom = (if (!controls || locked) 48 else if (!wantsPlay) 250 else 190).dp)
-                    .liquidGlass(shape = RoundedCornerShape(12.dp), style = GlassStyle.Floating, tint = Color(0x88141820)),
+                    .glassShadow(skipShape, GlassStyle.Floating, 12.dp)
+                    .liquidGlass(shape = skipShape, style = GlassStyle.Floating, tint = GlassTokens.DarkOverlayTint),
             ) { Text("跳过${r.kind.short} »", color = Color.White, fontSize = 15.sp) }
         }
 
         // ---- 中央提示 ----
         indicator?.let { (icon, text) ->
+            val indShape = RoundedCornerShape(18.dp)
             Row(
                 Modifier
                     .align(Alignment.Center)
-                    .liquidGlass(shape = RoundedCornerShape(16.dp), style = GlassStyle.Floating, tint = Color(0x88141820))
+                    .glassShadow(indShape, GlassStyle.Floating)
+                    .liquidGlass(shape = indShape, style = GlassStyle.Floating, tint = GlassTokens.DarkOverlayTint)
                     .padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1605,11 +1619,13 @@ private fun SeekPreview(fraction: Float, image: android.graphics.Bitmap?, time: 
     BoxWithConstraints(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
         val w = 168.dp
         val x = (maxWidth * fraction - w / 2).coerceIn(0.dp, (maxWidth - w).coerceAtLeast(0.dp))
+        val previewShape = RoundedCornerShape(14.dp)
         Column(
             Modifier
                 .offset(x = x)
                 .width(w)
-                .liquidGlass(shape = RoundedCornerShape(12.dp), style = GlassStyle.Floating, tint = Color(0x99141820)),
+                .glassShadow(previewShape, GlassStyle.Floating, 12.dp)
+                .liquidGlass(shape = previewShape, style = GlassStyle.Floating, tint = GlassTokens.DarkOverlayTint),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).background(Color(0xFF222222)), contentAlignment = Alignment.Center) {
@@ -1654,7 +1670,7 @@ private fun FrameButton(icon: ImageVector, label: String, onClick: () -> Unit) {
             .tvFocusRing(RoundedCornerShape(10.dp), color = Color.White, scale = true, fillBackground = true)
             .let {
                 if (activePress) {
-                    it.liquidGlass(shape = RoundedCornerShape(10.dp), style = GlassStyle.Pill, tint = Color(0xB32E3B52), lightShift = 0.8f)
+                    it.liquidGlass(shape = RoundedCornerShape(10.dp), style = GlassStyle.Pill, tint = GlassTokens.DarkDropletTint, lightShift = 0.8f)
                 } else it
             }
             .clip(RoundedCornerShape(10.dp))
@@ -1907,7 +1923,7 @@ private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAct
     val shape = RoundedCornerShape(28.dp)
     Column(
         Modifier.fillMaxHeight().statusBarsPadding().navigationBarsPadding().padding(12.dp).width(300.dp)
-            .shadow(c.shadow, shape)
+            .glassShadow(shape, GlassStyle.Sheet, c.shadow)
             .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface)
             .statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(vertical = 16.dp),
     ) {

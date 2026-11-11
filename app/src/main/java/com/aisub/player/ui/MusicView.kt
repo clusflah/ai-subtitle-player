@@ -178,7 +178,6 @@ fun MusicView(
         }
     }
 
-    GlassBackdropBox(Modifier.fillMaxSize()) { backdrop ->
     Box(
         Modifier.fillMaxSize().background(Color(0xFF1E201F))
             .pointerInput(Unit) {
@@ -198,7 +197,7 @@ fun MusicView(
             }
             .pointerInput(Unit) { detectTapGestures { } },
     ) {
-        Box(Modifier.fillMaxSize().glassBackdropSource(backdrop)) {
+        Box(Modifier.fillMaxSize()) {
             Backdrop(music)
         }
         val pages: @Composable (Modifier) -> Unit = { mod ->
@@ -243,7 +242,6 @@ fun MusicView(
                 ) { controls(Modifier.fillMaxWidth().padding(bottom = 20.dp)) }
             }
         }
-    }
     }
 
     if (showQueue) AppSheet(
@@ -442,10 +440,12 @@ private fun PlayControls(vm: MainViewModel, player: Player, wantsPlay: Boolean, 
         IconButton(onClick = { if (canSkip) vm.skipInQueue(false, restartFirst = true) else player.seekTo(0) }) {
             Icon(AppIcons.SkipPrevious, "上一首", tint = Color.White, modifier = Modifier.size(34.dp))
         }
-        Box(
-            Modifier.size(68.dp)
-                .liquidGlass(shape = CircleShape, style = GlassStyle.Floating, tint = Color(0x2EFFFFFF), borderColor = Color.White.copy(alpha = 0.85f))
-                .clickable { vm.togglePlay() },
+        GlassBox(
+            modifier = Modifier.size(68.dp).glassShadow(CircleShape, GlassStyle.Floating, 12.dp),
+            shape = CircleShape,
+            style = GlassStyle.Floating,
+            tint = Color(0x36FFFFFF),
+            onClick = { vm.togglePlay() },
             contentAlignment = Alignment.Center,
         ) {
             Icon(if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow, if (wantsPlay) "暂停" else "播放", tint = Color.White, modifier = Modifier.size(38.dp))

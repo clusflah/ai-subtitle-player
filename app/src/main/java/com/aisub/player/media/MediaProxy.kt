@@ -28,7 +28,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
     /** 登记一个地址，返回可给 VLC 打开的本机地址。文件名附在末尾，方便 VLC 按扩展名识别格式。 */
     @Synchronized
     fun register(uri: Uri, name: String): String {
-        val socket = server ?: ServerSocket(0, 16, InetAddress.getByName("127.0.0.1")).also {
+        val socket = server ?: ServerSocket(0, 64, InetAddress.getByName("127.0.0.1")).also {
             server = it
             thread(name = "media-proxy", isDaemon = true) { acceptLoop(it) }
         }
@@ -47,6 +47,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
     }
 
     private fun serve(client: Socket) {
+        runCatching { client.tcpNoDelay = true }
         val input = client.getInputStream().bufferedReader(Charsets.ISO_8859_1)
         val requestLine = input.readLine() ?: return
         val headers = generateSequence { input.readLine()?.takeIf { it.isNotEmpty() } }
@@ -64,20 +65,29 @@ class MediaProxy(private val factory: DataSource.Factory) {
         val start = range?.getOrNull(0)?.toLongOrNull() ?: 0L
         val end = range?.getOrNull(1)?.toLongOrNull()
         val source = factory.createDataSource()
+        var headersSent = false
         try {
             val requested = if (end != null) end - start + 1 else C.LENGTH_UNSET.toLong()
             val opened = source.open(DataSpec.Builder().setUri(uri).setPosition(start).setLength(requested).build())
-            val total = if (opened == C.LENGTH_UNSET.toLong()) null else start + opened
+            val endExclusive = if (opened == C.LENGTH_UNSET.toLong()) null else start + opened
+            val upstreamTotal = source.getResponseHeaders().entries
+                .firstOrNull { it.key.equals("Content-Range", ignoreCase = true) }
+                ?.value?.firstOrNull()
+                ?.substringAfterLast('/', "")
+                ?.trim()
+                ?.toLongOrNull()
+            val resourceTotal = upstreamTotal ?: if (end == null) endExclusive else null
             val head = StringBuilder()
-            if (range != null && total != null) {
+            if (range != null && endExclusive != null) {
                 head.append("HTTP/1.1 206 Partial Content\r\n")
-                head.append("Content-Range: bytes $start-${total - 1}/${if (end == null) total else "*"}\r\n")
+                head.append("Content-Range: bytes $start-${endExclusive - 1}/${resourceTotal ?: "*"}\r\n")
             } else {
                 head.append("HTTP/1.1 200 OK\r\n")
             }
             if (opened != C.LENGTH_UNSET.toLong()) head.append("Content-Length: $opened\r\n")
             head.append("Accept-Ranges: bytes\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n")
             out.write(head.toString().toByteArray())
+            headersSent = true
             if (method == "GET") {
                 val buf = ByteArray(1 shl 16)
                 while (true) {
@@ -90,9 +100,11 @@ class MediaProxy(private val factory: DataSource.Factory) {
         } catch (e: Exception) {
             // VLC 拖动时会主动断开旧连接，属于正常情况
             Log.d("Voxtitle", "中转连接结束：${e.message}")
-            runCatching {
-                out.write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
-                out.flush()
+            if (!headersSent) {
+                runCatching {
+                    out.write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
+                    out.flush()
+                }
             }
         } finally {
             runCatching { source.close() }

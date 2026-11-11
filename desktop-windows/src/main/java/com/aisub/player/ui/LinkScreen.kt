@@ -62,7 +62,6 @@ fun LinkScreen(vm: MainViewModel, onBack: () -> Unit, onDone: () -> Unit) {
     }
     BackHandler(onBack = leave)
 
-    GlassBackdropBox { backdrop ->
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -74,7 +73,7 @@ fun LinkScreen(vm: MainViewModel, onBack: () -> Unit, onDone: () -> Unit) {
         },
     ) { padding ->
         Column(
-            Modifier.padding(padding).fillMaxSize().glassBackdropSource(backdrop).padding(24.dp),
+            Modifier.padding(padding).fillMaxSize().padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             if (task == null) {
@@ -143,7 +142,6 @@ fun LinkScreen(vm: MainViewModel, onBack: () -> Unit, onDone: () -> Unit) {
                 )
             }
         }
-    }
     }
 }
 

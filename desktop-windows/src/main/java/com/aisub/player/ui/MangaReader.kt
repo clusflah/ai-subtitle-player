@@ -445,10 +445,12 @@ fun MangaReader(
 
         // 提示（已经是最后一页之类）
         endHint?.let {
+            val hintShape = RoundedCornerShape(16.dp)
             Text(
                 it, color = Color.White,
                 modifier = Modifier.align(Alignment.Center)
-                    .liquidGlass(shape = RoundedCornerShape(14.dp), style = GlassStyle.Floating, tint = Color(0x8810141C))
+                    .glassShadow(hintShape, GlassStyle.Floating)
+                    .liquidGlass(shape = hintShape, style = GlassStyle.Floating, tint = GlassTokens.DarkOverlayTint)
                     .padding(horizontal = 20.dp, vertical = 12.dp),
             )
         }
@@ -458,7 +460,7 @@ fun MangaReader(
             Text(
                 "${page + 1} / ${pages.size}", color = Color(0xD9FFFFFF), style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
-                    .liquidGlass(shape = RoundedCornerShape(8.dp), style = GlassStyle.Pill, tint = Color(0x660D1117), enableBackdrop = false)
+                    .liquidGlass(shape = RoundedCornerShape(8.dp), style = GlassStyle.Pill, tint = GlassTokens.DarkBadgeTint, enableBackdrop = false)
                     .padding(horizontal = 7.dp, vertical = 2.dp),
             )
         }
@@ -529,14 +531,15 @@ fun MangaReader(
                     val barFraction = if (rtl) 1f - pageFraction else pageFraction
 
                     if (dragging != null) {
+                        val previewShape = RoundedCornerShape(50)
                         Box(
                             Modifier.align(Alignment.CenterHorizontally)
                                 .padding(bottom = 4.dp)
+                                .glassShadow(previewShape, GlassStyle.Pill, 8.dp)
                                 .liquidGlass(
-                                    shape = RoundedCornerShape(50),
+                                    shape = previewShape,
                                     style = GlassStyle.Pill,
-                                    tint = Color(0xD8181F2C),
-                                    borderColor = Color(0x52FFFFFF),
+                                    tint = GlassTokens.DarkDockTint,
                                 )
                                 .padding(horizontal = 12.dp, vertical = 4.dp),
                         ) {
@@ -855,35 +858,41 @@ private fun ThumbnailPanel(pages: List<MangaPage>, current: Int, onPick: (Int) -
     val context = LocalContext.current
     val grid = rememberLazyGridState((current - 4).coerceAtLeast(0))
     val focus = remember { FocusRequester() }
+    val sheetShape = RoundedCornerShape(28.dp)
     LaunchedEffect(Unit) { delay(100); runCatching { focus.requestFocus() } }
-    Column(
-        Modifier.fillMaxSize()
-            .liquidGlass(shape = RoundedCornerShape(0.dp), style = GlassStyle.Sheet, tint = Color(0xCC0D1117))
-            .statusBarsPadding().navigationBarsPadding(),
-    ) {
-        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onClose, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "返回", tint = Color.White) }
-            Text("目录 · 共 ${pages.size} 页", color = Color.White, style = MaterialTheme.typography.titleMedium)
-        }
-        LazyVerticalGrid(GridCells.Adaptive(110.dp), state = grid, modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
-            itemsIndexed(pages, key = { i, _ -> i }) { i, p ->
-                val thumb by produceState(MangaImages.cachedThumb(p), p) { if (value == null) value = MangaImages.thumb(context, p) }
-                Column(
-                    Modifier.padding(4.dp)
-                        .then(if (i == current) Modifier.focusRequester(focus) else Modifier)
-                        .tvFocusRing(RoundedCornerShape(8.dp), scale = true)
-                        .clickable { onPick(i) },
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Box(
-                        Modifier.fillMaxWidth().aspectRatio(0.7f).background(if (i == current) Color(0xFF5A3A00) else Color(0xFF222222), RoundedCornerShape(6.dp)),
-                        contentAlignment = Alignment.Center,
+    Box(Modifier.fillMaxSize().background(Color(0x73000000))) {
+        Column(
+            Modifier.fillMaxSize()
+                .statusBarsPadding().navigationBarsPadding()
+                .padding(12.dp)
+                .glassShadow(sheetShape, GlassStyle.Sheet)
+                .liquidGlass(shape = sheetShape, style = GlassStyle.Sheet, tint = GlassTokens.DarkSheetTint)
+                .padding(top = 4.dp, bottom = 8.dp),
+        ) {
+            Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onClose, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "返回", tint = Color.White) }
+                Text("目录 · 共 ${pages.size} 页", color = Color.White, style = MaterialTheme.typography.titleMedium)
+            }
+            LazyVerticalGrid(GridCells.Adaptive(110.dp), state = grid, modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
+                itemsIndexed(pages, key = { i, _ -> i }) { i, p ->
+                    val thumb by produceState(MangaImages.cachedThumb(p), p) { if (value == null) value = MangaImages.thumb(context, p) }
+                    Column(
+                        Modifier.padding(4.dp)
+                            .then(if (i == current) Modifier.focusRequester(focus) else Modifier)
+                            .tvFocusRing(RoundedCornerShape(8.dp), scale = true)
+                            .clickable { onPick(i) },
+                        horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        val t = thumb
-                        if (t != null) Image(t, null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
-                        else CircularProgressIndicator(color = Color(0x66FFFFFF), modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                        Box(
+                            Modifier.fillMaxWidth().aspectRatio(0.7f).background(if (i == current) Color(0xFF5A3A00) else Color(0xFF222222), RoundedCornerShape(6.dp)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            val t = thumb
+                            if (t != null) Image(t, null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                            else CircularProgressIndicator(color = Color(0x66FFFFFF), modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                        }
+                        Text("${i + 1}", color = if (i == current) MaterialTheme.colorScheme.primary else Color.White, style = MaterialTheme.typography.labelMedium)
                     }
-                    Text("${i + 1}", color = if (i == current) MaterialTheme.colorScheme.primary else Color.White, style = MaterialTheme.typography.labelMedium)
                 }
             }
         }

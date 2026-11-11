@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -314,6 +315,7 @@ fun HomeScreen(
                         Modifier
                             .padding(top = 10.dp)
                             .fillMaxWidth()
+                            .glassShadow(searchPillShape, GlassStyle.Pill)
                             .liquidGlass(shape = searchPillShape, style = GlassStyle.Pill)
                             .padding(start = 14.dp, end = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -374,27 +376,26 @@ fun HomeScreen(
     ) { padding ->
       Row(Modifier.padding(top = padding.calculateTopPadding()).fillMaxSize()) {
         if (wide) {
-            NavigationRail(
-                containerColor = Color.Transparent,
-                modifier = Modifier
-                    .padding(start = 6.dp, top = 6.dp, bottom = 6.dp, end = 8.dp)
-                    .liquidGlass(shape = RoundedCornerShape(24.dp), style = GlassStyle.Bar),
+            Box(
+                Modifier
+                    .fillMaxHeight()
+                    .navigationBarsPadding()
+                    .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                contentAlignment = Alignment.Center,
             ) {
-                Spacer(Modifier.weight(1f))
-                Tab.entries.forEach { t ->
-                    NavigationRailItem(
-                        selected = tab == t,
-                        onClick = { selectTab(t) },
-                        icon = { Icon(t.icon, null) },
-                        label = { Text(t.label) },
-                        colors = NavigationRailItemDefaults.colors(
-                            selectedIconColor = MaterialTheme.colorScheme.primary,
-                            selectedTextColor = MaterialTheme.colorScheme.primary,
-                            indicatorColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f),
-                        ),
-                    )
-                }
-                Spacer(Modifier.weight(1f))
+                LiquidGlassNavigationRail(
+                    items = remember {
+                        Tab.entries.map { t ->
+                            LiquidNavTabItem(
+                                value = t,
+                                label = if (t == Tab.BROWSE) "资源库" else t.label,
+                                icon = t.icon,
+                            )
+                        }
+                    },
+                    selected = tab,
+                    onSelect = selectTab,
+                )
             }
         }
         Box(
