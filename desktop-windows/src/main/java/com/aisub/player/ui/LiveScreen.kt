@@ -4,15 +4,20 @@ import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -21,13 +26,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,10 +46,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -52,6 +68,8 @@ import com.aisub.player.live.LiveState
 import com.aisub.player.live.LiveViewModel
 import com.aisub.player.media.MediaEntry
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 /**
  * 直播：添加 M3U / TXT 直播源，按分组浏览、搜索频道，点频道播放（播放页里可以切台）。
@@ -144,18 +162,14 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
                     colors = appFieldColors(),
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
                 )
-                // 分组（收藏排在最前）
+                // 分组（收藏排在最前，支持鼠标滚轮横滑、左右翻页箭头、一键展开全部右侧分组）
                 if (state.groups.isNotEmpty() || state.favorites.isNotEmpty()) {
-                    LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (state.favorites.isNotEmpty()) item {
-                            FilterChip(
-                                state.group == LiveState.FAVORITES, { vm.setGroup(LiveState.FAVORITES) },
-                                label = { Text("★ 收藏 ${state.favorites.size}") },
-                            )
-                        }
-                        item { FilterChip(state.group == null, { vm.setGroup(null) }, label = { Text("全部") }) }
-                        items(state.groups) { g -> FilterChip(state.group == g, { vm.setGroup(g) }, label = { Text(g, maxLines = 1) }) }
-                    }
+                    LiveGroupBar(
+                        groups = state.groups,
+                        favoritesCount = state.favorites.size,
+                        selectedGroup = state.group,
+                        onSelectGroup = vm::setGroup,
+                    )
                 }
                 val visible = state.visible
                 val epgVer = EpgRepository.version
@@ -234,6 +248,211 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
             detectedEpgUrl = state.headerEpgUrls.firstOrNull().orEmpty(),
             onDismiss = { editing = null },
         ) { name, url, epgUrl -> vm.edit(s, name, url, epgUrl); editing = null }
+    }
+}
+
+/**
+ * 直播频道分类栏：
+ * - 支持鼠标滚轮（竖向/横向）直接横向滚动；
+ * - 超出宽度时自动显示左右翻页箭头，点击可快速浏览右侧分类；
+ * - 右侧提供「展开 / 收起」按钮，一键多行平铺显示全部分组。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun LiveGroupBar(
+    groups: List<String>,
+    favoritesCount: Int = 0,
+    selectedGroup: String?,
+    onSelectGroup: (String?) -> Unit,
+) {
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    var expanded by remember { mutableStateOf(false) }
+
+    val favOffset = if (favoritesCount > 0) 1 else 0
+    val selectedIdx = remember(selectedGroup, favoritesCount, groups) {
+        when (selectedGroup) {
+            LiveState.FAVORITES -> if (favoritesCount > 0) 0 else 0
+            null -> favOffset
+            else -> groups.indexOf(selectedGroup).let { if (it >= 0) it + favOffset + 1 else favOffset }
+        }
+    }
+
+    LaunchedEffect(selectedIdx, expanded) {
+        if (!expanded && selectedIdx >= 0) {
+            runCatching { listState.animateScrollToItem((selectedIdx - 1).coerceAtLeast(0)) }
+        }
+    }
+
+    if (expanded) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 2.dp),
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "全部分组（共 ${groups.size} 组）",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f).padding(start = 4.dp),
+                )
+                Surface(
+                    onClick = { expanded = false },
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("收起", style = MaterialTheme.typography.labelMedium)
+                        Icon(
+                            AppIcons.ExpandMore,
+                            contentDescription = "收起分组",
+                            modifier = Modifier.size(16.dp).rotate(180f),
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            FlowRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 200.dp)
+                    .verticalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (favoritesCount > 0) {
+                    FilterChip(
+                        selected = selectedGroup == LiveState.FAVORITES,
+                        onClick = { onSelectGroup(LiveState.FAVORITES) },
+                        label = { Text("★ 收藏 $favoritesCount") },
+                    )
+                }
+                FilterChip(
+                    selected = selectedGroup == null,
+                    onClick = { onSelectGroup(null) },
+                    label = { Text("全部") },
+                )
+                groups.forEach { g ->
+                    FilterChip(
+                        selected = selectedGroup == g,
+                        onClick = { onSelectGroup(g) },
+                        label = { Text(g, maxLines = 1) },
+                    )
+                }
+            }
+        }
+    } else {
+        val showOverflowControls = listState.canScrollBackward || listState.canScrollForward || groups.size > 4
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (listState.canScrollBackward) {
+                IconButton(
+                    onClick = { scope.launch { listState.animateScrollBy(-360f) } },
+                    modifier = Modifier.size(32.dp),
+                ) {
+                    Icon(
+                        AppIcons.ChevronLeft,
+                        contentDescription = "向左查看分组",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+            LazyRow(
+                state = listState,
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .pointerInput(listState) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (event.type == PointerEventType.Scroll) {
+                                    val delta = event.changes.fold(Offset.Zero) { acc, c -> acc + c.scrollDelta }
+                                    val raw = if (abs(delta.x) > abs(delta.y)) delta.x else delta.y
+                                    if (raw != 0f) {
+                                        val canScroll = (raw > 0f && listState.canScrollForward) ||
+                                            (raw < 0f && listState.canScrollBackward)
+                                        if (canScroll) {
+                                            scope.launch { listState.scrollBy(raw * 88f) }
+                                            event.changes.forEach { it.consume() }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+            ) {
+                if (favoritesCount > 0) {
+                    item {
+                        FilterChip(
+                            selected = selectedGroup == LiveState.FAVORITES,
+                            onClick = { onSelectGroup(LiveState.FAVORITES) },
+                            label = { Text("★ 收藏 $favoritesCount") },
+                        )
+                    }
+                }
+                item {
+                    FilterChip(
+                        selected = selectedGroup == null,
+                        onClick = { onSelectGroup(null) },
+                        label = { Text("全部") },
+                    )
+                }
+                items(groups) { g ->
+                    FilterChip(
+                        selected = selectedGroup == g,
+                        onClick = { onSelectGroup(g) },
+                        label = { Text(g, maxLines = 1) },
+                    )
+                }
+            }
+            if (listState.canScrollForward) {
+                IconButton(
+                    onClick = { scope.launch { listState.animateScrollBy(360f) } },
+                    modifier = Modifier.size(32.dp),
+                ) {
+                    Icon(
+                        AppIcons.ChevronRight,
+                        contentDescription = "向右查看分组",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+            if (showOverflowControls) {
+                Spacer(Modifier.width(2.dp))
+                Surface(
+                    onClick = { expanded = true },
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                ) {
+                    Row(
+                        Modifier.padding(start = 10.dp, end = 6.dp, top = 5.dp, bottom = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("展开", style = MaterialTheme.typography.labelMedium)
+                        Icon(
+                            AppIcons.ExpandMore,
+                            contentDescription = "展开全部分组",
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -195,9 +195,10 @@ data class AppSettings(
     val tvdbPin: String = "",
     /** Fanart.tv 个人 API Key：透明标题图、高清背景图 */
     val fanartKey: String = "",
-    /** 主界面背景方案与深色模式策略 */
+    /** 主界面背景方案、深色模式策略与液态玻璃效果开关 */
     val appBackground: AppBackground = AppBackground.VERY_LIGHT_GRAY,
     val appDarkMode: AppDarkMode = AppDarkMode.SYSTEM,
+    val liquidGlass: Boolean = true,
 ) {
     /** 某个服务商的配置，未填的字段用默认值补齐。 */
     fun configOf(p: Provider): ProviderConfig {
@@ -397,6 +398,7 @@ class SettingsRepository(context: Context) {
                     else -> d.appDarkMode
                 }
             },
+            liquidGlass = prefs.getBoolean("liquidGlass", d.liquidGlass),
         )
     }
 
@@ -459,6 +461,7 @@ class SettingsRepository(context: Context) {
             .putString("fanartKey", s.fanartKey)
             .putString("appBackground", s.appBackground.name)
             .putString("appDarkMode", s.appDarkMode.name)
+            .putBoolean("liquidGlass", s.liquidGlass)
         for (e in TtsEngineType.entries) editor.putString("ttsVoice.${e.name}", s.ttsVoices[e].orEmpty())
         for ((p, c) in s.providerConfigs) {
             editor.putString("${p.name}.apiKey", c.apiKey)

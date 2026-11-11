@@ -520,6 +520,10 @@ fun MangaReader(
 
             Column(
                 Modifier.fillMaxWidth()
+                    .let {
+                        if (LocalLiquidGlassEnabled.current) it
+                        else it.background(Color(0xB3000000))
+                    }
                     .navigationBarsPadding()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             ) {

@@ -251,6 +251,8 @@ class KeyEvent(
         const val KEYCODE_MEDIA_PREVIOUS = AwtKeyEvent.VK_OPEN_BRACKET
         const val KEYCODE_MEDIA_FAST_FORWARD = AwtKeyEvent.VK_PERIOD
         const val KEYCODE_MEDIA_REWIND = AwtKeyEvent.VK_COMMA
+        const val KEYCODE_LEFT_BRACKET = AwtKeyEvent.VK_OPEN_BRACKET
+        const val KEYCODE_RIGHT_BRACKET = AwtKeyEvent.VK_CLOSE_BRACKET
 
         fun fromNative(native: Any?): KeyEvent {
             if (native is KeyEvent) return native

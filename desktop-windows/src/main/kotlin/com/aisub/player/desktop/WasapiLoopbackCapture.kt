@@ -4,6 +4,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicLong
 import javax.sound.sampled.AudioFormat
 import javax.sound.sampled.AudioSystem
 import javax.sound.sampled.DataLine
@@ -12,8 +13,13 @@ import javax.sound.sampled.TargetDataLine
 /**
  * Windows WASAPI Loopback 系统内录采集器（16kHz 单声道 Float PCM）。
  * 首次运行时利用 Windows 系统自带的 .NET Framework 编译器 (csc.exe) 编译轻量的原生
- * CoreAudio WASAPI Loopback 采集器 (wasapi-loopback.exe)，直接捕获系统扬声器正在播放的声音，
+ * CoreAudio WASAPI Loopback 采集器 (wasapi-loopback-v3.exe)，直接捕获系统扬声器正在播放的声音，
  * 无需安装虚拟声卡，也不受立体声混音开关限制。
+ *
+ * 自愈机制：
+ * 1. 当音频驱动重置、声道/采样率切换（AUDCLNT_E_DEVICE_INVALIDATED 等 HRESULT != 0）时，采集进程立即退出并由守护循环自动重连；
+ * 2. 当系统默认播放设备切换（如插入耳机/切换显示器音响）时，2 秒内自动感知并切换到新设备；
+ * 3. Kotlin 侧内置 4 秒管道读取看门狗，防止底层 COM 调用卡死导致静默假死。
  */
 object WasapiLoopbackCapture {
     const val SAMPLE_RATE = 16_000
@@ -62,7 +68,7 @@ object WasapiLoopbackCapture {
                         android.util.Log.w("Voxtitle-WASAPI", "系统声音捕获异常: ${e.message}", e)
                     }
                     if (running && listeners.isNotEmpty()) {
-                        runCatching { Thread.sleep(800) }
+                        runCatching { Thread.sleep(500) }
                     }
                 }
             } finally {
@@ -87,6 +93,24 @@ object WasapiLoopbackCapture {
             .redirectError(ProcessBuilder.Redirect.DISCARD)
             .start()
         activeProcess = proc
+        val lastReadMs = AtomicLong(System.currentTimeMillis())
+        val watchdog = Thread({
+            while (running && proc.isAlive) {
+                try {
+                    Thread.sleep(1000)
+                } catch (_: InterruptedException) {
+                    break
+                }
+                if (running && proc.isAlive && System.currentTimeMillis() - lastReadMs.get() > 4_000L) {
+                    android.util.Log.w("Voxtitle-WASAPI", "WASAPI 采集进程超过 4 秒无音频心跳，强制重启音频捕获")
+                    runCatching { proc.destroyForcibly() }
+                    break
+                }
+            }
+        }, "wasapi-loopback-watchdog").apply {
+            isDaemon = true
+            start()
+        }
         try {
             val ins = proc.inputStream
             // 每次读取 1600 采样点 (100ms, 3200 字节)
@@ -95,6 +119,7 @@ object WasapiLoopbackCapture {
             while (running && proc.isAlive) {
                 val n = ins.read(buf, offset, buf.size - offset)
                 if (n < 0) break
+                if (n > 0) lastReadMs.set(System.currentTimeMillis())
                 val total = offset + n
                 val samplesCount = total / 2
                 if (samplesCount >= 800) { // 至少 50ms
@@ -113,6 +138,7 @@ object WasapiLoopbackCapture {
                 }
             }
         } finally {
+            watchdog.interrupt()
             runCatching { proc.destroyForcibly() }
             if (activeProcess === proc) activeProcess = null
         }
@@ -144,7 +170,7 @@ object WasapiLoopbackCapture {
 
     @Synchronized
     private fun ensureWasapiExe(): File? {
-        val exeFile = File(DesktopBinaryFinder.binDir, "wasapi-loopback-v2.exe")
+        val exeFile = File(DesktopBinaryFinder.binDir, "wasapi-loopback-v3.exe")
         if (exeFile.isFile && exeFile.length() > 1024) return exeFile
 
         val cscCandidates = listOf(
@@ -152,7 +178,7 @@ object WasapiLoopbackCapture {
             File("C:/Windows/Microsoft.NET/Framework/v4.0.30319/csc.exe"),
         )
         val csc = cscCandidates.firstOrNull { it.isFile } ?: return null
-        val csFile = File(DesktopBinaryFinder.binDir, "wasapi-loopback-v2.cs")
+        val csFile = File(DesktopBinaryFinder.binDir, "wasapi-loopback-v3.cs")
         return runCatching {
             csFile.writeText(WASAPI_CS_SOURCE, Charsets.UTF_8)
             val proc = ProcessBuilder(
@@ -191,6 +217,9 @@ class WasapiLoopback
     private interface IMMDevice
     {
         int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
+        int OpenPropertyStore(int stgmAccess, out IntPtr ppProperties);
+        int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
+        int GetState(out int pdwState);
     }
 
     [Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -228,6 +257,9 @@ class WasapiLoopback
             int hr = enumerator.GetDefaultAudioEndpoint(0, 0, out device);
             if (hr != 0 || device == null) return 1;
 
+            string initialDeviceId = null;
+            device.GetId(out initialDeviceId);
+
             Guid iidAudioClient = new Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
             object objClient;
             hr = device.Activate(ref iidAudioClient, 23, IntPtr.Zero, out objClient);
@@ -250,6 +282,7 @@ class WasapiLoopback
                 Guid subGuid = new Guid(subFormat);
                 if (subGuid == new Guid("00000003-0000-0010-8000-00aa00389b71")) isFloat = true;
             }
+            if (channels <= 0 || sampleRate <= 0) return 3;
 
             // AUDCLNT_SHAREMODE_SHARED = 0, AUDCLNT_STREAMFLAGS_LOOPBACK = 0x00020000
             hr = audioClient.Initialize(0, 0x00020000, 10000000, 0, mixFormatPtr, IntPtr.Zero);
@@ -261,7 +294,9 @@ class WasapiLoopback
             if (hr != 0 || objCapture == null) return 5;
             var captureClient = (IAudioCaptureClient)objCapture;
 
-            audioClient.Start();
+            hr = audioClient.Start();
+            if (hr != 0) return 6;
+
             Stream stdout = Console.OpenStandardOutput();
             int targetRate = 16000;
             double step = (double)sampleRate / targetRate;
@@ -271,11 +306,31 @@ class WasapiLoopback
             byte[] outBuf = new byte[6400];
             byte[] silenceBuf = new byte[1600]; // 50ms 16kHz 16-bit mono silence
             int silentLoops = 0;
+            int deviceCheckLoops = 0;
 
             while (true)
             {
+                deviceCheckLoops++;
+                if (deviceCheckLoops >= 120)
+                {
+                    deviceCheckLoops = 0;
+                    IMMDevice curDev;
+                    if (enumerator.GetDefaultAudioEndpoint(0, 0, out curDev) == 0 && curDev != null)
+                    {
+                        string curId;
+                        int idHr = curDev.GetId(out curId);
+                        Marshal.ReleaseComObject(curDev);
+                        if (idHr == 0 && initialDeviceId != null && curId != initialDeviceId)
+                        {
+                            return 12;
+                        }
+                    }
+                }
+
                 uint packetLength = 0;
-                captureClient.GetNextPacketSize(out packetLength);
+                hr = captureClient.GetNextPacketSize(out packetLength);
+                if (hr != 0) return 10;
+
                 if (packetLength == 0)
                 {
                     Thread.Sleep(15);
@@ -298,7 +353,7 @@ class WasapiLoopback
                     ulong devPos;
                     ulong qpcPos;
                     hr = captureClient.GetBuffer(out dataPtr, out numFrames, out flags, out devPos, out qpcPos);
-                    if (hr != 0) break;
+                    if (hr != 0) return 11;
 
                     bool silent = (flags & 2) != 0; // AUDCLNT_BUFFERFLAGS_SILENT = 2
                     int nFrames = (int)numFrames;
@@ -323,12 +378,22 @@ class WasapiLoopback
                                 {
                                     sum += BitConverter.ToInt16(raw, off) / 32768f;
                                 }
+                                else if (!isFloat && bytesPerSample == 4)
+                                {
+                                    sum += BitConverter.ToInt32(raw, off) / 2147483648f;
+                                }
+                                else if (bytesPerSample == 3)
+                                {
+                                    int v24 = (raw[off + 2] << 24) | (raw[off + 1] << 16) | (raw[off] << 8);
+                                    sum += v24 / 2147483648f;
+                                }
                             }
                             mono[i] = sum / channels;
                         }
                     }
 
-                    captureClient.ReleaseBuffer(numFrames);
+                    hr = captureClient.ReleaseBuffer(numFrames);
+                    if (hr != 0) return 13;
 
                     int outIdx = 0;
                     while (pos < nFrames)
@@ -356,7 +421,8 @@ class WasapiLoopback
                         stdout.Flush();
                     }
 
-                    captureClient.GetNextPacketSize(out packetLength);
+                    hr = captureClient.GetNextPacketSize(out packetLength);
+                    if (hr != 0) return 10;
                 }
             }
         }

@@ -192,6 +192,7 @@ fun HomeScreen(
     val toggle: (MediaEntry) -> Unit = { e -> selected = if (e.uri in selected) selected - e.uri else selected + e.uri }
     val openSettings = { nav.push(Screen.Settings) }
     val wide = LocalWideLayout.current
+    val glass = LocalLiquidGlassEnabled.current
     val selectTab: (Tab) -> Unit = { t ->
         lib.homeTab = t.ordinal
         selected = emptySet()
@@ -238,7 +239,7 @@ fun HomeScreen(
                         modifier = Modifier.weight(1f),
                     )
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(if (glass) 10.dp else 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         val globalSubActive = com.aisub.player.desktop.DesktopGlobalSubtitles.active
@@ -249,11 +250,11 @@ fun HomeScreen(
                         if (globalSubClickThrough) {
                             GlassBox(
                                 modifier = Modifier
-                                    .height(42.dp)
-                                    .glassShadow(pillShape, GlassStyle.Floating, 6.dp),
+                                    .height(if (glass) 42.dp else 36.dp)
+                                    .let { if (glass) it.glassShadow(pillShape, GlassStyle.Floating, 6.dp) else it },
                                 shape = pillShape,
                                 style = GlassStyle.Floating,
-                                tint = Color(0xFFD84315).copy(alpha = 0.88f),
+                                tint = if (glass) Color(0xFFD84315).copy(alpha = 0.88f) else Color(0xFFD84315),
                                 onClick = { com.aisub.player.desktop.DesktopGlobalSubtitles.onDisableClickThrough() },
                                 contentAlignment = Alignment.Center,
                             ) {
@@ -267,14 +268,15 @@ fun HomeScreen(
                             }
                         }
                         val subBtnTint = when {
-                            globalSubActive -> Orange.copy(alpha = 0.90f)
-                            else -> headerPalette.iconButtonTint
+                            globalSubActive -> if (glass) Orange.copy(alpha = 0.90f) else Orange
+                            glass -> headerPalette.iconButtonTint
+                            else -> MaterialTheme.colorScheme.surfaceContainerHigh
                         }
                         val subBtnFg = if (globalSubActive) Color.White else MaterialTheme.colorScheme.onSurface
                         GlassBox(
                             modifier = Modifier
-                                .height(42.dp)
-                                .glassShadow(pillShape, GlassStyle.Floating, if (isDarkHeader) 6.dp else 4.dp),
+                                .height(if (glass) 42.dp else 36.dp)
+                                .let { if (glass) it.glassShadow(pillShape, GlassStyle.Floating, if (isDarkHeader) 6.dp else 4.dp) else it },
                             shape = pillShape,
                             style = GlassStyle.Floating,
                             tint = subBtnTint,
@@ -439,31 +441,40 @@ fun HomeScreen(
                     },
                     selected = tab,
                     onSelect = selectTab,
-                    modifier = Modifier.navigationBarsPadding(),
+                    modifier = if (glass) Modifier.navigationBarsPadding() else Modifier,
                 )
             }
           }
         },
     ) { padding ->
-      Row(Modifier.padding(top = padding.calculateTopPadding()).fillMaxSize()) {
+      Row(Modifier.padding(if (glass) PaddingValues(top = padding.calculateTopPadding()) else padding).fillMaxSize()) {
         if (wide) {
-            Box(
-                Modifier
-                    .fillMaxHeight()
-                    .navigationBarsPadding()
-                    .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
-                contentAlignment = Alignment.Center,
-            ) {
+            val railItems = remember {
+                Tab.entries.map { t ->
+                    LiquidNavTabItem(
+                        value = t,
+                        label = if (t == Tab.BROWSE) "资源库" else t.label,
+                        icon = t.icon,
+                    )
+                }
+            }
+            if (glass) {
+                Box(
+                    Modifier
+                        .fillMaxHeight()
+                        .navigationBarsPadding()
+                        .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    LiquidGlassNavigationRail(
+                        items = railItems,
+                        selected = tab,
+                        onSelect = selectTab,
+                    )
+                }
+            } else {
                 LiquidGlassNavigationRail(
-                    items = remember {
-                        Tab.entries.map { t ->
-                            LiquidNavTabItem(
-                                value = t,
-                                label = if (t == Tab.BROWSE) "资源库" else t.label,
-                                icon = t.icon,
-                            )
-                        }
-                    },
+                    items = railItems,
                     selected = tab,
                     onSelect = selectTab,
                 )
@@ -507,29 +518,45 @@ fun HomeScreen(
                     openWebManga = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
                 )
                 Tab.LOCAL -> Column {
-                    // 视频 / 音乐 / 照片 液态玻璃分段切换器（仿演示视频 00:03）
+                    val mediaOptions = listOf(
+                        "视频 ${state.videos.size}",
+                        "音乐 ${state.audios.size}",
+                        "照片 ${state.images.size}",
+                    )
                     val selectedMediaIdx = when {
                         localPhotos -> 2
                         localVideo -> 0
                         else -> 1
                     }
-                    LiquidGlassSegmentedControl(
-                        options = listOf(
-                            "视频 ${state.videos.size}",
-                            "音乐 ${state.audios.size}",
-                            "照片 ${state.images.size}",
-                        ),
-                        selectedIndex = selectedMediaIdx,
-                        onSelect = { index ->
-                            localPhotos = index == 2
-                            if (index < 2) lib.localShowsVideo = index == 0
-                            selected = emptySet()
-                            if (index == 2) {
-                                if (!state.hasImagePermission) onRequestImagePermission() else lib.refreshImages()
+                    val selectMediaIdx: (Int) -> Unit = { index ->
+                        localPhotos = index == 2
+                        if (index < 2) lib.localShowsVideo = index == 0
+                        selected = emptySet()
+                        if (index == 2) {
+                            if (!state.hasImagePermission) onRequestImagePermission() else lib.refreshImages()
+                        }
+                    }
+                    if (glass) {
+                        LiquidGlassSegmentedControl(
+                            options = mediaOptions,
+                            selectedIndex = selectedMediaIdx,
+                            onSelect = selectMediaIdx,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                        )
+                    } else {
+                        Row(
+                            Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            mediaOptions.forEachIndexed { index, label ->
+                                FilterChip(
+                                    selected = selectedMediaIdx == index,
+                                    onClick = { selectMediaIdx(index) },
+                                    label = { Text(label) },
+                                )
                             }
-                        },
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                    )
+                        }
+                    }
                     if (localPhotos) {
                         if (!state.hasImagePermission) EmptyState("需要照片访问权限才能显示手机里的图片", "授予权限", icon = AppIcons.Image, onButton = onRequestImagePermission)
                         else if (state.images.isEmpty()) EmptyState("手机里还没有照片", "刷新照片", icon = AppIcons.Image, onButton = lib::refreshImages)

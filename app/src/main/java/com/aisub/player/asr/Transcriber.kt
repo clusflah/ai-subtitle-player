@@ -28,6 +28,8 @@ class Transcriber(
     numThreads: Int,
     /** 一段语音最长几秒：边播边识别时短一点，字幕出得快 */
     maxSpeechSeconds: Float = 12f,
+    /** 判定一句话说完了所需的最短停顿（秒）；全局实时字幕可设得更短以降低出字延迟 */
+    minSilenceSeconds: Float = 0.35f,
 ) : SpeechEngine {
 
     private val vad = Vad(
@@ -35,7 +37,7 @@ class Transcriber(
             sileroVadModelConfig = SileroVadModelConfig(
                 model = models.vadFile.absolutePath,
                 threshold = 0.5f,
-                minSilenceDuration = 0.35f,
+                minSilenceDuration = minSilenceSeconds,
                 minSpeechDuration = 0.25f,
                 windowSize = VAD_WINDOW,
                 maxSpeechDuration = maxSpeechSeconds,

@@ -196,12 +196,32 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 4.dp, bottom = 32.dp)) {
 
-            // ---------------- 主界面背景 ----------------
+            // ---------------- 外观与背景 ----------------
             val activeDark = isAppDarkTheme()
             CollapsibleCard(
-                "主界面背景",
-                "${s.appBackground.label} · ${s.appDarkMode.label} · ${s.appBackground.colorCode(activeDark)}",
+                "外观与背景",
+                "${if (s.liquidGlass) "液态玻璃" else "经典样式"} · ${s.appBackground.label} · ${s.appDarkMode.label} · ${s.appBackground.colorCode(activeDark)}",
             ) {
+                ListRow(
+                    title = "液态玻璃效果",
+                    subtitle = "开启悬浮模糊、折射高光与水滴回弹动画；关闭后恢复以前的经典效果",
+                    trailing = {
+                        Switch(
+                            checked = s.liquidGlass,
+                            onCheckedChange = { v ->
+                                val next = s.copy(liquidGlass = v)
+                                s = next
+                                vm.updateSettings(next)
+                            },
+                        )
+                    },
+                    onClick = {
+                        val next = s.copy(liquidGlass = !s.liquidGlass)
+                        s = next
+                        vm.updateSettings(next)
+                    },
+                )
+                CardDivider(inset = 16.dp)
                 AppBackgroundPicker(
                     selected = s.appBackground,
                     darkMode = s.appDarkMode,

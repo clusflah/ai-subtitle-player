@@ -71,6 +71,17 @@ internal fun LiquidDock(
     modifier: Modifier = Modifier,
     content: @Composable RowScope.() -> Unit,
 ) {
+    if (!LocalLiquidGlassEnabled.current) {
+        Row(
+            modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp)
+                .height(56.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            content = content,
+        )
+        return
+    }
     val tv = LocalTv.current
     val safeCount = count.coerceAtLeast(1)
     val rawSlot = if (tv && focusedSlot in 0 until safeCount) focusedSlot else activeSlot
@@ -215,6 +226,57 @@ internal fun DockButton(
     LaunchedEffect(focused) {
         onFocusChange(focused)
     }
+
+    if (!LocalLiquidGlassEnabled.current) {
+        val classicColor = when {
+            !enabled -> Color(0x55FFFFFF)
+            focused -> Color.White
+            active && !isCenter -> Orange
+            else -> Color.White
+        }
+        Box(
+            modifier = modifier
+                .fillMaxHeight()
+                .onFocusChanged { focusedNode = it.isFocused }
+                .clip(RoundedCornerShape(50))
+                .let {
+                    if (enabled) {
+                        it.clickable(
+                            interactionSource = interactionSource,
+                            indication = null,
+                            onClick = onClick,
+                        )
+                    } else it
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            if (isCenter) {
+                Box(
+                    Modifier
+                        .size(50.dp)
+                        .clip(CircleShape)
+                        .background(if (focused) Orange else Color(0x24FFFFFF)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = label,
+                        tint = classicColor,
+                        modifier = Modifier.size(iconSize),
+                    )
+                }
+            } else {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = label,
+                    tint = classicColor,
+                    modifier = Modifier.size(iconSize),
+                )
+            }
+        }
+        return
+    }
+
     LaunchedEffect(clickPulse) {
         if (clickPulse) {
             delay(85)

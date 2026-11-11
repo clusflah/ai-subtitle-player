@@ -141,20 +141,25 @@ fun CollapsibleSection(
     }
 }
 
-/** 圆角液态玻璃卡片，带柔和折射边缘高光与通透基底。 */
+/** 圆角卡片：开启液态玻璃时带柔和折射边缘高光与通透基底，关闭时恢复经典实色平面卡片。 */
 @Composable
 fun SurfaceCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    val glass = LocalLiquidGlassEnabled.current
     Surface(
-        color = Color.Transparent,
+        color = if (glass) Color.Transparent else MaterialTheme.colorScheme.surfaceContainerLowest,
         shape = MaterialTheme.shapes.large,
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = PageGutter - 4.dp)
-            .liquidGlass(
-                shape = MaterialTheme.shapes.large,
-                style = GlassStyle.Card,
-                tint = currentVisualPalette().cardTint,
-            ),
+            .let {
+                if (glass) {
+                    it.liquidGlass(
+                        shape = MaterialTheme.shapes.large,
+                        style = GlassStyle.Card,
+                        tint = currentVisualPalette().cardTint,
+                    )
+                } else it
+            },
     ) { Column(content = content) }
 }
 
@@ -173,6 +178,7 @@ fun CollapsibleCard(
 ) {
     var expanded by rememberSaveable(title) { mutableStateOf(initiallyExpanded) }
     val arrow by animateFloatAsState(if (expanded) 180f else 0f, label = "arrow")
+    val glass = LocalLiquidGlassEnabled.current
     val sectionIcon = when {
         "背景" in title || "外观" in title -> AppIcons.Palette
         "识别" in title -> AppIcons.AutoAwesome
@@ -185,16 +191,20 @@ fun CollapsibleCard(
         else -> AppIcons.Settings
     }
     Surface(
-        color = Color.Transparent,
+        color = if (glass) Color.Transparent else MaterialTheme.colorScheme.surfaceContainerLowest,
         shape = MaterialTheme.shapes.large,
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = PageGutter - 4.dp, vertical = 6.dp)
-            .liquidGlass(
-                shape = MaterialTheme.shapes.large,
-                style = GlassStyle.Card,
-                tint = currentVisualPalette().cardTint,
-            ),
+            .let {
+                if (glass) {
+                    it.liquidGlass(
+                        shape = MaterialTheme.shapes.large,
+                        style = GlassStyle.Card,
+                        tint = currentVisualPalette().cardTint,
+                    )
+                } else it
+            },
     ) {
         Column {
             Row(
@@ -227,12 +237,21 @@ fun CollapsibleCard(
 
 /** 输入框：细而浅的边框、12dp 圆角，长地址和 Key 仍然看得清边界 */
 @Composable
-fun appFieldColors() = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-    focusedContainerColor = currentVisualPalette().cardTint,
-    unfocusedContainerColor = currentVisualPalette().fieldContainerTint,
-    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
-    disabledBorderColor = MaterialTheme.colorScheme.outlineVariant,
-)
+fun appFieldColors() = if (LocalLiquidGlassEnabled.current) {
+    androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+        focusedContainerColor = currentVisualPalette().cardTint,
+        unfocusedContainerColor = currentVisualPalette().fieldContainerTint,
+        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+        disabledBorderColor = MaterialTheme.colorScheme.outlineVariant,
+    )
+} else {
+    androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
+        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+        disabledBorderColor = MaterialTheme.colorScheme.outlineVariant,
+    )
+}
 
 /** 卡片内各小节之间的分隔线 */
 @Composable
@@ -364,17 +383,22 @@ fun ListRow(
 /** 浏览页里的紧凑来源卡片（两列网格）。 */
 @Composable
 fun SourceCard(icon: ImageVector, title: String, subtitle: String, modifier: Modifier = Modifier, badge: (@Composable () -> Unit)? = null, onClick: () -> Unit) {
+    val glass = LocalLiquidGlassEnabled.current
     Surface(
         onClick = onClick,
-        color = Color.Transparent,
+        color = if (glass) Color.Transparent else MaterialTheme.colorScheme.surfaceContainerLowest,
         shape = MaterialTheme.shapes.large,
         modifier = modifier
             .tvFocusRing(MaterialTheme.shapes.large)
-            .liquidGlass(
-                shape = MaterialTheme.shapes.large,
-                style = GlassStyle.Card,
-                tint = currentVisualPalette().cardTint,
-            ),
+            .let {
+                if (glass) {
+                    it.liquidGlass(
+                        shape = MaterialTheme.shapes.large,
+                        style = GlassStyle.Card,
+                        tint = currentVisualPalette().cardTint,
+                    )
+                } else it
+            },
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             if (badge != null) badge() else IconBadge(icon, size = 36.dp)
@@ -392,16 +416,25 @@ fun countText(folders: Int, files: Int): String =
 /** 多选时的勾选标记。 */
 @Composable
 private fun SelectionBadge(selected: Boolean, modifier: Modifier = Modifier) {
+    val glass = LocalLiquidGlassEnabled.current
     Box(
         modifier
             .size(24.dp)
-            .liquidGlass(
-                shape = CircleShape,
-                style = GlassStyle.Pill,
-                tint = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.90f) else GlassTokens.DarkBadgeTint,
-                borderColor = Color.White.copy(alpha = 0.88f),
-                enableBackdrop = false,
-            ),
+            .let {
+                if (glass) {
+                    it.liquidGlass(
+                        shape = CircleShape,
+                        style = GlassStyle.Pill,
+                        tint = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.90f) else GlassTokens.DarkBadgeTint,
+                        borderColor = Color.White.copy(alpha = 0.88f),
+                        enableBackdrop = false,
+                    )
+                } else {
+                    it.clip(CircleShape)
+                        .background(if (selected) MaterialTheme.colorScheme.primary else Color(0x66000000))
+                        .border(2.dp, Color.White, CircleShape)
+                }
+            },
         contentAlignment = Alignment.Center,
     ) {
         if (selected) Icon(AppIcons.Check, null, tint = Color.White, modifier = Modifier.size(16.dp))

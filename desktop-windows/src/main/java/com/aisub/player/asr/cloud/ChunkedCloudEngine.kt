@@ -59,6 +59,9 @@ abstract class ChunkedCloudEngine(
     private var chunksSent = 0
     private var nextId = 1
 
+    @Volatile
+    private var liveCallTimeoutSec: Int = 0
+
     /** 第一段要发时才建，这样开始识别前 [useParallel] 还能改并发数 */
     private val pool by lazy { Executors.newFixedThreadPool(parallel) { r -> Thread(r, "asr-chunk").apply { isDaemon = true } } }
     private var poolStarted = false
@@ -81,6 +84,11 @@ abstract class ChunkedCloudEngine(
         chunkSec = eachSec
     }
 
+    /** 实时字幕模式：单次短音频请求设紧凑超时，避免某一段网络挂起把后续队列堵死 10 分钟 */
+    fun useLiveTimeout(seconds: Int = 25) {
+        liveCallTimeoutSec = seconds
+    }
+
     /** 识别一段 WAV（16kHz 单声道 16bit）。chunkStartMs 是这段在整段音频中的起点。会在多个线程里同时调用。 */
     protected abstract fun recognize(wav: ByteArray, chunkStartMs: Long, chunkEndMs: Long): List<Recognized>
 
@@ -91,6 +99,12 @@ abstract class ChunkedCloudEngine(
         if (size >= target) submit(quietestPoint(target - minOf(SAMPLE_RATE * 10, target / 3), target))
         // 取走已经识别完的（按顺序）；在途的太多就等最早的一段，避免解码跑得比识别快太多、内存堆积
         drain(onCue, wait = inFlight.size >= parallel * 2)
+    }
+
+    /** 实时流停顿时把已攒够半秒的尾部音频送去识别，但不阻塞主循环等待在途请求 */
+    fun flushPending(onCue: (Cue) -> Unit) {
+        if (size > SAMPLE_RATE / 2 && inFlight.size < parallel * 2) submit(size)
+        drain(onCue, wait = false)
     }
 
     override fun finish(onCue: (Cue) -> Unit) {
@@ -105,7 +119,13 @@ abstract class ChunkedCloudEngine(
         if (poolStarted) pool.shutdownNow()
     }
 
-    override fun close() = cancel()
+    override fun close() {
+        cancel()
+        runCatching {
+            http.dispatcher.executorService.shutdown()
+            http.connectionPool.evictAll()
+        }
+    }
 
     private fun submit(count: Int) {
         val start = bufferStartMs
@@ -172,12 +192,18 @@ abstract class ChunkedCloudEngine(
      */
     protected fun <T> execute(build: () -> Request, handle: (Response) -> T): T {
         var attempt = 0
+        val maxRetries = if (liveCallTimeoutSec > 0) 1 else RETRY_DELAYS_S.size
         while (true) {
             if (cancelled) throw IOException("已取消")
-            val call = http.newCall(build()).also { calls.add(it) }
+            val call = http.newCall(build()).also {
+                if (liveCallTimeoutSec > 0) {
+                    it.timeout().timeout(liveCallTimeoutSec.toLong(), TimeUnit.SECONDS)
+                }
+                calls.add(it)
+            }
             try {
                 call.execute().use { resp ->
-                    if ((resp.code == 429 || resp.code >= 500) && attempt < RETRY_DELAYS_S.size) {
+                    if ((resp.code == 429 || resp.code >= 500) && attempt < maxRetries) {
                         Thread.sleep(RETRY_DELAYS_S[attempt++] * 1000L)
                     } else {
                         return handle(resp)

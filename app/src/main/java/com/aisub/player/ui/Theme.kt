@@ -55,6 +55,7 @@ val Orange = Color(0xFFF28C00)
 
 val LocalAppBackground = compositionLocalOf { AppBackground.VERY_LIGHT_GRAY }
 val LocalAppDarkMode = compositionLocalOf { AppDarkMode.SYSTEM }
+val LocalLiquidGlassEnabled = compositionLocalOf { true }
 
 /** 桌面端可注入实时监听的 Windows 系统深色状态；Android 端为 null 时直接使用系统 isSystemInDarkTheme() */
 val LocalSystemDarkOverride = compositionLocalOf<Boolean?> { null }
@@ -786,6 +787,7 @@ private val AppTypography = Typography().let { t ->
 fun AppTheme(
     background: AppBackground = LocalAppBackground.current,
     darkMode: AppDarkMode = LocalAppDarkMode.current,
+    liquidGlass: Boolean = LocalLiquidGlassEnabled.current,
     content: @Composable () -> Unit,
 ) {
     val systemDark = isAppSystemInDarkTheme()
@@ -793,6 +795,7 @@ fun AppTheme(
     CompositionLocalProvider(
         LocalAppBackground provides background,
         LocalAppDarkMode provides darkMode,
+        LocalLiquidGlassEnabled provides liquidGlass,
     ) {
         MaterialTheme(
             colorScheme = colorSchemeFor(background, dark),

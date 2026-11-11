@@ -403,38 +403,69 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
             modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(horizontal = 22.dp, vertical = 8.dp),
         )
 
+        val glass = LocalLiquidGlassEnabled.current
+        val classicBarBg = if (followAppBg) MaterialTheme.colorScheme.surfaceContainer else theme.background
+
         if (controls) {
-            val topBarShape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp)
-            Surface(
-                color = Color.Transparent,
-                contentColor = barContent,
-                shape = topBarShape,
-                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
-                    .glassShadow(topBarShape, GlassStyle.Bar)
-                    .liquidGlass(shape = topBarShape, style = GlassStyle.Bar, tint = barTint, sampleBackdrop = true),
-            ) {
-                Row(Modifier.statusBarsPadding().padding(horizontal = 4.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onBack, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "返回") }
-                    Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                    IconButton(onClick = { showBookmarks = true }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) {
-                        Icon(AppIcons.Bookmark, "书签（${bookmarks.count { it.key == url }}）")
+            if (glass) {
+                val topBarShape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp)
+                Surface(
+                    color = Color.Transparent,
+                    contentColor = barContent,
+                    shape = topBarShape,
+                    modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
+                        .glassShadow(topBarShape, GlassStyle.Bar)
+                        .liquidGlass(shape = topBarShape, style = GlassStyle.Bar, tint = barTint, sampleBackdrop = true),
+                ) {
+                    Row(Modifier.statusBarsPadding().padding(horizontal = 4.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onBack, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "返回") }
+                        Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        IconButton(onClick = { showBookmarks = true }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) {
+                            Icon(AppIcons.Bookmark, "书签（${bookmarks.count { it.key == url }}）")
+                        }
+                        IconButton(onClick = { showToc = true }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ListIcon, "目录") }
                     }
-                    IconButton(onClick = { showToc = true }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ListIcon, "目录") }
+                }
+            } else {
+                Surface(
+                    color = classicBarBg,
+                    contentColor = barContent,
+                    tonalElevation = 2.dp,
+                    shadowElevation = 2.dp,
+                    modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
+                ) {
+                    Row(Modifier.statusBarsPadding().padding(horizontal = 4.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onBack, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "返回") }
+                        Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        IconButton(onClick = { showBookmarks = true }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) {
+                            Icon(AppIcons.Bookmark, "书签（${bookmarks.count { it.key == url }}）")
+                        }
+                        IconButton(onClick = { showToc = true }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ListIcon, "目录") }
+                    }
                 }
             }
-            val barShape = RoundedCornerShape(28.dp)
+            val barShape = if (glass) RoundedCornerShape(28.dp) else RoundedCornerShape(0.dp)
             Surface(
-                color = Color.Transparent,
+                color = if (glass) Color.Transparent else classicBarBg,
                 contentColor = barContent,
                 shape = barShape,
-                modifier = Modifier.align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .fillMaxWidth()
-                    .glassShadow(barShape, GlassStyle.Floating)
-                    .liquidGlass(shape = barShape, style = GlassStyle.Floating, tint = barTint, sampleBackdrop = true),
+                tonalElevation = if (glass) 0.dp else 2.dp,
+                shadowElevation = if (glass) 0.dp else 4.dp,
+                modifier = if (glass) {
+                    Modifier.align(Alignment.BottomCenter)
+                        .navigationBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .fillMaxWidth()
+                        .glassShadow(barShape, GlassStyle.Floating)
+                        .liquidGlass(shape = barShape, style = GlassStyle.Floating, tint = barTint, sampleBackdrop = true)
+                } else {
+                    Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                },
             ) {
-                Column(Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
+                Column(
+                    (if (glass) Modifier else Modifier.navigationBarsPadding())
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                ) {
                     val pct = if (rows.isEmpty()) 0 else (list.firstVisibleItemIndex + 1) * 100 / rows.size
                     Text(
                         "${book.chapters.getOrNull(current)?.title.orEmpty()} · $pct%",
@@ -467,15 +498,23 @@ fun BookReaderScreen(title: String, url: String, book: Ebook, onBack: () -> Unit
 
         // 朗读条
         if (reading && !controls) {
-            val ttsShape = RoundedCornerShape(26.dp)
+            val ttsShape = RoundedCornerShape(if (glass) 26.dp else 20.dp)
             Surface(
-                color = Color.Transparent, contentColor = barContent, shape = ttsShape,
+                color = if (glass) Color.Transparent else (if (followAppBg) MaterialTheme.colorScheme.surfaceContainerHigh else theme.background),
+                contentColor = barContent,
+                shape = ttsShape,
+                tonalElevation = if (glass) 0.dp else 3.dp,
+                shadowElevation = if (glass) 0.dp else 4.dp,
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .navigationBarsPadding()
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .fillMaxWidth()
-                    .glassShadow(ttsShape, GlassStyle.Floating)
-                    .liquidGlass(shape = ttsShape, style = GlassStyle.Floating, tint = barTint, sampleBackdrop = true),
+                    .let {
+                        if (glass) {
+                            it.glassShadow(ttsShape, GlassStyle.Floating)
+                                .liquidGlass(shape = ttsShape, style = GlassStyle.Floating, tint = barTint, sampleBackdrop = true)
+                        } else it
+                    },
             ) {
                 Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
                     val err = tts.error

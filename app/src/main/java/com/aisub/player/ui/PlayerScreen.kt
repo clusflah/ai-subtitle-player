@@ -876,6 +876,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             Column(
                 Modifier
                     .fillMaxWidth()
+                    .let {
+                        if (LocalLiquidGlassEnabled.current) it
+                        else it.background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000))))
+                    }
                     .navigationBarsPadding()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             ) {
@@ -2726,26 +2730,11 @@ private fun LiveChannelEpgSheet(
                     initialFirstVisibleItemIndex = (activeInFiltered - 3).coerceAtLeast(0),
                 )
                 if (groups.size > 1) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 16.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        FilterChip(
-                            selected = selectedGroup == null,
-                            onClick = { selectedGroup = null },
-                            label = { Text("全部") },
-                        )
-                        groups.forEach { g ->
-                            FilterChip(
-                                selected = selectedGroup == g,
-                                onClick = { selectedGroup = g },
-                                label = { Text(g, maxLines = 1) },
-                            )
-                        }
-                    }
+                    LiveGroupBar(
+                        groups = groups,
+                        selectedGroup = selectedGroup,
+                        onSelectGroup = { selectedGroup = it },
+                    )
                 }
                 LazyColumn(Modifier.fillMaxSize(), state = listState) {
                     itemsIndexed(indexedChannels, key = { _, pair -> "${pair.first}|${pair.second.uri}" }) { _, (realIdx, c) ->

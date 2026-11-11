@@ -3,6 +3,7 @@ package com.aisub.player.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +32,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
@@ -216,8 +219,8 @@ val LocalPopupColors = staticCompositionLocalOf { DarkPopupColors }
 @Composable
 fun popupColors(): PopupColors {
     val bg = LocalAppBackground.current
-    if (isAppDarkTheme()) {
-        return when (bg) {
+    val raw = if (isAppDarkTheme()) {
+        when (bg) {
             AppBackground.WARM_BEIGE_GRAY,
             AppBackground.WARM_CHAMPAGNE_GRADIENT,
             -> DarkWarmPopupColors
@@ -230,17 +233,28 @@ fun popupColors(): PopupColors {
             AppBackground.VERY_LIGHT_GRAY,
             -> DarkPopupColors
         }
+    } else {
+        when (bg) {
+            AppBackground.NEUTRAL_GRAY -> NeutralGrayPopupColors
+            AppBackground.WARM_BEIGE_GRAY -> WarmBeigePopupColors
+            AppBackground.PALE_CYAN_GRAY -> PaleCyanPopupColors
+            AppBackground.MINT_GREEN_GRADIENT -> MintGradientPopupColors
+            AppBackground.GLACIER_BLUE_PURPLE_GRADIENT -> GlacierGradientPopupColors
+            AppBackground.AURORA_GRAY_WHITE_GRADIENT -> AuroraGradientPopupColors
+            AppBackground.WARM_CHAMPAGNE_GRADIENT -> ChampagneGradientPopupColors
+            AppBackground.VERY_LIGHT_GRAY -> LightPopupColors
+        }
     }
-    return when (bg) {
-        AppBackground.NEUTRAL_GRAY -> NeutralGrayPopupColors
-        AppBackground.WARM_BEIGE_GRAY -> WarmBeigePopupColors
-        AppBackground.PALE_CYAN_GRAY -> PaleCyanPopupColors
-        AppBackground.MINT_GREEN_GRADIENT -> MintGradientPopupColors
-        AppBackground.GLACIER_BLUE_PURPLE_GRADIENT -> GlacierGradientPopupColors
-        AppBackground.AURORA_GRAY_WHITE_GRADIENT -> AuroraGradientPopupColors
-        AppBackground.WARM_CHAMPAGNE_GRADIENT -> ChampagneGradientPopupColors
-        AppBackground.VERY_LIGHT_GRAY -> LightPopupColors
-    }
+    if (LocalLiquidGlassEnabled.current) return raw
+    return raw.copy(
+        surface = raw.surface.copy(alpha = 1f),
+        card = raw.card.copy(alpha = 1f),
+        button = raw.button.copy(alpha = 1f),
+        selectedBg = raw.selectedBg.copy(alpha = 1f),
+        divider = if (raw.dark) Color(0xFF3E434C) else raw.textPrimary.copy(alpha = 0.12f),
+        scrim = if (raw.dark) 0.6f else 0.35f,
+        shadow = if (raw.dark) 0.dp else 8.dp,
+    )
 }
 
 /**
@@ -288,6 +302,24 @@ fun AppSheet(
     content: @Composable ColumnScope.() -> Unit,
 ) = PopupTheme {
     val c = LocalPopupColors.current
+    val glass = LocalLiquidGlassEnabled.current
+    if (!glass) {
+        ModalBottomSheet(
+            onDismissRequest = onDismissRequest, modifier = modifier, sheetState = sheetState,
+            containerColor = Color.Transparent, contentColor = c.textPrimary, tonalElevation = 0.dp,
+            scrimColor = Color.Black.copy(alpha = c.scrim), dragHandle = null,
+        ) {
+            val shape = MaterialTheme.shapes.extraLarge
+            Column(
+                Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp).fillMaxWidth()
+                    .shadow(c.shadow, shape).clip(shape).background(c.surface),
+            ) {
+                Box(Modifier.align(Alignment.CenterHorizontally)) { BottomSheetDefaults.DragHandle() }
+                content()
+            }
+        }
+        return@PopupTheme
+    }
     var entered by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { entered = true }
     val scaleX by animateFloatAsState(
@@ -338,6 +370,21 @@ fun AppMenu(
     content: @Composable ColumnScope.() -> Unit,
 ) = PopupTheme {
     val c = LocalPopupColors.current
+    if (!LocalLiquidGlassEnabled.current) {
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = onDismissRequest,
+            modifier = modifier,
+            offset = offset,
+            scrollState = scrollState,
+            shape = MaterialTheme.shapes.medium,
+            containerColor = c.surface,
+            tonalElevation = 0.dp,
+            shadowElevation = c.shadow,
+            content = content,
+        )
+        return@PopupTheme
+    }
     val shape = RoundedCornerShape(20.dp)
     val lightShift by animateFloatAsState(
         targetValue = if (expanded) 1.2f else 0f,
@@ -373,6 +420,25 @@ fun AppDialog(
     properties: DialogProperties = DialogProperties(),
 ) = PopupTheme {
     val c = LocalPopupColors.current
+    if (!LocalLiquidGlassEnabled.current) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = onDismissRequest,
+            confirmButton = confirmButton,
+            modifier = modifier,
+            dismissButton = dismissButton,
+            icon = icon,
+            title = title,
+            text = text,
+            shape = MaterialTheme.shapes.extraLarge,
+            containerColor = c.surface,
+            titleContentColor = c.textPrimary,
+            textContentColor = c.textSecondary,
+            iconContentColor = c.accent,
+            tonalElevation = 0.dp,
+            properties = properties,
+        )
+        return@PopupTheme
+    }
     val shape = RoundedCornerShape(28.dp)
     var entered by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { entered = true }

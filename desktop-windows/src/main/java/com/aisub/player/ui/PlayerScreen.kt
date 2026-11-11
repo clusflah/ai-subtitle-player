@@ -124,6 +124,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -245,12 +246,22 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             buffering = player.playbackState == Player.STATE_BUFFERING
             vm.checkAbLoop(positionMs)
             vm.extras.checkSkip(positionMs)
-            delay(100)
+            delay(50)
         }
     }
     // 字幕时间轴上的"现在"：普通视频就是播放位置；直播实时字幕换算到直播流自己的时间线上（见 LiveTimeline）
     val subtitleNow = vm.subtitleTime(positionMs)
     val current = state.cues.cueAt(subtitleNow - state.subtitleDelayMs)
+
+    // 同步应用内字幕活跃状态，供桌面全局悬浮字幕感知并自动避让双重叠加
+    val inAppSubActive = isPlaying && state.settings.showAiSubtitles &&
+        (state.transcribing || state.cues.isNotEmpty() || state.liveCaptions)
+    DisposableEffect(inAppSubActive) {
+        com.aisub.player.desktop.DesktopPlayerEngine.inAppSubtitlesActive = inAppSubActive
+        onDispose {
+            com.aisub.player.desktop.DesktopPlayerEngine.inAppSubtitlesActive = false
+        }
+    }
 
     // ---- 播放视频时不自动锁屏；暂停、播完、听音乐时按系统设置熄屏 ----
     val view = androidx.compose.ui.platform.LocalView.current
@@ -304,6 +315,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     var showBookmarks by remember { mutableStateOf(false) }
     var showSkip by remember { mutableStateOf(false) }
     var showStyle by remember { mutableStateOf(false) }
+    var showSyncDiag by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<PlayerDialog?>(null) }
     /** 正在标记的跳过区间起点 */
     var markStart by remember { mutableStateOf<Long?>(null) }
@@ -500,6 +512,16 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 }
                 true
             }
+            android.view.KeyEvent.KEYCODE_LEFT_BRACKET, android.view.KeyEvent.KEYCODE_RIGHT_BRACKET -> {
+                if (!locked) {
+                    val step = if (e.isShiftPressed) 500L else 100L
+                    val delta = if (code == android.view.KeyEvent.KEYCODE_RIGHT_BRACKET) step else -step
+                    val next = state.subtitleDelayMs + delta
+                    vm.setSubtitleDelay(next)
+                    indicator = AppIcons.Subtitles to (if (next == 0L) "字幕延迟 0.0 秒" else "字幕延迟 %+.1f 秒".format(next / 1000f))
+                }
+                true
+            }
             android.view.KeyEvent.KEYCODE_BACK -> {
                 onBack()
                 true
@@ -636,6 +658,53 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Color(0x66F28C00))
                     .padding(horizontal = 8.dp, vertical = 2.dp),
             )
+        }
+        // 同步诊断浮层（Stage 0：可通过「更多 → 同步诊断」随时开关）
+        if (showSyncDiag && !musicMode && !PipState.inPip) {
+            val clockMode = when (state.liveClock) {
+                com.aisub.player.live.LiveClock.Stream -> "直播时移对齐 (Stream)"
+                is com.aisub.player.live.LiveClock.Arrival -> "到达顺序兜底 (Arrival)"
+                null -> if (isLive) "直播直连" else "文件单调时钟 (File)"
+            }
+            val latestCueEnd = state.cues.lastOrNull()?.endMs
+            val leadSec = if (latestCueEnd != null) (latestCueEnd - subtitleNow) / 1000f else null
+            val liveOffsetMs = player.currentLiveOffset.takeIf { it != C.TIME_UNSET && it >= 0L }
+            val diagShape = RoundedCornerShape(14.dp)
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(top = if (controls) 68.dp else 14.dp, end = 14.dp)
+                    .liquidGlass(shape = diagShape, style = GlassStyle.Pill, tint = Color(0xCC10141C))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                Text("音画同步诊断", color = Color(0xFFFFB74D), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Text("模式：$clockMode", color = Color.White, fontSize = 11.sp)
+                Text(
+                    buildString {
+                        append("字幕时钟：%.2fs".format(subtitleNow / 1000f))
+                        if (liveOffsetMs != null) append(" · 距直播前沿：%.1fs".format(liveOffsetMs / 1000f))
+                    },
+                    color = Color(0xFFD5DCE6), fontSize = 11.sp,
+                )
+                Text(
+                    buildString {
+                        append("手动延迟：%+d ms ([ / ] 微调)".format(state.subtitleDelayMs))
+                        if (leadSec != null) append(" · 储备：%+.1fs".format(leadSec))
+                    },
+                    color = Color(0xFFD5DCE6), fontSize = 11.sp,
+                )
+                current?.let { c ->
+                    Text(
+                        "当前句：[%.2fs–%.2fs] Δ=%+dms".format(
+                            c.startMs / 1000f,
+                            c.endMs / 1000f,
+                            (subtitleNow - state.subtitleDelayMs) - c.startMs,
+                        ),
+                        color = Color(0xFF81C784), fontSize = 11.sp,
+                    )
+                }
+            }
         }
         if (PipState.inPip) return@Box
 
@@ -803,6 +872,18 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                 }
                 TaskChip(state, onClick = { tracksAi = true; showTracks = true }, modifier = Modifier.padding(start = 52.dp, bottom = 4.dp))
+                // 边播边识别时显示字幕超前画面缓冲秒数，直观反馈同步裕量
+                if (state.transcribing && !isLive && state.cues.isNotEmpty()) {
+                    val aheadSec = ((state.cues.maxOf { it.endMs } - subtitleNow) / 1000f)
+                    if (aheadSec > 0.5f) {
+                        Text(
+                            "字幕已提前准备好 +%.0f 秒（按 [ / ] 可微调延迟）".format(aheadSec),
+                            color = Color(0xFFB2DFDB),
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(start = 52.dp, end = 12.dp, bottom = 3.dp),
+                        )
+                    }
+                }
                 // 字幕用的识别、翻译服务和模型
                 val models = listOfNotNull(state.asrInfo, state.translateInfo)
                 if (models.isNotEmpty()) {
@@ -918,6 +999,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             Column(
                 Modifier
                     .fillMaxWidth()
+                    .let {
+                        if (LocalLiquidGlassEnabled.current) it
+                        else it.background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000))))
+                    }
                     .navigationBarsPadding()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             ) {
@@ -1241,7 +1326,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             modifier = Modifier.align(Alignment.CenterEnd).focusRequester(moreFocus),
         ) {
             MorePanel(
-                state = state, audioOnly = audioOnly, repeatMode = player.repeatMode,
+                state = state, audioOnly = audioOnly, repeatMode = player.repeatMode, showSyncDiag = showSyncDiag,
                 onAction = { action ->
                     showMore = false
                     when (action) {
@@ -1271,6 +1356,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             indicator = AppIcons.Repeat to repeatLabel(player.repeatMode)
                         }
                         MoreAction.INFO -> dialog = PlayerDialog.INFO
+                        MoreAction.SYNC_DIAG -> {
+                            showSyncDiag = !showSyncDiag
+                            indicator = AppIcons.Info to (if (showSyncDiag) "已开启同步诊断" else "已关闭同步诊断")
+                        }
                         MoreAction.AB_LOOP -> indicator = AppIcons.Repeat to vm.toggleAbLoop()
                         MoreAction.SAVE_PLAYLIST -> dialog = PlayerDialog.SAVE_PLAYLIST
                         MoreAction.SETTINGS -> onOpenSettings()
@@ -1888,10 +1977,10 @@ private fun GestureLayer(
 
 // ---------------- 更多菜单 ----------------
 
-private enum class MoreAction { ASPECT, SLEEP, SPEED, GOTO, NAVIGATE, BOOKMARKS, SKIP, EQUALIZER, AUDIO_ONLY, PIP, REPEAT, INFO, AB_LOOP, SAVE_PLAYLIST, SETTINGS }
+private enum class MoreAction { ASPECT, SLEEP, SPEED, GOTO, NAVIGATE, BOOKMARKS, SKIP, EQUALIZER, AUDIO_ONLY, PIP, REPEAT, INFO, SYNC_DIAG, AB_LOOP, SAVE_PLAYLIST, SETTINGS }
 
 @Composable
-private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAction: (MoreAction) -> Unit) {
+private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, showSyncDiag: Boolean = false, onAction: (MoreAction) -> Unit) {
     // 最常用的四个放在最上面一排，其余按用途分组
     val quick = listOf(
         Triple(MoreAction.SPEED, AppIcons.Speed, "倍速"),
@@ -1914,6 +2003,7 @@ private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAct
         "其他" to listOf(
             Triple(MoreAction.EQUALIZER, AppIcons.Equalizer, "均衡器"),
             Triple(MoreAction.INFO, AppIcons.Info, "视频信息"),
+            Triple(MoreAction.SYNC_DIAG, AppIcons.History, if (showSyncDiag) "关闭同步诊断" else "同步诊断"),
             Triple(MoreAction.SAVE_PLAYLIST, AppIcons.PlaylistAdd, "保存为播放列表"),
             Triple(MoreAction.SETTINGS, AppIcons.Settings, "设置"),
         ),
@@ -2768,26 +2858,11 @@ private fun LiveChannelEpgSheet(
                     initialFirstVisibleItemIndex = (activeInFiltered - 3).coerceAtLeast(0),
                 )
                 if (groups.size > 1) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 16.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        FilterChip(
-                            selected = selectedGroup == null,
-                            onClick = { selectedGroup = null },
-                            label = { Text("全部") },
-                        )
-                        groups.forEach { g ->
-                            FilterChip(
-                                selected = selectedGroup == g,
-                                onClick = { selectedGroup = g },
-                                label = { Text(g, maxLines = 1) },
-                            )
-                        }
-                    }
+                    LiveGroupBar(
+                        groups = groups,
+                        selectedGroup = selectedGroup,
+                        onSelectGroup = { selectedGroup = it },
+                    )
                 }
                 LazyColumn(Modifier.fillMaxSize(), state = listState) {
                     itemsIndexed(indexedChannels, key = { _, pair -> "${pair.first}|${pair.second.uri}" }) { _, (realIdx, c) ->

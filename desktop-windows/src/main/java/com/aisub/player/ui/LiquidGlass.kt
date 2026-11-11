@@ -11,6 +11,8 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -34,7 +36,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationRailItemDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -122,9 +132,9 @@ fun rememberGlassBackdrop(): GlassBackdropState {
 /**
  * 标记作为液态玻璃背景源的内容层（必须与开启 `sampleBackdrop = true` 的悬浮栏处于兄弟层级，不可嵌套）。
  */
-fun Modifier.glassBackdropSource(state: GlassBackdropState?): Modifier {
-    if (state == null) return this
-    return this
+fun Modifier.glassBackdropSource(state: GlassBackdropState?): Modifier = composed {
+    if (state == null || !LocalLiquidGlassEnabled.current) return@composed this
+    this
         .onGloballyPositioned { coords: LayoutCoordinates ->
             if (coords.isAttached) {
                 state.sourceRootOffset = coords.positionInRoot()
@@ -155,8 +165,9 @@ fun GlassBackdropBox(
     @Suppress("UNUSED_PARAMETER") captureContent: Boolean = false,
     content: @Composable BoxScope.(GlassBackdropState) -> Unit,
 ) {
+    val enabled = LocalLiquidGlassEnabled.current
     val backdrop = rememberGlassBackdrop()
-    CompositionLocalProvider(LocalGlassBackdrop provides backdrop) {
+    CompositionLocalProvider(LocalGlassBackdrop provides if (enabled) backdrop else null) {
         Box(modifier = modifier) {
             content(backdrop)
         }
@@ -275,6 +286,16 @@ fun Modifier.glassShadow(
     style: GlassStyle = GlassStyle.Floating,
     elevation: Dp = Dp.Unspecified,
 ): Modifier = composed {
+    if (!LocalLiquidGlassEnabled.current) {
+        val classicElevation = when {
+            elevation != Dp.Unspecified -> elevation
+            style == GlassStyle.Sheet -> 6.dp
+            style == GlassStyle.Floating -> 4.dp
+            style == GlassStyle.Bar -> 2.dp
+            else -> 0.dp
+        }
+        return@composed if (classicElevation <= 0.dp) this else this.shadow(classicElevation, shape)
+    }
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val resolvedElevation = if (elevation != Dp.Unspecified) {
         elevation
@@ -307,6 +328,7 @@ fun WindowBlurEffect(
     blurBehindRadius: Int = 52,
     @Suppress("UNUSED_PARAMETER") backgroundBlurRadius: Int = 68,
 ) {
+    if (!LocalLiquidGlassEnabled.current) return
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
     val view = LocalView.current
     DisposableEffect(view, blurBehindRadius) {
@@ -342,6 +364,34 @@ fun Modifier.liquidGlass(
     sampleBackdrop: Boolean = false,
     lightShift: Float = 0f,
 ): Modifier = composed {
+    if (!LocalLiquidGlassEnabled.current) {
+        val classicFill = when (tint) {
+            Color.Unspecified -> when (style) {
+                GlassStyle.Card -> MaterialTheme.colorScheme.surfaceContainerLowest
+                GlassStyle.Bar, GlassStyle.Sheet -> MaterialTheme.colorScheme.surfaceContainer
+                else -> MaterialTheme.colorScheme.surfaceContainerHigh
+            }
+            GlassTokens.DarkBadgeTint -> Color(0x99000000)
+            GlassTokens.DarkControlTint -> Color(0x66000000)
+            GlassTokens.DarkOverlayTint -> Color(0xCC000000)
+            GlassTokens.DarkSheetTint -> Color(0xFF22252A)
+            GlassTokens.DarkDockTint -> Color(0xE01B1E24)
+            GlassTokens.DarkDropletTint -> Color(0xFF333842)
+            GlassTokens.LightDockTint, GlassTokens.LightSheetTint -> MaterialTheme.colorScheme.surfaceContainerHigh
+            GlassTokens.LightDropletTint -> MaterialTheme.colorScheme.secondaryContainer
+            else -> if (tint.alpha >= 0.65f) tint.copy(alpha = 1f) else tint
+        }
+        return@composed this
+            .clip(shape)
+            .background(classicFill, shape)
+            .let { mod ->
+                if (borderColor != Color.Unspecified && style.borderWidth > 0.dp) {
+                    mod.border(style.borderWidth, borderColor, shape)
+                } else {
+                    mod
+                }
+            }
+    }
     val palette = currentVisualPalette()
     val defaultBase = palette.glassBase
     val resolvedTint = if (tint != Color.Unspecified) {
@@ -606,6 +656,33 @@ fun GlassBox(
     contentAlignment: Alignment = Alignment.TopStart,
     content: @Composable BoxScope.() -> Unit,
 ) {
+    if (!LocalLiquidGlassEnabled.current) {
+        var focusedNode by remember { mutableStateOf(false) }
+        val tv = LocalTv.current
+        val focused = tv && onClick != null && focusedNode
+        val effectiveTint = if (focused) MaterialTheme.colorScheme.primary.copy(alpha = 0.38f) else tint
+        val effectiveBorder = if (focused) MaterialTheme.colorScheme.primary else borderColor
+        val classicMod = modifier
+            .let { if (onClick != null) it.onFocusChanged { focusedNode = it.isFocused } else it }
+            .liquidGlass(
+                shape = shape,
+                style = style,
+                tint = effectiveTint,
+                borderColor = effectiveBorder,
+                enableBackdrop = false,
+            )
+            .let {
+                if (onClick != null) {
+                    it.tvFocusRing(shape = shape).clickable(onClick = onClick)
+                } else it
+            }
+        Box(
+            modifier = classicMod,
+            contentAlignment = contentAlignment,
+            content = content,
+        )
+        return
+    }
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val isFocused by interactionSource.collectIsFocusedAsState()
@@ -689,6 +766,19 @@ fun LiquidGlassIconButton(
     size: Dp = 42.dp,
     tint: Color = MaterialTheme.colorScheme.onSurface,
 ) {
+    if (!LocalLiquidGlassEnabled.current) {
+        IconButton(
+            onClick = onClick,
+            modifier = modifier.size(size).tvFocusRing(shape = CircleShape),
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = tint,
+            )
+        }
+        return
+    }
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val isFocused by interactionSource.collectIsFocusedAsState()
@@ -794,6 +884,28 @@ fun <T> LiquidGlassBottomBar(
     onSelect: (T) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    if (!LocalLiquidGlassEnabled.current) {
+        NavigationBar(
+            modifier = modifier,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
+            tonalElevation = 0.dp,
+        ) {
+            items.forEach { item ->
+                NavigationBarItem(
+                    selected = item.value == selected,
+                    onClick = { onSelect(item.value) },
+                    icon = { Icon(item.icon, contentDescription = item.label) },
+                    label = { Text(item.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = MaterialTheme.colorScheme.primary,
+                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                        indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                    ),
+                )
+            }
+        }
+        return
+    }
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val selectedIndex = items.indexOfFirst { it.value == selected }.coerceAtLeast(0)
     val currentSelected by rememberUpdatedState(selected)
@@ -989,6 +1101,27 @@ fun <T> LiquidGlassNavigationRail(
     onSelect: (T) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    if (!LocalLiquidGlassEnabled.current) {
+        NavigationRail(
+            modifier = modifier,
+            containerColor = Color.Transparent,
+        ) {
+            items.forEach { item ->
+                NavigationRailItem(
+                    selected = item.value == selected,
+                    onClick = { onSelect(item.value) },
+                    icon = { Icon(item.icon, contentDescription = item.label) },
+                    label = { Text(item.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    colors = NavigationRailItemDefaults.colors(
+                        selectedIconColor = MaterialTheme.colorScheme.primary,
+                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                        indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                    ),
+                )
+            }
+        }
+        return
+    }
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val tv = LocalTv.current
     val selectedIndex = items.indexOfFirst { it.value == selected }.coerceAtLeast(0)
@@ -1206,6 +1339,43 @@ fun LiquidGlassSegmentedControl(
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    if (!LocalLiquidGlassEnabled.current) {
+        val safeIdx = selectedIndex.coerceIn(0, (options.size - 1).coerceAtLeast(0))
+        Surface(
+            modifier = modifier.fillMaxWidth().height(40.dp),
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ) {
+            Row(
+                Modifier.fillMaxSize().padding(3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                options.forEachIndexed { index, label ->
+                    val isSelected = index == safeIdx
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(if (isSelected) MaterialTheme.colorScheme.surfaceContainerLowest else Color.Transparent)
+                            .tvFocusRing(shape = RoundedCornerShape(9.dp), fillBackground = true)
+                            .clickable { onSelect(index) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 14.sp,
+                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+        return
+    }
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val tv = LocalTv.current
     val safeIndex = selectedIndex.coerceIn(0, (options.size - 1).coerceAtLeast(0))

@@ -568,7 +568,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         .setUri(e.uri)
         .setMediaId(e.uri)
         .setMediaMetadata(MediaMetadata.Builder().setTitle(e.title).build())
-        .apply { if (e.isLive) setMimeType(liveMimeFor(e.uri)) }
+        .apply {
+            if (e.isLive) {
+                setMimeType(liveMimeFor(e.uri))
+                setTag("live")
+            }
+        }
         .build()
 
     /**

@@ -98,13 +98,24 @@ class GeminiStreamingTranscriber(
         ).toString()
 
         override fun send(pcm: ByteArray) {
+            var handshakeTimedOut = false
             synchronized(early) {
                 if (!ready) {
-                    early.add(pcm)
-                    return
+                    if (early.size >= 120) {
+                        early.clear()
+                        handshakeTimedOut = true
+                    } else {
+                        early.add(pcm)
+                    }
+                    if (!handshakeTimedOut) return
                 }
             }
-            socket.send(audio(pcm))
+            if (handshakeTimedOut) {
+                socket.cancel()
+                events.failed("Gemini 流式识别握手超时")
+                return
+            }
+            checkSend(socket, events, socket.send(audio(pcm)))
         }
 
         override fun finish() {
@@ -119,7 +130,15 @@ class GeminiStreamingTranscriber(
         }
 
         private fun handle(text: String) {
+            events.touch()
             val json = runCatching { JSONObject(text) }.getOrNull() ?: return
+            if (json.has("error")) {
+                val err = json.optJSONObject("error")
+                val code = err?.optInt("code") ?: 0
+                val msg = err?.optString("message").orEmpty()
+                events.failed("Gemini 流式识别出错（$code）：$msg", fatal = code == 401 || code == 403)
+                return
+            }
             if (json.has("setupComplete")) {
                 synchronized(early) {
                     ready = true
@@ -137,7 +156,11 @@ class GeminiStreamingTranscriber(
                     pending.append(piece)
                     offsetMs(t.optString("endOffset")).takeIf { it >= 0 }?.let { pendingEnd = it }
                     // 一句话说完了就先交出去，不等这一轮结束
-                    if (piece.trimEnd().lastOrNull() in SENTENCE_END) emit()
+                    if (piece.trimEnd().lastOrNull() in SENTENCE_END) {
+                        emit()
+                    } else {
+                        events.partial(pending.toString())
+                    }
                 }
             }
             if (content.optBoolean("turnComplete")) {

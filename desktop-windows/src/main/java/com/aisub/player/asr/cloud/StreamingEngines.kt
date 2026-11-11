@@ -25,6 +25,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
+import kotlin.math.abs
 
 /**
  * 流式识别的公共部分：通过 WebSocket 边发音频边收结果，一两秒就出字，不用等一段攒满。
@@ -44,6 +45,14 @@ abstract class StreamingCloudEngine : SpeechEngine {
         .pingInterval(15, TimeUnit.SECONDS)
         .build()
 
+    /** 实时音频流模式（桌面全局字幕等）：输入已是 1x 实时，不做额外 sleep 节流，并启用假死连接自动自愈 */
+    @Volatile
+    var liveStream: Boolean = false
+
+    /** 边说边出字的临时识别预览回调（仅实时字幕窗口按需订阅） */
+    @Volatile
+    var onPartial: ((String) -> Unit)? = null
+
     /** 一路连接。所有回调都在 OkHttp 的线程上。 */
     protected abstract inner class Session {
         /** 发一包 16kHz 单声道 16bit 小端 PCM */
@@ -60,12 +69,21 @@ abstract class StreamingCloudEngine : SpeechEngine {
 
     /** 连接上收到的事件 */
     protected inner class Events internal constructor(private val baseMs: Long) {
+        internal val createdAtMs = System.currentTimeMillis()
+
+        @Volatile
+        internal var lastActivityMs = createdAtMs
+
+        @Volatile
+        internal var isOpened = false
+
         @Volatile
         internal var ended = false
 
         /** 这路连接出过结果 */
         @Volatile
         internal var any = false
+
         @Volatile
         internal var hadError = false
         internal val done = CountDownLatch(1)
@@ -73,9 +91,26 @@ abstract class StreamingCloudEngine : SpeechEngine {
         /** 连上了，或者没连上就结束了 */
         internal val opened = CountDownLatch(1)
 
-        fun open() = opened.countDown()
+        fun touch() {
+            lastActivityMs = System.currentTimeMillis()
+        }
+
+        fun open() {
+            isOpened = true
+            touch()
+            opened.countDown()
+        }
+
+        fun partial(text: String) {
+            touch()
+            val trimmed = text.trim()
+            if (trimmed.isNotEmpty()) {
+                runCatching { onPartial?.invoke(trimmed) }
+            }
+        }
 
         fun result(items: List<Recognized>) {
+            touch()
             if (items.isEmpty()) return
             any = true
             failures = 0
@@ -126,15 +161,68 @@ abstract class StreamingCloudEngine : SpeechEngine {
     @Volatile
     private var pacingFrom = 0L
 
+    /** 实时流看门狗：累计发送了多少有声样本但没收到服务端任何帧 */
+    private var lastObservedServerActivityMs = 0L
+    private var unansweredSpeechSamples = 0L
+
     /** 这路连接已经发出的音频长度（毫秒）；结果不带时间的接口用它来估 */
     protected val sessionAudioMs: Long get() = (sent - pacingFrom) * 1000 / SAMPLE_RATE
 
     override fun accept(samples: FloatArray, onCue: (Cue) -> Unit) {
+        if (liveStream && samples.isNotEmpty()) {
+            checkLiveSessionHealth(samples)
+        }
         for (s in samples) {
             packet.putShort((s.coerceIn(-1f, 1f) * 32767).toInt().toShort())
             if (!packet.hasRemaining()) flushPacket()
         }
         drain(onCue)
+    }
+
+    private fun checkLiveSessionHealth(samples: FloatArray) {
+        val e = events ?: return
+        if (e.ended) {
+            unansweredSpeechSamples = 0L
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (!e.isOpened && now - e.createdAtMs > 15_000L) {
+            log("流式识别连接握手超过 15 秒未完成，主动重连")
+            session?.close()
+            session = null
+            e.failed("流式识别连接握手超时")
+            unansweredSpeechSamples = 0L
+            return
+        }
+        if (e.lastActivityMs != lastObservedServerActivityMs) {
+            lastObservedServerActivityMs = e.lastActivityMs
+            unansweredSpeechSamples = 0L
+            return
+        }
+        var peak = 0f
+        for (v in samples) {
+            val a = abs(v)
+            if (a > peak) peak = a
+        }
+        if (peak >= 0.012f) {
+            unansweredSpeechSamples += samples.size
+            val unansweredMs = unansweredSpeechSamples * 1000L / SAMPLE_RATE
+            if (unansweredMs >= 16_000L && now - e.lastActivityMs >= 16_000L) {
+                log("流式识别连续 ${unansweredMs / 1000} 秒输入有效声音但服务端无响应，主动重建连接")
+                unansweredSpeechSamples = 0L
+                session?.close()
+                session = null
+                e.end()
+            }
+        }
+    }
+
+    protected fun checkSend(socket: WebSocket, events: Events, ok: Boolean) {
+        if (events.ended || cancelled) return
+        if (!ok || socket.queueSize() > MAX_QUEUE_BYTES) {
+            socket.cancel()
+            events.failed("流式识别发送通道已断开或拥塞")
+        }
     }
 
     override fun finish(onCue: (Cue) -> Unit) {
@@ -210,6 +298,10 @@ abstract class StreamingCloudEngine : SpeechEngine {
     override fun close() {
         session?.close()
         session = null
+        runCatching {
+            http.dispatcher.executorService.shutdown()
+            http.connectionPool.evictAll()
+        }
     }
 
     private fun flushPacket() {
@@ -220,13 +312,16 @@ abstract class StreamingCloudEngine : SpeechEngine {
         var e = events
         if (session == null || e == null || e.ended) {
             session?.close()
+            val maxRetry = if (liveStream) 6 else MAX_FAILURES
             // 接连几路连接都没出结果就断了：多半是配置或网络有问题，别一直重连
-            if (e != null && e.hadError && !e.any && sessionAudioMs < 5_000L && ++failures >= MAX_FAILURES) {
+            if (e != null && e.hadError && !e.any && sessionAudioMs < 5_000L && ++failures >= maxRetry) {
                 throw IOException(lastError ?: "流式识别连接失败")
             }
-            if (e != null) Thread.sleep(minOf(500L * failures, 3_000L))
+            if (e != null && e.hadError) Thread.sleep(minOf(500L * failures, 2_000L))
             e = Events(sent * 1000 / SAMPLE_RATE)
             events = e
+            lastObservedServerActivityMs = e.lastActivityMs
+            unansweredSpeechSamples = 0L
             log("流式识别：开新连接（已发 ${sent * 1000 / SAMPLE_RATE / 1000} 秒音频，连续失败 $failures 次）")
             session = openSession(e)
             pacingStart = System.currentTimeMillis()
@@ -239,6 +334,7 @@ abstract class StreamingCloudEngine : SpeechEngine {
 
     /** 不比 [PACE] 倍速更快地发（开头允许先冲几秒，第一句字幕早点出来） */
     private fun pace() {
+        if (liveStream) return
         val audioMs = (sent - pacingFrom) * 1000 / SAMPLE_RATE
         val allowedMs = (System.currentTimeMillis() - pacingStart) * PACE + BURST_MS
         var wait = ((audioMs - allowedMs) / PACE).toLong()
@@ -300,6 +396,7 @@ abstract class StreamingCloudEngine : SpeechEngine {
         private const val PACE = 2f
         private const val BURST_MS = 3_000f
         private const val MAX_FAILURES = 3
+        private const val MAX_QUEUE_BYTES = 256 * 1024L
 
         /** 逐词结果 → 带时间的 token；没有逐词时给整句 */
         internal fun sentence(text: String, start: Long, end: Long, words: List<Triple<String, Long, Long>>): Recognized =
@@ -342,9 +439,19 @@ class AzureStreamingTranscriber(
         private var headerSent = false
         private val socket: WebSocket
 
+        @Volatile
+        private var lastHypothesis = ""
+
+        @Volatile
+        private var hypothesisStartMs = 0L
+
+        @Volatile
+        private var hypothesisEndMs = 1_500L
+
         init {
             val host = hostOverride ?: ("wss://" + if (china) "$region.stt.speech.azure.cn" else "$region.stt.speech.microsoft.com")
-            val url = "$host/speech/recognition/conversation/cognitiveservices/v1?language=$locale&format=detailed&profanity=raw"
+            val liveQuery = if (liveStream) "&segmentationSilenceTimeoutMs=450" else ""
+            val url = "$host/speech/recognition/conversation/cognitiveservices/v1?language=$locale&format=detailed&profanity=raw$liveQuery"
             socket = http.newWebSocket(
                 Request.Builder().url(url)
                     .header("Ocp-Apim-Subscription-Key", apiKey)
@@ -381,7 +488,7 @@ class AzureStreamingTranscriber(
             // 第一包带上 WAV 头，告诉服务端音频格式
             val payload = if (headerSent) pcm else streamingWavHeader() + pcm
             headerSent = true
-            socket.send(audioMessage(payload))
+            checkSend(socket, events, socket.send(audioMessage(payload)))
         }
 
         override fun finish() {
@@ -393,16 +500,42 @@ class AzureStreamingTranscriber(
             socket.cancel()
         }
 
+        private fun flushFallbackHypothesis() {
+            val fallback = lastHypothesis.trim()
+            lastHypothesis = ""
+            if (fallback.isNotEmpty()) {
+                val end = maxOf(hypothesisEndMs, hypothesisStartMs + 1_200L)
+                events.result(listOf(Recognized.Sentence(fallback, hypothesisStartMs, end)))
+            }
+        }
+
         private fun handle(message: String) {
+            events.touch()
             val split = message.indexOf("\r\n\r\n")
             if (split < 0) return
             val path = message.substring(0, split).lineSequence()
                 .firstOrNull { it.startsWith("Path:", ignoreCase = true) }?.substringAfter(':')?.trim()?.lowercase()
             val body = message.substring(split + 4)
             when (path) {
+                "speech.hypothesis" -> {
+                    val json = runCatching { JSONObject(body) }.getOrNull() ?: return
+                    val text = json.optString("Text").trim()
+                    if (text.isNotEmpty()) {
+                        val start = json.optLong("Offset") / 10_000
+                        val dur = json.optLong("Duration") / 10_000
+                        if (lastHypothesis.isEmpty() || start > 0L) hypothesisStartMs = start
+                        hypothesisEndMs = start + maxOf(dur, 800L)
+                        lastHypothesis = text
+                        events.partial(text)
+                    }
+                }
                 "speech.phrase" -> {
                     val json = runCatching { JSONObject(body) }.getOrNull() ?: return
-                    if (json.optString("RecognitionStatus") != "Success") return
+                    if (json.optString("RecognitionStatus") != "Success") {
+                        flushFallbackHypothesis()
+                        return
+                    }
+                    lastHypothesis = ""
                     val text = json.optJSONArray("NBest")?.optJSONObject(0)?.optString("Display")
                         ?.ifEmpty { null } ?: json.optString("DisplayText")
                     if (text.isBlank()) return
@@ -411,7 +544,10 @@ class AzureStreamingTranscriber(
                     val end = start + json.optLong("Duration") / 10_000
                     events.result(listOf(Recognized.Sentence(text, start, end)))
                 }
-                "turn.end" -> events.end()
+                "turn.end" -> {
+                    flushFallbackHypothesis()
+                    events.end()
+                }
             }
         }
     }
@@ -489,7 +625,8 @@ class VolcStreamingTranscriber(
                 .put(
                     "request",
                     JSONObject().put("model_name", "bigmodel").put("enable_itn", true).put("enable_punc", true)
-                        .put("show_utterances", true),
+                        .put("show_utterances", true)
+                        .apply { if (liveStream) put("end_window_size", 450) },
                 )
             socket.send(packet(FULL_CLIENT_REQUEST, 0, JSON, request.toString().toByteArray()))
         }
@@ -500,7 +637,7 @@ class VolcStreamingTranscriber(
                 .putInt(payload.size).put(payload).array().toByteString()
 
         override fun send(pcm: ByteArray) {
-            socket.send(packet(AUDIO_ONLY, 0, 0, pcm))
+            checkSend(socket, events, socket.send(packet(AUDIO_ONLY, 0, 0, pcm)))
         }
 
         override fun finish() {
@@ -512,6 +649,7 @@ class VolcStreamingTranscriber(
         }
 
         private fun handle(data: ByteArray) {
+            events.touch()
             // 出错之后服务端可能还回几个错误帧，这路连接已经作废了
             if (data.size < 8 || events.ended) return
             val buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN)
@@ -539,7 +677,8 @@ class VolcStreamingTranscriber(
             val json = runCatching { JSONObject(String(payload)) }.getOrNull()
             // 负序号 / 最后一包：这次识别结束，剩下的句子都算定稿
             val last = flags and 0x02 != 0
-            json?.optJSONObject("result")?.optJSONArray("utterances").objects()
+            val utterances = json?.optJSONObject("result")?.optJSONArray("utterances").objects()
+            utterances
                 .filter { (last || it.optBoolean("definite")) && it.optString("text").isNotBlank() }
                 .forEach { u ->
                     val start = u.optLong("start_time")
@@ -547,6 +686,10 @@ class VolcStreamingTranscriber(
                     val words = u.optJSONArray("words").objects().map { w -> Triple(w.optString("text"), w.optLong("start_time"), w.optLong("end_time")) }
                     events.result(listOf(sentence(u.optString("text"), start, u.optLong("end_time"), words)))
                 }
+            if (!last) {
+                utterances.lastOrNull { !it.optBoolean("definite") && it.optString("text").isNotBlank() }
+                    ?.let { events.partial(it.optString("text")) }
+            }
             if (last) events.end()
         }
     }
@@ -609,6 +752,7 @@ class AliyunStreamingTranscriber(
             )
             val funAsr = language == "auto" || language in setOf("zh", "en", "ja", "yue")
             val parameters = JSONObject().put("format", "pcm").put("sample_rate", 16_000)
+            if (liveStream) parameters.put("max_sentence_silence", 450)
             if (!funAsr) parameters.put("language_hints", JSONArray().put(language))
             val run = JSONObject()
                 .put("header", JSONObject().put("action", "run-task").put("task_id", taskId).put("streaming", "duplex"))
@@ -622,13 +766,24 @@ class AliyunStreamingTranscriber(
         }
 
         override fun send(pcm: ByteArray) {
+            var handshakeTimedOut = false
             synchronized(early) {
                 if (!started) {
-                    early.add(pcm)
-                    return
+                    if (early.size >= 120) {
+                        early.clear()
+                        handshakeTimedOut = true
+                    } else {
+                        early.add(pcm)
+                    }
+                    if (!handshakeTimedOut) return
                 }
             }
-            socket.send(pcm.toByteString())
+            if (handshakeTimedOut) {
+                socket.cancel()
+                events.failed("阿里实时识别任务启动超时")
+                return
+            }
+            checkSend(socket, events, socket.send(pcm.toByteString()))
         }
 
         override fun finish() {
@@ -647,6 +802,7 @@ class AliyunStreamingTranscriber(
         }
 
         private fun handle(text: String) {
+            events.touch()
             val json = runCatching { JSONObject(text) }.getOrNull() ?: return
             val header = json.optJSONObject("header") ?: return
             when (header.optString("event")) {
@@ -660,11 +816,16 @@ class AliyunStreamingTranscriber(
                 }
                 "result-generated" -> {
                     val s = json.optJSONObject("payload")?.optJSONObject("output")?.optJSONObject("sentence") ?: return
-                    if (!s.optBoolean("sentence_end") || s.optString("text").isBlank()) return
+                    val sentenceText = s.optString("text")
+                    if (sentenceText.isBlank()) return
+                    if (!s.optBoolean("sentence_end")) {
+                        events.partial(sentenceText)
+                        return
+                    }
                     val words = s.optJSONArray("words").objects().map { w ->
                         Triple(w.optString("text"), w.optLong("begin_time"), w.optLong("end_time"))
                     }
-                    events.result(listOf(sentence(s.optString("text"), s.optLong("begin_time"), s.optLong("end_time"), words)))
+                    events.result(listOf(sentence(sentenceText, s.optLong("begin_time"), s.optLong("end_time"), words)))
                 }
                 "task-finished" -> events.end()
                 "task-failed" -> {

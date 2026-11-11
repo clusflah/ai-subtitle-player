@@ -64,6 +64,7 @@ import com.aisub.player.AppDarkMode
 import com.aisub.player.ui.AppIcons
 import com.aisub.player.ui.GlassStyle
 import com.aisub.player.ui.GlassTokens
+import com.aisub.player.ui.LocalLiquidGlassEnabled
 import com.aisub.player.ui.LocalSystemDarkOverride
 import com.aisub.player.ui.PopupTheme
 import com.aisub.player.ui.glassShadow
@@ -360,6 +361,9 @@ fun main(args: Array<String>) {
                         }.getOrDefault(AppDarkMode.SYSTEM),
                     )
                 }
+                var savedLiquidGlass by remember {
+                    mutableStateOf(settingsPrefs.getBoolean("liquidGlass", true))
+                }
                 LaunchedEffect(Unit) {
                     var tick = 0
                     while (true) {
@@ -370,6 +374,7 @@ fun main(args: Array<String>) {
                             settingsPrefs.getString("appBackground", null) == "DARK" -> AppDarkMode.DARK
                             else -> AppDarkMode.SYSTEM
                         }
+                        savedLiquidGlass = settingsPrefs.getBoolean("liquidGlass", true)
                         if (tick++ % 6 == 0) {
                             winSystemDark = queryWindowsDarkTheme()
                         }
@@ -387,6 +392,7 @@ fun main(args: Array<String>) {
                         LocalConfiguration provides configuration,
                         LocalLifecycleOwner provides DesktopLifecycleOwner,
                         LocalSystemDarkOverride provides winSystemDark,
+                        LocalLiquidGlassEnabled provides savedLiquidGlass,
                     ) {
                         Box(Modifier.fillMaxSize()) {
                             activeActivity.desktopContent?.invoke()

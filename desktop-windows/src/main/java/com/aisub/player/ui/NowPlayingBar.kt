@@ -73,29 +73,38 @@ fun NowPlayingBar(
     }
     if (entry == null || !main.playingMusic || dismissed || player.mediaItemCount == 0 || state.playbackError != null) return
     val cover: ImageBitmap? = remember(music.cover) { music.cover?.asImageBitmap() }
+    val glass = LocalLiquidGlassEnabled.current
     val palette = currentVisualPalette()
-    val shape = RoundedCornerShape(24.dp)
-    val hasBackdrop = LocalGlassBackdrop.current != null
-    val horizPad = if (navigationBarInset) 12.dp else 16.dp
+    val shape = RoundedCornerShape(if (glass) 24.dp else 12.dp)
+    val hasBackdrop = glass && LocalGlassBackdrop.current != null
+    val horizPad = if (glass) (if (navigationBarInset) 12.dp else 16.dp) else 10.dp
     Surface(
         modifier = (if (navigationBarInset) modifier.navigationBarsPadding() else modifier)
             .padding(start = horizPad, end = horizPad, top = 6.dp, bottom = bottomPadding)
             .fillMaxWidth()
-            .glassShadow(shape, GlassStyle.Floating)
-            .liquidGlass(
-                shape = shape,
-                style = GlassStyle.Floating,
-                tint = palette.dockTint,
-                sampleBackdrop = hasBackdrop,
-            ),
+            .let {
+                if (glass) {
+                    it.glassShadow(shape, GlassStyle.Floating)
+                        .liquidGlass(
+                            shape = shape,
+                            style = GlassStyle.Floating,
+                            tint = palette.dockTint,
+                            sampleBackdrop = hasBackdrop,
+                        )
+                } else it
+            },
         shape = shape,
-        tonalElevation = 0.dp,
-        shadowElevation = 0.dp,
-        color = Color.Transparent,
+        tonalElevation = if (glass) 0.dp else 6.dp,
+        shadowElevation = if (glass) 0.dp else 6.dp,
+        color = if (glass) Color.Transparent else MaterialTheme.colorScheme.surfaceContainerHigh,
     ) {
         Column {
             Row(Modifier.clickable(onClick = onOpen).padding(start = 10.dp, end = 6.dp, top = 8.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(42.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
+                Box(
+                    Modifier.size(42.dp).clip(RoundedCornerShape(if (glass) 10.dp else 6.dp))
+                        .background(if (glass) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f) else MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center,
+                ) {
                     if (cover != null) Image(cover, null, contentScale = ContentScale.Crop, modifier = Modifier.size(42.dp))
                     else Icon(AppIcons.MusicNote, null, tint = MaterialTheme.colorScheme.outline)
                 }
@@ -113,7 +122,7 @@ fun NowPlayingBar(
                     Icon(AppIcons.Close, "关闭", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            Box(Modifier.fillMaxWidth().height(2.dp).background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))) {
+            Box(Modifier.fillMaxWidth().height(2.dp).background(if (glass) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f) else MaterialTheme.colorScheme.surfaceVariant)) {
                 Box(Modifier.fillMaxWidth(progress).height(2.dp).background(Orange))
             }
         }

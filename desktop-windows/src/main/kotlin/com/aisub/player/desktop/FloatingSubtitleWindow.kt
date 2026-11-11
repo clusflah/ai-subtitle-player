@@ -5,7 +5,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -19,21 +18,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -50,8 +47,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpSize
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
@@ -65,17 +62,21 @@ import com.aisub.player.asr.ModelCatalog
 import com.aisub.player.asr.ModelManager
 import com.aisub.player.asr.SpeechEngine
 import com.aisub.player.asr.Transcriber
+import com.aisub.player.asr.cloud.ChunkedCloudEngine
+import com.aisub.player.asr.cloud.StreamingCloudEngine
 import com.aisub.player.asrProblem
 import com.aisub.player.createCloudEngine
 import com.aisub.player.createStreamingEngine
 import com.aisub.player.streamingAvailable
 import com.aisub.player.subtitle.Cue
+import com.aisub.player.translate.ChatCompletionsTranslator
 import com.aisub.player.translate.ChineseScript
 import com.aisub.player.translate.LanguageCheck
 import com.aisub.player.ui.AppIcons
 import com.aisub.player.ui.AppMenu
 import com.aisub.player.ui.GlassStyle
 import com.aisub.player.ui.GlassTokens
+import com.aisub.player.ui.LocalLiquidGlassEnabled
 import com.aisub.player.ui.glassShadow
 import com.aisub.player.ui.liquidGlass
 import com.sun.jna.Native
@@ -95,18 +96,29 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import java.awt.FileDialog
 import java.awt.Frame
 import java.awt.Toolkit
 import java.io.File
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 data class FloatingSubState(
     val running: Boolean = false,
     val status: String? = "点击开始捕获 Windows 系统声音并实时生成双语字幕",
     val currentCue: Cue? = null,
+    val cueUpdatedAtMs: Long = 0L,
+    val partialText: String? = null,
+    val partialTranslation: String? = null,
+    val partialUpdatedAtMs: Long = 0L,
+    val latencyMs: Long? = null,
     val history: List<Cue> = emptyList(),
     val clickThrough: Boolean = false,
 )
@@ -126,7 +138,7 @@ class DesktopLiveTranscriber(private val app: Application) {
     private var translateJob: Job? = null
     private val audioQueue = LinkedBlockingQueue<FloatArray>(400)
     private var audioListener: ((FloatArray) -> Unit)? = null
-    private var nextId = 1
+    private val nextId = AtomicInteger(1)
 
     fun setClickThrough(enabled: Boolean) {
         _state.update { it.copy(clickThrough = enabled) }
@@ -142,12 +154,14 @@ class DesktopLiveTranscriber(private val app: Application) {
         _state.update {
             it.copy(
                 running = true,
+                partialText = null,
                 status = "正在启动 Windows 系统声音捕获…",
             )
         }
 
         val listener: (FloatArray) -> Unit = { samples ->
-            while (audioQueue.size >= 25) {
+            // 保留约 6 秒缓冲容量，防止本地大模型（如 Qwen3-ASR）单句解码耗时波动时丢字
+            while (audioQueue.size >= 120) {
                 audioQueue.poll()
             }
             audioQueue.offer(samples)
@@ -158,11 +172,47 @@ class DesktopLiveTranscriber(private val app: Application) {
         recognizeJob = scope.launch {
             var engine: SpeechEngine? = null
             val emptySamples = FloatArray(0)
+            val lastSignalOutMs = AtomicLong(System.currentTimeMillis())
+            val sessionProducedOutput = AtomicBoolean(false)
+            val speechOnsetWallMs = AtomicLong(0L)
+
+            fun recordLatencySample(now: Long): Long? {
+                val onset = speechOnsetWallMs.getAndSet(0L)
+                if (onset <= 0L) return null
+                val raw = (now - onset).coerceIn(120L, 6_500L)
+                val prev = _state.value.latencyMs
+                return if (prev == null) raw else ((prev * 3L + raw * 2L) / 5L)
+            }
+
+            val onPartial: (String) -> Unit = { rawPartial ->
+                val text = rawPartial.trim()
+                if (text.isNotEmpty()) {
+                    val now = System.currentTimeMillis()
+                    lastSignalOutMs.set(now)
+                    sessionProducedOutput.set(true)
+                    val lat = recordLatencySample(now)
+                    _state.update { st ->
+                        if (st.partialText == text) st
+                        else st.copy(
+                            status = null,
+                            partialText = text,
+                            partialTranslation = if (st.partialText != null && text.startsWith(st.partialText)) st.partialTranslation else null,
+                            partialUpdatedAtMs = now,
+                            latencyMs = lat ?: st.latencyMs,
+                        )
+                    }
+                }
+            }
+
             val onCue: (Cue) -> Unit = { rawCue ->
                 val text = rawCue.text.trim()
                 if (text.isNotEmpty()) {
+                    val now = System.currentTimeMillis()
+                    lastSignalOutMs.set(now)
+                    sessionProducedOutput.set(true)
+                    val lat = recordLatencySample(now)
                     val cue = Cue(
-                        id = nextId++,
+                        id = nextId.getAndIncrement(),
                         startMs = rawCue.startMs.coerceAtLeast(0L),
                         endMs = maxOf(rawCue.endMs, rawCue.startMs + 1500L),
                         text = text,
@@ -170,19 +220,25 @@ class DesktopLiveTranscriber(private val app: Application) {
                     )
                     _state.update { st ->
                         val last = st.history.lastOrNull()
-                        val updatedHistory = if (last != null && last.text == cue.text) {
+                        val duplicate = last != null && last.text == cue.text && (now - st.cueUpdatedAtMs) < 4_000L
+                        val updatedHistory = if (duplicate) {
                             st.history
                         } else {
                             (st.history + cue).takeLast(500)
                         }
                         st.copy(
                             status = null,
-                            currentCue = if (last != null && last.text == cue.text) last else cue,
+                            currentCue = if (duplicate) last else cue,
+                            cueUpdatedAtMs = now,
+                            partialText = null,
+                            partialTranslation = null,
+                            latencyMs = lat ?: st.latencyMs,
                             history = updatedHistory,
                         )
                     }
                 }
             }
+
             try {
                 if (settings.asrEngine == AsrEngine.LOCAL) {
                     val model = ModelCatalog.byId(settings.localModel)
@@ -196,49 +252,124 @@ class DesktopLiveTranscriber(private val app: Application) {
                 }
 
                 while (isActive) {
+                    sessionProducedOutput.set(false)
+                    lastSignalOutMs.set(System.currentTimeMillis())
                     try {
-                        engine = createEngine(settings)
+                        val currentEngine = createEngine(settings, onPartial)
+                        engine = currentEngine
                         _state.update { st ->
-                            st.copy(status = if (st.currentCue == null) "正在监听系统声音…（播放任意视频或音频即出字幕）" else null)
+                            st.copy(status = if (st.currentCue == null && st.partialText == null) "正在监听系统声音…（播放任意视频或音频即出字幕）" else null)
                         }
 
                         var hadSpeechSinceFlush = false
                         var silentSamples = 0L
-                        val preSpeechBuffer = ArrayDeque<FloatArray>(4)
+                        val preSpeechBuffer = ArrayDeque<FloatArray>(6)
+                        var lastObservedSignalMs = lastSignalOutMs.get()
+                        var activeAudioWithoutOutputMs = 0L
 
                         while (isActive) {
-                            val chunk = audioQueue.poll(120, TimeUnit.MILLISECONDS)
+                            val chunk = audioQueue.poll(100, TimeUnit.MILLISECONDS)
                             if (chunk == null) {
-                                engine.accept(emptySamples, onCue)
+                                currentEngine.accept(emptySamples, onCue)
                                 continue
                             }
-                            var maxAbs = 0f
-                            for (v in chunk) {
-                                val a = kotlin.math.abs(v)
-                                if (a > maxAbs) maxAbs = a
-                            }
-                            if (maxAbs >= 0.003f) {
-                                if (!hadSpeechSinceFlush) {
-                                    while (preSpeechBuffer.isNotEmpty()) {
-                                        engine.accept(preSpeechBuffer.removeFirst(), onCue)
-                                    }
+
+                            // 若主窗口正在播放且已开启应用内字幕，自动避让避免画面出现两层重复字幕
+                            if (DesktopPlayerEngine.inAppSubtitlesActive && DesktopPlayerEngine.activePlayer?.isPlaying == true) {
+                                lastSignalOutMs.set(System.currentTimeMillis())
+                                speechOnsetWallMs.set(0L)
+                                _state.update { st ->
+                                    val yieldMsg = "主窗口正在显示应用内字幕，全局字幕已自动避让"
+                                    if (st.status == yieldMsg && st.partialText == null && st.currentCue == null) st
+                                    else st.copy(status = yieldMsg, partialText = null, partialTranslation = null, currentCue = null)
                                 }
-                                hadSpeechSinceFlush = true
-                                silentSamples = 0L
-                                engine.accept(chunk, onCue)
-                            } else {
-                                if (hadSpeechSinceFlush) {
-                                    silentSamples += chunk.size
-                                    engine.accept(chunk, onCue)
-                                    if (silentSamples >= WasapiLoopbackCapture.SAMPLE_RATE * 2L) {
+                                currentEngine.accept(emptySamples, onCue)
+                                continue
+                            } else if (_state.value.status == "主窗口正在显示应用内字幕，全局字幕已自动避让") {
+                                _state.update { it.copy(status = "正在监听系统声音…（播放任意视频或音频即出字幕）") }
+                            }
+
+                            var maxAbs = 0f
+                            var sumSq = 0.0
+                            for (v in chunk) {
+                                val a = abs(v)
+                                if (a > maxAbs) maxAbs = a
+                                sumSq += v.toDouble() * v
+                            }
+                            val rms = if (chunk.isNotEmpty()) sqrt(sumSq / chunk.size) else 0.0
+                            if (maxAbs >= 0.012f) {
+                                speechOnsetWallMs.compareAndSet(0L, System.currentTimeMillis())
+                            }
+
+                            // 端到端活性看门狗：若连续 24 秒输入有效节目声音但引擎无任何文本/临时帧输出，自动重启识别实例
+                            val latestSignal = lastSignalOutMs.get()
+                            if (latestSignal != lastObservedSignalMs) {
+                                lastObservedSignalMs = latestSignal
+                                activeAudioWithoutOutputMs = 0L
+                            } else if (rms >= 0.008) {
+                                activeAudioWithoutOutputMs += chunk.size * 1000L / WasapiLoopbackCapture.SAMPLE_RATE
+                                val now = System.currentTimeMillis()
+                                if (activeAudioWithoutOutputMs >= 24_000L && now - latestSignal >= 25_000L) {
+                                    android.util.Log.w("Voxtitle-LiveSub", "全局字幕看门狗触发：连续 24 秒有声音但无识别输出，正在自动重建引擎")
+                                    runCatching { currentEngine.close() }
+                                    engine = null
+                                    break
+                                }
+                            }
+
+                            when (currentEngine) {
+                                // 1. 云端 WebSocket 实时流式识别（Azure / 火山 / 阿里 / Gemini）：
+                                //    持续喂入完整 16kHz 音频流（包含静音心跳），由服务端自动断句；绝不在停顿时调用 finish() 关闭连接！
+                                is StreamingCloudEngine -> {
+                                    currentEngine.accept(chunk, onCue)
+                                }
+
+                                // 2. 本地 sherpa-onnx（内置 Silero VAD）：
+                                //    持续送入音频由 VAD 0.25s 自动断句；长停顿时轻量 flush 尾部残余片段
+                                is Transcriber -> {
+                                    if (maxAbs >= 0.003f) {
+                                        hadSpeechSinceFlush = true
+                                        silentSamples = 0L
+                                    } else if (hadSpeechSinceFlush) {
+                                        silentSamples += chunk.size
+                                    }
+                                    currentEngine.accept(chunk, onCue)
+                                    if (hadSpeechSinceFlush && silentSamples >= WasapiLoopbackCapture.SAMPLE_RATE) {
                                         hadSpeechSinceFlush = false
                                         silentSamples = 0L
-                                        engine.finish(onCue)
+                                        currentEngine.finish(onCue)
                                     }
-                                } else {
-                                    if (preSpeechBuffer.size >= 3) preSpeechBuffer.removeFirst()
-                                    preSpeechBuffer.addLast(chunk)
-                                    engine.accept(emptySamples, onCue)
+                                }
+
+                                // 3. 云端 HTTP 分段识别（Whisper / OpenAI / 非流式）：
+                                //    跳过纯静音避免幻觉，停顿时非阻塞 flushPending，绝不阻塞主采集协程等待慢请求
+                                is ChunkedCloudEngine -> {
+                                    if (maxAbs >= 0.003f) {
+                                        if (!hadSpeechSinceFlush) {
+                                            while (preSpeechBuffer.isNotEmpty()) {
+                                                currentEngine.accept(preSpeechBuffer.removeFirst(), onCue)
+                                            }
+                                        }
+                                        hadSpeechSinceFlush = true
+                                        silentSamples = 0L
+                                        currentEngine.accept(chunk, onCue)
+                                    } else if (hadSpeechSinceFlush) {
+                                        silentSamples += chunk.size
+                                        currentEngine.accept(chunk, onCue)
+                                        if (silentSamples >= WasapiLoopbackCapture.SAMPLE_RATE * 9L / 10L) {
+                                            hadSpeechSinceFlush = false
+                                            silentSamples = 0L
+                                            currentEngine.flushPending(onCue)
+                                        }
+                                    } else {
+                                        if (preSpeechBuffer.size >= 4) preSpeechBuffer.removeFirst()
+                                        preSpeechBuffer.addLast(chunk)
+                                        currentEngine.accept(emptySamples, onCue)
+                                    }
+                                }
+
+                                else -> {
+                                    currentEngine.accept(chunk, onCue)
                                 }
                             }
                         }
@@ -248,14 +379,16 @@ class DesktopLiveTranscriber(private val app: Application) {
                         runCatching { engine?.close() }
                         engine = null
                         val msg = e.message.orEmpty()
-                        val isFatal = msg.contains("鉴权失败") || msg.contains("未填写") || msg.contains("API Key")
+                        val isFatal = !sessionProducedOutput.get() && (
+                            msg.contains("鉴权失败") || msg.contains("未填写") || msg.contains("没开通")
+                        )
                         if (isFatal) {
                             _state.update { it.copy(status = "识别出错：$msg", running = false) }
                             break
                         }
                         android.util.Log.w("Voxtitle-LiveSub", "实时字幕识别中断，准备自动恢复: $msg")
                         _state.update { it.copy(status = "识别连接重连中…") }
-                        delay(1200)
+                        delay(1000)
                     }
                 }
             } catch (e: CancellationException) {
@@ -276,28 +409,69 @@ class DesktopLiveTranscriber(private val app: Application) {
         translateJob?.cancel()
         translateJob = null
         if (!settings.autoTranslate) return
-        val translator = settings.createTranslator() ?: return
+        val translator = settings.createTranslator()?.also {
+            (it as? ChatCompletionsTranslator)?.useLiveTimeout(18)
+        } ?: return
+
         translateJob = scope.launch {
-            val translatedIds = HashSet<Int>()
+            val doneIds = LinkedHashSet<Int>()
+            val attempts = LinkedHashMap<Int, Int>()
+            var lastPreviewSource = ""
+
+            fun markDone(id: Int) {
+                doneIds += id
+                while (doneIds.size > 800) {
+                    val first = doneIds.iterator().let { it.next().also { _ -> it.remove() } }
+                    attempts.remove(first)
+                }
+            }
+
             while (isActive) {
-                delay(200)
+                delay(150)
                 val st = _state.value
                 val targetLocale = settings.ttsLocale
                 val pending = st.history.filter {
-                    it.translation == null && it.id !in translatedIds
+                    it.translation == null && it.id !in doneIds && (attempts[it.id] ?: 0) < 2
                 }.takeLast(3)
-                if (pending.isEmpty()) continue
+
+                if (pending.isEmpty()) {
+                    // 长句定稿前预翻译：当流式临时文本满 6 字且停顿 550ms（或增长满 18 字），提前给出译文预览
+                    val part = st.partialText?.trim().orEmpty()
+                    val now = System.currentTimeMillis()
+                    val shouldPreview = part.length >= 6 &&
+                        part != lastPreviewSource &&
+                        !LanguageCheck.alreadyTarget(part, targetLocale, settings.asrLanguage, ChineseScript::variant) &&
+                        ((now - st.partialUpdatedAtMs) >= 550L || part.length - lastPreviewSource.length >= 18)
+                    if (shouldPreview) {
+                        lastPreviewSource = part
+                        val ctx = st.history.takeLast(3).map { it.text }
+                        runCatching {
+                            val previewRes = withTimeout(8_000L) {
+                                translator.translate(listOf(clipLivePartial(part, 80)), ctx, settings.targetLanguage)
+                            }.firstOrNull()?.trim().orEmpty()
+                            if (previewRes.isNotEmpty()) {
+                                _state.update { cur ->
+                                    if (cur.partialText != null && cur.partialText.startsWith(part.take(minOf(part.length, 6)))) {
+                                        cur.copy(partialTranslation = previewRes)
+                                    } else cur
+                                }
+                            }
+                        }
+                    } else if (part.isEmpty()) {
+                        lastPreviewSource = ""
+                    }
+                    continue
+                }
 
                 for (c in pending) {
                     if (LanguageCheck.alreadyTarget(c.text, targetLocale, settings.asrLanguage, ChineseScript::variant)) {
-                        translatedIds += c.id
+                        markDone(c.id)
                         updateCueTranslation(c.id, c.text)
                     }
                 }
 
-                val toTranslate = pending.filter { it.id !in translatedIds }
+                val toTranslate = pending.filter { it.id !in doneIds }
                 if (toTranslate.isEmpty()) continue
-                toTranslate.forEach { translatedIds += it.id }
 
                 val contextLines = st.history
                     .filter { it.id < toTranslate.first().id }
@@ -305,18 +479,31 @@ class DesktopLiveTranscriber(private val app: Application) {
                     .map { it.text }
 
                 runCatching {
-                    val res = translator.translate(toTranslate.map { it.text }, contextLines, settings.targetLanguage)
+                    val res = withTimeout(20_000L) {
+                        translator.translate(toTranslate.map { it.text }, contextLines, settings.targetLanguage)
+                    }
                     toTranslate.forEachIndexed { idx, cue ->
                         val trans = res.getOrNull(idx)?.takeIf { it.isNotBlank() }
                         if (trans != null) {
+                            markDone(cue.id)
                             updateCueTranslation(cue.id, trans)
                         } else {
-                            translatedIds.remove(cue.id)
+                            attempts[cue.id] = (attempts[cue.id] ?: 0) + 1
                         }
                     }
-                }.onFailure {
-                    toTranslate.forEach { translatedIds.remove(it.id) }
-                    delay(1500)
+                }.onFailure { err ->
+                    if (err is CancellationException && !isActive) throw err
+                    toTranslate.forEach { cue ->
+                        attempts[cue.id] = (attempts[cue.id] ?: 0) + 1
+                    }
+                    while (attempts.size > 800) {
+                        val iter = attempts.entries.iterator()
+                        if (iter.hasNext()) {
+                            iter.next()
+                            iter.remove()
+                        }
+                    }
+                    delay(1000)
                 }
             }
         }
@@ -345,16 +532,30 @@ class DesktopLiveTranscriber(private val app: Application) {
         translateJob = null
         audioListener?.let { WasapiLoopbackCapture.removeListener(it) }
         audioListener = null
-        _state.update { it.copy(running = false, status = if (it.currentCue == null) "已暂停系统声音识别" else null) }
+        _state.update { it.copy(running = false, partialText = null, partialTranslation = null, status = if (it.currentCue == null) "已暂停系统声音识别" else null) }
     }
 
     fun clear() {
-        _state.update { it.copy(currentCue = null, history = emptyList(), status = if (it.running) "正在监听系统声音…" else "点击开始捕获 Windows 系统声音并实时生成双语字幕") }
+        _state.update {
+            it.copy(
+                currentCue = null,
+                partialText = null,
+                partialTranslation = null,
+                history = emptyList(),
+                status = if (it.running) "正在监听系统声音…" else "点击开始捕获 Windows 系统声音并实时生成双语字幕",
+            )
+        }
     }
 
-    private fun createEngine(s: AppSettings): SpeechEngine {
+    private fun createEngine(s: AppSettings, onPartial: (String) -> Unit): SpeechEngine {
         if (s.streamingAvailable) {
-            s.createStreamingEngine()?.let { return it }
+            s.createStreamingEngine()?.let { streaming ->
+                (streaming as? StreamingCloudEngine)?.apply {
+                    liveStream = true
+                    this.onPartial = onPartial
+                }
+                return streaming
+            }
         }
         return if (s.asrEngine == AsrEngine.LOCAL) {
             val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
@@ -363,11 +564,15 @@ class DesktopLiveTranscriber(private val app: Application) {
                 models = models,
                 language = AsrLanguages.primary(s.asrLanguage),
                 numThreads = threads,
-                maxSpeechSeconds = 4.5f,
+                maxSpeechSeconds = 3.8f,
+                minSilenceSeconds = 0.25f,
             )
         } else {
             s.createCloudEngine().also {
-                (it as? com.aisub.player.asr.cloud.ChunkedCloudEngine)?.useChunks(2, 3)
+                (it as? ChunkedCloudEngine)?.apply {
+                    useChunks(2, 3)
+                    useLiveTimeout(25)
+                }
             }
         }
     }
@@ -391,6 +596,20 @@ private fun setWindowClickThrough(window: java.awt.Window, enabled: Boolean) {
     }
 }
 
+private fun AppSettings.sameLiveConfigAs(other: AppSettings): Boolean =
+    asrEngine == other.asrEngine &&
+        asrLanguage == other.asrLanguage &&
+        localModel == other.localModel &&
+        streamingAsr == other.streamingAsr &&
+        autoTranslate == other.autoTranslate &&
+        provider == other.provider &&
+        targetLanguage == other.targetLanguage
+
+private fun clipLivePartial(text: String, maxChars: Int = 62): String {
+    val clean = text.replace('\n', ' ').trim()
+    return if (clean.length <= maxChars) clean else "…" + clean.takeLast(maxChars - 1)
+}
+
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun FloatingSubtitleWindow(
@@ -403,6 +622,7 @@ fun FloatingSubtitleWindow(
     var fontSizeSp by remember { mutableFloatStateOf(22f) }
     var hovered by remember { mutableStateOf(false) }
     var langMenuOpen by remember { mutableStateOf(false) }
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
     val screenSize = remember { Toolkit.getDefaultToolkit().screenSize }
     val winWidth = 860.dp
@@ -436,6 +656,25 @@ fun FloatingSubtitleWindow(
                 settings = settingsStore.load()
                 transcriber.start(settings)
             }
+            while (true) {
+                delay(500)
+                nowMs = System.currentTimeMillis()
+            }
+        }
+
+        // 同步主窗口「设置」里的引擎、语言、翻译服务及液态玻璃开关变更
+        LaunchedEffect(Unit) {
+            while (true) {
+                delay(1500)
+                val latest = settingsStore.load()
+                if (latest != settings) {
+                    val needRestart = !latest.sameLiveConfigAs(settings) && transcriber.state.value.running
+                    settings = latest
+                    if (needRestart) {
+                        transcriber.restart(latest)
+                    }
+                }
+            }
         }
 
         val textShadow = Shadow(
@@ -443,6 +682,7 @@ fun FloatingSubtitleWindow(
             blurRadius = 8f,
         )
 
+        CompositionLocalProvider(LocalLiquidGlassEnabled provides settings.liquidGlass) {
         MaterialTheme(colorScheme = androidx.compose.material3.darkColorScheme()) {
         val windowShape = RoundedCornerShape(24.dp)
         Box(
@@ -483,27 +723,43 @@ fun FloatingSubtitleWindow(
                 verticalArrangement = Arrangement.Center,
             ) {
                 val cue = state.currentCue
-                if (cue != null) {
-                    val trans = cue.translation?.takeIf { it.isNotBlank() }
-                    if (trans != null) {
+                val activePartial = state.partialText
+                    ?.takeIf { it.isNotBlank() && (nowMs - state.partialUpdatedAtMs) <= 4_500L && it != cue?.text }
+                val primaryOriginal = activePartial?.let { clipLivePartial(it) } ?: cue?.text
+
+                if (primaryOriginal != null) {
+                    val partialPreviewTrans = if (activePartial != null) state.partialTranslation?.takeIf { it.isNotBlank() } else null
+                    val ownTrans = cue?.translation?.takeIf { it.isNotBlank() }
+                    val fallbackPrevTrans = if (partialPreviewTrans == null && ownTrans == null && settings.autoTranslate && (nowMs - state.cueUpdatedAtMs) <= 2_800L) {
+                        state.history.asReversed().firstOrNull { !it.translation.isNullOrBlank() }?.translation
+                    } else null
+                    val displayTrans = partialPreviewTrans ?: ownTrans ?: fallbackPrevTrans
+                    val transAlpha = when {
+                        partialPreviewTrans != null -> 0.85f
+                        ownTrans != null && activePartial == null -> 1f
+                        else -> 0.65f
+                    }
+                    if (displayTrans != null) {
                         Text(
-                            text = trans,
-                            color = Color(0xFFFFE082),
+                            text = displayTrans,
+                            color = Color(0xFFFFE082).copy(alpha = transAlpha),
                             fontSize = fontSizeSp.sp,
                             fontWeight = FontWeight.Bold,
                             textAlign = TextAlign.Center,
                             maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
                             style = TextStyle(shadow = textShadow),
                         )
                         Spacer(Modifier.height(4.dp))
                     }
                     Text(
-                        text = cue.text,
-                        color = Color.White,
-                        fontSize = (if (trans != null) (fontSizeSp * 0.82f) else fontSizeSp).sp,
-                        fontWeight = if (trans != null) FontWeight.Medium else FontWeight.SemiBold,
+                        text = primaryOriginal,
+                        color = if (activePartial != null) Color.White.copy(alpha = 0.92f) else Color.White,
+                        fontSize = (if (displayTrans != null) (fontSizeSp * 0.82f) else fontSizeSp).sp,
+                        fontWeight = if (displayTrans != null) FontWeight.Medium else FontWeight.SemiBold,
                         textAlign = TextAlign.Center,
                         maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                         style = TextStyle(shadow = textShadow),
                     )
                     val statusHint = state.status?.takeIf { it.isNotBlank() && !it.startsWith("正在监听") }
@@ -515,6 +771,7 @@ fun FloatingSubtitleWindow(
                             fontSize = 12.sp,
                             textAlign = TextAlign.Center,
                             maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             style = TextStyle(shadow = textShadow),
                         )
                     }
@@ -643,6 +900,16 @@ fun FloatingSubtitleWindow(
                                 fontSize = 12.sp,
                             )
                         }
+
+                        // 实时语音→上屏延迟指示器
+                        state.latencyMs?.takeIf { state.running }?.let { lat ->
+                            Text(
+                                text = "延迟 ~%.1fs".format(lat / 1000f),
+                                color = if (lat <= 1_200L) Color(0xFFA5D6A7) else Color(0xFFFFE082),
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(start = 2.dp),
+                            )
+                        }
                     }
 
                     Row(
@@ -737,6 +1004,7 @@ fun FloatingSubtitleWindow(
                     }
                 }
             }
+        }
         }
         }
     }

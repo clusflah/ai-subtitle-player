@@ -54,7 +54,18 @@ class AudioDecoder(
 
         val ffmpeg = DesktopBinaryFinder.ensureFfmpeg()
         if (ffmpeg != null) {
-            decodeWithFfmpeg(ffmpeg, inputPath, headers, targetRate, startMs, isActive, onProgress, onChunk)
+            val initialOffsetMs = if (startMs == 0L) probeAudioStartOffsetMs(inputPath, headers) else 0L
+            decodeWithFfmpeg(
+                ffmpegExe = ffmpeg,
+                inputPath = inputPath,
+                headers = headers,
+                targetRate = targetRate,
+                startMs = startMs,
+                isActive = isActive,
+                onProgress = onProgress,
+                onChunk = onChunk,
+                initialAudioOffsetMs = initialOffsetMs,
+            )
             return
         }
 
@@ -69,6 +80,59 @@ class AudioDecoder(
     }
 
     companion object {
+        /**
+         * 探测音轨相对容器/视频起点的偏移（毫秒）：
+         * 许多 TS 录播、MKV 或带片头静音的 MP4 中，首帧音频 PTS 晚于视频起点（或带 AAC priming 负偏移）。
+         * 仅在合理范围 [-2000ms, +15000ms] 内补偿，防止损坏的 TS 时间戳跳变导致误插长静音。
+         */
+        internal fun probeAudioStartOffsetMs(inputPath: String, headers: Map<String, String>): Long {
+            val ffprobe = DesktopBinaryFinder.findFfprobe() ?: return 0L
+            return runCatching {
+                val cmd = ArrayList<String>()
+                cmd += listOf(
+                    ffprobe, "-v", "error",
+                    "-probesize", "2M",
+                    "-analyzeduration", "2000000",
+                    "-show_entries", "format=start_time:stream=codec_type,start_time",
+                    "-of", "json",
+                )
+                if (headers.isNotEmpty() && (inputPath.startsWith("http://") || inputPath.startsWith("https://"))) {
+                    val headerStr = headers.entries.joinToString("\r\n") { "${it.key}: ${it.value}" } + "\r\n"
+                    cmd += listOf("-headers", headerStr)
+                }
+                cmd += inputPath
+                val proc = ProcessBuilder(cmd)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start()
+                val text = proc.inputStream.bufferedReader(Charsets.UTF_8).readText()
+                if (!proc.waitFor(4, java.util.concurrent.TimeUnit.SECONDS)) {
+                    proc.destroyForcibly()
+                    return 0L
+                }
+                val root = org.json.JSONObject(text)
+                val formatStart = root.optJSONObject("format")?.optString("start_time")?.toDoubleOrNull()
+                val streams = root.optJSONArray("streams") ?: return 0L
+                var videoStart: Double? = null
+                var audioStart: Double? = null
+                for (i in 0 until streams.length()) {
+                    val s = streams.optJSONObject(i) ?: continue
+                    val type = s.optString("codec_type")
+                    val st = s.optString("start_time").toDoubleOrNull() ?: continue
+                    if (type == "video" && videoStart == null) videoStart = st
+                    if (type == "audio" && audioStart == null) audioStart = st
+                }
+                val aStart = audioStart ?: return 0L
+                val refStart = videoStart ?: formatStart ?: return 0L
+                val diffMs = kotlin.math.round((aStart - refStart) * 1000.0).toLong()
+                if (diffMs in -2_000L..15_000L && kotlin.math.abs(diffMs) >= 20L) {
+                    android.util.Log.i("Voxtitle-sync", "检测到音画起点偏移=${diffMs}ms (audio=${aStart}s, ref=${refStart}s)")
+                    diffMs
+                } else {
+                    0L
+                }
+            }.getOrDefault(0L)
+        }
+
         internal fun decodeWithFfmpeg(
             ffmpegExe: String,
             inputPath: String,
@@ -79,6 +143,7 @@ class AudioDecoder(
             onProgress: (Float) -> Unit,
             onChunk: (FloatArray) -> Unit,
             onEmittedMs: ((Long) -> Unit)? = null,
+            initialAudioOffsetMs: Long = 0L,
         ) {
             val cmd = ArrayList<String>()
             cmd += ffmpegExe
@@ -95,6 +160,7 @@ class AudioDecoder(
                 "-vn",
                 "-ac", "1",
                 "-ar", targetRate.toString(),
+                "-af", "aresample=async=1000",
                 "-f", "f32le",
                 "-acodec", "pcm_f32le",
                 "pipe:1",
@@ -125,6 +191,8 @@ class AudioDecoder(
             }.apply { isDaemon = true; start() }
 
             var totalSamples = 0L
+            var dropLeadingSamples = if (initialAudioOffsetMs < 0L) (-initialAudioOffsetMs * targetRate / 1000L) else 0L
+            var prependedSilence = initialAudioOffsetMs <= 0L
             var lastTickMs = System.currentTimeMillis()
             try {
                 val buf = ByteArray(16384)
@@ -138,10 +206,33 @@ class AudioDecoder(
                     if (floatCount > 0) {
                         val validBytes = floatCount * 4
                         val fb = ByteBuffer.wrap(buf, 0, validBytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
-                        val floats = FloatArray(floatCount)
+                        var floats = FloatArray(floatCount)
                         fb.get(floats)
-                        onChunk(floats)
-                        totalSamples += floatCount
+                        if (!prependedSilence) {
+                            prependedSilence = true
+                            var padRemaining = (initialAudioOffsetMs * targetRate / 1000L).toInt().coerceAtLeast(0)
+                            val chunkCap = targetRate // 1s chunks
+                            while (padRemaining > 0 && isActive()) {
+                                val step = minOf(padRemaining, chunkCap)
+                                onChunk(FloatArray(step))
+                                totalSamples += step
+                                padRemaining -= step
+                            }
+                        }
+                        if (dropLeadingSamples > 0L) {
+                            if (floats.size <= dropLeadingSamples) {
+                                dropLeadingSamples -= floats.size
+                                floats = FloatArray(0)
+                            } else {
+                                val skip = dropLeadingSamples.toInt()
+                                dropLeadingSamples = 0L
+                                floats = floats.copyOfRange(skip, floats.size)
+                            }
+                        }
+                        if (floats.isNotEmpty()) {
+                            onChunk(floats)
+                            totalSamples += floats.size
+                        }
                         val emittedMs = totalSamples * 1000L / targetRate
                         val now = System.currentTimeMillis()
                         if (now - lastTickMs >= 250L) {
