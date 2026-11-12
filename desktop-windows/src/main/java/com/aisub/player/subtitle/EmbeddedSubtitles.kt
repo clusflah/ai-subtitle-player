@@ -87,10 +87,24 @@ object EmbeddedSubtitles {
         else -> "application/$codecName" to true
     }
 
+    fun resetDemuxCache() {}
+
+    fun setDemuxListener(listener: ((List<Track>) -> Unit)?) {}
+
+    fun demuxedTracks(): List<Track> = emptyList()
+
+    fun mergeTracks(primary: List<Track>, secondary: List<Track>): List<Track> {
+        if (secondary.isEmpty()) return primary
+        if (primary.isEmpty()) return secondary
+        return primary
+    }
+
     fun extract(
         uri: Uri,
         dataSourceFactory: DataSource.Factory,
         isActive: () -> Boolean,
+        startMs: Long = 0L,
+        onPartial: ((List<Track>) -> Unit)? = null,
         onProgress: (Float) -> Unit,
     ): List<Track> {
         if (!isActive()) throw InterruptedException()
@@ -116,7 +130,8 @@ object EmbeddedSubtitles {
             headers = emptyMap()
         }
 
-        val headerArgs = if (headers.isNotEmpty() && (inputPath.startsWith("http://") || inputPath.startsWith("https://"))) {
+        val isHttp = inputPath.startsWith("http://") || inputPath.startsWith("https://")
+        val headerArgs = if (headers.isNotEmpty() && isHttp) {
             listOf("-headers", headers.entries.joinToString("\r\n") { "${it.key}: ${it.value}" } + "\r\n")
         } else emptyList()
 
@@ -136,46 +151,69 @@ object EmbeddedSubtitles {
 
         val textMetas = metas.filter { !it.imageBased }
         val tmpFiles = HashMap<Int, File>()
+        fun snapshotTracks(): List<Track> = metas.map { m ->
+            val cues = if (m.imageBased) {
+                emptyList()
+            } else {
+                val f = tmpFiles[m.subIndex]
+                if (f != null && f.exists() && f.length() > 0) {
+                    runCatching { parseSrtWithCueOf(f.readText(Charsets.UTF_8)) }.getOrDefault(emptyList())
+                } else emptyList()
+            }
+            Track(
+                id = m.streamIndex,
+                language = m.language,
+                label = m.label,
+                codec = m.codecMime,
+                imageBased = m.imageBased,
+                cues = cues,
+            )
+        }
+
         try {
             if (textMetas.isNotEmpty()) {
                 val cmd = ArrayList<String>()
                 cmd += ffmpeg
                 cmd += listOf("-nostdin", "-hide_banner", "-y")
                 cmd += headerArgs
+                if (isHttp && startMs > 15_000L) {
+                    val seekSec = "%.3f".format(Locale.US, (startMs - 5_000L).coerceAtLeast(0L) / 1000.0)
+                    cmd += listOf("-ss", seekSec, "-copyts")
+                }
                 cmd += listOf("-i", inputPath)
                 for (m in textMetas) {
                     val tmp = File.createTempFile("voxtitle_sub_${m.subIndex}_", ".srt")
                     tmpFiles[m.subIndex] = tmp
-                    cmd += listOf("-map", "0:s:${m.subIndex}", "-c:s", "srt", tmp.absolutePath)
+                    cmd += listOf("-map", "0:s:${m.subIndex}", "-c:s", "srt", "-flush_packets", "1", tmp.absolutePath)
                 }
                 val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
+                // 持续排空 FFmpeg 输出管道，避免写满 4KB 系统缓冲区导致子进程死锁
+                Thread {
+                    runCatching { proc.inputStream.bufferedReader(Charsets.UTF_8).forEachLine { } }
+                }.apply { isDaemon = true; start() }
+
+                var lastPartialMs = System.currentTimeMillis()
+                var lastTotalCues = 0
                 while (proc.isAlive) {
                     if (!isActive()) {
                         proc.destroyForcibly()
                         throw InterruptedException()
                     }
                     Thread.sleep(50)
+                    val now = System.currentTimeMillis()
+                    if (onPartial != null && now - lastPartialMs >= 800L) {
+                        lastPartialMs = now
+                        val current = snapshotTracks()
+                        val total = current.sumOf { it.cues.size }
+                        if (total > lastTotalCues) {
+                            lastTotalCues = total
+                            onPartial(current)
+                        }
+                    }
                 }
             }
             onProgress(1f)
-            return metas.map { m ->
-                val cues = if (m.imageBased) {
-                    emptyList()
-                } else {
-                    val f = tmpFiles[m.subIndex]
-                    if (f != null && f.exists() && f.length() > 0) {
-                        parseSrtWithCueOf(f.readText(Charsets.UTF_8))
-                    } else emptyList()
-                }
-                Track(
-                    id = m.streamIndex,
-                    language = m.language,
-                    label = m.label,
-                    codec = m.codecMime,
-                    imageBased = m.imageBased,
-                    cues = cues,
-                )
-            }
+            return snapshotTracks()
         } finally {
             tmpFiles.values.forEach { runCatching { it.delete() } }
         }

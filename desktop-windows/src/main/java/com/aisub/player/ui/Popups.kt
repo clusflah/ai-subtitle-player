@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.BottomSheetDefaults
@@ -70,47 +71,47 @@ data class PopupColors(
 
 val LightPopupColors = PopupColors(
     page = Color(0xFFF6F7FA),
-    surface = Color(0xE4F8FAFC),
-    card = Color(0xD4F0F3F8),
-    button = Color(0xDEE4E9F1),
+    surface = Color(0xA8F8FAFC),
+    card = Color(0x9EF0F3F8),
+    button = Color(0xB8E4E9F1),
     textPrimary = Color(0xFF1C2026),
-    textSecondary = Color(0xFF606773),
+    textSecondary = Color(0xFF565D68),
     divider = Color(0x221C2026),
     accent = Color(0xFFC47B20),
     disabled = Color(0xFFC2C7D0),
-    selectedBg = Color(0xDCFBEBD6),
+    selectedBg = Color(0xC8FBEBD6),
     selectedText = Color(0xFFB0661A),
-    scrim = 0.24f,
-    shadow = 16.dp,
+    scrim = 0.12f,
+    shadow = 14.dp,
     dark = false,
 )
 
 private val NeutralGrayPopupColors = LightPopupColors.copy(
     page = Color(0xFFF2F4F7),
-    surface = Color(0xE4F6F8FB),
-    card = Color(0xD4EDF0F6),
-    button = Color(0xDEE2E7F0),
+    surface = Color(0xA8F6F8FB),
+    card = Color(0x9EEDF0F6),
+    button = Color(0xB8E2E7F0),
 )
 
 private val WarmBeigePopupColors = LightPopupColors.copy(
     page = Color(0xFFF5F2EC),
-    surface = Color(0xE6FAF7F2),
-    card = Color(0xD6F1ECE3),
-    button = Color(0xDEE8E1D6),
+    surface = Color(0xACFAF7F2),
+    card = Color(0xA2F1ECE3),
+    button = Color(0xB8E8E1D6),
     textPrimary = Color(0xFF26211B),
     textSecondary = Color(0xFF6B6258),
     divider = Color(0x2226211B),
     accent = Color(0xFFBF6E19),
     disabled = Color(0xFFC9C2B8),
-    selectedBg = Color(0xE0F9E9D2),
+    selectedBg = Color(0xC8F9E9D2),
     selectedText = Color(0xFFA85D12),
 )
 
 private val PaleCyanPopupColors = LightPopupColors.copy(
     page = Color(0xFFEEF3F1),
-    surface = Color(0xE4F4F9F7),
-    card = Color(0xD4E8F0EC),
-    button = Color(0xDEDDE7E3),
+    surface = Color(0xA8F4F9F7),
+    card = Color(0x9EE8F0EC),
+    button = Color(0xB8DDE7E3),
     textPrimary = Color(0xFF1C2623),
     textSecondary = Color(0xFF586963),
     divider = Color(0x221C2623),
@@ -119,9 +120,9 @@ private val PaleCyanPopupColors = LightPopupColors.copy(
 
 private val MintGradientPopupColors = LightPopupColors.copy(
     page = Color(0xFFECF4F0),
-    surface = Color(0xE2F2F8F5),
-    card = Color(0xD2E5F0EB),
-    button = Color(0xDCD9E8E1),
+    surface = Color(0xA6F2F8F5),
+    card = Color(0x9CE5F0EB),
+    button = Color(0xB6D9E8E1),
     textPrimary = Color(0xFF1B2622),
     textSecondary = Color(0xFF556861),
     divider = Color(0x221B2622),
@@ -130,9 +131,9 @@ private val MintGradientPopupColors = LightPopupColors.copy(
 
 private val GlacierGradientPopupColors = LightPopupColors.copy(
     page = Color(0xFFF0F0F8),
-    surface = Color(0xE2F5F5FC),
-    card = Color(0xD2EAEBF6),
-    button = Color(0xDCE0E2F1),
+    surface = Color(0xA6F5F5FC),
+    card = Color(0x9CEAEBF6),
+    button = Color(0xB6E0E2F1),
     textPrimary = Color(0xFF1E202C),
     textSecondary = Color(0xFF5D6175),
     divider = Color(0x221E202C),
@@ -141,9 +142,9 @@ private val GlacierGradientPopupColors = LightPopupColors.copy(
 
 private val AuroraGradientPopupColors = LightPopupColors.copy(
     page = Color(0xFFF2F3F6),
-    surface = Color(0xE4F6F8FB),
-    card = Color(0xD4ECF0F5),
-    button = Color(0xDEE0E6EE),
+    surface = Color(0xA8F6F8FB),
+    card = Color(0x9EECF0F5),
+    button = Color(0xB8E0E6EE),
     textPrimary = Color(0xFF1F232A),
     textSecondary = Color(0xFF5B626E),
     divider = Color(0x221F232A),
@@ -152,65 +153,65 @@ private val AuroraGradientPopupColors = LightPopupColors.copy(
 
 private val ChampagneGradientPopupColors = LightPopupColors.copy(
     page = Color(0xFFF5F2EE),
-    surface = Color(0xE5FAF8F4),
-    card = Color(0xD6F0ECE5),
-    button = Color(0xDEE7E1D8),
+    surface = Color(0xAAFAF8F4),
+    card = Color(0xA0F0ECE5),
+    button = Color(0xB8E7E1D8),
     textPrimary = Color(0xFF26221D),
     textSecondary = Color(0xFF675F56),
     divider = Color(0x2226221D),
     accent = Color(0xFFB5691D),
     disabled = Color(0xFFC8C2BA),
-    selectedBg = Color(0xE0F9E9D4),
+    selectedBg = Color(0xC8F9E9D4),
     selectedText = Color(0xFFA35B14),
 )
 
 val DarkPopupColors = PopupColors(
     page = Color(0xFF12161F),
     surface = GlassTokens.DarkSheetTint,
-    card = Color(0xA6263042),
-    button = Color(0xBF323F54),
+    card = Color(0x88263042),
+    button = Color(0xA0323F54),
     textPrimary = Color(0xFFFFFFFF),
     textSecondary = Color(0xFFB8C2D0),
-    divider = Color(0x32FFFFFF),
+    divider = Color(0x2EFFFFFF),
     accent = Color(0xFFE49A36),
     disabled = Color(0xFF68707D),
-    selectedBg = Color(0xB84A3824),
+    selectedBg = Color(0x9E4A3824),
     selectedText = Color(0xFFF2AA4A),
-    scrim = 0.44f,
-    shadow = 20.dp,
+    scrim = 0.24f,
+    shadow = 16.dp,
     dark = true,
 )
 
 private val DarkWarmPopupColors = DarkPopupColors.copy(
     page = Color(0xFF191613),
-    surface = Color(0xD6221E1A),
-    card = Color(0xAB302A24),
-    button = Color(0xC23D352D),
+    surface = Color(0x9E221E1A),
+    card = Color(0x8C302A24),
+    button = Color(0xA23D352D),
     textSecondary = Color(0xFFC8BFB4),
-    selectedBg = Color(0xBA4E3A24),
+    selectedBg = Color(0xA04E3A24),
 )
 
 private val DarkCyanPopupColors = DarkPopupColors.copy(
     page = Color(0xFF121816),
-    surface = Color(0xD418221F),
-    card = Color(0xA824332F),
-    button = Color(0xBF2E403B),
+    surface = Color(0x9E18221F),
+    card = Color(0x8824332F),
+    button = Color(0xA02E403B),
     textSecondary = Color(0xFFB4C6C0),
 )
 
 private val DarkGlacierPopupColors = DarkPopupColors.copy(
     page = Color(0xFF151621),
-    surface = Color(0xD41B1D2C),
-    card = Color(0xA8282B40),
-    button = Color(0xBF343852),
+    surface = Color(0x9E1B1D2C),
+    card = Color(0x88282B40),
+    button = Color(0xA0343852),
     textSecondary = Color(0xFFB9BCD2),
 )
 
 private val DarkAuroraPopupColors = DarkPopupColors.copy(
     page = Color(0xFF15171B),
-    surface = Color(0xD41A1F26),
-    card = Color(0xA8272E38),
-    button = Color(0xBF323B48),
+    surface = Color(0x9E1A1F26),
+    card = Color(0x88272E38),
+    button = Color(0xA0323B48),
     textSecondary = Color(0xFFB8C1CE),
 )
 
@@ -247,12 +248,12 @@ fun popupColors(): PopupColors {
     }
     if (LocalLiquidGlassEnabled.current) return raw
     return raw.copy(
-        surface = raw.surface.copy(alpha = 1f),
-        card = raw.card.copy(alpha = 1f),
-        button = raw.button.copy(alpha = 1f),
-        selectedBg = raw.selectedBg.copy(alpha = 1f),
-        divider = if (raw.dark) Color(0xFF3E434C) else raw.textPrimary.copy(alpha = 0.12f),
-        scrim = if (raw.dark) 0.6f else 0.35f,
+        surface = raw.surface.copy(alpha = 0.76f),
+        card = raw.card.copy(alpha = 0.80f),
+        button = raw.button.copy(alpha = 0.84f),
+        selectedBg = raw.selectedBg.copy(alpha = 0.88f),
+        divider = if (raw.dark) Color(0x44FFFFFF) else raw.textPrimary.copy(alpha = 0.12f),
+        scrim = if (raw.dark) 0.30f else 0.16f,
         shadow = if (raw.dark) 0.dp else 8.dp,
     )
 }
@@ -309,12 +310,14 @@ fun AppSheet(
             containerColor = Color.Transparent, contentColor = c.textPrimary, tonalElevation = 0.dp,
             scrimColor = Color.Black.copy(alpha = c.scrim), dragHandle = null,
         ) {
-            val shape = MaterialTheme.shapes.extraLarge
+            val shape = RoundedCornerShape(22.dp)
             Column(
-                Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp).fillMaxWidth()
+                Modifier.align(Alignment.CenterHorizontally)
+                    .padding(start = 24.dp, end = 24.dp, bottom = 12.dp)
+                    .widthIn(max = 360.dp)
+                    .fillMaxWidth()
                     .shadow(c.shadow, shape).clip(shape).background(c.surface),
             ) {
-                Box(Modifier.align(Alignment.CenterHorizontally)) { BottomSheetDefaults.DragHandle() }
                 content()
             }
         }
@@ -344,9 +347,12 @@ fun AppSheet(
     ) {
         WindowBlurEffect(blurBehindRadius = 56, backgroundBlurRadius = 72)
         // 悬浮的完整圆角液态玻璃框，不贴屏幕边缘
-        val shape = RoundedCornerShape(28.dp)
+        val shape = RoundedCornerShape(22.dp)
         Column(
-            Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp).fillMaxWidth()
+            Modifier.align(Alignment.CenterHorizontally)
+                .padding(start = 24.dp, end = 24.dp, bottom = 12.dp)
+                .widthIn(max = 360.dp)
+                .fillMaxWidth()
                 .graphicsLayer {
                     this.scaleX = scaleX
                     this.scaleY = scaleY
@@ -354,7 +360,6 @@ fun AppSheet(
                 .glassShadow(shape, GlassStyle.Sheet, c.shadow)
                 .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface, lightShift = lightShift),
         ) {
-            Box(Modifier.align(Alignment.CenterHorizontally)) { BottomSheetDefaults.DragHandle() }
             content()
         }
     }

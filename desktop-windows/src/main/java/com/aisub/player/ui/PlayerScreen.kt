@@ -607,8 +607,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 // 视频自带字幕和 AI 字幕同时显示时，把自带字幕抬高，避免叠在一起
                 val aiVisible = state.settings.showAiSubtitles && state.cues.isNotEmpty()
                 it.subtitleView?.setBottomPaddingFraction(if (aiVisible) 0.32f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
-                // 正在翻译直播自带字幕：原文已经在 AI 字幕里，自带字幕不再原样显示
-                it.subtitleView?.visibility = if (state.liveCaptions) android.view.View.GONE else android.view.View.VISIBLE
+                // 正在翻译直播自带字幕，或自带字幕已载入 AI 字幕显示原文：自带字幕不再原样显示，免得同一句出现两遍
+                val embeddedInAi = aiVisible && state.settings.showOriginal && (state.embeddedTracks != null || state.extractingEmbedded)
+                it.subtitleView?.visibility = if (state.liveCaptions || embeddedInAi) android.view.View.GONE else android.view.View.VISIBLE
             },
             modifier = Modifier.fillMaxSize(),
         )
@@ -1384,7 +1385,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     when (action) {
                         SubtitleAction.GENERATE -> if (state.transcribing) vm.cancelAll() else { showTracks = false; generateTranslate = false; dialog = PlayerDialog.ASR_LANGUAGE }
                         SubtitleAction.TRANSLATE -> when {
-                            state.translating -> vm.cancelAll()
+                            state.translating || state.extractingEmbedded || state.liveCaptions -> vm.cancelAll()
+                            // 当前还没有 AI 字幕，但视频有自带文字字幕：先提取自带字幕再翻译
+                            state.cues.isEmpty() -> { showTracks = false; chooseModel("选择翻译模型") { vm.extractEmbeddedSubtitles(translate = true) } }
                             // 已经全部翻译过：换个模型重新翻译
                             state.cues.none { it.translation == null } -> { showTracks = false; chooseModel("重新翻译") { vm.retranslateAll() } }
                             else -> { showTracks = false; chooseModel("选择翻译模型") { vm.startTranslation() } }
@@ -1396,7 +1399,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         SubtitleAction.EXPORT -> dialog = PlayerDialog.EXPORT
                         SubtitleAction.ERROR -> dialog = PlayerDialog.ERROR
                         SubtitleAction.ROLES -> { showTracks = false; showRoles = true }
-                        SubtitleAction.EMBEDDED -> if (state.extractingEmbedded || state.liveCaptions) vm.cancelAll() else vm.extractEmbeddedSubtitles()
+                        SubtitleAction.EMBEDDED -> if (state.extractingEmbedded || state.liveCaptions) vm.cancelAll() else {
+                            showTracks = false
+                            chooseModel("选择翻译模型") { vm.extractEmbeddedSubtitles(translate = true) }
+                        }
                         SubtitleAction.STYLE -> { showTracks = false; showStyle = true }
                     }
                 },
@@ -1822,6 +1828,7 @@ private fun SeekBar(
 @Composable
 private fun TaskChip(state: UiState, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val text = when {
+        state.translating && state.cues.isNotEmpty() && !state.transcribing -> "AI 翻译中 ${state.cues.count { it.translation != null }}/${state.cues.size}"
         state.extractingEmbedded -> "读取视频自带字幕 ${((state.progress ?: 0f) * 100).toInt()}%"
         state.transcribing -> state.progress?.takeIf { it >= 0 && state.status.startsWith("正在识别") }
             ?.let { (if (state.streamingAsr) "AI 流式识别字幕中 " else "AI 识别字幕中 ") + "${(it * 100).toInt()}%" }
@@ -2164,10 +2171,29 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
     var embeddedOpen by remember { mutableStateOf(false) }
     var version by remember { mutableIntStateOf(0) } // 选轨后刷新
 
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
+    val textGroups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT } }
+    val hasTextSubtitles = remember(textGroups) {
+        textGroups.any { g ->
+            (0 until g.length).any { i ->
+                val f = g.getTrackFormat(i)
+                (f.codecs ?: f.sampleMimeType) !in IMAGE_SUBTITLE_TYPES
+            }
+        }
+    }
+    val live = state.current?.isLive == true
+    // 兼容模式下直播拿不到字幕的文字
+    val canRead = if (live) !vm.usingVlc && hasTextSubtitles else hasTextSubtitles || vm.usingVlc
+
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(vertical = 6.dp)) {
         // ---------------- AI 字幕：识别、外挂文件或提取出的字幕，由本应用显示 ----------------
         if (ai) {
-            Text("AI 字幕", color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp))
+            Text(
+                "AI 字幕",
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+            )
             PanelHint(
                 if (state.cues.isEmpty()) "语音识别、字幕文件或从视频提取的字幕，可以翻译、朗读，样式和位置可调"
                 else "当前 ${state.cues.size} 句" + (state.cues.count { it.translation != null }.takeIf { it > 0 }?.let { "，已翻译 $it 句" } ?: ""),
@@ -2195,12 +2221,13 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
             ActionRow(
                 AppIcons.Translate,
                 when {
-                    state.translating -> "停止翻译"
+                    state.translating || state.extractingEmbedded || state.liveCaptions -> "停止翻译"
                     state.cues.isNotEmpty() && state.cues.none { it.translation == null } -> "重新翻译"
                     else -> "翻译字幕"
                 },
-                subtitle = "翻译成${state.settings.targetLanguage}，可以选择翻译模型",
-                enabled = state.translating || state.cues.isNotEmpty(),
+                subtitle = if (state.cues.isEmpty() && canRead) "读取视频自带字幕并翻译成${state.settings.targetLanguage}，可以选择翻译模型"
+                else "翻译成${state.settings.targetLanguage}，可以选择翻译模型",
+                enabled = state.translating || state.extractingEmbedded || state.liveCaptions || state.cues.isNotEmpty() || canRead,
             ) { onSubtitleAction(SubtitleAction.TRANSLATE) }
             if (Pinyin.available && state.settings.targetIsChinese) {
                 ActionRow(
@@ -2223,7 +2250,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
             SwitchRow(AppIcons.Subtitles, "在画面上显示 AI 字幕", subtitle = "关掉后仍可翻译、朗读", checked = state.settings.showAiSubtitles) {
                 vm.updateSettings(state.settings.copy(showAiSubtitles = it))
             }
-            Box(Modifier.padding(horizontal = 24.dp, vertical = 8.dp)) {
+            Box(Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
                 DisplayModeSelector(state.settings.showOriginal, state.settings.showTranslation) { o, t ->
                     vm.updateSettings(state.settings.copy(showOriginal = o, showTranslation = t))
                 }
@@ -2242,7 +2269,6 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
         }
 
         // ---------------- 视频自带字幕：文件里的字幕轨，按原样显示 ----------------
-        val textGroups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT } }
         SheetHeader("字幕", embeddedOpen) { embeddedOpen = !embeddedOpen }
         if (embeddedOpen) {
             PanelHint("视频文件里的字幕轨，按字幕文件原样显示（ASS 的位置、字体、特效由文件决定）")
@@ -2272,9 +2298,6 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
                 }
             }
             // 读出自带字幕的文字交给 AI 字幕，比语音识别准
-            val live = state.current?.isLive == true
-            // 兼容模式下直播拿不到字幕的文字
-            val canRead = if (live) !vm.usingVlc && textGroups.isNotEmpty() else textGroups.isNotEmpty() || vm.usingVlc
             if (canRead || state.extractingEmbedded || state.liveCaptions) {
                 ActionRow(
                     AppIcons.Translate,
@@ -2297,7 +2320,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
         if (audioOpen) {
             Text(
                 "选过的音轨和字幕按视频记住，下次打开自动选好；首选语言在「设置 → 播放」里改",
-                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 24.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 20.dp),
             )
             val groups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO } }
             val disabled = remember(version, state.current?.uri) { C.TRACK_TYPE_AUDIO in player.trackSelectionParameters.disabledTrackTypes }
@@ -2348,22 +2371,22 @@ private fun subtitleTrackName(f: androidx.media3.common.Format, groupIndex: Int)
 /** 面板分组下的说明文字 */
 @Composable
 private fun PanelHint(text: String) {
-    Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(start = 24.dp, end = 24.dp, bottom = 4.dp))
+    Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 3.dp))
 }
 
 /** 分组里的小标题（获取字幕、显示…） */
 @Composable
 private fun GroupLabel(text: String) {
-    Text(text, color = Orange, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 12.dp, bottom = 2.dp))
+    Text(text, color = Orange, fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 2.dp))
 }
 
 @Composable
 private fun SheetHeader(title: String, open: Boolean, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().tvFocusRing(RoundedCornerShape(8.dp)).tvSecondaryClick(allowDpadRight = true, onSecondaryClick = onClick).clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 16.dp),
+        Modifier.fillMaxWidth().tvFocusRing(RoundedCornerShape(8.dp)).tvSecondaryClick(allowDpadRight = true, onSecondaryClick = onClick).clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title, color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, modifier = Modifier.weight(1f))
+        Text(title, color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp, modifier = Modifier.weight(1f))
         Icon(if (open) AppIcons.ArrowDropUp else AppIcons.ArrowDropDown, null, tint = MaterialTheme.colorScheme.onSurface)
     }
 }
@@ -2371,25 +2394,25 @@ private fun SheetHeader(title: String, open: Boolean, onClick: () -> Unit) {
 @Composable
 private fun TrackRow(label: String, selected: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick).heightIn(min = 56.dp).padding(horizontal = 24.dp),
+        Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick).heightIn(min = 44.dp).padding(horizontal = 20.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.width(48.dp)) { if (selected) Icon(AppIcons.Check, null, tint = MaterialTheme.colorScheme.onSurface) }
-        Text(label, color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 17.sp)
+        Box(Modifier.width(38.dp)) { if (selected) Icon(AppIcons.Check, null, tint = MaterialTheme.colorScheme.onSurface) }
+        Text(label, color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 15.sp)
     }
 }
 
 @Composable
 private fun SwitchRow(icon: ImageVector, label: String, subtitle: String?, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clickable { onChange(!checked) }.heightIn(min = 56.dp).padding(horizontal = 24.dp, vertical = 8.dp),
+        Modifier.fillMaxWidth().clickable { onChange(!checked) }.heightIn(min = 46.dp).padding(horizontal = 20.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(26.dp))
-        Spacer(Modifier.width(24.dp))
+        Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(16.dp))
         Column(Modifier.weight(1f)) {
-            Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 17.sp)
-            if (subtitle != null) Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+            Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp)
+            if (subtitle != null) Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
         }
         Switch(checked = checked, onCheckedChange = onChange)
     }
@@ -2406,14 +2429,14 @@ private fun ActionRow(
 ) {
     val color = if (enabled) tint else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
     Row(
-        Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick).heightIn(min = 56.dp).padding(horizontal = 24.dp, vertical = 8.dp),
+        Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick).heightIn(min = 46.dp).padding(horizontal = 20.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, null, tint = color, modifier = Modifier.size(26.dp))
-        Spacer(Modifier.width(24.dp))
+        Icon(icon, null, tint = color, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(16.dp))
         Column {
-            Text(label, color = color, fontSize = 17.sp)
-            if (subtitle != null) Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+            Text(label, color = color, fontSize = 15.sp)
+            if (subtitle != null) Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
         }
     }
 }

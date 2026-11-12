@@ -686,9 +686,14 @@ private fun MediaTab(
         }
         return
     }
-    // 继续观看：最近一次没看完的视频
+    // 继续观看：仅显示本机媒体库中最近一次没看完的视频/音频（排除云盘、WebDAV、SMB、直播等远端记录）
+    val localUris = remember(all) { all.mapTo(HashSet(all.size)) { it.uri } }
     val resume = state.history.firstOrNull { h ->
-        h.entry.isVideo == isVideo && h.positionMs > 10_000 && (h.entry.durationMs <= 0 || h.positionMs < h.entry.durationMs - 30_000)
+        !h.entry.isLive &&
+            (h.entry.uri in localUris || h.entry.uri.startsWith("content://") || h.entry.uri.startsWith("file://")) &&
+            h.entry.isVideo == isVideo &&
+            h.positionMs > 10_000 &&
+            (h.entry.durationMs <= 0 || h.positionMs < h.entry.durationMs - 30_000)
     }?.takeIf { q.isEmpty() }
 
     if (isVideo && state.videoGrid) {

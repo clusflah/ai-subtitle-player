@@ -265,21 +265,22 @@ class AiffExtractor : Extractor {
     }
 }
 
-/** 在已有的解封装列表前面加上 AIFF；其余设置原样转给原来的 factory。 */
+/** 在已有的解封装列表前面加上 AIFF；同时把播放器解封装出的自带字幕样本旁路给 [com.aisub.player.subtitle.EmbeddedSubtitles]。 */
 @OptIn(UnstableApi::class)
 fun ExtractorsFactory.withAiff(): ExtractorsFactory {
     val base = this
     return object : ExtractorsFactory {
-        override fun createExtractors(): Array<Extractor> = arrayOf<Extractor>(AiffExtractor()) + base.createExtractors()
+        override fun createExtractors(): Array<Extractor> =
+            arrayOf<Extractor>(AiffExtractor()) + base.createExtractors().map(com.aisub.player.subtitle.EmbeddedSubtitles::wrapExtractor)
 
         override fun createExtractors(uri: Uri, responseHeaders: Map<String, List<String>>): Array<Extractor> =
-            arrayOf<Extractor>(AiffExtractor()) + base.createExtractors(uri, responseHeaders)
+            arrayOf<Extractor>(AiffExtractor()) + base.createExtractors(uri, responseHeaders).map(com.aisub.player.subtitle.EmbeddedSubtitles::wrapExtractor)
 
         override fun experimentalSetTextTrackTranscodingEnabled(enabled: Boolean): ExtractorsFactory =
             base.experimentalSetTextTrackTranscodingEnabled(enabled).withAiff()
 
         override fun setSubtitleParserFactory(factory: SubtitleParser.Factory): ExtractorsFactory =
-            base.setSubtitleParserFactory(factory).withAiff()
+            base.setSubtitleParserFactory(com.aisub.player.subtitle.EmbeddedSubtitles.wrapSubtitleParserFactory(factory)).withAiff()
 
         override fun experimentalSetCodecsToParseWithinGopSampleDependencies(codecs: Int): ExtractorsFactory =
             base.experimentalSetCodecsToParseWithinGopSampleDependencies(codecs).withAiff()

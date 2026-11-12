@@ -371,6 +371,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var playbackStatsCheckpoint = 0L
     /** 读出的自带字幕轨载入后一定翻译（播放页的「翻译成…字幕」按钮），不看自动翻译设置 */
     private var translateEmbedded = false
+    private var streamingEmbeddedTrackId: Int? = null
+    private var streamingEmbeddedTranslate = false
+    private var embeddedCueListenerAdded = false
+    private val embeddedCueListener = object : Player.Listener {
+        override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
+            if (!streamingEmbeddedTranslate && _state.value.embeddedTracks == null) return
+            val lines = captionLines(cueGroup.cues)
+            if (lines.isEmpty()) return
+            val startMs = (if (cueGroup.presentationTimeUs != C.TIME_UNSET && cueGroup.presentationTimeUs > 0) {
+                cueGroup.presentationTimeUs / 1000
+            } else {
+                player.currentPosition
+            }).coerceAtLeast(0L)
+            val cue = SubtitleParser.cueOf(1, startMs, startMs + 3500L, lines)
+            val fallbackTrack = EmbeddedSubtitles.Track(
+                id = streamingEmbeddedTrackId ?: 0,
+                language = null,
+                label = "自带字幕",
+                codec = null,
+                imageBased = false,
+                cues = listOf(cue),
+            )
+            applyProgressiveEmbeddedTrack(fallbackTrack, streamingEmbeddedTranslate)
+        }
+    }
     private var linkJob: Job? = null
 
     /** 下载版才有；标准版为 null */
@@ -787,6 +812,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun onEntryChanged(entry: MediaEntry) {
         if (_state.value.current?.uri == entry.uri) return
         cancelAll()
+        EmbeddedSubtitles.resetDemuxCache()
         sawFirstFrame = false
         frameWatch?.cancel()
         _state.update { it.copy(videoProblem = null, transcoding = false, liveClock = null, liveHint = null, asrInfo = null, translateInfo = null) }
@@ -1656,6 +1682,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun startTranslation() {
         if (translateJob?.isActive == true) return
+        val curSettings = _state.value.settings
+        if (!curSettings.showAiSubtitles || !curSettings.showTranslation) {
+            updateSettings(curSettings.copy(showAiSubtitles = true, showTranslation = true))
+        }
         val settings = _state.value.settings
         val translator = settings.createTranslator()
         if (translator == null) {
@@ -1732,7 +1762,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // 直播：画面已经播过去的不翻了
             val pending = snapshot.cues.filter { it.translation == null && it.id !in inFlight && (!live || it.endMs >= position - 2_000) }
             if (pending.isEmpty()) {
-                if (running > 0 || snapshot.transcribing || snapshot.liveCaptions) {
+                if (running > 0 || snapshot.transcribing || snapshot.liveCaptions || snapshot.extractingEmbedded) {
                     delay(250)
                     continue
                 }
@@ -1748,7 +1778,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val urgent = realtime && quick.firstOrNull()?.let { it.startMs < position + horizon } == true
             val size = if (urgent || live) batchSize else BATCH_SIZE
             val batch = (if (urgent) quick.filter { it.startMs < position + horizon } else ahead.ifEmpty { pending }).take(size)
-            if (!urgent && !live && snapshot.transcribing && batch.size < size && running > 0) {
+            if (!urgent && !live && (snapshot.transcribing || snapshot.extractingEmbedded) && batch.size < size && running > 0) {
                 delay(250)
                 continue
             }
@@ -1817,6 +1847,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         translateJob?.cancel()
         embeddedJob?.cancel()
         captionJob?.cancel()
+        EmbeddedSubtitles.setDemuxListener(null)
+        streamingEmbeddedTrackId = null
+        streamingEmbeddedTranslate = false
+        if (embeddedCueListenerAdded) {
+            exoPlayer.removeListener(embeddedCueListener)
+            embeddedCueListenerAdded = false
+        }
     }
 
     /** 全部重新翻译（例如换了翻译模型）：清掉已有译文，从头翻。 */
@@ -1961,6 +1998,64 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 优先选当前播放器已选中的字幕轨（或已经开始流式提取的那条），否则选第一条有文字的字幕轨。 */
+    private fun preferredEmbeddedTrack(tracks: List<EmbeddedSubtitles.Track>): EmbeddedSubtitles.Track? {
+        val usable = tracks.filter { it.cues.isNotEmpty() }
+        if (usable.isEmpty()) return null
+        streamingEmbeddedTrackId?.let { id -> usable.firstOrNull { it.id == id }?.let { return it } }
+        if (!usingVlc) {
+            val selected = exoPlayer.currentTracks.groups
+                .firstOrNull { it.type == C.TRACK_TYPE_TEXT && it.isSelected }
+                ?.takeIf { it.length > 0 }
+                ?.getTrackFormat(0)
+            if (selected != null) {
+                usable.firstOrNull {
+                    (selected.language != null && it.language == selected.language) &&
+                        (selected.label == null || it.label == selected.label)
+                }?.let { return it }
+                usable.firstOrNull { selected.language != null && it.language == selected.language }?.let { return it }
+            }
+        }
+        return usable.first()
+    }
+
+    /**
+     * 边读边把自带字幕合并进当前字幕列表，保留已有 cue 的 id 和译文（避免打乱正在进行的翻译批次），
+     * 并立即启动实时翻译。
+     */
+    private fun applyProgressiveEmbeddedTrack(track: EmbeddedSubtitles.Track, translate: Boolean) {
+        if (track.cues.isEmpty()) return
+        if (streamingEmbeddedTrackId == null) streamingEmbeddedTrackId = track.id
+        var addedNew = false
+        _state.update { s ->
+            val byKey = s.cues.associateBy { it.startMs to it.text }
+            var maxId = s.cues.maxOfOrNull { it.id } ?: 0
+            val merged = (s.cues + track.cues)
+                .distinctBy { it.startMs to it.text }
+                .sortedBy { it.startMs }
+                .map { c ->
+                    val existing = byKey[c.startMs to c.text]
+                    if (existing != null) existing else {
+                        addedNew = true
+                        c.copy(id = ++maxId)
+                    }
+                }
+            if (merged.size == s.cues.size && !addedNew) return@update s
+            s.copy(
+                cues = merged,
+                status = if (s.translating) s.status else "已读取视频自带字幕「${track.title}」${merged.size} 句",
+                error = null,
+                failedTask = null,
+            )
+        }
+        val settings = _state.value.settings
+        if ((translate || (settings.autoTranslate && settings.createTranslator() != null)) &&
+            _state.value.cues.any { it.translation == null }
+        ) {
+            startTranslation()
+        }
+    }
+
     /**
      * 读取视频自带的文字字幕轨。只有一条可用时直接用；有多条时放进 embeddedTracks 让用户选，
      * 选中后调用 [useEmbeddedTrack]。
@@ -1970,20 +2065,63 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // 直播读不完整个文件：改成边播边翻译
         if (_state.value.current?.isLive == true) return startLiveCaptions()
         val uri = _state.value.videoUri ?: return
-        if (embeddedJob?.isActive == true) return
+        if (translate) {
+            val curSettings = _state.value.settings
+            if (!curSettings.showAiSubtitles || !curSettings.showTranslation) {
+                updateSettings(curSettings.copy(showAiSubtitles = true, showTranslation = true))
+            }
+        }
         translateEmbedded = translate
-        _state.value.embeddedTracks?.let { tracks -> offerEmbedded(tracks); return }
+        streamingEmbeddedTranslate = translate
+        if (embeddedJob?.isActive == true) {
+            if (translate && _state.value.cues.isNotEmpty()) startTranslation()
+            return
+        }
+        _state.value.embeddedTracks?.takeIf { it.any { t -> t.cues.isNotEmpty() } }?.let { tracks ->
+            offerEmbedded(tracks)
+            return
+        }
         transcribeJob?.cancel()
+        if (!usingVlc) {
+            val texts = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
+            if (texts.isNotEmpty() && (C.TRACK_TYPE_TEXT in exoPlayer.trackSelectionParameters.disabledTrackTypes || texts.none { it.isSelected })) {
+                extras.selectTrack(C.TRACK_TYPE_TEXT, texts[0], 0)
+            }
+            if (!embeddedCueListenerAdded) {
+                exoPlayer.addListener(embeddedCueListener)
+                embeddedCueListenerAdded = true
+            }
+        }
+        EmbeddedSubtitles.setDemuxListener { partial ->
+            viewModelScope.launch {
+                preferredEmbeddedTrack(partial)?.let { applyProgressiveEmbeddedTrack(it, streamingEmbeddedTranslate) }
+            }
+        }
+        preferredEmbeddedTrack(EmbeddedSubtitles.demuxedTracks())?.let {
+            applyProgressiveEmbeddedTrack(it, translate)
+        }
         _state.update { it.copy(extractingEmbedded = true, status = "正在读取视频自带的字幕…", progress = 0f, error = null) }
+        val startMs = if (_state.value.current?.let(::isRemote) == true) player.currentPosition.coerceAtLeast(0L) else 0L
         embeddedJob = viewModelScope.launch {
             try {
                 val tracks = withContext(Dispatchers.IO) {
-                    EmbeddedSubtitles.extract(uri, authDataSourceFactory(getApplication()), isActive = { isActive }) { p ->
+                    EmbeddedSubtitles.extract(
+                        uri = uri,
+                        dataSourceFactory = authDataSourceFactory(getApplication()),
+                        isActive = { isActive },
+                        startMs = startMs,
+                        onPartial = { partial ->
+                            viewModelScope.launch {
+                                preferredEmbeddedTrack(partial)?.let { applyProgressiveEmbeddedTrack(it, streamingEmbeddedTranslate) }
+                            }
+                        },
+                    ) { p ->
                         _state.update { it.copy(progress = p) }
                     }
                 }
-                _state.update { it.copy(embeddedTracks = tracks, progress = null) }
-                offerEmbedded(tracks)
+                val merged = EmbeddedSubtitles.mergeTracks(tracks, EmbeddedSubtitles.demuxedTracks())
+                _state.update { it.copy(embeddedTracks = merged, progress = null) }
+                offerEmbedded(merged)
             } catch (e: CancellationException) {
                 _state.update { it.copy(status = "已取消", progress = null) }
                 throw e
@@ -1991,7 +2129,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(status = "已取消", progress = null) }
             } catch (e: Exception) {
                 android.util.Log.e("Voxtitle", "读取内嵌字幕失败", e)
-                _state.update { it.copy(status = "", progress = null, error = "读取视频自带字幕失败：${e.message ?: e}") }
+                val demuxed = EmbeddedSubtitles.demuxedTracks()
+                preferredEmbeddedTrack(demuxed)?.let { applyProgressiveEmbeddedTrack(it, streamingEmbeddedTranslate) }
+                val hasPlayerTextTrack = !usingVlc && exoPlayer.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
+                if (_state.value.cues.isNotEmpty() || hasPlayerTextTrack) {
+                    _state.update {
+                        it.copy(
+                            status = if (it.cues.isNotEmpty()) "正在翻译视频自带字幕…" else "正在跟随播放翻译自带字幕…",
+                            progress = null,
+                            error = null,
+                        )
+                    }
+                    if (streamingEmbeddedTranslate) startTranslation()
+                } else {
+                    _state.update { it.copy(status = "", progress = null, error = "读取视频自带字幕失败：${e.message ?: e}") }
+                }
             } finally {
                 _state.update { it.copy(extractingEmbedded = false) }
             }
@@ -2208,15 +2360,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val usable = tracks.filter { it.cues.isNotEmpty() }
         when {
             usable.size == 1 -> useEmbeddedTrack(usable[0])
-            usable.isEmpty() -> _state.update {
-                it.copy(
-                    status = "",
-                    error = if (tracks.any { t -> t.imageBased }) "视频自带的是图形字幕（PGS / VobSub），没有文字，无法翻译。可以用 AI 识别字幕"
-                    else "视频里没有找到文字字幕轨。画面里烧录的字幕无法提取，可以用 AI 识别字幕",
-                )
+            usable.isEmpty() -> {
+                val hasPlayerTextTrack = !usingVlc &&
+                    exoPlayer.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.isSupported } &&
+                    tracks.none { it.imageBased }
+                if (_state.value.cues.isNotEmpty() || hasPlayerTextTrack) {
+                    _state.update {
+                        it.copy(
+                            status = if (it.cues.isNotEmpty()) "正在翻译视频自带字幕…" else "正在跟随播放翻译自带字幕…",
+                            error = null,
+                        )
+                    }
+                    if (translateEmbedded) startTranslation()
+                } else {
+                    _state.update {
+                        it.copy(
+                            status = "",
+                            error = if (tracks.any { t -> t.imageBased }) "视频自带的是图形字幕（PGS / VobSub），没有文字，无法翻译。可以用 AI 识别字幕"
+                            else "视频里没有找到文字字幕轨。画面里烧录的字幕无法提取，可以用 AI 识别字幕",
+                        )
+                    }
+                }
             }
-            // 多条：界面弹出选择
-            else -> _state.update { it.copy(status = "找到 ${usable.size} 条字幕轨，请选择一条", choosingEmbedded = true) }
+            // 多条：如果已经在边读边翻译首选字幕轨，直接完成合并继续翻；否则弹出选择
+            else -> {
+                val preferred = preferredEmbeddedTrack(usable)
+                if (translateEmbedded && preferred != null && _state.value.cues.isNotEmpty()) {
+                    useEmbeddedTrack(preferred)
+                } else {
+                    _state.update { it.copy(status = "找到 ${usable.size} 条字幕轨，请选择一条", choosingEmbedded = true) }
+                }
+            }
         }
     }
 
@@ -2294,19 +2468,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun useEmbeddedTrack(track: EmbeddedSubtitles.Track) {
         val video = _state.value.videoUri ?: return
         if (track.cues.isEmpty()) return
-        cancelAll()
-        _state.update {
-            it.copy(
-                cues = track.cues, status = "已载入视频自带字幕「${track.title}」${track.cues.size} 句",
-                error = null, failedTask = null, choosingEmbedded = false,
+        val sameStreamingTrack = streamingEmbeddedTrackId == null || streamingEmbeddedTrackId == track.id
+        gapWatch?.cancel()
+        transcribeJob?.cancel()
+        embeddedJob?.cancel()
+        captionJob?.cancel()
+        if (!sameStreamingTrack) {
+            translateJob?.cancel()
+        }
+        streamingEmbeddedTrackId = track.id
+        var finalCues: List<Cue> = track.cues
+        _state.update { s ->
+            val merged = if (sameStreamingTrack && s.cues.isNotEmpty()) {
+                val byKey = s.cues.associateBy { it.startMs to it.text }
+                var maxId = s.cues.maxOfOrNull { it.id } ?: 0
+                (s.cues + track.cues)
+                    .distinctBy { it.startMs to it.text }
+                    .sortedBy { it.startMs }
+                    .map { c -> byKey[c.startMs to c.text] ?: c.copy(id = ++maxId) }
+            } else {
+                track.cues
+            }
+            finalCues = merged
+            s.copy(
+                cues = merged,
+                status = if (s.translating) s.status else "已载入视频自带字幕「${track.title}」${merged.size} 句",
+                error = null,
+                failedTask = null,
+                choosingEmbedded = false,
             )
         }
         dropCoverage(video)
-        store.save(video, track.cues)
+        store.save(video, finalCues)
         val settings = _state.value.settings
-        val translate = translateEmbedded
+        val translate = translateEmbedded || streamingEmbeddedTranslate
         translateEmbedded = false
-        if (track.cues.none { it.translation == null }) return
+        if (finalCues.none { it.translation == null }) return
         // 点「翻译」进来的：翻译没配置好时也调用，好提示出原因
         if (translate || (settings.autoTranslate && settings.createTranslator() != null)) startTranslation()
     }
