@@ -216,8 +216,8 @@ data class GlassStyle(
             bevelWidth = 18.dp,
             refractionStrength = 11.dp,
             borderWidth = 1.dp,
-            lightAlpha = 0.62f,
-            darkAlpha = 0.56f,
+            lightAlpha = 0.84f,
+            darkAlpha = 0.76f,
             specularIntensity = 0.82f,
             chromaticAberration = 1.5f,
         )
@@ -261,8 +261,8 @@ object GlassTokens {
     val LightDropletTint = Color(0xF0E6EEF8)
 
     /** 底部抽屉、对话框、下拉菜单、侧滑面板基底色 */
-    val DarkSheetTint = Color(0x9E181F2C)
-    val LightSheetTint = Color(0xA8F7F9FC)
+    val DarkSheetTint = Color(0xD4181F2C)
+    val LightSheetTint = Color(0xDCF7F9FC)
 
     /** 悬浮提示框、进度预览窗、片头跳过、状态气泡（深色沉浸场景） */
     val DarkOverlayTint = Color(0xB8181F2C)
@@ -528,14 +528,14 @@ fun Modifier.liquidGlass(
             val baseAlpha = resolvedTint.alpha.coerceIn(0.08f, 0.94f)
             val baseColor = resolvedTint.copy(alpha = 1f)
             val highlightTint = if (isDark) {
-                Color.White.copy(alpha = (baseAlpha * 0.24f).coerceAtMost(0.36f))
+                Color.White.copy(alpha = (baseAlpha * 0.30f).coerceAtMost(0.42f))
             } else {
-                Color.White.copy(alpha = (baseAlpha * 0.34f).coerceAtMost(0.56f))
+                Color.White.copy(alpha = (baseAlpha * 0.72f).coerceAtMost(0.88f))
             }
             val fillBrush = Brush.linearGradient(
-                0f to baseColor.copy(alpha = (baseAlpha * 0.96f).coerceAtMost(0.92f)),
-                0.45f to baseColor.copy(alpha = (baseAlpha * 0.72f).coerceAtLeast(0.06f)),
-                1f to baseColor.copy(alpha = (baseAlpha * 0.86f).coerceAtMost(0.90f)),
+                0f to baseColor.copy(alpha = (baseAlpha * 1.04f).coerceAtMost(0.95f)),
+                0.45f to baseColor.copy(alpha = (baseAlpha * 0.84f).coerceAtLeast(0.06f)),
+                1f to baseColor.copy(alpha = (baseAlpha * 0.95f).coerceAtMost(0.92f)),
                 start = Offset.Zero,
                 end = endOffset,
             )
