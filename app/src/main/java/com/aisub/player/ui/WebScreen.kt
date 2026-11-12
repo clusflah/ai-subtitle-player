@@ -1223,6 +1223,10 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                 onOpenUrl = { url, reader ->
                     reading = false
                     reopenAfter = if (reader) readingBook.webUrl else null
+                    tab.webView?.let {
+                        it.visibility = android.view.View.VISIBLE
+                        if (tab.active) it.onResume()
+                    }
                     go(url)
                 },
             )

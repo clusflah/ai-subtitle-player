@@ -586,8 +586,13 @@ internal object DesktopWebMangaParser {
             val attrs = aMatch.groupValues[1]
             val inner = aMatch.groupValues[2]
             val href = extractAttr("<a $attrs>", "href")?.trim() ?: continue
-            if (href.isEmpty() || href.startsWith("javascript:", ignoreCase = true) || href.startsWith("#")) continue
-            val absUrl = resolveUrl(pageUrl, href) ?: continue
+            if (href.isEmpty() || href.startsWith("#")) continue
+            val rawTarget = if (href.startsWith("javascript:", ignoreCase = true)) {
+                extractJsNavUrl(href) ?: extractJsNavUrl(extractAttr("<a $attrs>", "onclick")) ?: continue
+            } else {
+                href
+            }
+            val absUrl = resolveUrl(pageUrl, rawTarget) ?: continue
             if (!absUrl.startsWith("http") || absUrl == pageUrl) continue
 
             val h3 = Regex("""<h[1-5][^>]*>([\s\S]*?)</h[1-5]>""", RegexOption.IGNORE_CASE).find(inner)?.groupValues?.get(1)
@@ -618,6 +623,18 @@ internal object DesktopWebMangaParser {
             toc = tocUrl,
             links = links,
         )
+    }
+
+    private fun extractJsNavUrl(script: String?): String? {
+        if (script.isNullOrBlank()) return null
+        val m = Regex("""(?:pushHistory|location\.(?:assign|replace)|window\.open)\s*\(\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE).find(script)
+            ?: Regex("""(?:window\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE).find(script)
+            ?: return null
+        val target = m.groupValues[1].trim()
+        val looksLikeUrl = target.startsWith("/") || target.startsWith("http://", ignoreCase = true) ||
+            target.startsWith("https://", ignoreCase = true) || target.startsWith("./") || target.startsWith("../") ||
+            Regex("""\.(?:html?|php|aspx?)(?:[?#]|$)""", RegexOption.IGNORE_CASE).containsMatchIn(target)
+        return target.takeIf { looksLikeUrl }
     }
 
     private fun extractAttr(tag: String, name: String): String? {
@@ -653,10 +670,20 @@ internal object DesktopWebMangaParser {
         }
     }
 
+    private fun isHexDigit(ch: Char): Boolean =
+        ch in '0'..'9' || ch in 'a'..'f' || ch in 'A'..'F'
+
     private fun encodeUriPath(path: String): String {
         val sb = StringBuilder()
-        for (ch in path) {
-            if (ch.code < 128 && (ch.isLetterOrDigit() || ch in "/-_.~!*'();:@&=+\$,?#[]")) {
+        var i = 0
+        while (i < path.length) {
+            val ch = path[i]
+            if (ch == '%' && i + 2 < path.length && isHexDigit(path[i + 1]) && isHexDigit(path[i + 2])) {
+                sb.append(ch).append(path[i + 1]).append(path[i + 2])
+                i += 3
+                continue
+            }
+            if (ch.code < 128 && (ch.isLetterOrDigit() || ch in "/-_.~!*'();:@&=+\$,[]")) {
                 sb.append(ch)
             } else {
                 for (b in ch.toString().toByteArray(Charsets.UTF_8)) {
@@ -664,6 +691,7 @@ internal object DesktopWebMangaParser {
                     sb.append("%02X".format(b.toInt() and 0xFF))
                 }
             }
+            i++
         }
         return sb.toString()
     }

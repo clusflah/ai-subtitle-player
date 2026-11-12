@@ -95,8 +95,12 @@ class WebMangaCollector {
     private fun cleanTitle(t: String): String {
         val parts = t.split(" - ", " | ", "_", "－", "—").map { it.trim() }.filter { it.isNotEmpty() }
         if (parts.size <= 1) return t.trim()
-        // 第一段常是「漫画名 第 N 话」；只有「第 N 话」时把下一段（漫画名）接上
-        return if (MangaStore.seriesName(parts[0]).isEmpty()) parts[1] + " " + parts[0] else parts[0]
+        // 第一段常是「漫画名 第 N 话」；只有「第 N 话」时把下一段（漫画名）接上；第二段是「第 N 话」时也接上
+        return when {
+            MangaStore.seriesName(parts[0]).isEmpty() -> parts[1] + " " + parts[0]
+            MangaStore.seriesName(parts[1]).isEmpty() -> parts[0] + " " + parts[1]
+            else -> parts[0]
+        }
     }
 }
 

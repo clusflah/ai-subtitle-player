@@ -135,9 +135,21 @@
     return pages;
   }
 
-  // ---- 已知网站：整话的图片地址在网页数据里，网页上一次只显示一张（翻页式），上面按图片认不出来 ----
-  let siteData;   // undefined 还没看过；null 不是这类网站
-  let siteResult = null;
+  // ---- 已知网站：整话的图片地址或上下话信息在网页脚本数据里（翻页式或单页应用） ----
+  let smhHref = '';
+  let smhData;
+  let dm5Cid = 0;
+  let dm5Pages = null;
+  let dm5Fetching = false;
+  let copyRetries = 0;
+
+  function encodePath(p) {
+    return encodeURI(p).replace(/%25([0-9A-Fa-f]{2})/g, '%$1').replace(/#/g, '%23');
+  }
+
+  function normPath(p) {
+    try { return decodeURIComponent(p); } catch (e) { return p; }
+  }
 
   // 看漫画（manhuagui）：手机版调 SMH.reader({images, sl, nextId, prevId})，电脑版调 SMH.imgData({path, files, sl, nextId, prevId})。
   // 把这段脚本再跑一遍，临时换成只记下参数的（返回什么都不做的对象，网页不会重新初始化）
@@ -162,43 +174,193 @@
     return d && Array.isArray(d.images) && d.images.length ? d : null;
   }
 
-  function siteManga() {
-    if (window !== window.top) return null;
-    if (siteResult) return siteResult;
-    if (siteData === undefined) {
-      try { siteData = manhuaguiData(); } catch (e) { siteData = null; }
+  function manhuaguiManga() {
+    const baseHref = location.href.split('#')[0];
+    if (smhHref !== baseHref) {
+      smhHref = baseHref;
+      smhData = null;
     }
-    const d = siteData;
+    if (!smhData) {
+      try { smhData = manhuaguiData(); } catch (e) { smhData = null; }
+    }
+    const d = smhData;
     if (!d) return null;
-    // 图片服务器（有好几个）按网页上正在显示的那张定，还没加载出 img 时默认用 i.hamreus.com
-    const set = new Set(d.images);
+    // 图片服务器按网页上正在显示的那张定（d.images 里常混着未编码中文与已编码的 %20/%E6，两边都解码后再比对）
+    const set = new Set(d.images.map(normPath));
     const shown = [...document.images].find((i) => {
-      try { return set.has(decodeURIComponent(new URL(i.currentSrc || i.src).pathname)); } catch (e) { return false; }
+      try { return set.has(normPath(new URL(i.currentSrc || i.src).pathname)); } catch (e) { return false; }
     });
     const origin = shown ? new URL(shown.currentSrc || shown.src).origin : 'https://i.hamreus.com';
     const q = d.sl ? '?e=' + d.sl.e + '&m=' + d.sl.m : '';
     const dir = location.pathname.replace(/[^/]*$/, '');
     const chapter = (id) => (id ? new URL(dir + id + '.html', location.href).href : '');
-    siteResult = {
-      pages: d.images.map((p) => origin + encodeURI(p) + q),
+    const bname = d.bname || d.bookName || '';
+    const cname = d.cname || d.chapterTitle || '';
+    return {
+      pages: d.images.map((p) => origin + encodePath(p) + q),
       next: chapter(d.nextId),
       prev: chapter(d.prevId),
       toc: new URL(dir, location.href).href,
+      title: [bname, cname].filter(Boolean).join(' '),
     };
-    return siteResult;
+  }
+
+  // 动漫屋（dm5.com / m.dm5.com）：手机版整话签名地址在 window.newImgs，桌面翻页版通过 chapterfun.ashx 按页获取
+  function fetchDm5(cid, count) {
+    if (dm5Fetching) return;
+    dm5Fetching = true;
+    (async () => {
+      const mid = window.DM5_MID || '';
+      const dt = window.DM5_VIEWSIGN_DT || '';
+      const sign = window.DM5_VIEWSIGN || '';
+      const keyEl = document.getElementById('dm5_key');
+      const key = (keyEl && keyEl.value) || '';
+      const base = location.pathname.replace(/\/?$/, '/');
+      const out = [];
+      const seen = new Set();
+      let page = 1;
+      const limit = Math.min(count, 150);
+      while (page <= limit && out.length < count) {
+        const u = base + 'chapterfun.ashx?cid=' + encodeURIComponent(cid) +
+          '&page=' + page + '&key=' + encodeURIComponent(key) +
+          '&language=1&gtk=6&_cid=' + encodeURIComponent(cid) +
+          '&_mid=' + encodeURIComponent(mid) +
+          '&_dt=' + encodeURIComponent(dt) +
+          '&_sign=' + encodeURIComponent(sign);
+        const r = await fetch(u, {
+          credentials: 'include',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        if (!r.ok) break;
+        const js = await r.text();
+        if (!js) break;
+        let arr = null;
+        try { arr = (0, eval)(js); } catch (e) {}
+        if (!Array.isArray(arr) || !arr.length) break;
+        let added = 0;
+        for (const item of arr) {
+          const full = abs(String(item || ''));
+          if (full && !seen.has(full)) {
+            seen.add(full);
+            out.push(full);
+            added++;
+          }
+        }
+        if (!added) break;
+        page += added;
+      }
+      if (out.length && Number(window.DM5_CID) === cid) {
+        dm5Cid = cid;
+        dm5Pages = out;
+        later(50);
+      }
+    })().catch(() => {}).finally(() => { dm5Fetching = false; });
+  }
+
+  function dm5Data() {
+    if (Array.isArray(window.newImgs) && window.newImgs.length) {
+      const pages = window.newImgs.map((u) => abs(String(u || ''))).filter((u) => /^https?:/.test(u));
+      if (pages.length) return { pages };
+    }
+    const cid = Number(window.DM5_CID || 0);
+    const count = Number(window.DM5_IMAGE_COUNT || 0);
+    if (cid > 0 && count > 0) {
+      if (dm5Cid === cid && dm5Pages && dm5Pages.length) return { pages: dm5Pages };
+      fetchDm5(cid, count);
+    }
+    return null;
+  }
+
+  // 拷贝漫画 H5（mangacopy.com 等 Vue 单页应用）：上下话按钮不是 <a> 链接，章节图片和 prev/next UUID 在 Vue 组件 content.chapter 里
+  function mangacopyData() {
+    const app = document.getElementById('app');
+    const root = app && app.__vue__;
+    if (!root) {
+      if (/\/comicContent\//i.test(location.pathname) && copyRetries++ < 20) later(500);
+      return null;
+    }
+    let comp = null;
+    (function walk(v, d) {
+      if (!v || comp || d > 10) return;
+      const c = v.$data && v.$data.content;
+      if (c && c.chapter && Array.isArray(c.chapter.contents)) { comp = v; return; }
+      for (const ch of (v.$children || [])) walk(ch, d + 1);
+    })(root, 0);
+    if (!comp) {
+      if (/\/comicContent\//i.test(location.pathname) && copyRetries++ < 20) later(500);
+      return null;
+    }
+    const content = comp.$data.content || {};
+    const ch = content.chapter || {};
+    const comic = content.comic || {};
+    const pages = (ch.contents || []).map((x) => (x && x.url ? abs(x.url) : '')).filter((u) => /^https?:/.test(u));
+    if (!pages.length) {
+      if (/\/comicContent\//i.test(location.pathname) && copyRetries++ < 20) later(500);
+      return null;
+    }
+    const pathWord = ch.comic_path_word || comic.path_word || (root.$route && root.$route.params && root.$route.params.pathWord) || '';
+    const router = root.$router;
+    const chapterUrl = (uuid) => {
+      if (!uuid || !pathWord) return '';
+      if (router && typeof router.resolve === 'function') {
+        try {
+          const r = router.resolve({ name: 'comicContent', params: { pathWord, uuid } });
+          if (r && r.href) return abs(r.href);
+        } catch (e) {}
+      }
+      const m = location.pathname.match(/^(.*\/comicContent\/)[^/]+\/[^/]+/i);
+      return abs((m ? m[1] : '/h5/comicContent/') + encodeURIComponent(pathWord) + '/' + encodeURIComponent(uuid));
+    };
+    let toc = '';
+    if (pathWord) {
+      if (router && typeof router.resolve === 'function') {
+        try {
+          const r = router.resolve({ name: 'details', params: { type: 'comic', pathWord } });
+          if (r && r.href) toc = abs(r.href);
+        } catch (e) {}
+      }
+      if (!toc) {
+        const prefix = /^\/h5\//i.test(location.pathname) ? '/h5' : '';
+        toc = abs(prefix + '/details/comic/' + encodeURIComponent(pathWord));
+      }
+    }
+    return {
+      pages,
+      next: chapterUrl(ch.next),
+      prev: chapterUrl(ch.prev),
+      toc,
+      title: [comic.name, ch.name].filter(Boolean).join(' '),
+    };
+  }
+
+  function siteManga() {
+    if (window !== window.top) return null;
+    return manhuaguiManga() || dm5Data() || mangacopyData();
   }
 
   const NEXT = /^\s*(下一[话話章回节節集卷页頁]|下[一]?章|下一篇|next\s*(chapter|episode|›|»|>)?|›|»)\s*[>›»]?\s*$/i;
   const PREV = /^\s*[<‹«]?\s*(上一[话話章回节節集卷]|上[一]?章|上一篇|prev(ious)?\s*(chapter|episode)?|‹|«)\s*$/i;
   const TOC = /^\s*(目录|目錄|章节目录|章節目錄|章节列表|返回目录|返回目錄|全部章节|漫画首页|漫畫首頁|详情|詳情|table of contents|chapters?)\s*$/i;
 
+  function jsNavUrl(s) {
+    if (!s) return '';
+    const m = s.match(/(?:pushHistory|location\.(?:assign|replace)|window\.open)\s*\(\s*['"]([^'"]+)['"]/i) ||
+      s.match(/(?:window\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/i);
+    if (!m) return '';
+    const target = m[1].trim();
+    if (!/^(\/|https?:\/\/|\.\.?\/)/i.test(target) && !/\.(html?|php|aspx?)([?#]|$)/i.test(target)) return '';
+    return abs(target);
+  }
+
   function link(re) {
     for (const a of document.querySelectorAll('a[href]')) {
       const t = (a.textContent || a.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
       if (!t || t.length > 20 || !re.test(t)) continue;
-      const href = a.getAttribute('href') || '';
-      if (!href || /^(javascript:|#)/i.test(href)) continue;
-      const u = abs(href);
+      const href = (a.getAttribute('href') || '').trim();
+      if (!href || href.startsWith('#')) continue;
+      const u = /^javascript:/i.test(href)
+        ? (jsNavUrl(href) || jsNavUrl(a.getAttribute('onclick') || ''))
+        : abs(href);
       if (!/^https?:/.test(u) || u === location.href) continue;
       return u;
     }
@@ -212,11 +374,11 @@
     const top = window === window.top;
     let site = null;
     try { site = siteManga(); } catch (e) {}
-    if (site && site.pages.length > pages.length) pages = site.pages;
+    if (site && site.pages && site.pages.length && site.pages.length >= pages.length) pages = site.pages;
     const info = {
       frame: location.href,
       top,
-      title: top ? document.title : '',
+      title: (site && site.title) || (top ? document.title : ''),
       pages,
       next: (site && site.next) || (top || pages.length ? link(NEXT) : ''),
       prev: (site && site.prev) || (top || pages.length ? link(PREV) : ''),
@@ -258,6 +420,29 @@
   addEventListener('load', () => later(300));
   // 图片加载完尺寸才知道（DOM 没变）：也重新看
   document.addEventListener('load', (e) => { if (e.target && e.target.tagName === 'IMG') later(idle ? 5000 : 1000); }, true);
+
+  // 单页应用切换章节（pushState / replaceState / popstate）：重新扫描新章节
+  const routeKey = () => location.pathname + location.search + (location.hash.startsWith('#/') ? location.hash : '');
+  let lastRoute = routeKey();
+  function onRouteChange() {
+    const cur = routeKey();
+    if (cur === lastRoute) return;
+    lastRoute = cur;
+    copyRetries = 0;
+    later(350);
+  }
+  addEventListener('popstate', onRouteChange);
+  addEventListener('hashchange', onRouteChange);
+  for (const k of ['pushState', 'replaceState']) {
+    const orig = history[k];
+    if (typeof orig === 'function') {
+      history[k] = function () {
+        const r = orig.apply(this, arguments);
+        onRouteChange();
+        return r;
+      };
+    }
+  }
 
   // ---- 交出网页里解密出来的图（App 的阅读模式要的时候调） ----
   // 一张一张来：还没加载的要滚过去等网页加载、解密，几张同时滚会互相抢

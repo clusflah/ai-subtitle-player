@@ -64,7 +64,7 @@ object MangaFetcher {
 
     private fun web(page: MangaPage): ByteArray {
         val req = Request.Builder().url(page.url).apply {
-            header("Referer", page.referer!!)
+            header("Referer", page.referer!!.substringBefore('#'))
             header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
             userAgent?.let { header("User-Agent", it) }
             runCatching { android.webkit.CookieManager.getInstance().getCookie(page.url) }.getOrNull()
