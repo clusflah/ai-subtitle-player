@@ -56,16 +56,23 @@ object EmbeddedSubtitles {
 
     private val ASS_TAGS = Regex("\\{\\\\[^}]*\\}")
     private val demuxCollectors = ConcurrentHashMap<Int, TextCollector>()
+    private val currentExtractor = ThreadLocal<Extractor?>()
+    private val matroskaBlockTimeField by lazy {
+        runCatching {
+            MatroskaExtractor::class.java.getDeclaredField("blockTimeUs").apply { isAccessible = true }
+        }.getOrNull()
+    }
+
+    private fun currentBlockTimeUs(): Long {
+        val ext = currentExtractor.get() as? MatroskaExtractor ?: return 0L
+        return runCatching { matroskaBlockTimeField?.getLong(ext) ?: 0L }.getOrDefault(0L)
+    }
 
     @Volatile
     private var demuxListener: ((List<Track>) -> Unit)? = null
 
-    @Volatile
-    private var lastDemuxNotifyMs = 0L
-
     fun resetDemuxCache() {
         demuxCollectors.clear()
-        lastDemuxNotifyMs = 0L
     }
 
     fun setDemuxListener(listener: ((List<Track>) -> Unit)?) {
@@ -75,15 +82,18 @@ object EmbeddedSubtitles {
     fun demuxedTracks(): List<Track> =
         demuxCollectors.values.map { it.toTrack() }.filter { it.cues.isNotEmpty() || it.imageBased }
 
-    private fun notifyDemuxUpdated(force: Boolean = false) {
+    private fun notifyDemuxUpdated() {
         val listener = demuxListener ?: return
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (!force && now - lastDemuxNotifyMs < 400L) return
-        lastDemuxNotifyMs = now
         listener(demuxedTracks())
     }
 
-    private fun recordDemuxedCues(format: Format, cues: CuesWithTiming) {
+    private fun recordDemuxedCues(
+        format: Format,
+        startUs: Long,
+        durationUs: Long,
+        cues: List<androidx.media3.common.text.Cue>,
+    ) {
+        if (startUs == C.TIME_UNSET || startUs < 0L) return
         val id = format.id?.toIntOrNull()
             ?: demuxCollectors.entries.firstOrNull { (_, c) ->
                 c.format?.language == format.language && c.format?.label == format.label
@@ -93,61 +103,72 @@ object EmbeddedSubtitles {
             TextCollector(id).also { it.format(format) }
         }
         if (collector.format == null) collector.format(format)
-        val lines = cues.cues.mapNotNull { it.text?.toString() }
+        val lines = cues.mapNotNull { it.text?.toString() }
             .flatMap { it.split('\n') }
             .map { it.replace(ASS_TAGS, "").trim() }
             .filter { it.isNotEmpty() }
-        if (collector.addSample(cues.startTimeUs, cues.durationUs, lines)) {
-            notifyDemuxUpdated(force = collector.sampleCount() <= 3)
+        if (collector.addSample(startUs, durationUs, lines)) {
+            notifyDemuxUpdated()
         }
     }
 
-    fun wrapSubtitleParserFactory(delegate: Media3SubtitleParser.Factory): Media3SubtitleParser.Factory {
-        val ssaFactory = DefaultSubtitleParserFactory()
-        return object : Media3SubtitleParser.Factory {
-            override fun supportsFormat(format: Format): Boolean = delegate.supportsFormat(format)
+    private class WrappedSubtitleParserFactory(
+        private val delegate: Media3SubtitleParser.Factory,
+    ) : Media3SubtitleParser.Factory {
+        private val ssaFactory = DefaultSubtitleParserFactory()
 
-            override fun getCueReplacementBehavior(format: Format): Int = delegate.getCueReplacementBehavior(format)
+        override fun supportsFormat(format: Format): Boolean = delegate.supportsFormat(format)
 
-            override fun create(format: Format): Media3SubtitleParser {
-                val primary = delegate.create(format)
-                val isAss = format.sampleMimeType == MimeTypes.TEXT_SSA || format.codecs == MimeTypes.TEXT_SSA
-                val ssaFallback = if (isAss && ssaFactory.supportsFormat(format)) {
-                    runCatching { ssaFactory.create(format) }.getOrNull()
-                } else null
-                return object : Media3SubtitleParser {
-                    override fun parse(
-                        data: ByteArray,
-                        offset: Int,
-                        length: Int,
-                        outputOptions: Media3SubtitleParser.OutputOptions,
-                        output: androidx.media3.common.util.Consumer<CuesWithTiming>,
-                    ) {
-                        var emitted = false
-                        primary.parse(data, offset, length, outputOptions) { c ->
-                            emitted = true
-                            recordDemuxedCues(format, c)
-                            output.accept(c)
-                        }
-                        if (!emitted && ssaFallback != null) {
-                            runCatching {
-                                ssaFallback.parse(data, offset, length, Media3SubtitleParser.OutputOptions.allCues()) { c ->
-                                    recordDemuxedCues(format, c)
+        override fun getCueReplacementBehavior(format: Format): Int = delegate.getCueReplacementBehavior(format)
+
+        override fun create(format: Format): Media3SubtitleParser {
+            val primary = delegate.create(format)
+            val isAss = format.sampleMimeType == MimeTypes.TEXT_SSA || format.codecs == MimeTypes.TEXT_SSA
+            val ssaFallback = if (isAss && ssaFactory.supportsFormat(format)) {
+                runCatching { ssaFactory.create(format) }.getOrNull()
+            } else null
+            return object : Media3SubtitleParser {
+                override fun parse(
+                    data: ByteArray,
+                    offset: Int,
+                    length: Int,
+                    outputOptions: Media3SubtitleParser.OutputOptions,
+                    output: androidx.media3.common.util.Consumer<CuesWithTiming>,
+                ) {
+                    var emitted = false
+                    primary.parse(data, offset, length, outputOptions) { c ->
+                        emitted = true
+                        // 普通字幕轨由 SubtitleTranscodingTrackOutput 加上 sampleTimeUs 后发给 TapTrackOutput，这里不重复记（避免 MKV 相对时间 00:00 造成时间轴错乱）
+                        output.accept(c)
+                    }
+                    // ASS/SSA 字幕轨在 AssMatroskaExtractor 下由 libass 直接渲染，primary 为 NoOp，需在此处结合当前 MKV 块时间戳记录
+                    if (!emitted && ssaFallback != null) {
+                        val sampleTimeUs = currentBlockTimeUs()
+                        runCatching {
+                            ssaFallback.parse(data, offset, length, Media3SubtitleParser.OutputOptions.allCues()) { c ->
+                                val realStartUs = when {
+                                    c.startTimeUs == C.TIME_UNSET -> sampleTimeUs
+                                    format.subsampleOffsetUs == Format.OFFSET_SAMPLE_RELATIVE -> sampleTimeUs + c.startTimeUs
+                                    else -> c.startTimeUs + format.subsampleOffsetUs
                                 }
+                                recordDemuxedCues(format, realStartUs, c.durationUs, c.cues)
                             }
                         }
                     }
+                }
 
-                    override fun getCueReplacementBehavior(): Int = primary.cueReplacementBehavior
+                override fun getCueReplacementBehavior(): Int = primary.cueReplacementBehavior
 
-                    override fun reset() {
-                        primary.reset()
-                        ssaFallback?.reset()
-                    }
+                override fun reset() {
+                    primary.reset()
+                    ssaFallback?.reset()
                 }
             }
         }
     }
+
+    fun wrapSubtitleParserFactory(delegate: Media3SubtitleParser.Factory): Media3SubtitleParser.Factory =
+        if (delegate is WrappedSubtitleParserFactory) delegate else WrappedSubtitleParserFactory(delegate)
 
     fun wrapExtractor(extractor: Extractor): Extractor {
         if (extractor is MatroskaExtractor) {
@@ -155,7 +176,7 @@ object EmbeddedSubtitles {
                 val field = MatroskaExtractor::class.java.getDeclaredField("subtitleParserFactory")
                 field.isAccessible = true
                 val current = field.get(extractor) as? Media3SubtitleParser.Factory
-                if (current != null) {
+                if (current != null && current !is WrappedSubtitleParserFactory) {
                     field.set(extractor, wrapSubtitleParserFactory(current))
                 }
             }
@@ -164,8 +185,15 @@ object EmbeddedSubtitles {
             override fun getUnderlyingImplementation(): Extractor = extractor.underlyingImplementation
             override fun sniff(input: androidx.media3.extractor.ExtractorInput): Boolean = extractor.sniff(input)
             override fun init(output: ExtractorOutput) = extractor.init(TapExtractorOutput(output))
-            override fun read(input: androidx.media3.extractor.ExtractorInput, seekPosition: PositionHolder): Int =
-                extractor.read(input, seekPosition)
+            override fun read(input: androidx.media3.extractor.ExtractorInput, seekPosition: PositionHolder): Int {
+                val prev = currentExtractor.get()
+                currentExtractor.set(extractor)
+                return try {
+                    extractor.read(input, seekPosition)
+                } finally {
+                    currentExtractor.set(prev)
+                }
+            }
             override fun seek(position: Long, timeUs: Long) = extractor.seek(position, timeUs)
             override fun release() = extractor.release()
         }
@@ -204,7 +232,7 @@ object EmbeddedSubtitles {
 
         override fun sampleMetadata(timeUs: Long, flags: Int, size: Int, offset: Int, cryptoData: TrackOutput.CryptoData?) {
             val added = collector.onSampleMetadata(timeUs, size, offset)
-            if (added) notifyDemuxUpdated(force = collector.sampleCount() <= 3)
+            if (added) notifyDemuxUpdated()
             downstream.sampleMetadata(timeUs, flags, size, offset, cryptoData)
         }
     }
@@ -301,7 +329,8 @@ object EmbeddedSubtitles {
                         if (sm.isSeekable) {
                             val targetUs = (startMs - 5_000L).coerceAtLeast(0L) * 1000L
                             val pt = sm.getSeekPoints(targetUs).first
-                            if (pt.position > pos + (2L shl 20)) {
+                            if (kotlin.math.abs(pt.position - pos) > (1L shl 20)) {
+                                output.texts.values.forEach { it.clearSamples() }
                                 adapter.seek(pt.position, pt.timeUs)
                                 position.position = pt.position
                                 result = Extractor.RESULT_SEEK
@@ -320,6 +349,18 @@ object EmbeddedSubtitles {
                     }
                 }
                 dataSource.close()
+                // MKV 读完文件末尾的 Cues 索引后会返回 RESULT_SEEK 跳回 0:00，此时直接改跳到当前播放位置附近，省去回 0:00 的多余连接
+                val sm = output.seekMap
+                if (!seekedToStart && startMs > 15_000L && output.tracksEnded && sm != null && result == Extractor.RESULT_SEEK) {
+                    seekedToStart = true
+                    if (sm.isSeekable) {
+                        val targetUs = (startMs - 5_000L).coerceAtLeast(0L) * 1000L
+                        val pt = sm.getSeekPoints(targetUs).first
+                        output.texts.values.forEach { it.clearSamples() }
+                        adapter.seek(pt.position, pt.timeUs)
+                        position.position = pt.position
+                    }
+                }
                 // 提取器要求跳到别处读（MP4 的 moov 在文件末尾等），重新打开
                 if (result == Extractor.RESULT_SEEK) start = position.position
             }
@@ -372,6 +413,12 @@ object EmbeddedSubtitles {
 
         @Synchronized
         fun sampleCount(): Int = samples.size
+
+        @Synchronized
+        fun clearSamples() {
+            samples.clear()
+            sampleKeys.clear()
+        }
 
         @Synchronized
         fun addSample(startUs: Long, durationUs: Long, lines: List<String>): Boolean {

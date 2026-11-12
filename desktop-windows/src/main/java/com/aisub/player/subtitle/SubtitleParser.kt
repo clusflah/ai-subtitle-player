@@ -105,11 +105,14 @@ object SubtitleParser {
             Cue(id, start, end, lines.joinToString(" "))
         }
 
-    /** 一行中文一行西文时，视为"译文 + 原文"的双语字幕。 */
-    private fun looksBilingual(first: String, second: String): Boolean =
-        hasCjk(first) != hasCjk(second)
+    /** 一行中文一行外文时，视为"译文 + 原文"的双语字幕（严格要求一行是汉字中文、另一行是有实际文字的外文，避免把韩语/日语/标点误判为已翻译中文）。 */
+    private fun looksBilingual(first: String, second: String): Boolean {
+        val s1 = com.aisub.player.translate.LanguageCheck.script(first) ?: return false
+        val s2 = com.aisub.player.translate.LanguageCheck.script(second) ?: return false
+        return (s1 == "zh") != (s2 == "zh")
+    }
 
-    private fun hasCjk(s: String) = s.any { CueSplitter.isCjk(it) }
+    private fun hasCjk(s: String) = com.aisub.player.translate.LanguageCheck.script(s) == "zh"
 
     private fun toMs(h: String, m: String, s: String, frac: String): Long {
         val hours = h.removeSuffix(":").toLongOrNull() ?: 0

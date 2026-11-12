@@ -607,8 +607,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 // 视频自带字幕和 AI 字幕同时显示时，把自带字幕抬高，避免叠在一起
                 val aiVisible = state.settings.showAiSubtitles && state.cues.isNotEmpty()
                 it.subtitleView?.setBottomPaddingFraction(if (aiVisible) 0.32f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
-                // 正在翻译直播自带字幕，或自带字幕已载入 AI 字幕显示原文：自带字幕不再原样显示，免得同一句出现两遍
-                val embeddedInAi = aiVisible && state.settings.showOriginal && (state.embeddedTracks != null || state.extractingEmbedded)
+                // 正在翻译直播自带字幕，或自带字幕已载入 AI 字幕：自带字幕不再原样显示，免得同一句出现两遍
+                val embeddedInAi = aiVisible && (state.embeddedTracks != null || state.extractingEmbedded)
                 it.subtitleView?.visibility = if (state.liveCaptions || embeddedInAi) android.view.View.GONE else android.view.View.VISIBLE
             },
             modifier = Modifier.fillMaxSize(),
@@ -1386,8 +1386,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         SubtitleAction.GENERATE -> if (state.transcribing) vm.cancelAll() else { showTracks = false; generateTranslate = false; dialog = PlayerDialog.ASR_LANGUAGE }
                         SubtitleAction.TRANSLATE -> when {
                             state.translating || state.extractingEmbedded || state.liveCaptions -> vm.cancelAll()
-                            // 当前还没有 AI 字幕，但视频有自带文字字幕：先提取自带字幕再翻译
-                            state.cues.isEmpty() -> { showTracks = false; chooseModel("选择翻译模型") { vm.extractEmbeddedSubtitles(translate = true) } }
+                            // 当前还没有 AI 字幕（或当前播放位置没有对应的字幕），且视频有自带文字字幕：读取自带字幕再翻译
+                            vm.shouldExtractEmbeddedOnTranslate() -> { showTracks = false; chooseModel("选择翻译模型") { vm.extractEmbeddedSubtitles(translate = true) } }
                             // 已经全部翻译过：换个模型重新翻译
                             state.cues.none { it.translation == null } -> { showTracks = false; chooseModel("重新翻译") { vm.retranslateAll() } }
                             else -> { showTracks = false; chooseModel("选择翻译模型") { vm.startTranslation() } }

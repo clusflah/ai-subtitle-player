@@ -377,14 +377,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val embeddedCueListener = object : Player.Listener {
         override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
             if (!streamingEmbeddedTranslate && _state.value.embeddedTracks == null) return
+            // 解复用拦截器已拿到精确容器时间戳和结束时间，不再用渲染回调生成 3.5s 近似字幕
+            if (EmbeddedSubtitles.demuxedTracks().any { it.cues.isNotEmpty() }) return
             val lines = captionLines(cueGroup.cues)
             if (lines.isEmpty()) return
-            val startMs = (if (cueGroup.presentationTimeUs != C.TIME_UNSET && cueGroup.presentationTimeUs > 0) {
-                cueGroup.presentationTimeUs / 1000
-            } else {
-                player.currentPosition
-            }).coerceAtLeast(0L)
+            val startMs = subtitleTime().coerceAtLeast(0L)
             val cue = SubtitleParser.cueOf(1, startMs, startMs + 3500L, lines)
+            if (_state.value.cues.any { it.text == cue.text && kotlin.math.abs(it.startMs - startMs) < 10_000L }) return
             val fallbackTrack = EmbeddedSubtitles.Track(
                 id = streamingEmbeddedTrackId ?: 0,
                 language = null,
@@ -825,13 +824,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val videoLanguage = store.loadAsrLanguage(uri)
         // 直播字幕的时间是那一次直播的时间轴，下次打开对不上（会一遍遍冒出旧字幕）：不读缓存，旧版存下的也清掉
         if (entry.isLive) store.deleteCues(uri)
-        // 旧版把俄语等非拉丁文字误判成「不用翻译」、原文直接当了译文，这里清掉让它重新翻译
+        // 旧版把俄语等非拉丁文字误判成「不用翻译」、两行外文误判成双语，或流媒体解复用存下了 0:00 的错位字幕，这里清掉或修正
         val cached = if (entry.isLive) emptyList() else store.load(uri).let { cues ->
-            val s = _state.value.settings
-            val asrLanguage = videoLanguage ?: s.asrLanguage
-            cues.map {
-                if (it.translation == it.text && !LanguageCheck.alreadyTarget(it.text, s.ttsLocale, asrLanguage, ChineseScript::variant))
-                    it.copy(translation = null) else it
+            val remote = isRemote(entry)
+            if (cues.count { it.startMs == 0L } >= 2 || (remote && cues.any { it.startMs == 0L })) {
+                store.deleteCues(uri)
+                emptyList()
+            } else {
+                val s = _state.value.settings
+                val asrLanguage = videoLanguage ?: s.asrLanguage
+                cues.map { sanitizeEmbeddedCue(it, s.ttsLocale, asrLanguage) }
             }
         }
         ttsReader.reset()
@@ -1998,6 +2000,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 清理非目标语言的预填译文（例如把双语拆行或旧版误拆的韩/日文还原回原文并置空译文，确保大模型会翻译）。 */
+    private fun sanitizeEmbeddedCue(c: Cue, targetLocale: String?, asrLanguage: String): Cue {
+        val tr = c.translation ?: return c
+        if (LanguageCheck.alreadyTarget(tr, targetLocale, asrLanguage, ChineseScript::variant)) return c
+        val combined = if (tr == c.text || tr.isBlank()) c.text else "$tr ${c.text}".trim()
+        return c.copy(text = combined, translation = null)
+    }
+
+    /** 点 AI 字幕面板的「翻译字幕」时，是否应该读取并翻译视频自带字幕。 */
+    fun shouldExtractEmbeddedOnTranslate(): Boolean {
+        val s = _state.value
+        if (s.cues.isEmpty()) return true
+        val hasTextSubtitles = !usingVlc && exoPlayer.currentTracks.groups.any { g ->
+            g.type == C.TRACK_TYPE_TEXT && (0 until g.length).any { i ->
+                val f = g.getTrackFormat(i)
+                (f.codecs ?: f.sampleMimeType) !in listOf("application/pgs", "application/vobsub", "application/dvbsubs")
+            }
+        }
+        if (!hasTextSubtitles) return false
+        val pos = player.currentPosition.coerceAtLeast(0L)
+        return s.asrInfo == null && s.embeddedTracks == null && s.cues.none { pos in (it.startMs - 15_000L)..(it.endMs + 30_000L) }
+    }
+
     /** 优先选当前播放器已选中的字幕轨（或已经开始流式提取的那条），否则选第一条有文字的字幕轨。 */
     private fun preferredEmbeddedTrack(tracks: List<EmbeddedSubtitles.Track>): EmbeddedSubtitles.Track? {
         val usable = tracks.filter { it.cues.isNotEmpty() }
@@ -2009,6 +2034,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 ?.takeIf { it.length > 0 }
                 ?.getTrackFormat(0)
             if (selected != null) {
+                selected.id?.toIntOrNull()?.let { sid -> usable.firstOrNull { it.id == sid } }?.let { return it }
                 usable.firstOrNull {
                     (selected.language != null && it.language == selected.language) &&
                         (selected.label == null || it.label == selected.label)
@@ -2026,11 +2052,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun applyProgressiveEmbeddedTrack(track: EmbeddedSubtitles.Track, translate: Boolean) {
         if (track.cues.isEmpty()) return
         if (streamingEmbeddedTrackId == null) streamingEmbeddedTrackId = track.id
+        val settings = _state.value.settings
+        val asrLanguage = _state.value.videoAsrLanguage ?: settings.asrLanguage
+        val cleanTrackCues = track.cues.map { sanitizeEmbeddedCue(it, settings.ttsLocale, asrLanguage) }
         var addedNew = false
         _state.update { s ->
             val byKey = s.cues.associateBy { it.startMs to it.text }
             var maxId = s.cues.maxOfOrNull { it.id } ?: 0
-            val merged = (s.cues + track.cues)
+            val merged = (s.cues + cleanTrackCues)
                 .distinctBy { it.startMs to it.text }
                 .sortedBy { it.startMs }
                 .map { c ->
@@ -2040,15 +2069,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         c.copy(id = ++maxId)
                     }
                 }
-            if (merged.size == s.cues.size && !addedNew) return@update s
+            if (merged.size == s.cues.size && !addedNew && s.embeddedTracks != null) return@update s
+            val updatedTrack = track.copy(cues = merged)
             s.copy(
                 cues = merged,
+                embeddedTracks = s.embeddedTracks ?: listOf(updatedTrack),
                 status = if (s.translating) s.status else "已读取视频自带字幕「${track.title}」${merged.size} 句",
                 error = null,
                 failedTask = null,
             )
         }
-        val settings = _state.value.settings
         if ((translate || (settings.autoTranslate && settings.createTranslator() != null)) &&
             _state.value.cues.any { it.translation == null }
         ) {
@@ -2077,11 +2107,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (translate && _state.value.cues.isNotEmpty()) startTranslation()
             return
         }
-        _state.value.embeddedTracks?.takeIf { it.any { t -> t.cues.isNotEmpty() } }?.let { tracks ->
-            offerEmbedded(tracks)
-            return
+        val remote = _state.value.current?.let(::isRemote) == true
+        if (!remote) {
+            _state.value.embeddedTracks?.takeIf { it.any { t -> t.cues.isNotEmpty() } }?.let { tracks ->
+                offerEmbedded(tracks)
+                return
+            }
         }
         transcribeJob?.cancel()
+        gapWatch?.cancel()
+        if (streamingEmbeddedTrackId == null) {
+            store.deleteCues(uri)
+            _state.update { it.copy(cues = emptyList(), embeddedTracks = null) }
+        }
         if (!usingVlc) {
             val texts = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
             if (texts.isNotEmpty() && (C.TRACK_TYPE_TEXT in exoPlayer.trackSelectionParameters.disabledTrackTypes || texts.none { it.isSelected })) {
@@ -2097,11 +2135,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 preferredEmbeddedTrack(partial)?.let { applyProgressiveEmbeddedTrack(it, streamingEmbeddedTranslate) }
             }
         }
-        preferredEmbeddedTrack(EmbeddedSubtitles.demuxedTracks())?.let {
+        val initialDemuxed = EmbeddedSubtitles.demuxedTracks()
+        preferredEmbeddedTrack(initialDemuxed)?.let {
             applyProgressiveEmbeddedTrack(it, translate)
         }
+        if (CloudRegistry.isCloud(uri.toString()) && initialDemuxed.any { it.cues.isNotEmpty() }) {
+            _state.update { it.copy(extractingEmbedded = false, embeddedTracks = initialDemuxed, progress = null, error = null) }
+            offerEmbedded(initialDemuxed)
+            return
+        }
         _state.update { it.copy(extractingEmbedded = true, status = "正在读取视频自带的字幕…", progress = 0f, error = null) }
-        val startMs = if (_state.value.current?.let(::isRemote) == true) player.currentPosition.coerceAtLeast(0L) else 0L
+        val startMs = if (remote) player.currentPosition.coerceAtLeast(0L) else 0L
         embeddedJob = viewModelScope.launch {
             try {
                 val tracks = withContext(Dispatchers.IO) {
@@ -2135,6 +2179,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (_state.value.cues.isNotEmpty() || hasPlayerTextTrack) {
                     _state.update {
                         it.copy(
+                            embeddedTracks = it.embeddedTracks ?: demuxed.takeIf { d -> d.isNotEmpty() },
                             status = if (it.cues.isNotEmpty()) "正在翻译视频自带字幕…" else "正在跟随播放翻译自带字幕…",
                             progress = null,
                             error = null,
@@ -2477,17 +2522,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             translateJob?.cancel()
         }
         streamingEmbeddedTrackId = track.id
-        var finalCues: List<Cue> = track.cues
+        val settings = _state.value.settings
+        val asrLanguage = _state.value.asrSettings.asrLanguage
+        val cleanTrackCues = track.cues.map { sanitizeEmbeddedCue(it, settings.ttsLocale, asrLanguage) }
+        var finalCues: List<Cue> = cleanTrackCues
         _state.update { s ->
             val merged = if (sameStreamingTrack && s.cues.isNotEmpty()) {
                 val byKey = s.cues.associateBy { it.startMs to it.text }
                 var maxId = s.cues.maxOfOrNull { it.id } ?: 0
-                (s.cues + track.cues)
+                (s.cues + cleanTrackCues)
                     .distinctBy { it.startMs to it.text }
                     .sortedBy { it.startMs }
                     .map { c -> byKey[c.startMs to c.text] ?: c.copy(id = ++maxId) }
             } else {
-                track.cues
+                cleanTrackCues
             }
             finalCues = merged
             s.copy(
@@ -2499,8 +2547,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         dropCoverage(video)
-        store.save(video, finalCues)
-        val settings = _state.value.settings
+        if (_state.value.current?.let(::isRemote) != true) {
+            store.save(video, finalCues)
+        }
         val translate = translateEmbedded || streamingEmbeddedTranslate
         translateEmbedded = false
         if (finalCues.none { it.translation == null }) return

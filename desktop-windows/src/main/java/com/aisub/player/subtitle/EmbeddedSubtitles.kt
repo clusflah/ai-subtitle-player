@@ -175,6 +175,9 @@ object EmbeddedSubtitles {
                 val cmd = ArrayList<String>()
                 cmd += ffmpeg
                 cmd += listOf("-nostdin", "-hide_banner", "-y")
+                if (isHttp) {
+                    cmd += listOf("-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2")
+                }
                 cmd += headerArgs
                 if (isHttp && startMs > 15_000L) {
                     val seekSec = "%.3f".format(Locale.US, (startMs - 5_000L).coerceAtLeast(0L) / 1000.0)
