@@ -18,6 +18,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import com.aisub.player.desktop.DesktopBinaryFinder
 import com.aisub.player.desktop.DesktopLiveRelay
+import com.aisub.player.desktop.DesktopPlayerEngine
 import com.aisub.player.live.LiveHeaders
 import com.aisub.player.remote.AuthRegistry
 import com.aisub.player.remote.Endpoints
@@ -177,9 +178,10 @@ class ExoAudioDecoder(
             if (relaySession != null) {
                 var relayUsed = false
                 try {
-                    val asrStream = relaySession.openAsrStream(leadBackMs = 1_000L, waitMs = 8_000L)
+                    val asrStream = relaySession.openAsrStream(leadBackMs = 1_500L, waitMs = 10_000L)
                     if (asrStream != null) {
                         relayUsed = true
+                        DesktopPlayerEngine.activePlayer?.ensureAttachedToLiveRelay(relaySession)
                         decodeFromRelayStream(
                             ffmpegExe = ffmpeg,
                             session = relaySession,
@@ -246,12 +248,16 @@ class ExoAudioDecoder(
             ffmpegExe,
             "-hide_banner",
             "-loglevel", "error",
+            "-probesize", "4096",
+            "-analyzeduration", "100000",
+            "-fflags", "+nobuffer+discardcorrupt",
             "-f", "mpegts",
             "-i", "pipe:0",
             "-vn",
             "-ac", "1",
             "-ar", targetRate.toString(),
             "-af", "aresample=async=1000",
+            "-flush_packets", "1",
             "-f", "f32le",
             "-acodec", "pcm_f32le",
             "pipe:1",
@@ -289,6 +295,7 @@ class ExoAudioDecoder(
 
         var totalSamples = 0L
         var lastTickMs = System.currentTimeMillis()
+        var firstTickSent = false
         try {
             val buf = ByteArray(16384)
             var leftover = 0
@@ -308,7 +315,13 @@ class ExoAudioDecoder(
                     val emittedMs = totalSamples * 1000L / targetRate
                     relayPlayer.emittedMs = emittedMs
                     val now = System.currentTimeMillis()
-                    if (now - lastTickMs >= 240L) {
+                    if (!firstTickSent && emittedMs > 0L) {
+                        firstTickSent = true
+                        lastTickMs = now
+                        // 首包连续触发两次相同 emittedMs 的回调，使 MainViewModel.runLive 的 steady 条件立即成立并建立首个时间轴对照点
+                        onTick?.invoke(relayPlayer, emittedMs)
+                        onTick?.invoke(relayPlayer, emittedMs)
+                    } else if (now - lastTickMs >= 240L) {
                         lastTickMs = now
                         onTick?.invoke(relayPlayer, emittedMs)
                     }

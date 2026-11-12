@@ -242,4 +242,106 @@ class DesktopLiveRelayTest {
         assertEquals(48_200L, LiveTimeline.periodPosition(screenPlayer))
         assertEquals(mappedCueStart, LiveTimeline.periodPosition(screenPlayer))
     }
+
+    private fun buildAudioPesPacket(pid: Int, ptsMs: Long): ByteArray {
+        val pkt = ByteArray(TS_PACKET_SIZE) { 0x00 }
+        pkt[0] = 0x47
+        pkt[1] = (0x40 or ((pid ushr 8) and 0x1F)).toByte()
+        pkt[2] = (pid and 0xFF).toByte()
+        pkt[3] = 0x10 // payload only
+        val off = 4
+        pkt[off] = 0x00; pkt[off + 1] = 0x00; pkt[off + 2] = 0x01
+        pkt[off + 3] = 0xC0.toByte() // audio stream_id
+        pkt[off + 4] = 0x00; pkt[off + 5] = 0x00
+        pkt[off + 6] = 0x80.toByte()
+        pkt[off + 7] = 0x80.toByte() // PTS present
+        pkt[off + 8] = 0x05
+        val ticks = ptsMs * 90L
+        pkt[off + 9] = (0x21L or (((ticks ushr 30) and 0x07L) shl 1)).toByte()
+        pkt[off + 10] = ((ticks ushr 22) and 0xFFL).toByte()
+        pkt[off + 11] = (0x01L or (((ticks ushr 15) and 0x7FL) shl 1)).toByte()
+        pkt[off + 12] = ((ticks ushr 7) and 0xFFL).toByte()
+        pkt[off + 13] = (0x01L or ((ticks and 0x7FL) shl 1)).toByte()
+        return pkt
+    }
+
+    @Test
+    fun chunkerDoesNotInflateTimelineOnBFrameReorderingAndAudioMuxLag() {
+        val chunks = ArrayList<TsChunk>()
+        var detectedAudioLag = 0L
+        val chunker = MpegTsChunker(
+            initialTimelineMs = 10_000L,
+            onAudioLagMs = { detectedAudioLag = it },
+            onChunk = { chunks.add(it) },
+        )
+        chunker.feed(buildPatPacket())
+        chunker.feed(buildPmtPacket(videoPid = 256, audioPid = 257))
+
+        // 模拟真实 4K 50fps 直播流：视频含 B 帧重排，且音频 PTS 恒定滞后视频高水位约 320ms
+        val videoPtsSeq = longArrayOf(
+            1_000L, 1_120L, 1_040L, 1_020L, 1_060L, 1_080L, 1_100L,
+            1_240L, 1_160L, 1_140L, 1_180L, 1_200L, 1_220L,
+            2_000L,
+        )
+        for (i in videoPtsSeq.indices) {
+            val vPts = videoPtsSeq[i]
+            chunker.feed(buildVideoPesPacket(256, vPts, isKeyframe = (vPts == 1_000L || vPts == 2_000L)), nowWallMs = 1_000L + i * 20L)
+            // 每隔 2 帧交织一个滞后 320ms 的音频 PES 包
+            if (i % 2 == 1) {
+                chunker.feed(buildAudioPesPacket(257, vPts - 320L), nowWallMs = 1_000L + i * 20L)
+            }
+        }
+        chunker.flushCurrentChunk()
+
+        // 1_000ms -> 2_000ms 真实跨度仅 1_000ms（末包自成一片故 endMs = startMs + 40ms = 11_040ms），绝不因 B 帧与音视频交织暴涨
+        assertEquals(11_000L, chunks.last().startMs)
+        assertEquals(11_040L, chunks.last().endMs)
+        assertTrue(detectedAudioLag in 200L..450L)
+    }
+
+    @Test
+    fun audioOnlyStreamFiltersOutVideoPacketsAndCompensatesAudioMuxLag() {
+        val ring = RelayRingBuffer(initialTimelineMs = 10_000L)
+        val chunker = MpegTsChunker(
+            initialTimelineMs = 10_000L,
+            onPat = { ring.updatePat(it) },
+            onPmt = { ring.updatePmt(it) },
+            onPids = { v, a -> ring.updatePids(v, a) },
+            onAudioLagMs = { ring.updateAudioLagMs(it) },
+            onChunk = { ring.append(it) },
+        )
+        chunker.feed(buildPatPacket())
+        chunker.feed(buildPmtPacket(videoPid = 256, audioPid = 257))
+        chunker.feed(buildVideoPesPacket(256, 5_000L, isKeyframe = true))
+        chunker.feed(buildAudioPesPacket(257, 4_700L))
+        chunker.feed(buildVideoPesPacket(256, 5_500L, isKeyframe = false))
+        chunker.feed(buildAudioPesPacket(257, 5_200L))
+        chunker.flushCurrentChunk()
+
+        val asrStream = ring.openStream(
+            desiredContentMs = 10_000L,
+            waitFirstChunkMs = 100L,
+            requireKeyframe = false,
+            audioOnly = true,
+        )
+        assertNotNull(asrStream)
+        val buf = ByteArray(TS_PACKET_SIZE * 10)
+        // 读出预置 PAT+PMT 与两个分片的过滤后音频包
+        val n1 = asrStream!!.read(buf, 0, buf.size)
+        val n2 = asrStream.read(buf, n1, buf.size - n1)
+        val n3 = asrStream.read(buf, n1 + n2, buf.size - n1 - n2)
+        val totalRead = n1 + n2 + n3
+        asrStream.close()
+
+        assertEquals(0, totalRead % TS_PACKET_SIZE)
+        var off = 0
+        var audioCount = 0
+        while (off + TS_PACKET_SIZE <= totalRead) {
+            val pid = ((buf[off + 1].toInt() and 0x1F) shl 8) or (buf[off + 2].toInt() and 0xFF)
+            assertTrue("纯音频流不应包含视频 PID 256", pid != 256)
+            if (pid == 257) audioCount++
+            off += TS_PACKET_SIZE
+        }
+        assertEquals(2, audioCount)
+    }
 }

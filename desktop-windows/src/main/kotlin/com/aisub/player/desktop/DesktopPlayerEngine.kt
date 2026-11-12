@@ -517,10 +517,16 @@ class DesktopExoPlayer(
     private var liveFirstVlcTimeCalibrated: Boolean = false
 
     @Volatile
+    private var firstFrameRenderedNano: Long = 0L
+
+    @Volatile
     private var liveDesiredContentMs: Long = -1L
 
     @Volatile
     private var liveWindowStartContentMs: Long = 0L
+
+    private fun computeLiveWindowStartMs(session: DesktopLiveRelay.RelaySession): Long =
+        (session.oldestTimelineMs - 1_500L).coerceAtLeast(0L)
 
     private fun rawExtrapolatedPlayheadMs(compensateSpeakerLatency: Boolean): Long {
         val base = positionMsInternal
@@ -534,12 +540,20 @@ class DesktopExoPlayer(
 
     private fun currentLiveScreenContentMs(session: DesktopLiveRelay.RelaySession): Long {
         val actualConnStart = session.actualStartMsForConnection(liveRelayConnId)
+        val anchor = actualConnStart ?: liveContentBaseMs
         if (ffmpegRunning.get()) {
-            val anchor = actualConnStart ?: liveContentBaseMs
             return (anchor + positionMsInternal.coerceAtLeast(0L)).coerceIn(session.oldestTimelineMs, session.latestTimelineMs)
         }
+        if (!renderedFirstFrame.get() && !isCurrentItemAudioOnly) {
+            return anchor.coerceIn(session.oldestTimelineMs, session.latestTimelineMs)
+        }
         if (!liveFirstVlcTimeCalibrated) {
-            return (actualConnStart ?: liveContentBaseMs).coerceIn(session.oldestTimelineMs, session.latestTimelineMs)
+            val elapsed = if (firstFrameRenderedNano > 0L) {
+                ((System.nanoTime() - firstFrameRenderedNano) / 1_000_000L).coerceIn(0L, 1_500L)
+            } else {
+                0L
+            }
+            return (anchor + elapsed).coerceIn(session.oldestTimelineMs, session.latestTimelineMs)
         }
         val contentMs = liveContentBaseMs + rawExtrapolatedPlayheadMs(compensateSpeakerLatency = true)
         return contentMs.coerceIn(session.oldestTimelineMs, session.latestTimelineMs)
@@ -552,10 +566,10 @@ class DesktopExoPlayer(
                 return positionMsInternal
             }
             liveRelaySession?.takeIf { !it.isStopped }?.let { session ->
-                val oldest = session.oldestTimelineMs
-                liveWindowStartContentMs = oldest
+                val wStart = computeLiveWindowStartMs(session)
+                liveWindowStartContentMs = wStart
                 val contentMs = currentLiveScreenContentMs(session)
-                return (contentMs - oldest).coerceAtLeast(0L)
+                return (contentMs - wStart).coerceAtLeast(0L)
             }
             val raw = rawExtrapolatedPlayheadMs(compensateSpeakerLatency = !isCurrentMediaItemLive)
             val bounded = if (duration != C.TIME_UNSET && duration > 0) raw.coerceAtMost(duration) else raw
@@ -572,7 +586,9 @@ class DesktopExoPlayer(
     override val bufferedPosition: Long
         get() {
             liveRelaySession?.takeIf { !it.isStopped }?.let { session ->
-                return (session.latestTimelineMs - liveWindowStartContentMs).coerceAtLeast(currentPosition)
+                val wStart = computeLiveWindowStartMs(session)
+                liveWindowStartContentMs = wStart
+                return (session.latestTimelineMs - wStart).coerceAtLeast(currentPosition)
             }
             return (currentPosition + 5000L).let { if (duration != C.TIME_UNSET) it.coerceAtMost(duration) else it }
         }
@@ -626,7 +642,8 @@ class DesktopExoPlayer(
             override fun getWindow(windowIndex: Int, window: Window): Window {
                 val session = if (windowIndex == currentMediaItemIndex) liveRelaySession?.takeIf { !it.isStopped } else null
                 if (session != null) {
-                    val wStart = liveWindowStartContentMs
+                    val wStart = computeLiveWindowStartMs(session)
+                    liveWindowStartContentMs = wStart
                     window.windowStartTimeMs = DesktopLiveRelay.EPOCH_MS + wStart
                     window.positionInFirstPeriodUs = wStart * 1000L
                     window.durationUs = (session.latestTimelineMs - wStart).coerceAtLeast(1_000L) * 1000L
@@ -833,15 +850,18 @@ class DesktopExoPlayer(
         // 直播时移中继跳转：支持 delayLive 往回跳秒与 restoreLivePlayback(C.TIME_UNSET) 回到直播前沿，无需断开上游拉流
         val activeRelay = liveRelaySession?.takeIf { !it.isStopped }
         if (activeRelay != null) {
+            val wStart = computeLiveWindowStartMs(activeRelay)
+            liveWindowStartContentMs = wStart
             val desiredContent = if (positionMs == C.TIME_UNSET) {
                 -1L
             } else {
-                (liveWindowStartContentMs + positionMs.coerceAtLeast(0L))
+                (wStart + positionMs.coerceAtLeast(0L))
                     .coerceIn(activeRelay.oldestTimelineMs, activeRelay.latestTimelineMs)
             }
             liveDesiredContentMs = desiredContent
-            liveContentBaseMs = if (desiredContent >= 0L) desiredContent else activeRelay.latestTimelineMs
+            liveContentBaseMs = activeRelay.previewPlaybackStartMs(desiredContent)
             liveFirstVlcTimeCalibrated = false
+            firstFrameRenderedNano = 0L
             positionMsInternal = 0L
             positionAnchorNano = System.nanoTime()
             lastReportedMonotonicMs = -1L
@@ -1085,7 +1105,7 @@ class DesktopExoPlayer(
                     DesktopLiveRelay.acquire(playableUrl, headers)
                 }
                 if (session != null) {
-                    if (session.awaitFirstChunk(6_000L) && gen == mediaGeneration.get()) {
+                    if (session.awaitFirstChunk(15_000L) && gen == mediaGeneration.get()) {
                         val targetOffset = item.liveConfiguration.targetOffsetMs
                         val desired = when {
                             liveDesiredContentMs >= 0L -> liveDesiredContentMs
@@ -1094,9 +1114,10 @@ class DesktopExoPlayer(
                             else -> -1L
                         }
                         liveRelaySession = session
-                        liveWindowStartContentMs = session.oldestTimelineMs
-                        liveContentBaseMs = if (desired >= 0L) desired else session.latestTimelineMs
+                        liveWindowStartContentMs = computeLiveWindowStartMs(session)
+                        liveContentBaseMs = session.previewPlaybackStartMs(desired)
                         liveFirstVlcTimeCalibrated = false
+                        firstFrameRenderedNano = 0L
                         positionMsInternal = 0L
                         positionAnchorNano = System.nanoTime()
                         val (relayUrl, connId) = session.buildPlaybackUrl(desired)
@@ -1128,6 +1149,29 @@ class DesktopExoPlayer(
         }
     }
 
+    internal fun ensureAttachedToLiveRelay(session: DesktopLiveRelay.RelaySession) {
+        if (session.isStopped) return
+        val cur = liveRelaySession
+        if (cur === session && !cur.isStopped) return
+        vlcExecutor.execute {
+            if (session.isStopped || !isCurrentMediaItemLive) return@execute
+            val active = liveRelaySession
+            if (active === session && !active.isStopped) return@execute
+            session.retain()
+            releaseLiveRelay()
+            liveRelaySession = session
+            liveWindowStartContentMs = computeLiveWindowStartMs(session)
+            liveContentBaseMs = session.previewPlaybackStartMs(-1L)
+            liveFirstVlcTimeCalibrated = false
+            firstFrameRenderedNano = 0L
+            positionMsInternal = 0L
+            positionAnchorNano = System.nanoTime()
+            val nextGen = mediaGeneration.incrementAndGet()
+            Log.i("Voxtitle-sync", "主播放器自动绑定至活动直播时移中继[${session.id}]")
+            reconnectLiveRelayPlaybackOnExecutor(nextGen, session, -1L)
+        }
+    }
+
     private fun reconnectLiveRelayPlaybackOnExecutor(
         gen: Int,
         session: DesktopLiveRelay.RelaySession,
@@ -1136,6 +1180,7 @@ class DesktopExoPlayer(
         if (session.isStopped || gen != mediaGeneration.get()) return
         prepareStartRealtimeMs = System.currentTimeMillis()
         renderedFirstFrame.set(false)
+        firstFrameRenderedNano = 0L
         vlcPlayedCurrentItem = false
         vlcActivelyPlaying = false
         ffmpegAudioClockReady = false
@@ -1193,7 +1238,7 @@ class DesktopExoPlayer(
             if (url.startsWith("http://127.0.0.1:") || url.startsWith("http://localhost:")) {
                 options.add(":http-proxy=")
                 if (url.contains("/live/")) {
-                    options.add(":network-caching=500")
+                    options.add(":network-caching=300")
                 }
             }
             if (startPosMs > 0) {
@@ -1304,6 +1349,8 @@ class DesktopExoPlayer(
                 DesktopPlayerEngine.submitFrameBgraBuffer(w, h, buf)
             }
             if (renderedFirstFrame.compareAndSet(false, true)) {
+                firstFrameRenderedNano = System.nanoTime()
+                positionAnchorNano = firstFrameRenderedNano
                 val firstFrameCost = System.currentTimeMillis() - prepareStartRealtimeMs
                 Log.i(TAG, "VLC 首帧已渲染 (${w}x${h}), 总耗时=${firstFrameCost}ms")
                 vlcPlayedCurrentItem = true
@@ -1388,13 +1435,23 @@ class DesktopExoPlayer(
                     vlcActivelyPlaying = playWhenReady
                     liveRelaySession?.takeIf { !it.isStopped }?.let { session ->
                         val actualStart = session.actualStartMsForConnection(liveRelayConnId)
-                        if (actualStart != null) {
-                            if (!liveFirstVlcTimeCalibrated) {
-                                liveContentBaseMs = actualStart - newTime
+                        if (actualStart != null && (renderedFirstFrame.get() || isCurrentItemAudioOnly)) {
+                            if (!liveFirstVlcTimeCalibrated && newTime > 0L) {
+                                val elapsedFirstFrameMs = if (firstFrameRenderedNano > 0L) {
+                                    ((System.nanoTime() - firstFrameRenderedNano) / 1_000_000L).coerceIn(0L, 2_000L)
+                                } else {
+                                    0L
+                                }
+                                liveContentBaseMs = actualStart + elapsedFirstFrameMs - newTime
                                 liveFirstVlcTimeCalibrated = true
-                                Log.i("Voxtitle-sync", "直播 VLC 时钟已校准[${session.id}]: actualStart=${actualStart}ms, firstVlcTime=${newTime}ms, base=${liveContentBaseMs}ms")
-                            } else if (kotlin.math.abs(newTime - prevTime) > 10_000L && System.currentTimeMillis() - prepareStartRealtimeMs < 5_000L) {
-                                liveContentBaseMs = actualStart - newTime
+                                Log.i("Voxtitle-sync", "直播 VLC 时钟已校准[${session.id}]: actualStart=${actualStart}ms, firstVlcTime=${newTime}ms, elapsedFirstFrame=${elapsedFirstFrameMs}ms, base=${liveContentBaseMs}ms")
+                            } else if (liveFirstVlcTimeCalibrated && kotlin.math.abs(newTime - prevTime) > 5_000L) {
+                                val elapsedFirstFrameMs = if (firstFrameRenderedNano > 0L) {
+                                    ((System.nanoTime() - firstFrameRenderedNano) / 1_000_000L).coerceAtLeast(0L)
+                                } else {
+                                    0L
+                                }
+                                liveContentBaseMs = actualStart + elapsedFirstFrameMs - newTime
                             }
                         }
                     }
@@ -1476,7 +1533,16 @@ class DesktopExoPlayer(
             val currentSpu = mp.subpictures().track()
             for (d in mp.subpictures().trackDescriptions().orEmpty()) {
                 if (d.id() < 0) continue
-                val f = Format.Builder().setId("s${d.id()}").setLabel(d.description()).setSampleMimeType(MimeTypes.TEXT_UNKNOWN).build()
+                val desc = d.description().orEmpty()
+                // 直播流或 VLC 虚拟的 Closed captions / Teletext / DVB 图形字幕无法提取文本，标记为 APPLICATION_PGS 以便「一键字幕」按钮直接走 AI 实时语音识别
+                val isNonExtractableSpu = isCurrentMediaItemLive ||
+                    desc.contains("closed caption", ignoreCase = true) ||
+                    desc.contains("teletext", ignoreCase = true) ||
+                    desc.contains("dvb", ignoreCase = true) ||
+                    desc.contains("pgs", ignoreCase = true) ||
+                    desc.contains("vobsub", ignoreCase = true)
+                val mime = if (isNonExtractableSpu) MimeTypes.APPLICATION_PGS else MimeTypes.TEXT_UNKNOWN
+                val f = Format.Builder().setId("s${d.id()}").setLabel(desc).setSampleMimeType(mime).build()
                 groups.add(Tracks.Group(TrackGroup("s${d.id()}", f), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(d.id() == currentSpu)))
             }
             currentTracks = Tracks(groups)

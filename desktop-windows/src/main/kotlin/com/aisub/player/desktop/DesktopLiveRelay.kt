@@ -39,10 +39,13 @@ internal data class TsChunk(
  */
 internal class MpegTsChunker(
     private val minKeyframeCutMs: Long = 400L,
-    private val maxChunkDurationMs: Long = 900L,
-    private val maxChunkBytes: Int = 256 * 1024,
+    private val maxChunkDurationMs: Long = 1_200L,
+    private val maxChunkBytes: Int = 2 * 1024 * 1024,
+    initialTimelineMs: Long = 0L,
     private val onPat: (ByteArray) -> Unit = {},
     private val onPmt: (ByteArray) -> Unit = {},
+    private val onPids: (videoPid: Int, audioPid: Int) -> Unit = { _, _ -> },
+    private val onAudioLagMs: (Long) -> Unit = {},
     private val onChunk: (TsChunk) -> Unit,
 ) {
     private val carry = ByteArray(TS_PACKET_SIZE * 2)
@@ -54,11 +57,15 @@ internal class MpegTsChunker(
     private var videoStreamType: Int = 0
 
     private var prevRawTicks90k: Long = -1L
+    private var seenAnyPesPts: Boolean = false
+    private var lastVideoPts90k: Long = -1L
+    private var lastAudioPts90k: Long = -1L
     private var lastPacketWallMs: Long = -1L
-    private var timelineMs: Long = 0L
-    private var latestEmittedEndMs: Long = 0L
+    private var timelineMs: Long = initialTimelineMs
+    private var latestEmittedEndMs: Long = initialTimelineMs
+    private var emittedAnyKeyframeChunk: Boolean = false
 
-    private val currentBuf = ByteArrayOutputStream(64 * 1024)
+    private val currentBuf = ByteArrayOutputStream(256 * 1024)
     private var currentStartMs: Long = -1L
     private var currentHasKeyframe: Boolean = false
     private var nextSeq: Long = 0L
@@ -67,6 +74,9 @@ internal class MpegTsChunker(
         flushCurrentChunk()
         carryLen = 0
         prevRawTicks90k = -1L
+        seenAnyPesPts = false
+        lastVideoPts90k = -1L
+        lastAudioPts90k = -1L
         lastPacketWallMs = nowWallMs
         timelineMs = maxOf(timelineMs, latestEmittedEndMs) + 40L
     }
@@ -75,13 +85,17 @@ internal class MpegTsChunker(
         if (currentBuf.size() <= 0) return
         val start = if (currentStartMs >= 0L) currentStartMs else timelineMs
         val end = maxOf(timelineMs, start + 40L)
+        val hasKf = currentHasKeyframe
         val chunk = TsChunk(
             seq = nextSeq++,
             startMs = start,
             endMs = end,
-            isKeyframe = currentHasKeyframe,
+            isKeyframe = hasKf,
             data = currentBuf.toByteArray(),
         )
+        if (hasKf) {
+            emittedAnyKeyframeChunk = true
+        }
         latestEmittedEndMs = end
         currentBuf.reset()
         currentStartMs = -1L
@@ -162,7 +176,7 @@ internal class MpegTsChunker(
 
         var payloadOff = off + 4
         var randomAccess = false
-        var rawTicks90k = -1L
+        var pcrTicks90k = -1L
 
         if (afc == 2 || afc == 3) {
             val afLen = buf[off + 4].toInt() and 0xFF
@@ -170,7 +184,7 @@ internal class MpegTsChunker(
                 val flags = buf[off + 5].toInt() and 0xFF
                 randomAccess = (flags and 0x40) != 0
                 if ((flags and 0x10) != 0 && afLen >= 7 && off + 11 <= off + TS_PACKET_SIZE) {
-                    rawTicks90k = readPcrBase90k(buf, off + 6)
+                    pcrTicks90k = readPcrBase90k(buf, off + 6)
                 }
             }
             payloadOff = off + 5 + afLen
@@ -187,26 +201,51 @@ internal class MpegTsChunker(
         }
 
         var packetIsKeyframe = false
+        var ptsTicks90k = -1L
         if (hasPayload && pusi && (pid == videoPid || pid == audioPid || (videoPid < 0 && audioPid < 0 && pid in 0x0020..0x1FFE))) {
             val pts = readPesPts90k(buf, payloadOff, off + TS_PACKET_SIZE)
-            if (pts >= 0L && rawTicks90k < 0L) {
-                rawTicks90k = pts
+            if (pts >= 0L) {
+                seenAnyPesPts = true
+                ptsTicks90k = pts
+                if (pid == videoPid) {
+                    lastVideoPts90k = pts
+                } else if (pid == audioPid) {
+                    lastAudioPts90k = pts
+                }
+                if (lastVideoPts90k >= 0L && lastAudioPts90k >= 0L) {
+                    val wrap = 1L shl 33
+                    var diffTicks = lastVideoPts90k - lastAudioPts90k
+                    if (diffTicks < -(wrap / 2)) diffTicks += wrap
+                    val lagMs = diffTicks / 90L
+                    if (lagMs in -2_500L..2_500L) {
+                        onAudioLagMs(lagMs)
+                    }
+                }
             }
             if (pid == videoPid || (videoPid < 0 && pid != audioPid)) {
                 packetIsKeyframe = randomAccess || detectAnnexBKeyframe(buf, payloadOff, off + TS_PACKET_SIZE, videoStreamType)
             } else if (videoPid < 0 && pid == audioPid) {
                 packetIsKeyframe = true
             }
-        } else if (pid == videoPid && randomAccess) {
-            packetIsKeyframe = true
+        }
+
+        val rawTicks90k = when {
+            ptsTicks90k >= 0L -> ptsTicks90k
+            !seenAnyPesPts && pcrTicks90k >= 0L -> pcrTicks90k
+            else -> -1L
         }
 
         updateTimeline(rawTicks90k, nowWallMs)
 
-        // 若已积攒至少 minKeyframeCutMs 且新包是关键帧起点，先切出上一块，让关键帧落在下一块开头
+        // 确保每个标记为 isKeyframe=true 的分片都以关键帧 PES 首包（pusi=true）在字节 0 处开头，绝不在帧中间劈开
+        val isPrimaryPusi = pusi && (pid == videoPid || (videoPid < 0 && pid != 0 && pid != pmtPid))
         if (currentBuf.size() > 0 && currentStartMs >= 0L) {
             val dur = timelineMs - currentStartMs
-            if ((packetIsKeyframe && dur >= minKeyframeCutMs) || dur >= maxChunkDurationMs || currentBuf.size() >= maxChunkBytes) {
+            val shouldCutBeforeKeyframe = packetIsKeyframe && (dur >= minKeyframeCutMs || !currentHasKeyframe)
+            val shouldEarlyEmitFirstKeyframe = !emittedAnyKeyframeChunk && currentHasKeyframe && isPrimaryPusi && (dur >= 160L || currentBuf.size() >= 64 * 1024)
+            val shouldCutBySizeOrDur = isPrimaryPusi && (dur >= maxChunkDurationMs || currentBuf.size() >= maxChunkBytes)
+            val shouldHardCut = currentBuf.size() >= maxChunkBytes * 2
+            if (shouldCutBeforeKeyframe || shouldEarlyEmitFirstKeyframe || shouldCutBySizeOrDur || shouldHardCut) {
                 flushCurrentChunk()
             }
         }
@@ -225,19 +264,31 @@ internal class MpegTsChunker(
     private fun updateTimeline(rawTicks90k: Long, nowWallMs: Long) {
         if (rawTicks90k >= 0L) {
             packetsWithoutPts = 0
-            if (prevRawTicks90k >= 0L) {
-                val wrap = 1L shl 33
-                var diffTicks = rawTicks90k - prevRawTicks90k
-                if (diffTicks < -(wrap / 2)) diffTicks += wrap
-                val diffMs = diffTicks / 90L
-                timelineMs += when {
-                    diffMs in 0L..8_000L -> diffMs
-                    diffMs in -2_000L..-1L -> 0L // B 帧显示序重排导致的微小回退保持单调不退
-                    else -> wallStepMs(nowWallMs)
+            if (prevRawTicks90k < 0L) {
+                prevRawTicks90k = rawTicks90k
+                lastPacketWallMs = nowWallMs
+                return
+            }
+            val wrap = 1L shl 33
+            var diffTicks = rawTicks90k - prevRawTicks90k
+            if (diffTicks < -(wrap / 2)) diffTicks += wrap
+            val diffMs = diffTicks / 90L
+            when {
+                diffMs in 1L..8_000L -> {
+                    timelineMs += diffMs
+                    prevRawTicks90k = rawTicks90k
+                    lastPacketWallMs = nowWallMs
+                }
+                diffMs in -3_000L..0L -> {
+                    // B 帧显示序重排或音视频复用偏移导致的回退：保持高水位 prevRawTicks90k 不回退，绝不重复累加差值
+                    lastPacketWallMs = nowWallMs
+                }
+                else -> {
+                    timelineMs += wallStepMs(nowWallMs)
+                    prevRawTicks90k = rawTicks90k
+                    lastPacketWallMs = nowWallMs
                 }
             }
-            prevRawTicks90k = rawTicks90k
-            lastPacketWallMs = nowWallMs
         } else {
             packetsWithoutPts++
             // 仅当整路流确实不含任何 PTS/PCR（连续超过 128 个包仍未见到时间戳）时才启用挂钟兜底，避免与 PTS 叠加双倍计时
@@ -296,6 +347,7 @@ internal class MpegTsChunker(
         val progInfoLen = ((buf[idx + 10].toInt() and 0x0F) shl 8) or (buf[idx + 11].toInt() and 0xFF)
         val end = minOf(pktEnd, idx + 3 + sectionLen - 4)
         var pos = idx + 12 + progInfoLen
+        var changed = false
         while (pos + 5 <= end) {
             val streamType = buf[pos].toInt() and 0xFF
             val elemPid = ((buf[pos + 1].toInt() and 0x1F) shl 8) or (buf[pos + 2].toInt() and 0xFF)
@@ -304,12 +356,17 @@ internal class MpegTsChunker(
                 0x1B, 0x24, 0x02, 0x01, 0x10, 0x42, 0xD1 -> if (videoPid < 0) {
                     videoPid = elemPid
                     videoStreamType = streamType
+                    changed = true
                 }
                 0x0F, 0x11, 0x03, 0x04, 0x81, 0x87, 0x06 -> if (audioPid < 0) {
                     audioPid = elemPid
+                    changed = true
                 }
             }
             pos += 5 + esInfoLen
+        }
+        if (changed) {
+            onPids(videoPid, audioPid)
         }
     }
 
@@ -381,11 +438,12 @@ internal class MpegTsChunker(
 }
 
 /**
- * 线程安全的直播时移环形缓冲区（默认保留最近 120 秒或最多 84MB MPEG-TS 分片）。
+ * 线程安全的直播时移环形缓冲区（默认保留最近 120 秒或最多 128MB MPEG-TS 分片）。
  */
 internal class RelayRingBuffer(
     private val maxDurationMs: Long = 120_000L,
-    private val maxBytes: Long = 84L * 1024L * 1024L,
+    private val maxBytes: Long = 128L * 1024L * 1024L,
+    initialTimelineMs: Long = 0L,
 ) {
     private val lock = ReentrantLock()
     private val cond = lock.newCondition()
@@ -396,18 +454,40 @@ internal class RelayRingBuffer(
     private var closed: Boolean = false
 
     @Volatile
-    var oldestTimelineMs: Long = 0L
+    var videoPid: Int = -1
         private set
 
     @Volatile
-    var latestTimelineMs: Long = 0L
+    var audioPid: Int = -1
+        private set
+
+    @Volatile
+    var audioPtsLagMs: Long = 0L
+        private set
+
+    @Volatile
+    var oldestTimelineMs: Long = initialTimelineMs
+        private set
+
+    @Volatile
+    var latestTimelineMs: Long = initialTimelineMs
         private set
 
     val chunkCount: Int
         get() = lock.withLock { chunks.size }
 
+    val hasKeyframeChunk: Boolean
+        get() = lock.withLock { chunks.any { it.isKeyframe } }
+
     fun updatePat(pkt: ByteArray) = lock.withLock { patPacket = pkt }
     fun updatePmt(pkt: ByteArray) = lock.withLock { pmtPacket = pkt }
+    fun updatePids(vPid: Int, aPid: Int) {
+        if (vPid > 0) videoPid = vPid
+        if (aPid > 0) audioPid = aPid
+    }
+    fun updateAudioLagMs(lagMs: Long) {
+        audioPtsLagMs = lagMs
+    }
 
     fun append(chunk: TsChunk) = lock.withLock {
         if (closed) return@withLock
@@ -440,18 +520,17 @@ internal class RelayRingBuffer(
 
     /**
      * 按目标内容时间 [desiredContentMs] 选择最合适的起始分片：
-     * - `< 0`：表示切入直播前沿（取最近 2.5 秒内最后一个关键帧分片，兼顾秒开与画面无花屏）；
-     * - `>= 0`：表示时移回退到目标毫秒（优先取目标之前 3.5 秒内最近的关键帧分片）。
+     * - [requireKeyframe] 为 true（画面播放器）：保证返回以关键帧（VPS/SPS/PPS/IDR）开头的分片，杜绝花屏与等待；
+     * - [requireKeyframe] 为 false（纯音频 ASR 流）：直接取覆盖目标毫秒的分片，无需回退到视频关键帧。
      */
-    internal fun selectStartChunkLocked(desiredContentMs: Long): TsChunk? {
+    internal fun selectStartChunkLocked(desiredContentMs: Long, requireKeyframe: Boolean = true): TsChunk? {
         if (chunks.isEmpty()) return null
         if (desiredContentMs < 0L) {
-            val latestEnd = chunks.last().endMs
-            val minEdgeStart = latestEnd - 2_500L
-            for (i in chunks.size - 1 downTo 0) {
-                val c = chunks[i]
-                if (c.startMs < minEdgeStart) break
-                if (c.isKeyframe) return c
+            if (requireKeyframe) {
+                for (i in chunks.size - 1 downTo 0) {
+                    val c = chunks[i]
+                    if (c.isKeyframe) return c
+                }
             }
             return chunks.last()
         }
@@ -461,18 +540,30 @@ internal class RelayRingBuffer(
             val c = chunks[i]
             if (c.startMs <= clamped) coveringIdx = i else break
         }
-        val minKeyframeStart = clamped - 3_500L
+        if (!requireKeyframe) {
+            return chunks[coveringIdx]
+        }
         for (i in coveringIdx downTo 0) {
             val c = chunks[i]
-            if (c.startMs < minKeyframeStart) break
+            if (c.isKeyframe) return c
+        }
+        for (i in (coveringIdx + 1) until chunks.size) {
+            val c = chunks[i]
             if (c.isKeyframe) return c
         }
         return chunks[coveringIdx]
     }
 
+    fun previewStartMs(desiredContentMs: Long, requireKeyframe: Boolean = true): Long? = lock.withLock {
+        selectStartChunkLocked(desiredContentMs, requireKeyframe)?.startMs
+    }
+
     fun openStream(
         desiredContentMs: Long = -1L,
         waitFirstChunkMs: Long = 8_000L,
+        requireKeyframe: Boolean = true,
+        audioOnly: Boolean = false,
+        pacedForPlayback: Boolean = false,
         onSelectedStartMs: ((Long) -> Unit)? = null,
     ): RelayInputStream? {
         lock.withLock {
@@ -482,24 +573,41 @@ internal class RelayRingBuffer(
                 if (rem <= 0L) break
                 cond.awaitNanos(rem)
             }
-            val startChunk = selectStartChunkLocked(desiredContentMs) ?: return null
+            val startChunk = selectStartChunkLocked(desiredContentMs, requireKeyframe) ?: return null
             val preamble = ByteArrayOutputStream(TS_PACKET_SIZE * 2).apply {
                 patPacket?.let { write(it) }
                 pmtPacket?.let { write(it) }
             }.toByteArray()
-            onSelectedStartMs?.invoke(startChunk.startMs)
-            return RelayInputStream(startChunk.seq, startChunk.startMs, preamble)
+            val effectiveStartMs = if (audioOnly) {
+                (startChunk.startMs - audioPtsLagMs.coerceIn(0L, 1_500L)).coerceAtLeast(oldestTimelineMs)
+            } else {
+                startChunk.startMs
+            }
+            onSelectedStartMs?.invoke(effectiveStartMs)
+            return RelayInputStream(
+                nextSeq = startChunk.seq,
+                startContentMs = effectiveStartMs,
+                chunkAnchorMs = startChunk.startMs,
+                preamble = preamble,
+                audioOnly = audioOnly,
+                pacedForPlayback = pacedForPlayback,
+            )
         }
     }
 
     inner class RelayInputStream internal constructor(
         private var nextSeq: Long,
         val startContentMs: Long,
+        private val chunkAnchorMs: Long = startContentMs,
         preamble: ByteArray,
+        private val audioOnly: Boolean = false,
+        private val pacedForPlayback: Boolean = false,
     ) : InputStream() {
         private var curBytes: ByteArray? = preamble.takeIf { it.isNotEmpty() }
         private var curOffset: Int = 0
         private var streamClosed = false
+        private var seenFirstAudioPusi = false
+        private val streamOpenNano: Long = System.nanoTime()
 
         override fun read(): Int {
             val single = ByteArray(1)
@@ -523,9 +631,39 @@ internal class RelayRingBuffer(
                 }
 
                 val nextChunk = awaitNextChunk() ?: return -1
-                curBytes = nextChunk.data
+                val payload = if (audioOnly) filterAudioOnlyPackets(nextChunk.data) else nextChunk.data
+                if (payload.isEmpty()) continue
+                curBytes = payload
                 curOffset = 0
             }
+        }
+
+        private fun filterAudioOnlyPackets(raw: ByteArray): ByteArray {
+            val vPid = videoPid
+            val aPid = audioPid
+            if (vPid <= 0 || aPid <= 0 || vPid == aPid) return raw
+            val out = ByteArrayOutputStream(minOf(raw.size, 16 * 1024))
+            var off = 0
+            while (off + TS_PACKET_SIZE <= raw.size) {
+                if ((raw[off].toInt() and 0xFF) == 0x47) {
+                    val b1 = raw[off + 1].toInt() and 0xFF
+                    val b2 = raw[off + 2].toInt() and 0xFF
+                    val pusi = (b1 and 0x40) != 0
+                    val pid = ((b1 and 0x1F) shl 8) or b2
+                    if (pid != vPid) {
+                        if (pid == aPid) {
+                            if (pusi) seenFirstAudioPusi = true
+                            if (seenFirstAudioPusi) {
+                                out.write(raw, off, TS_PACKET_SIZE)
+                            }
+                        } else {
+                            out.write(raw, off, TS_PACKET_SIZE)
+                        }
+                    }
+                }
+                off += TS_PACKET_SIZE
+            }
+            return out.toByteArray()
         }
 
         private fun awaitNextChunk(): TsChunk? {
@@ -541,6 +679,17 @@ internal class RelayRingBuffer(
                         val idx = (nextSeq - firstSeq).toInt()
                         if (idx in 0 until chunks.size) {
                             val found = chunks[idx]
+                            if (pacedForPlayback) {
+                                val targetDeltaMs = found.startMs - chunkAnchorMs - PLAYBACK_INITIAL_BURST_MS
+                                if (targetDeltaMs > 0L) {
+                                    val elapsedWallMs = (System.nanoTime() - streamOpenNano) / 1_000_000L
+                                    val waitMs = targetDeltaMs - elapsedWallMs
+                                    if (waitMs > 15L) {
+                                        cond.await(minOf(waitMs, 250L), TimeUnit.MILLISECONDS)
+                                        continue
+                                    }
+                                }
+                            }
                             nextSeq = found.seq + 1
                             return found
                         }
@@ -560,19 +709,24 @@ internal class RelayRingBuffer(
             }
         }
     }
+
+    companion object {
+        private const val PLAYBACK_INITIAL_BURST_MS = 1_800L
+    }
 }
 
 /**
  * Windows 桌面直播单连接时移中继引擎：
  * 1. 对同一路直播源仅建立单路 FFmpeg 上游拉流，避免播放器与识别解码器双连接被源站限流或时间轴错位；
  * 2. 在内存环形缓冲区维护最近 120 秒 MPEG-TS 切片与单调时钟；
- * 3. 同时向 [DesktopExoPlayer]（本地 HTTP `.ts` 流，支持 `delayLive` 往回跳秒）与 `ExoAudioDecoder`（零拷贝内存流）供数，
+ * 3. 同时向 [DesktopExoPlayer]（本地 HTTP `.ts` 流，支持 `delayLive` 往回跳秒并按 1.0x 倍速稳态供流）与 `ExoAudioDecoder`（纯音频过滤零拷贝流）供数，
  *    使桌面端原封不动复用 `MainViewModel.runLive` / `LiveTimeline` / `delayLive` 的全部音画对齐算法。
  */
 object DesktopLiveRelay {
     /** 合成 UTC 基准时间（2023-11-14T22:13:20Z），让 [com.aisub.player.live.LiveTimeline] 走精确的毫秒级 UTC 映射分支 */
     const val EPOCH_MS: Long = 1_700_000_000_000L
-    private const val IDLE_GRACE_MS: Long = 8_000L
+    const val INITIAL_TIMELINE_MS: Long = 10_000L
+    private const val IDLE_GRACE_MS: Long = 10_000L
     private const val MAX_SESSIONS: Int = 3
 
     private val sessionsByUrl = ConcurrentHashMap<String, RelaySession>()
@@ -668,7 +822,7 @@ object DesktopLiveRelay {
         private val ffmpegExe: String,
     ) {
         val createdAtMs: Long = System.currentTimeMillis()
-        internal val ring = RelayRingBuffer()
+        internal val ring = RelayRingBuffer(initialTimelineMs = INITIAL_TIMELINE_MS)
         private val refs = AtomicInteger(0)
         private val stopped = AtomicBoolean(false)
         private val failed = AtomicBoolean(false)
@@ -711,6 +865,10 @@ object DesktopLiveRelay {
             return "http://127.0.0.1:$port/live/$id.ts?startMs=$desiredStartContentMs&conn=$connId" to connId
         }
 
+        fun previewPlaybackStartMs(desiredStartContentMs: Long): Long =
+            ring.previewStartMs(desiredStartContentMs, requireKeyframe = true)
+                ?: if (desiredStartContentMs >= 0L) desiredStartContentMs else latestTimelineMs
+
         internal fun recordConnectionStart(connId: Long, actualStartMs: Long) {
             if (connId > 0L) {
                 connActualStartMs[connId] = actualStartMs
@@ -728,20 +886,31 @@ object DesktopLiveRelay {
             return !failed.get() && ring.chunkCount > 0
         }
 
-        internal fun openAsrStream(leadBackMs: Long = 1_000L, waitMs: Long = 8_000L): RelayRingBuffer.RelayInputStream? {
+        internal fun openAsrStream(leadBackMs: Long = 1_500L, waitMs: Long = 10_000L): RelayRingBuffer.RelayInputStream? {
             if (!awaitFirstChunk(waitMs)) return null
             val desired = (latestTimelineMs - leadBackMs).coerceAtLeast(oldestTimelineMs)
-            return ring.openStream(desiredContentMs = desired, waitFirstChunkMs = waitMs)
+            return ring.openStream(
+                desiredContentMs = desired,
+                waitFirstChunkMs = waitMs,
+                requireKeyframe = false,
+                audioOnly = true,
+                pacedForPlayback = false,
+            )
         }
 
         internal fun startPulling() {
             pullerPool.execute {
                 val chunker = MpegTsChunker(
+                    initialTimelineMs = INITIAL_TIMELINE_MS,
                     onPat = { ring.updatePat(it) },
                     onPmt = { ring.updatePmt(it) },
+                    onPids = { vPid, aPid -> ring.updatePids(vPid, aPid) },
+                    onAudioLagMs = { lagMs -> ring.updateAudioLagMs(lagMs) },
                     onChunk = { chunk ->
                         ring.append(chunk)
-                        firstChunkLatch.countDown()
+                        if (chunk.isKeyframe || ring.chunkCount >= 2) {
+                            firstChunkLatch.countDown()
+                        }
                     },
                 )
                 var attempts = 0
@@ -828,25 +997,32 @@ object DesktopLiveRelay {
             val isHttp = playableUrl.startsWith("http://", ignoreCase = true) ||
                 playableUrl.startsWith("https://", ignoreCase = true)
             if (isHttp) {
+                val ua = headers.entries.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
+                    ?: "VLC/3.0.20 LibVLC/3.0.20"
                 cmd += listOf(
+                    "-user_agent", ua,
                     "-reconnect", "1",
                     "-reconnect_streamed", "1",
                     "-reconnect_at_eof", "1",
                     "-reconnect_delay_max", "2",
                     "-rw_timeout", "15000000",
                 )
-                if (headers.isNotEmpty()) {
-                    val hdr = headers.entries.joinToString("\r\n") { "${it.key}: ${it.value}" } + "\r\n"
+                val extraHeaders = headers.entries.filterNot { it.key.equals("User-Agent", ignoreCase = true) }
+                if (extraHeaders.isNotEmpty()) {
+                    val hdr = extraHeaders.joinToString("\r\n") { "${it.key}: ${it.value}" } + "\r\n"
                     cmd += listOf("-headers", hdr)
                 }
             }
             cmd += listOf(
-                "-fflags", "+genpts+discardcorrupt",
+                "-probesize", "1048576",
+                "-analyzeduration", "1500000",
+                "-fflags", "+nobuffer+genpts+discardcorrupt",
                 "-i", playableUrl,
                 "-map", "0:v:0?",
                 "-map", "0:a:0?",
                 "-c", "copy",
                 "-mpegts_copyts", "0",
+                "-flush_packets", "1",
                 "-f", "mpegts",
                 "pipe:1",
             )
@@ -901,6 +1077,9 @@ object DesktopLiveRelay {
             val stream = session.ring.openStream(
                 desiredContentMs = startMs,
                 waitFirstChunkMs = 10_000L,
+                requireKeyframe = true,
+                audioOnly = false,
+                pacedForPlayback = true,
                 onSelectedStartMs = { actualMs ->
                     session.recordConnectionStart(connId, actualMs)
                     Log.i(TAG, "直播本地流连接[$sessionId, conn=$connId]: 请求起点=${startMs}ms -> 实际关键帧=${actualMs}ms (最新=${session.latestTimelineMs}ms)")
