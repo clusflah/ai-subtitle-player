@@ -1,24 +1,42 @@
 package com.aisub.player.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ProvideTextStyle
 import androidx.compose.material3.SheetState
+import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -27,19 +45,36 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerButton
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.changedToDown
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.aisub.player.AppBackground
 
@@ -217,10 +252,17 @@ private val DarkAuroraPopupColors = DarkPopupColors.copy(
 
 val LocalPopupColors = staticCompositionLocalOf { DarkPopupColors }
 
+/**
+ * 沉浸式播放页（视频播放、音乐播放、暗底漫画阅读）开启此开关后，
+ * 弹出面板与对话框统一采用影院级深色半透明毛玻璃，不再因系统亮色主题刺眼泛白。
+ */
+val LocalForceDarkPopup = staticCompositionLocalOf { false }
+
 @Composable
 fun popupColors(): PopupColors {
     val bg = LocalAppBackground.current
-    val raw = if (isAppDarkTheme()) {
+    val darkTheme = LocalForceDarkPopup.current || isAppDarkTheme()
+    val raw = if (darkTheme) {
         when (bg) {
             AppBackground.WARM_BEIGE_GRAY,
             AppBackground.WARM_CHAMPAGNE_GRADIENT,
@@ -294,73 +336,233 @@ fun PopupTheme(content: @Composable () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * 遮罩点击收起：桌面端同时支持鼠标左键与右键点击空白区域立即关闭弹窗，
+ * 并仅在按下点位于遮罩自身时触发，避免在弹窗内拖动滑杆越出边界时误关。
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+fun Modifier.dismissOnOutsideClick(enabled: Boolean = true, onDismiss: () -> Unit): Modifier {
+    if (!enabled) return this
+    return this.pointerInput(onDismiss) {
+        val maxMovePx = 28.dp.toPx()
+        awaitEachGesture {
+            var down: PointerInputChange? = null
+            while (down == null) {
+                val event = awaitPointerEvent()
+                val btn = event.button
+                if (btn == null || btn == PointerButton.Primary || btn == PointerButton.Secondary) {
+                    down = event.changes.firstOrNull { !it.isConsumed && it.changedToDown() }
+                }
+            }
+            val startPos = down.position
+            down.consume()
+            var movedTooFar = false
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                if ((change.position - startPos).getDistance() > maxMovePx) {
+                    movedTooFar = true
+                }
+                if (!change.pressed) {
+                    change.consume()
+                    if (!movedTooFar) onDismiss()
+                    break
+                }
+            }
+        }
+    }
+}
+
+/** 拦截弹窗卡片矩形内的点击命中穿透，使卡片内空白点击不会穿透到底层遮罩，同时不影响内部悬停、滚轮与滑杆。 */
+fun Modifier.consumeCardPointerEvents(): Modifier = pointerInput(Unit) {
+    awaitPointerEventScope {
+        while (true) {
+            awaitPointerEvent(PointerEventPass.Final)
+        }
+    }
+}
+
+/** 桌面端统一的右上角圆角关闭按钮（支持鼠标悬停高亮）。 */
+@Composable
+fun PopupCloseButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val c = LocalPopupColors.current
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val bgColor = when {
+        hovered && c.dark -> Color(0x38FFFFFF)
+        hovered -> Color(0x1E1C2026)
+        c.dark -> Color(0x1AFFFFFF)
+        else -> Color(0x101C2026)
+    }
+    Box(
+        modifier = modifier
+            .size(30.dp)
+            .clip(CircleShape)
+            .background(bgColor)
+            .hoverable(interaction)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            AppIcons.Close,
+            contentDescription = "关闭",
+            tint = if (hovered) c.textPrimary else c.textSecondary,
+            modifier = Modifier.size(16.dp),
+        )
+    }
+}
+
+/**
+ * 桌面端悬浮侧边检查器抽屉（对标 IINA / PotPlayer / Infuse 右侧悬浮控制面板）：
+ * 停靠在窗口右侧且上下留白，不遮挡画面中心主体；支持点击任意外部区域（左/右键）、右上角「×」、Esc 键或向右拖曳标题栏收起。
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 fun AppSheet(
     onDismissRequest: () -> Unit,
     modifier: Modifier = Modifier,
-    sheetState: SheetState = rememberModalBottomSheetState(),
+    @Suppress("UNUSED_PARAMETER") sheetState: SheetState = rememberModalBottomSheetState(),
+    title: String? = null,
+    headerActions: (@Composable RowScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) = PopupTheme {
     val c = LocalPopupColors.current
     val glass = LocalLiquidGlassEnabled.current
-    if (!glass) {
-        ModalBottomSheet(
-            onDismissRequest = onDismissRequest, modifier = modifier, sheetState = sheetState,
-            containerColor = Color.Transparent, contentColor = c.textPrimary, tonalElevation = 0.dp,
-            scrimColor = Color.Black.copy(alpha = c.scrim), dragHandle = null,
-        ) {
-            val shape = RoundedCornerShape(22.dp)
-            Column(
-                Modifier.align(Alignment.CenterHorizontally)
-                    .padding(start = 24.dp, end = 24.dp, bottom = 12.dp)
-                    .widthIn(max = 360.dp)
-                    .fillMaxWidth()
-                    .shadow(c.shadow, shape).clip(shape).background(c.surface),
-            ) {
-                content()
-            }
-        }
-        return@PopupTheme
-    }
+    val density = LocalDensity.current
+    BackHandler(onBack = onDismissRequest)
+
     var entered by remember { mutableStateOf(false) }
+    var dragOffsetX by remember { mutableFloatStateOf(0f) }
     LaunchedEffect(Unit) { entered = true }
-    val scaleX by animateFloatAsState(
-        targetValue = if (entered) 1f else 0.93f,
-        animationSpec = spring(dampingRatio = 0.48f, stiffness = 340f),
-        label = "sheetScaleX",
+
+    val slideProgress by animateFloatAsState(
+        targetValue = if (entered) 0f else 1f,
+        animationSpec = spring(dampingRatio = 0.84f, stiffness = 540f),
+        label = "sheetSlide",
     )
-    val scaleY by animateFloatAsState(
-        targetValue = if (entered) 1f else 0.90f,
-        animationSpec = spring(dampingRatio = 0.44f, stiffness = 300f),
-        label = "sheetScaleY",
+    val scrimFactor by animateFloatAsState(
+        targetValue = if (entered) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.9f, stiffness = 500f),
+        label = "sheetScrim",
     )
     val lightShift by animateFloatAsState(
-        targetValue = if (entered) 1.5f else 0f,
-        animationSpec = spring(dampingRatio = 0.56f, stiffness = 200f),
+        targetValue = if (entered) 1.35f else 0f,
+        animationSpec = spring(dampingRatio = 0.62f, stiffness = 240f),
         label = "sheetLight",
     )
-    ModalBottomSheet(
-        onDismissRequest = onDismissRequest, modifier = modifier, sheetState = sheetState,
-        containerColor = Color.Transparent, contentColor = c.textPrimary, tonalElevation = 0.dp,
-        scrimColor = Color.Black.copy(alpha = c.scrim), dragHandle = null,
+    val enterOffsetPx = with(density) { 44.dp.toPx() }
+    val dismissDragThresholdPx = with(density) { 64.dp.toPx() }
+
+    Dialog(
+        onDismissRequest = onDismissRequest,
+        properties = DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+            usePlatformDefaultWidth = false,
+            usePlatformInsets = false,
+            scrimColor = Color.Transparent,
+        ),
     ) {
-        WindowBlurEffect(blurBehindRadius = 56, backgroundBlurRadius = 72)
-        // 悬浮的完整圆角液态玻璃框，不贴屏幕边缘
-        val shape = RoundedCornerShape(22.dp)
-        Column(
-            Modifier.align(Alignment.CenterHorizontally)
-                .padding(start = 24.dp, end = 24.dp, bottom = 12.dp)
-                .widthIn(max = 360.dp)
-                .fillMaxWidth()
-                .graphicsLayer {
-                    this.scaleX = scaleX
-                    this.scaleY = scaleY
-                }
-                .glassShadow(shape, GlassStyle.Sheet, c.shadow)
-                .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface, lightShift = lightShift),
+        BoxWithConstraints(
+            Modifier
+                .fillMaxSize()
+                .onPreviewKeyEvent {
+                    if (it.type == KeyEventType.KeyDown && it.key == Key.Escape) {
+                        onDismissRequest()
+                        true
+                    } else false
+                },
         ) {
-            content()
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = c.scrim * scrimFactor))
+                    .dismissOnOutsideClick(onDismiss = onDismissRequest),
+            )
+
+            val safeMaxW = (maxWidth - 32.dp).coerceAtLeast(280.dp)
+            val panelWidth = (maxWidth * 0.36f).coerceIn(380.dp, 460.dp).coerceAtMost(safeMaxW)
+            val panelMaxHeight = (maxHeight - 32.dp).coerceAtLeast(220.dp)
+            val shape = RoundedCornerShape(22.dp)
+
+            Column(
+                Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(16.dp)
+                    .then(modifier)
+                    .width(panelWidth)
+                    .heightIn(max = panelMaxHeight)
+                    .graphicsLayer {
+                        translationX = slideProgress * enterOffsetPx + dragOffsetX.coerceAtLeast(0f)
+                        alpha = (1f - slideProgress * 0.65f).coerceIn(0f, 1f)
+                    }
+                    .let { base ->
+                        if (glass) {
+                            base.glassShadow(shape, GlassStyle.Sheet, c.shadow)
+                                .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface, lightShift = lightShift)
+                        } else {
+                            base.shadow(c.shadow, shape).clip(shape).background(c.surface)
+                        }
+                    }
+                    .consumeCardPointerEvents(),
+            ) {
+                if (glass) WindowBlurEffect(blurBehindRadius = 56, backgroundBlurRadius = 72)
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .pointerInput(onDismissRequest) {
+                            detectHorizontalDragGestures(
+                                onDragEnd = {
+                                    if (dragOffsetX > dismissDragThresholdPx) onDismissRequest()
+                                    dragOffsetX = 0f
+                                },
+                                onDragCancel = { dragOffsetX = 0f },
+                                onHorizontalDrag = { change, dragAmount ->
+                                    val next = (dragOffsetX + dragAmount).coerceAtLeast(0f)
+                                    if (next > 0f || dragOffsetX > 0f) {
+                                        change.consume()
+                                        dragOffsetX = next
+                                    }
+                                },
+                            )
+                        }
+                        .padding(
+                            start = 20.dp,
+                            end = 12.dp,
+                            top = if (title != null) 12.dp else 8.dp,
+                            bottom = if (title != null) 6.dp else 2.dp,
+                        ),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (title != null) {
+                        Text(
+                            title,
+                            color = c.textPrimary,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                    } else {
+                        Spacer(Modifier.weight(1f))
+                    }
+                    if (headerActions != null) {
+                        headerActions()
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    PopupCloseButton(onClick = onDismissRequest)
+                }
+
+                CompositionLocalProvider(LocalContentColor provides c.textPrimary) {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false),
+                        content = content,
+                    )
+                }
+            }
         }
     }
 }
@@ -374,12 +576,14 @@ fun AppMenu(
     scrollState: ScrollState = rememberScrollState(),
     content: @Composable ColumnScope.() -> Unit,
 ) = PopupTheme {
+    if (expanded) BackHandler(onBack = onDismissRequest)
     val c = LocalPopupColors.current
+    val menuModifier = modifier.widthIn(min = 176.dp, max = 340.dp)
     if (!LocalLiquidGlassEnabled.current) {
         DropdownMenu(
             expanded = expanded,
             onDismissRequest = onDismissRequest,
-            modifier = modifier,
+            modifier = menuModifier,
             offset = offset,
             scrollState = scrollState,
             shape = MaterialTheme.shapes.medium,
@@ -390,7 +594,7 @@ fun AppMenu(
         )
         return@PopupTheme
     }
-    val shape = RoundedCornerShape(20.dp)
+    val shape = RoundedCornerShape(18.dp)
     val lightShift by animateFloatAsState(
         targetValue = if (expanded) 1.2f else 0f,
         animationSpec = spring(dampingRatio = 0.58f, stiffness = 240f),
@@ -399,7 +603,7 @@ fun AppMenu(
     DropdownMenu(
         expanded = expanded,
         onDismissRequest = onDismissRequest,
-        modifier = modifier.liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface, lightShift = lightShift),
+        modifier = menuModifier.liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface, lightShift = lightShift),
         offset = offset,
         scrollState = scrollState,
         shape = shape,
@@ -413,6 +617,12 @@ fun AppMenu(
     )
 }
 
+/**
+ * 桌面端居中模态对话框：
+ * 适度加宽（410dp–540dp）、限制最大高度（不超过窗口高度 82%），标题栏与底部操作按钮常驻不随内容滚走，
+ * 并统一提供右上角「×」关闭按钮、点击外部任意空白区域收起及 Esc 键收起。
+ */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun AppDialog(
     onDismissRequest: () -> Unit,
@@ -425,61 +635,162 @@ fun AppDialog(
     properties: DialogProperties = DialogProperties(),
 ) = PopupTheme {
     val c = LocalPopupColors.current
-    if (!LocalLiquidGlassEnabled.current) {
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = onDismissRequest,
-            confirmButton = confirmButton,
-            modifier = modifier,
-            dismissButton = dismissButton,
-            icon = icon,
-            title = title,
-            text = text,
-            shape = MaterialTheme.shapes.extraLarge,
-            containerColor = c.surface,
-            titleContentColor = c.textPrimary,
-            textContentColor = c.textSecondary,
-            iconContentColor = c.accent,
-            tonalElevation = 0.dp,
-            properties = properties,
-        )
-        return@PopupTheme
-    }
-    val shape = RoundedCornerShape(28.dp)
+    val glass = LocalLiquidGlassEnabled.current
+    BackHandler(enabled = properties.dismissOnBackPress, onBack = onDismissRequest)
+
     var entered by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { entered = true }
     val scale by animateFloatAsState(
-        targetValue = if (entered) 1f else 0.94f,
-        animationSpec = spring(dampingRatio = 0.54f, stiffness = 360f),
+        targetValue = if (entered) 1f else 0.95f,
+        animationSpec = spring(dampingRatio = 0.78f, stiffness = 480f),
         label = "dialogScale",
+    )
+    val scrimFactor by animateFloatAsState(
+        targetValue = if (entered) 1f else 0f,
+        animationSpec = spring(dampingRatio = 0.9f, stiffness = 500f),
+        label = "dialogScrim",
     )
     val lightShift by animateFloatAsState(
         targetValue = if (entered) 1.3f else 0f,
         animationSpec = spring(dampingRatio = 0.58f, stiffness = 220f),
         label = "dialogLight",
     )
-    androidx.compose.material3.AlertDialog(
+
+    Dialog(
         onDismissRequest = onDismissRequest,
-        confirmButton = {
-            WindowBlurEffect(blurBehindRadius = 56, backgroundBlurRadius = 72)
-            confirmButton()
-        },
-        modifier = modifier
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
+        properties = DialogProperties(
+            dismissOnBackPress = properties.dismissOnBackPress,
+            dismissOnClickOutside = properties.dismissOnClickOutside,
+            usePlatformDefaultWidth = false,
+            usePlatformInsets = false,
+            scrimColor = Color.Transparent,
+        ),
+    ) {
+        BoxWithConstraints(
+            Modifier
+                .fillMaxSize()
+                .onPreviewKeyEvent {
+                    if (properties.dismissOnBackPress && it.type == KeyEventType.KeyDown && it.key == Key.Escape) {
+                        onDismissRequest()
+                        true
+                    } else false
+                },
+        ) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = c.scrim * scrimFactor))
+                    .dismissOnOutsideClick(
+                        enabled = properties.dismissOnClickOutside,
+                        onDismiss = onDismissRequest,
+                    ),
+            )
+
+            val safeMaxW = (maxWidth - 48.dp).coerceAtLeast(280.dp)
+            val dialogMinW = 410.dp.coerceAtMost(safeMaxW)
+            val dialogMaxW = 540.dp.coerceAtMost(safeMaxW)
+            val dialogMaxH = (maxHeight * 0.82f).coerceIn(240.dp, 680.dp)
+            val shape = RoundedCornerShape(22.dp)
+
+            Column(
+                Modifier
+                    .align(Alignment.Center)
+                    .padding(24.dp)
+                    .then(modifier)
+                    .widthIn(min = dialogMinW, max = dialogMaxW)
+                    .heightIn(max = dialogMaxH)
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                        alpha = scrimFactor.coerceIn(0f, 1f)
+                    }
+                    .let { base ->
+                        if (glass) {
+                            base.glassShadow(shape, GlassStyle.Sheet, c.shadow)
+                                .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface, lightShift = lightShift)
+                        } else {
+                            base.shadow(c.shadow, shape).clip(shape).background(c.surface)
+                        }
+                    }
+                    .consumeCardPointerEvents(),
+            ) {
+                if (glass) WindowBlurEffect(blurBehindRadius = 56, backgroundBlurRadius = 72)
+
+                val showCloseBtn = properties.dismissOnClickOutside || properties.dismissOnBackPress
+                if (title != null || icon != null) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = 24.dp, end = 14.dp, top = 18.dp, bottom = if (text != null) 6.dp else 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (icon != null) {
+                            CompositionLocalProvider(LocalContentColor provides c.accent) {
+                                Box(Modifier.padding(end = 10.dp)) { icon() }
+                            }
+                        }
+                        Box(Modifier.weight(1f)) {
+                            if (title != null) {
+                                CompositionLocalProvider(LocalContentColor provides c.textPrimary) {
+                                    ProvideTextStyle(
+                                        MaterialTheme.typography.titleLarge.copy(
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = c.textPrimary,
+                                        ),
+                                    ) {
+                                        title()
+                                    }
+                                }
+                            }
+                        }
+                        if (showCloseBtn) {
+                            Spacer(Modifier.width(8.dp))
+                            PopupCloseButton(onClick = onDismissRequest)
+                        }
+                    }
+                } else if (showCloseBtn) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 10.dp, end = 12.dp),
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        PopupCloseButton(onClick = onDismissRequest)
+                    }
+                }
+
+                if (text != null) {
+                    Box(
+                        Modifier
+                            .weight(1f, fill = false)
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp, vertical = 8.dp),
+                    ) {
+                        CompositionLocalProvider(LocalContentColor provides c.textPrimary) {
+                            ProvideTextStyle(
+                                MaterialTheme.typography.bodyMedium.copy(
+                                    color = c.textPrimary,
+                                    fontSize = 14.sp,
+                                    lineHeight = 20.sp,
+                                ),
+                            ) {
+                                text()
+                            }
+                        }
+                    }
+                }
+
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 18.dp, top = 6.dp, bottom = 14.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    dismissButton?.invoke()
+                    if (dismissButton != null) Spacer(Modifier.width(6.dp))
+                    confirmButton()
+                }
             }
-            .glassShadow(shape, GlassStyle.Sheet, c.shadow)
-            .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface, lightShift = lightShift),
-        dismissButton = dismissButton,
-        icon = icon,
-        title = title,
-        text = text,
-        shape = shape,
-        containerColor = Color.Transparent,
-        titleContentColor = c.textPrimary,
-        textContentColor = c.textSecondary,
-        iconContentColor = c.accent,
-        tonalElevation = 0.dp,
-        properties = properties,
-    )
+        }
+    }
 }

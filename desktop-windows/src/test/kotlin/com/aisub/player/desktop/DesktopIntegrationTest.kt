@@ -11,6 +11,13 @@ import android.provider.MediaStore
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Size
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.unit.dp
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import com.aisub.player.SettingsRepository
@@ -450,5 +457,246 @@ class DesktopIntegrationTest {
         )
         assertTrue("User backup has servers", store.servers().isNotEmpty())
         assertTrue("User backup has live sources", live.list().isNotEmpty())
+    }
+
+    @Test
+    fun test9_MediaScanExcludesTypeScriptAndScreenshotsAndSyncsVolumeBrightness() {
+        val ffmpeg = DesktopBinaryFinder.ensureFfmpeg()!!
+        val ctx = GlobalDesktopApp
+
+        // 1. 在 Downloads 下模拟前端工程与 TypeScript 源码/声明文件（含 > 8KB 的大型 .ts 源码）
+        val nodeModDir = File(tempHome, "Downloads/mooneva-pill-mod/node_modules/@noble/hashes").apply { mkdirs() }
+        File(tempHome, "Downloads/mooneva-pill-mod/package.json").writeText("""{"name":"mooneva-pill-mod"}""")
+        File(nodeModDir, "index.d.ts").writeText("export declare function sha256(data: Uint8Array): Uint8Array;\n")
+        File(nodeModDir, "large_source.ts").writeText("export const TABLE = [\n" + (1..800).joinToString(",\n") { "  \"entry_$it\"" } + "\n];\n")
+
+        // 即使直接放在 Downloads 根目录下的独立 .ts / .d.ts 文本文件，也不应被误判为视频
+        val standaloneTs = File(tempHome, "Downloads/standalone_script.ts")
+        standaloneTs.writeText("// Standalone TypeScript file\n" + "const x: number = 42;\n".repeat(400))
+        val standaloneDts = File(tempHome, "Downloads/types.d.ts")
+        standaloneDts.writeText("export interface Config { host: string; port: number; }\n".repeat(200))
+
+        // 生成一个真正的 MPEG-TS (.ts) 视频流，验证真 .ts 视频仍然能被正常识别
+        val realTsVideo = File(tempHome, "Downloads/real_broadcast_clip.ts")
+        val genTs = ProcessBuilder(
+            ffmpeg, "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc=duration=2:size=320x180:rate=25",
+            "-c:v", "mpeg2video", "-f", "mpegts",
+            realTsVideo.absolutePath,
+        ).start()
+        assertEquals(0, genTs.waitFor())
+        assertTrue("Real MPEG-TS file should pass sync byte check", android.content.ContentResolver.isMpegTransportStream(realTsVideo))
+        assertFalse("TypeScript source should fail MPEG-TS check", android.content.ContentResolver.isMpegTransportStream(standaloneTs))
+
+        val scannedVideos = MediaLibrary.videos(ctx)
+        val scannedNames = scannedVideos.map { it.title }
+        assertTrue("Real MPEG-TS video must be recognized: $scannedNames", "real_broadcast_clip.ts" in scannedNames)
+        assertFalse("index.d.ts must NOT be recognized as video", "index.d.ts" in scannedNames)
+        assertFalse("large_source.ts in node_modules must NOT be recognized", "large_source.ts" in scannedNames)
+        assertFalse("standalone_script.ts must NOT be recognized as video", "standalone_script.ts" in scannedNames)
+        assertFalse("types.d.ts must NOT be recognized as video", "types.d.ts" in scannedNames)
+        assertFalse("MediaEntry.isVideoName must reject .d.ts", com.aisub.player.media.MediaEntry.isVideoName("index.d.ts"))
+
+        // 2. 验证「本机 -> 照片」排除 Downloads 杂图、Pictures/Screenshots 目录及截屏命名前缀，仅保留真正照片
+        val dlImgDir = File(tempHome, "Downloads").apply { mkdirs() }
+        val screenshotsDir = File(tempHome, "Pictures/Screenshots").apply { mkdirs() }
+        val travelDir = File(tempHome, "Pictures/Travel").apply { mkdirs() }
+
+        fun makeJpg(target: File) {
+            val p = ProcessBuilder(
+                ffmpeg, "-y", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc=duration=1:size=800x600:rate=1",
+                "-frames:v", "1", "-q:v", "2",
+                target.absolutePath,
+            ).start()
+            assertEquals(0, p.waitFor())
+        }
+
+        makeJpg(File(dlImgDir, "terminal_log.jpg"))
+        makeJpg(File(screenshotsDir, "2026-11-12_capture.jpg"))
+        makeJpg(File(tempHome, "Pictures/屏幕截图 2026-11-12 220000.jpg"))
+        makeJpg(File(tempHome, "Pictures/Screenshot 2026-11-12.jpg"))
+        makeJpg(File(travelDir, "DSC_0001.jpg"))
+
+        val scannedImages = MediaLibrary.images(ctx)
+        val imageNames = scannedImages.map { it.title }
+        assertEquals("Only real photo in Pictures/Travel should be scanned: $imageNames", listOf("DSC_0001.jpg"), imageNames)
+
+        // 3. 验证桌面端音量 / 静音 / 亮度调节状态与 AudioManager 0..100 双向同步
+        val audio = ctx.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
+        assertEquals(100, audio.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC))
+        DesktopPlayerEngine.setMuted(false)
+        DesktopPlayerEngine.setMasterVolume(0.65f)
+        assertEquals(65, audio.getStreamVolume(android.media.AudioManager.STREAM_MUSIC))
+        assertEquals(0.65f, DesktopPlayerEngine.masterVolumeState.floatValue, 0.001f)
+
+        val mutedNow = DesktopPlayerEngine.toggleMute()
+        assertTrue(mutedNow)
+        assertEquals(0, audio.getStreamVolume(android.media.AudioManager.STREAM_MUSIC))
+        assertEquals(0f, DesktopPlayerEngine.effectiveMasterVolume, 0.001f)
+
+        audio.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, 80, 0)
+        assertFalse(DesktopPlayerEngine.isMuted)
+        assertEquals(0.80f, DesktopPlayerEngine.masterVolumeState.floatValue, 0.001f)
+
+        DesktopPlayerEngine.setVideoBrightness(1.35f)
+        assertEquals(1.35f, DesktopPlayerEngine.brightnessState.floatValue, 0.001f)
+        DesktopPlayerEngine.resetVideoBrightness()
+        assertEquals(1.0f, DesktopPlayerEngine.brightnessState.floatValue, 0.001f)
+    }
+
+    @OptIn(
+        androidx.compose.ui.InternalComposeUiApi::class,
+        androidx.compose.material3.ExperimentalMaterial3Api::class,
+    )
+    @Test
+    fun test10_DesktopPopupDrawerAndDialogGeometryAndDismissal() {
+        val scene = androidx.compose.ui.ImageComposeScene(width = 1280, height = 820)
+        try {
+            var playerExited = false
+            var sheetOpen by androidx.compose.runtime.mutableStateOf(true)
+            var dialogOpen by androidx.compose.runtime.mutableStateOf(false)
+            var sheetBounds = androidx.compose.ui.geometry.Rect.Zero
+            var dialogBounds = androidx.compose.ui.geometry.Rect.Zero
+            var sheetIsDark = false
+
+            scene.setContent {
+                com.aisub.player.ui.AppTheme {
+                    androidx.activity.compose.BackHandler { playerExited = true }
+                    androidx.compose.runtime.CompositionLocalProvider(
+                        com.aisub.player.ui.LocalSystemDarkOverride provides false,
+                        com.aisub.player.ui.LocalForceDarkPopup provides true,
+                    ) {
+                        if (sheetOpen) {
+                            com.aisub.player.ui.AppSheet(
+                                onDismissRequest = { sheetOpen = false },
+                                title = "AI 字幕",
+                                modifier = androidx.compose.ui.Modifier.onGloballyPositioned { coords ->
+                                    sheetBounds = coords.boundsInWindow()
+                                },
+                            ) {
+                                sheetIsDark = com.aisub.player.ui.LocalPopupColors.current.dark
+                                androidx.compose.foundation.layout.Column(
+                                    androidx.compose.ui.Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                                ) {
+                                    repeat(30) { idx ->
+                                        androidx.compose.material3.Text("测试选项 $idx", modifier = androidx.compose.ui.Modifier.padding(12.dp))
+                                    }
+                                }
+                            }
+                        }
+                        if (dialogOpen) {
+                            com.aisub.player.ui.AppDialog(
+                                onDismissRequest = { dialogOpen = false },
+                                title = { androidx.compose.material3.Text("播放速度") },
+                                modifier = androidx.compose.ui.Modifier.onGloballyPositioned { coords ->
+                                    dialogBounds = coords.boundsInWindow()
+                                },
+                                text = {
+                                    androidx.compose.foundation.layout.Column(
+                                        androidx.compose.ui.Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()),
+                                    ) {
+                                        repeat(35) { idx ->
+                                            androidx.compose.material3.Text("内容行 $idx", modifier = androidx.compose.ui.Modifier.padding(8.dp))
+                                        }
+                                    }
+                                },
+                                confirmButton = {
+                                    androidx.compose.material3.TextButton(onClick = { dialogOpen = false }) {
+                                        androidx.compose.material3.Text("确定")
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+
+            var simNano = 1_000_000L
+            fun pump(frames: Int = 4) {
+                repeat(frames) {
+                    scene.render(simNano)
+                    simNano += 140_000_000L
+                }
+            }
+
+            fun clickAt(
+                x: Float,
+                y: Float,
+                button: androidx.compose.ui.input.pointer.PointerButton = androidx.compose.ui.input.pointer.PointerButton.Primary,
+            ) {
+                val pos = androidx.compose.ui.geometry.Offset(x, y)
+                scene.sendPointerEvent(androidx.compose.ui.input.pointer.PointerEventType.Press, position = pos, button = button)
+                pump(1)
+                scene.sendPointerEvent(androidx.compose.ui.input.pointer.PointerEventType.Release, position = pos, button = button)
+                pump(2)
+            }
+
+            pump(5)
+
+            // 1. 验证播放页强制深色弹窗配色 & 右侧抽屉尺寸/位置（靠右悬浮、够宽、不顶天立地）
+            assertTrue("Player popup should force dark palette even in light OS mode", sheetIsDark)
+            assertTrue("AppSheet width should be >= 380px on 1280px window, got ${sheetBounds.width}", sheetBounds.width >= 380f)
+            assertTrue("AppSheet should be docked on the right half (left > 750), got $sheetBounds", sheetBounds.left > 750f)
+            assertTrue("AppSheet should leave top/bottom margin and not touch y=0..820, got $sheetBounds", sheetBounds.top >= 12f && sheetBounds.bottom <= 808f)
+
+            // 2. 点击卡片内部空白处不应误关弹窗
+            clickAt(sheetBounds.center.x, sheetBounds.center.y)
+            assertTrue("Clicking inside AppSheet card must NOT dismiss it", sheetOpen)
+
+            // 3. 点击卡片左侧仅 12px 处（旧 ModalBottomSheet 640dp 隐形死区位置）应立即收起
+            clickAt(sheetBounds.left - 12f, sheetBounds.center.y)
+            assertFalse("Clicking just outside AppSheet card must immediately dismiss it", sheetOpen)
+
+            // 4. 重新打开，验证右键点击外部空白也能收起
+            sheetOpen = true
+            pump(5)
+            clickAt(300f, 400f, button = androidx.compose.ui.input.pointer.PointerButton.Secondary)
+            assertFalse("Right-clicking outside AppSheet must dismiss it", sheetOpen)
+
+            // 5. 重新打开，验证点击右上角「×」按钮收起
+            sheetOpen = true
+            pump(5)
+            clickAt(sheetBounds.right - 27f, sheetBounds.top + 27f)
+            assertFalse("Clicking top-right close button on AppSheet must dismiss it", sheetOpen)
+
+            // 6. 重新打开，验证按 Esc（BackDispatcher）只关弹窗、不误退播放页
+            sheetOpen = true
+            pump(5)
+            assertTrue(androidx.activity.compose.DesktopBackDispatcher.dispatchBack())
+            pump(2)
+            assertFalse("Esc must dismiss AppSheet", sheetOpen)
+            assertFalse("Esc while AppSheet is open must NOT exit player", playerExited)
+
+            // 7. 验证 AppDialog 桌面宽度、最大高度限制、外部点击、「×」按钮与 Esc 收起
+            dialogOpen = true
+            pump(5)
+            assertTrue("AppDialog width should be >= 400px, got ${dialogBounds.width}", dialogBounds.width >= 400f)
+            assertTrue("AppDialog height should be capped <= 84% of window height, got ${dialogBounds.height}", dialogBounds.height <= 820f * 0.84f)
+
+            // 点击对话框内部不关闭
+            clickAt(dialogBounds.center.x, dialogBounds.center.y)
+            assertTrue("Clicking inside AppDialog must NOT dismiss it", dialogOpen)
+
+            // 点击对话框左侧紧邻外部空白立即关闭
+            clickAt(dialogBounds.left - 14f, dialogBounds.center.y)
+            assertFalse("Clicking outside AppDialog must dismiss it", dialogOpen)
+
+            // 重新打开，点击对话框右上角「×」关闭
+            dialogOpen = true
+            pump(5)
+            clickAt(dialogBounds.right - 29f, dialogBounds.top + 33f)
+            assertFalse("Clicking top-right close button on AppDialog must dismiss it", dialogOpen)
+
+            // 重新打开，按 Esc 只关对话框不退播放页
+            dialogOpen = true
+            pump(5)
+            assertTrue(androidx.activity.compose.DesktopBackDispatcher.dispatchBack())
+            pump(2)
+            assertFalse("Esc must dismiss AppDialog", dialogOpen)
+            assertFalse("Esc while AppDialog is open must NOT exit player", playerExited)
+        } finally {
+            scene.close()
+        }
     }
 }

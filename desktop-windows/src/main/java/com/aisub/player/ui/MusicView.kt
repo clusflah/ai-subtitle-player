@@ -65,6 +65,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -167,19 +168,58 @@ fun MusicView(
     val translations = if (music.lyrics != null) music.translations else remember(cues) {
         cues.sortedBy { it.startMs }.map { it.translation }.takeIf { t -> t.any { it != null } }
     }
-    // 竖屏停在歌词页时，一会儿不操作就淡出下方控件，让歌词占满；点一下屏幕再显示
+    // 竖屏停在歌词页时，一会儿不操作就淡出下方控件，让歌词占满；点一下屏幕或移动鼠标一定距离再显示
     var touches by remember { mutableIntStateOf(0) }
+    var sliderAdjusting by remember { mutableStateOf(false) }
     var controlsShown by remember { mutableStateOf(true) }
-    LaunchedEffect(pager.currentPage, touches, landscape, showMenu, showQueue) {
+    LaunchedEffect(pager.currentPage, touches, landscape, showMenu, showQueue, sliderAdjusting) {
         controlsShown = true
-        if (onLyricsPage && !landscape && !showMenu && !showQueue) {
+        if (onLyricsPage && !landscape && !showMenu && !showQueue && !sliderAdjusting) {
             delay(4_000)
             controlsShown = false
         }
     }
+    val wakeDistPx = with(LocalDensity.current) { 36.dp.toPx() }
 
     Box(
         Modifier.fillMaxSize().background(Color(0xFF1E201F))
+            .pointerInput(wakeDistPx) {
+                var lastPos: Offset? = null
+                var lastMoveMs = 0L
+                var movedPx = 0f
+                var lastBumpMs = 0L
+                awaitPointerEventScope {
+                    while (true) {
+                        val ev = awaitPointerEvent(PointerEventPass.Initial)
+                        if (ev.type == androidx.compose.ui.input.pointer.PointerEventType.Move) {
+                            val ch = ev.changes.firstOrNull() ?: continue
+                            if (ch.pressed) {
+                                lastPos = ch.position
+                                movedPx = 0f
+                                continue
+                            }
+                            val now = System.currentTimeMillis()
+                            val prev = lastPos
+                            lastPos = ch.position
+                            if (prev == null || now - lastMoveMs > 600L) {
+                                movedPx = 0f
+                            } else {
+                                movedPx += kotlin.math.hypot(ch.position.x - prev.x, ch.position.y - prev.y)
+                            }
+                            lastMoveMs = now
+                            if (!controlsShown && movedPx >= wakeDistPx) {
+                                touches++
+                                lastBumpMs = now
+                                movedPx = 0f
+                            } else if (controlsShown && movedPx >= wakeDistPx && now - lastBumpMs >= 350L) {
+                                touches++
+                                lastBumpMs = now
+                                movedPx = 0f
+                            }
+                        }
+                    }
+                }
+            }
             .pointerInput(Unit) {
                 // 只观察、不消费，歌词的点击、滑动照常。轻点才算操作（重新显示控件）；
                 // 拖着歌词滑动不算，免得一滑控件就冒出来
@@ -215,6 +255,14 @@ fun MusicView(
             }
         }
         val controls: @Composable (Modifier) -> Unit = { mod ->
+            val masterVol = com.aisub.player.desktop.DesktopPlayerEngine.masterVolumeState.floatValue
+            val isMuted = com.aisub.player.desktop.DesktopPlayerEngine.mutedState.value
+            val effVol = if (isMuted) 0f else masterVol
+            val volIcon = when {
+                effVol <= 0.005f -> AppIcons.VolumeOff
+                effVol < 0.5f -> AppIcons.VolumeDown
+                else -> AppIcons.Volume
+            }
             Column(mod) {
                 SongTitleRow(tags.title, listOfNotNull(tags.artist, tags.album).joinToString(" - "), liked, toggleLike) { showMenu = true }
                 // 歌词页以外，在歌名下面显示正在唱的一句
@@ -225,6 +273,32 @@ fun MusicView(
                 ) else Spacer(Modifier.height(14.dp))
                 MusicSeekBar(positionMs, player.duration.takeIf { it > 0 } ?: tags.durationMs, onSeek)
                 PlayControls(vm, player, wantsPlay, onMessage, onQueue = { showQueue = true })
+                DesktopAdjustPill(
+                    icon = volIcon,
+                    label = if (isMuted || effVol <= 0.005f) "取消静音" else "静音",
+                    fraction = effVol,
+                    valueText = "${(effVol * 100).roundToInt()}%",
+                    height = 46.dp,
+                    iconTint = if (isMuted || effVol <= 0.005f) Color(0xFFFF8A80) else Color(0xFFD5DCE6),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 32.dp, vertical = 6.dp),
+                    onIconClick = {
+                        com.aisub.player.desktop.DesktopPlayerEngine.toggleMute()
+                        touches++
+                    },
+                    onFractionChange = { f ->
+                        com.aisub.player.desktop.DesktopPlayerEngine.setMasterVolume(f)
+                        touches++
+                    },
+                    onWheelStep = { dir ->
+                        val next = (effVol + dir * 0.05f).coerceIn(0f, 1f)
+                        com.aisub.player.desktop.DesktopPlayerEngine.setMasterVolume(next)
+                        if (next <= 0.001f) com.aisub.player.desktop.DesktopPlayerEngine.setMuted(true)
+                        touches++
+                    },
+                    onDragActiveChange = { sliderAdjusting = it },
+                )
             }
         }
         if (landscape) {
@@ -244,16 +318,37 @@ fun MusicView(
         }
     }
 
-    if (showQueue) AppSheet(
-        onDismissRequest = { showQueue = false },
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-    ) { QueueSheet(vm, player, current, onMessage) }
+    CompositionLocalProvider(LocalForceDarkPopup provides true) {
+        if (showQueue) {
+            var queueVersion by remember { mutableIntStateOf(0) }
+            val entries = remember(queueVersion, current?.uri) { vm.queueEntries }
+            val (mode, next) = rememberPlayMode(player)
+            AppSheet(
+                onDismissRequest = { showQueue = false },
+                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                title = "播放列表 (${entries.size})",
+                headerActions = {
+                    Row(
+                        Modifier.clip(RoundedCornerShape(50)).clickable { onMessage(next().label) }.padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(mode.icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(mode.label, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
+                    }
+                },
+            ) {
+                QueueSheet(vm, entries, current, onRemoved = { queueVersion++ })
+            }
+        }
 
-    if (showMenu) AppSheet(
-        onDismissRequest = { showMenu = false },
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-    ) {
-        ActionSheet(music, current, liked, toggleLike) { action -> showMenu = false; onAction(action) }
+        if (showMenu) AppSheet(
+            onDismissRequest = { showMenu = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            title = "歌曲操作",
+        ) {
+            ActionSheet(music, current, liked, toggleLike) { action -> showMenu = false; onAction(action) }
+        }
     }
 }
 
@@ -520,6 +615,7 @@ private fun LyricsPage(
                             .liquidGlass(shape = RoundedCornerShape(6.dp), style = GlassStyle.Pill, tint = Color(0x28FFFFFF))
                             .clickable { menu = true }.padding(horizontal = 8.dp, vertical = 4.dp),
                     )
+                    CompositionLocalProvider(LocalForceDarkPopup provides true) {
                     AppMenu(menu, onDismissRequest = { menu = false }) {
                         val own = music.lyrics
                         MenuRow("调整歌词", AppIcons.SwapVert, enabled = own?.synced == true) { menu = false; adjusting = true }
@@ -535,13 +631,25 @@ private fun LyricsPage(
                         MenuRow("切换歌词", AppIcons.Search) { menu = false; onAction(MusicAction.SEARCH_LYRICS) }
                         MenuRow("导入歌词文件", AppIcons.File) { menu = false; onAction(MusicAction.IMPORT_LYRICS) }
                     }
+                    }
                 }
                 Spacer(Modifier.width(16.dp))
+                val lrcMuted = com.aisub.player.desktop.DesktopPlayerEngine.mutedState.value
+                val lrcVol = if (lrcMuted) 0f else com.aisub.player.desktop.DesktopPlayerEngine.masterVolumeState.floatValue
                 IconButton(onClick = {
-                    // 系统音量条
-                    (context.getSystemService(Context.AUDIO_SERVICE) as AudioManager)
-                        .adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_SAME, AudioManager.FLAG_SHOW_UI)
-                }) { Icon(AppIcons.Volume, "音量", tint = Color(0xCCFFFFFF)) }
+                    val mutedNow = com.aisub.player.desktop.DesktopPlayerEngine.toggleMute()
+                    onMessage(if (mutedNow) "已静音" else "音量 ${(com.aisub.player.desktop.DesktopPlayerEngine.masterVolume * 100).roundToInt()}%")
+                }) {
+                    Icon(
+                        when {
+                            lrcVol <= 0.005f -> AppIcons.VolumeOff
+                            lrcVol < 0.5f -> AppIcons.VolumeDown
+                            else -> AppIcons.Volume
+                        },
+                        "静音切换",
+                        tint = if (lrcVol <= 0.005f) Color(0xFFFF8A80) else Color(0xCCFFFFFF),
+                    )
+                }
             }
         }
     }
@@ -558,7 +666,7 @@ private fun Pill(text: String, onClick: () -> Unit) = Text(
 
 @Composable
 private fun MenuRow(text: String, icon: ImageVector, enabled: Boolean = true, onClick: () -> Unit) = DropdownMenuItem(
-    text = { Text(text, fontSize = 17.sp, modifier = Modifier.widthIn(min = 150.dp)) },
+    text = { Text(text, fontSize = 16.sp, modifier = Modifier.widthIn(min = 150.dp)) },
     trailingIcon = { Icon(icon, null) },
     enabled = enabled, onClick = onClick,
     colors = LocalPopupColors.current.let {
@@ -627,30 +735,14 @@ private fun SyncedLyrics(lyrics: Lyrics, translations: List<String?>?, positionM
 // ---------------- 播放列表 ----------------
 
 @Composable
-private fun QueueSheet(vm: MainViewModel, player: Player, current: MediaEntry?, onMessage: (String) -> Unit) {
-    var version by remember { mutableIntStateOf(0) }
-    val entries = remember(version, current?.uri) { vm.queueEntries }
+private fun QueueSheet(vm: MainViewModel, entries: List<MediaEntry>, current: MediaEntry?, onRemoved: () -> Unit) {
     val currentIndex = entries.indexOfFirst { it.uri == current?.uri }
-    val (mode, next) = rememberPlayMode(player)
-    Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("播放列表", color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-        Text("(${entries.size})", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 15.sp, modifier = Modifier.padding(start = 2.dp))
-        Spacer(Modifier.weight(1f))
-        Row(
-            Modifier.clip(RoundedCornerShape(50)).clickable { onMessage(next().label) }.padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(mode.icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(4.dp))
-            Text(mode.label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp)
-        }
-    }
     val c = LocalPopupColors.current
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 2).coerceAtLeast(0))
     // 歌曲放在一块浅灰卡片里；正在播放的那首除了文字变色，整行也有底色
     LazyColumn(
-        Modifier.heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.65f).dp)
-            .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
+        Modifier.heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.72f).dp)
+            .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 16.dp)
             .liquidGlass(shape = RoundedCornerShape(14.dp), style = GlassStyle.Card, tint = c.card, enableBackdrop = false),
         state = listState, contentPadding = PaddingValues(vertical = 6.dp),
     ) {
@@ -667,11 +759,11 @@ private fun QueueSheet(vm: MainViewModel, player: Player, current: MediaEntry?, 
                     Spacer(Modifier.width(6.dp))
                 }
                 Text(
-                    e.displayTitle, color = if (active) c.selectedText else c.textPrimary, fontSize = 17.sp,
+                    e.displayTitle, color = if (active) c.selectedText else c.textPrimary, fontSize = 16.sp,
                     fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(vertical = 12.dp),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(vertical = 11.dp),
                 )
-                if (entries.size > 1) IconButton(onClick = { vm.removeQueueIndex(i); version++ }) {
+                if (entries.size > 1) IconButton(onClick = { vm.removeQueueIndex(i); onRemoved() }) {
                     Icon(AppIcons.Close, "从播放列表移除", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }

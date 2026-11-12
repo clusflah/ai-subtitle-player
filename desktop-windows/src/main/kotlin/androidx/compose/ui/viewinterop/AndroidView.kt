@@ -80,6 +80,12 @@ fun <T : View> AndroidView(
     when (view) {
         is PlayerView -> {
             val resizeMode = view.resizeMode
+            val brightnessCache = remember {
+                object {
+                    var brightness: Float = 1f
+                    var filter: androidx.compose.ui.graphics.ColorFilter? = null
+                }
+            }
             Canvas(
                 modifier = modifier
                     .background(Color.Black)
@@ -88,9 +94,29 @@ fun <T : View> AndroidView(
                         DesktopPlayerEngine.updateDisplaySize(sz.width, sz.height)
                     },
             ) {
-                // 仅在 Draw 阶段读取 frameTick，每帧只触发 Canvas 重绘，跳过 Composable 重组与布局
+                // 仅在 Draw 阶段读取 frameTick 与 brightnessState，只触发 Canvas 重绘，跳过 Composable 重组与布局
                 @Suppress("UNUSED_VARIABLE")
                 val tick = DesktopPlayerEngine.frameTick.longValue
+                val brightness = DesktopPlayerEngine.brightnessState.floatValue
+                if (brightness != brightnessCache.brightness) {
+                    brightnessCache.brightness = brightness
+                    brightnessCache.filter = if (kotlin.math.abs(brightness - 1f) < 0.005f) {
+                        null
+                    } else {
+                        val scale = if (brightness <= 1f) brightness else 1f + (brightness - 1f) * 0.65f
+                        val lift = if (brightness <= 1f) 0f else (brightness - 1f) * 32f
+                        androidx.compose.ui.graphics.ColorFilter.colorMatrix(
+                            androidx.compose.ui.graphics.ColorMatrix(
+                                floatArrayOf(
+                                    scale, 0f, 0f, 0f, lift,
+                                    0f, scale, 0f, 0f, lift,
+                                    0f, 0f, scale, 0f, lift,
+                                    0f, 0f, 0f, 1f, 0f,
+                                ),
+                            ),
+                        )
+                    }
+                }
                 val img = DesktopPlayerEngine.currentDrawBitmap ?: return@Canvas
                 val cw = size.width
                 val ch = size.height
@@ -129,6 +155,7 @@ fun <T : View> AndroidView(
                         dstOffset = IntOffset(dstX, dstY),
                         dstSize = IntSize(dstW.coerceAtLeast(1), dstH.coerceAtLeast(1)),
                         filterQuality = FilterQuality.Low,
+                        colorFilter = brightnessCache.filter,
                     )
                 }
             }

@@ -4,6 +4,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,31 +25,43 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.max
@@ -401,6 +415,222 @@ internal fun ThinSeekBar(
                 .shadow(4.dp, CircleShape, ambientColor = Orange.copy(alpha = 0.45f), spotColor = Orange.copy(alpha = 0.65f))
                 .clip(CircleShape)
                 .background(Orange),
+        )
+    }
+}
+
+/**
+ * 桌面端液态玻璃调节胶囊（音量 / 亮度）：
+ * 与 [LiquidDock] 共享全圆角胶囊高度、阴影与液态玻璃折射材质，支持点击图标（静音 / 重置 100%）、
+ * 点击或水平拖拽滑杆、鼠标滚轮微调，以及中心基准刻度磁吸。
+ */
+@Composable
+internal fun DesktopAdjustPill(
+    icon: ImageVector,
+    label: String,
+    fraction: Float,
+    valueText: String,
+    modifier: Modifier = Modifier,
+    height: Dp = 60.dp,
+    iconTint: Color = Color(0xFFD5DCE6),
+    centerTick: Boolean = false,
+    onIconClick: () -> Unit,
+    onFractionChange: (Float) -> Unit,
+    onWheelStep: ((Int) -> Unit)? = null,
+    onDragActiveChange: (Boolean) -> Unit = {},
+) {
+    val clamped = fraction.coerceIn(0f, 1f)
+    val currentOnFractionChange by rememberUpdatedState(onFractionChange)
+    val currentOnWheelStep by rememberUpdatedState(onWheelStep)
+    val currentOnDragActiveChange by rememberUpdatedState(onDragActiveChange)
+
+    var widthPx by remember { mutableFloatStateOf(1f) }
+    var isDragging by remember { mutableStateOf(false) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            if (isDragging) {
+                currentOnDragActiveChange(false)
+            }
+        }
+    }
+
+    val pillScaleX by animateFloatAsState(
+        targetValue = if (isDragging) 1.015f else 1f,
+        animationSpec = spring(dampingRatio = 0.54f, stiffness = 360f),
+        label = "adjustPillScaleX",
+    )
+    val pillScaleY by animateFloatAsState(
+        targetValue = if (isDragging) 0.99f else 1f,
+        animationSpec = spring(dampingRatio = 0.54f, stiffness = 360f),
+        label = "adjustPillScaleY",
+    )
+    val thumbScale by animateFloatAsState(
+        targetValue = if (isDragging) 1.22f else 1f,
+        animationSpec = spring(dampingRatio = 0.54f, stiffness = 380f),
+        label = "adjustThumbScale",
+    )
+
+    val pillShape = RoundedCornerShape(50)
+    val glassEnabled = LocalLiquidGlassEnabled.current
+    val trackHeight = if (isDragging) 5.dp else 4.dp
+
+    Row(
+        modifier = modifier
+            .height(height)
+            .graphicsLayer {
+                scaleX = pillScaleX
+                scaleY = pillScaleY
+            }
+            .let { mod ->
+                if (glassEnabled) {
+                    mod
+                        .shadow(
+                            elevation = 18.dp,
+                            shape = pillShape,
+                            ambientColor = Color(0x28000000),
+                            spotColor = Color(0x36000000),
+                        )
+                        .liquidGlass(
+                            shape = pillShape,
+                            style = GlassStyle.Floating,
+                            tint = GlassTokens.DarkDockTint,
+                            lightShift = if (isDragging) 0.45f else 0f,
+                        )
+                } else {
+                    mod
+                        .clip(pillShape)
+                        .background(Color(0xE01B1E24))
+                }
+            }
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val ev = awaitPointerEvent(PointerEventPass.Main)
+                        if (ev.type == PointerEventType.Scroll) {
+                            val stepFn = currentOnWheelStep ?: continue
+                            val dy = ev.changes.firstOrNull()?.scrollDelta?.y ?: 0f
+                            if (abs(dy) > 0.01f) {
+                                ev.changes.forEach { it.consume() }
+                                stepFn(if (dy < 0f) 1 else -1)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(start = 8.dp, end = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .clip(CircleShape)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onIconClick,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = iconTint,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 4.dp)
+                .height(32.dp)
+                .onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
+                .pointerInput(centerTick) {
+                    detectTapGestures { o ->
+                        val raw = (o.x / widthPx).coerceIn(0f, 1f)
+                        val snapped = if (centerTick && abs(raw - 0.5f) < 0.03f) 0.5f else raw
+                        currentOnFractionChange(snapped)
+                    }
+                }
+                .pointerInput(centerTick) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { o ->
+                            isDragging = true
+                            currentOnDragActiveChange(true)
+                            val raw = (o.x / widthPx).coerceIn(0f, 1f)
+                            currentOnFractionChange(if (centerTick && abs(raw - 0.5f) < 0.025f) 0.5f else raw)
+                        },
+                        onDragEnd = {
+                            isDragging = false
+                            currentOnDragActiveChange(false)
+                        },
+                        onDragCancel = {
+                            isDragging = false
+                            currentOnDragActiveChange(false)
+                        },
+                    ) { change, _ ->
+                        change.consume()
+                        val raw = (change.position.x / widthPx).coerceIn(0f, 1f)
+                        val snapped = if (centerTick && abs(raw - 0.5f) < 0.025f) 0.5f else raw
+                        currentOnFractionChange(snapped)
+                    }
+                },
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(trackHeight)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color(0x44FFFFFF)),
+            )
+            if (centerTick) {
+                Canvas(Modifier.fillMaxWidth().height(12.dp)) {
+                    val cx = size.width * 0.5f
+                    val cy = size.height * 0.5f
+                    drawRect(
+                        color = Color(0x99FFFFFF),
+                        topLeft = Offset(cx - 1.dp.toPx(), cy - 4.dp.toPx()),
+                        size = Size(2.dp.toPx(), 8.dp.toPx()),
+                    )
+                }
+            }
+            Box(
+                Modifier
+                    .fillMaxWidth(clamped)
+                    .height(trackHeight)
+                    .clip(RoundedCornerShape(50))
+                    .background(Orange),
+            )
+            Box(
+                Modifier
+                    .offset {
+                        val thumbPx = 14.dp.toPx()
+                        val travel = (widthPx - thumbPx).coerceAtLeast(0f)
+                        IntOffset((clamped * travel).roundToInt(), 0)
+                    }
+                    .size(14.dp)
+                    .graphicsLayer {
+                        scaleX = thumbScale
+                        scaleY = thumbScale
+                    }
+                    .shadow(4.dp, CircleShape, ambientColor = Orange.copy(alpha = 0.45f), spotColor = Orange.copy(alpha = 0.65f))
+                    .clip(CircleShape)
+                    .background(Orange),
+            )
+        }
+
+        Spacer(Modifier.width(4.dp))
+        Text(
+            text = valueText,
+            color = Color(0xFFE5EAF2),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            textAlign = TextAlign.End,
+            maxLines = 1,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier.width(38.dp),
         )
     }
 }

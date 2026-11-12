@@ -164,8 +164,7 @@ fun RolesPanel(vm: MainViewModel, state: com.aisub.player.UiState) {
     fun voiceLabel(id: String?) = if (id == null) "自动" else names[id]?.let { "$it（$id）" } ?: id
     val counts = remember(state.cues) { state.cues.groupingBy { it.speaker }.eachCount() }
 
-    Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("角色与配音", style = MaterialTheme.typography.titleLarge)
+    Column(Modifier.padding(horizontal = 20.dp).padding(top = 4.dp, bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             "由翻译服务的大模型根据台词判断说话人，再按性别自动分配${settings.ttsEngine.label}的语音；只看文字，可能分错，可以逐个更换。",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,

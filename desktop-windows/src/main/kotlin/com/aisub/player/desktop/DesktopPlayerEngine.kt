@@ -178,9 +178,47 @@ object DesktopPlayerEngine {
         }
     }
 
+    const val MIN_BRIGHTNESS = 0.20f
+    const val MAX_BRIGHTNESS = 1.80f
+
+    val masterVolumeState = androidx.compose.runtime.mutableFloatStateOf(1.0f)
+    val mutedState = androidx.compose.runtime.mutableStateOf(false)
+    val brightnessState = androidx.compose.runtime.mutableFloatStateOf(1.0f)
+
     @Volatile
     var masterVolume: Float = 1.0f
         private set
+
+    @Volatile
+    var isMuted: Boolean = false
+        private set
+
+    @Volatile
+    var videoBrightness: Float = 1.0f
+        private set
+
+    val effectiveMasterVolume: Float
+        get() = if (isMuted) 0f else masterVolume
+
+    @Volatile
+    private var volumePrefs: android.content.SharedPreferences? = null
+
+    @Volatile
+    private var volumeModifiedInSession: Boolean = false
+
+    internal fun initPrefsIfNeeded(context: Context?) {
+        if (context == null || volumePrefs != null) return
+        val p = runCatching { context.getSharedPreferences("player", Context.MODE_PRIVATE) }.getOrNull() ?: return
+        volumePrefs = p
+        if (!volumeModifiedInSession) {
+            val savedVol = p.getFloat("desktop.volume", 1.0f).coerceIn(0f, 1f)
+            val savedMuted = p.getBoolean("desktop.muted", false)
+            masterVolume = savedVol
+            masterVolumeState.floatValue = savedVol
+            isMuted = savedMuted
+            mutedState.value = savedMuted
+        }
+    }
 
     @Volatile
     var activePlayer: DesktopExoPlayer? = null
@@ -412,9 +450,49 @@ object DesktopPlayerEngine {
     }
 
     fun setMasterVolume(vol: Float) {
-        masterVolume = vol.coerceIn(0f, 1f)
+        val clamped = vol.coerceIn(0f, 1f)
+        volumeModifiedInSession = true
+        masterVolume = clamped
+        masterVolumeState.floatValue = clamped
+        if (clamped > 0.001f && isMuted) {
+            isMuted = false
+            mutedState.value = false
+        }
+        volumePrefs?.edit()
+            ?.putFloat("desktop.volume", clamped)
+            ?.putBoolean("desktop.muted", isMuted)
+            ?.apply()
         activePlayer?.updateEffectiveVolume()
     }
+
+    fun setMuted(muted: Boolean) {
+        volumeModifiedInSession = true
+        isMuted = muted
+        mutedState.value = muted
+        if (!muted && masterVolume <= 0.005f) {
+            masterVolume = 0.50f
+            masterVolumeState.floatValue = 0.50f
+        }
+        volumePrefs?.edit()
+            ?.putFloat("desktop.volume", masterVolume)
+            ?.putBoolean("desktop.muted", muted)
+            ?.apply()
+        activePlayer?.updateEffectiveVolume()
+    }
+
+    fun toggleMute(): Boolean {
+        val next = !isMuted
+        setMuted(next)
+        return next
+    }
+
+    fun setVideoBrightness(value: Float) {
+        val clamped = value.coerceIn(MIN_BRIGHTNESS, MAX_BRIGHTNESS)
+        videoBrightness = clamped
+        brightnessState.floatValue = clamped
+    }
+
+    fun resetVideoBrightness() = setVideoBrightness(1.0f)
 
     fun applyEqualizer(enabled: Boolean, bandLevels: ShortArray) {
         activePlayer?.applyEqualizer(enabled, bandLevels)
@@ -425,6 +503,10 @@ class DesktopExoPlayer(
     private val context: Context,
     private val dataSourceFactory: DataSource.Factory?,
 ) : ExoPlayer {
+    init {
+        DesktopPlayerEngine.initPrefsIfNeeded(context)
+    }
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private val listeners = CopyOnWriteArraySet<Player.Listener>()
     private val playlist = ArrayList<MediaItem>()
@@ -925,11 +1007,19 @@ class DesktopExoPlayer(
     override fun hasNextMediaItem(): Boolean = currentMediaItemIndex + 1 < playlist.size
     override fun hasPreviousMediaItem(): Boolean = currentMediaItemIndex > 0
 
-    internal fun updateEffectiveVolume() {
-        val eff = (volume * DesktopPlayerEngine.masterVolume).coerceIn(0f, 1f)
+    private fun applyVlcVolumeOnExecutor(mp: MediaPlayer?) {
+        if (mp == null) return
+        val eff = (volume * DesktopPlayerEngine.effectiveMasterVolume).coerceIn(0f, 1f)
         val volInt = (eff * 100).roundToInt()
+        runCatching {
+            mp.audio()?.setMute(volInt == 0)
+            mp.audio()?.setVolume(volInt)
+        }
+    }
+
+    internal fun updateEffectiveVolume() {
         vlcExecutor.execute {
-            runCatching { vlcMp?.audio()?.setVolume(volInt) }
+            applyVlcVolumeOnExecutor(vlcMp)
         }
     }
 
@@ -1247,8 +1337,7 @@ class DesktopExoPlayer(
             headers["User-Agent"]?.let { options.add(":http-user-agent=$it") }
             headers["Referer"]?.let { options.add(":http-referrer=$it") }
 
-            val eff = (volume * DesktopPlayerEngine.masterVolume).coerceIn(0f, 1f)
-            runCatching { mp.audio().setVolume((eff * 100).roundToInt()) }
+            applyVlcVolumeOnExecutor(mp)
             runCatching { mp.controls().setRate(playbackParameters.speed) }
 
             renderedFirstFrame.set(false)
@@ -1406,6 +1495,7 @@ class DesktopExoPlayer(
                 val gen = mediaGeneration.get()
                 vlcExecutor.execute {
                     if (gen == mediaGeneration.get() && vlcMp === mp) {
+                        applyVlcVolumeOnExecutor(mp)
                         vlcAudioDelayMs = runCatching { (mp.audio().delay() / 1_000L).coerceIn(-2_000L, 2_000L) }.getOrDefault(0L)
                         refreshVlcTracksOnExecutor(mp)
                     }
@@ -1846,7 +1936,7 @@ class DesktopExoPlayer(
                     val n = ins.read(buf, 0, buf.size)
                     if (n < 0) break
                     if (n == 0) continue
-                    val effVol = (volume * DesktopPlayerEngine.masterVolume).coerceIn(0f, 1f)
+                    val effVol = (volume * DesktopPlayerEngine.effectiveMasterVolume).coerceIn(0f, 1f)
                     if (effVol < 0.99f) {
                         var i = 0
                         while (i + 1 < n) {

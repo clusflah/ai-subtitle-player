@@ -17,14 +17,21 @@ import javax.sound.sampled.Clip
 import javax.sound.sampled.LineEvent
 
 class AudioManager {
-    private var currentVolume = 12
+    fun getStreamMaxVolume(streamType: Int): Int = 100
 
-    fun getStreamMaxVolume(streamType: Int): Int = 15
-    fun getStreamVolume(streamType: Int): Int = currentVolume
+    fun getStreamVolume(streamType: Int): Int =
+        (com.aisub.player.desktop.DesktopPlayerEngine.effectiveMasterVolume * 100f)
+            .let { kotlin.math.round(it).toInt().coerceIn(0, 100) }
 
     fun setStreamVolume(streamType: Int, index: Int, flags: Int) {
-        currentVolume = index.coerceIn(0, 15)
-        com.aisub.player.desktop.DesktopPlayerEngine.setMasterVolume(currentVolume / 15f)
+        val clamped = index.coerceIn(0, 100)
+        if (clamped == 0) {
+            com.aisub.player.desktop.DesktopPlayerEngine.setMasterVolume(0f)
+            com.aisub.player.desktop.DesktopPlayerEngine.setMuted(true)
+        } else {
+            com.aisub.player.desktop.DesktopPlayerEngine.setMuted(false)
+            com.aisub.player.desktop.DesktopPlayerEngine.setMasterVolume(clamped / 100f)
+        }
     }
 
     fun adjustStreamVolume(streamType: Int, direction: Int, flags: Int) {}

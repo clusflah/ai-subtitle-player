@@ -558,8 +558,8 @@ fun HomeScreen(
                         }
                     }
                     if (localPhotos) {
-                        if (!state.hasImagePermission) EmptyState("需要照片访问权限才能显示手机里的图片", "授予权限", icon = AppIcons.Image, onButton = onRequestImagePermission)
-                        else if (state.images.isEmpty()) EmptyState("手机里还没有照片", "刷新照片", icon = AppIcons.Image, onButton = lib::refreshImages)
+                        if (!state.hasImagePermission) EmptyState("需要照片访问权限才能显示本机图片", "授予权限", icon = AppIcons.Image, onButton = onRequestImagePermission)
+                        else if (state.images.isEmpty()) EmptyState("本机 Pictures 目录还没有照片", "刷新照片", icon = AppIcons.Image, onButton = lib::refreshImages)
                         else LazyVerticalGrid(GridCells.Adaptive(if (LocalTv.current) 180.dp else 112.dp), contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 104.dp)) {
                             itemsIndexed(state.images, key = { _, e -> e.uri }) { index, e ->
                                 NetImage(e.uri, Modifier.padding(3.dp).aspectRatio(1f).clip(MaterialTheme.shapes.small)
@@ -837,11 +837,11 @@ private fun BrowseTab(
         CollapsibleSection("browse.local", "本地文件") {
             data class LocalSpec(val name: String, val icon: ImageVector, val badge: SourceBadgeKind, val path: String)
             val local = listOf(
-                LocalSpec("内部存储", AppIcons.Phone, SourceBadgeKind.LOCAL_PHONE, ""),
-                LocalSpec("Download", AppIcons.Download, SourceBadgeKind.LOCAL_DOWNLOAD, "Download"),
-                LocalSpec("Movies", AppIcons.Movie, SourceBadgeKind.LOCAL_MOVIES, "Movies"),
+                LocalSpec("用户目录", AppIcons.Phone, SourceBadgeKind.LOCAL_PHONE, ""),
+                LocalSpec("Downloads", AppIcons.Download, SourceBadgeKind.LOCAL_DOWNLOAD, "Downloads"),
+                LocalSpec("Videos", AppIcons.Movie, SourceBadgeKind.LOCAL_MOVIES, "Videos"),
                 LocalSpec("Music", AppIcons.MusicNote, SourceBadgeKind.LOCAL_MUSIC, "Music"),
-                LocalSpec("DCIM", AppIcons.Folder, SourceBadgeKind.LOCAL_DCIM, "DCIM"),
+                LocalSpec("Pictures", AppIcons.Folder, SourceBadgeKind.LOCAL_DCIM, "Pictures"),
             )
             data class Card(val icon: ImageVector, val badge: SourceBadgeKind, val title: String, val subtitle: String, val onClick: () -> Unit)
             val cards = remember(all, state.hasPermission) {

@@ -297,6 +297,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     var controls by remember { mutableStateOf(true) }
     var locked by remember { mutableStateOf(false) }
     var interactions by remember { mutableIntStateOf(0) }
+    var sliderAdjusting by remember { mutableStateOf(false) }
+    var lastManualHideMs by remember { mutableLongStateOf(0L) }
     var resizeIndex by remember { mutableIntStateOf(0) }
     /** 画面在播放区域里的下沿和播放区域的高度（像素）；竖屏放横视频时下面有一大块黑边，字幕放到画面正下方 */
     var videoBottomPx by remember { mutableIntStateOf(0) }
@@ -348,8 +350,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     LaunchedEffect(Unit) { vm.extras.events.collect { indicator = null to it } }
     LaunchedEffect(gesturePreview) { gesturePreview?.let(vm.extras::requestThumbnail) ?: vm.extras.clearThumbnail() }
 
-    LaunchedEffect(controls, interactions, isPlaying, showMore, showTracks) {
-        if (controls && isPlaying && !showMore && !showTracks) {
+    LaunchedEffect(controls, interactions, isPlaying, showMore, showTracks, sliderAdjusting) {
+        if (controls && isPlaying && !showMore && !showTracks && !sliderAdjusting) {
             delay(3500)
             controls = false
         }
@@ -465,6 +467,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             }
         }
     }
+    // 更多菜单打开时按 Esc 先收起更多菜单，不直接退出播放页
+    BackHandler(enabled = showMore) { showMore = false }
     // 返回键先收起控制栏，再按一次才退出播放页
     BackHandler(enabled = tv && controls && !locked && !showMore && !musicMode) { controls = false }
     val seekBy: (Long) -> Unit = { delta ->
@@ -575,8 +579,52 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         }
     }
 
+    val wakeDistancePx = with(LocalDensity.current) { 36.dp.toPx() }
+    val keepAliveDistancePx = with(LocalDensity.current) { 20.dp.toPx() }
+
     Box(
         Modifier.fillMaxSize().background(Color.Black)
+            .pointerInput(musicMode, wakeDistancePx, keepAliveDistancePx) {
+                if (musicMode) return@pointerInput
+                var lastPos: Offset? = null
+                var lastMoveMs = 0L
+                var movedPx = 0f
+                var lastBumpMs = 0L
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                        if (event.type == androidx.compose.ui.input.pointer.PointerEventType.Move) {
+                            val change = event.changes.firstOrNull() ?: continue
+                            if (change.pressed) {
+                                lastPos = change.position
+                                movedPx = 0f
+                                continue
+                            }
+                            val now = System.currentTimeMillis()
+                            val prev = lastPos
+                            lastPos = change.position
+                            if (prev == null || now - lastMoveMs > 600L) {
+                                movedPx = 0f
+                            } else {
+                                movedPx += kotlin.math.hypot(change.position.x - prev.x, change.position.y - prev.y)
+                            }
+                            lastMoveMs = now
+                            if (!controls) {
+                                if (now - lastManualHideMs >= 350L && movedPx >= wakeDistancePx) {
+                                    controls = true
+                                    interactions++
+                                    lastBumpMs = now
+                                    movedPx = 0f
+                                }
+                            } else if (movedPx >= keepAliveDistancePx && now - lastBumpMs >= 300L) {
+                                interactions++
+                                lastBumpMs = now
+                                movedPx = 0f
+                            }
+                        }
+                    }
+                }
+            }
             .onPreviewKeyEvent(onTvKey).onFocusChanged { rootFocused = it.isFocused }
             .focusRequester(rootFocus).focusProperties { canFocus = !musicMode }.focusable(),
     ) {
@@ -721,7 +769,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         // ---- 手势层 ----
         GestureLayer(
             locked = locked,
-            onTap = { controls = !controls; interactions++ },
+            onTap = {
+                if (controls) lastManualHideMs = System.currentTimeMillis()
+                controls = !controls
+                interactions++
+            },
             onIndicator = { indicator = it },
             onSeekPreview = { gesturePreview = it },
             speed = { speed },
@@ -1115,103 +1167,225 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                 } else Spacer(Modifier.height(4.dp))
                 // 播放键居中，左右各一个上一集/下一集；外侧两组对称：
-                // 手机左=字幕、AI 字幕，右=旋转、更多；电视左=字幕、AI 字幕，右=倍速、更多（电视不能转屏）
+                // 桌面端宽窗口下左右对称放置「亮度调节条」与「音量调节条」液态玻璃胶囊，窄窗口自适应为双列调节行
                 val canSkip = vm.queueSize > 1 && !vm.usingVlc
-                LiquidDock(
-                    count = 7,
-                    activeSlot = targetSlot,
-                    focusedSlot = focusedSlot,
-                    pulsing = pulsing || dragging != null,
-                ) {
-                    DockButton(
-                        icon = AppIcons.Subtitles,
-                        label = "字幕与音轨",
-                        modifier = Modifier.weight(1f),
-                        iconSize = 22.dp,
-                        active = effectiveSlot == 0 && targetSlot != 3,
-                        onFocusChange = { if (it) focusedSlot = 0 else if (focusedSlot == 0) focusedSlot = -1 },
+                var brightnessDragging by remember { mutableStateOf(false) }
+                var volumeDragging by remember { mutableStateOf(false) }
+                LaunchedEffect(dragging != null, brightnessDragging, volumeDragging) {
+                    sliderAdjusting = (dragging != null) || brightnessDragging || volumeDragging
+                }
+                DisposableEffect(Unit) {
+                    onDispose { sliderAdjusting = false }
+                }
+
+                val minB = com.aisub.player.desktop.DesktopPlayerEngine.MIN_BRIGHTNESS
+                val maxB = com.aisub.player.desktop.DesktopPlayerEngine.MAX_BRIGHTNESS
+                val curBrightness = com.aisub.player.desktop.DesktopPlayerEngine.brightnessState.floatValue
+                val brightnessFraction = ((curBrightness - minB) / (maxB - minB)).coerceIn(0f, 1f)
+                val masterVol = com.aisub.player.desktop.DesktopPlayerEngine.masterVolumeState.floatValue
+                val isMuted = com.aisub.player.desktop.DesktopPlayerEngine.mutedState.value
+                val effectiveVol = if (isMuted) 0f else masterVol
+                val volumeIcon = when {
+                    effectiveVol <= 0.005f -> AppIcons.VolumeOff
+                    effectiveVol < 0.5f -> AppIcons.VolumeDown
+                    else -> AppIcons.Volume
+                }
+
+                val brightnessPill: @Composable (Modifier, Dp) -> Unit = { pillMod, pillHeight ->
+                    DesktopAdjustPill(
+                        icon = AppIcons.Brightness,
+                        label = "亮度调节（点击重置 100%）",
+                        fraction = brightnessFraction,
+                        valueText = "${(curBrightness * 100).roundToInt()}%",
+                        modifier = pillMod,
+                        height = pillHeight,
+                        iconTint = if (abs(curBrightness - 1f) >= 0.02f) Orange else Color(0xFFD5DCE6),
+                        centerTick = true,
+                        onIconClick = {
+                            com.aisub.player.desktop.DesktopPlayerEngine.resetVideoBrightness()
+                            indicator = AppIcons.Brightness to "亮度 100%"
+                            interactions++
+                        },
+                        onFractionChange = { f ->
+                            val nextB = (minB + f * (maxB - minB)).coerceIn(minB, maxB)
+                            com.aisub.player.desktop.DesktopPlayerEngine.setVideoBrightness(nextB)
+                            interactions++
+                        },
+                        onWheelStep = { dir ->
+                            val rawB = (curBrightness + dir * 0.05f).coerceIn(minB, maxB)
+                            val snappedB = if (abs(rawB - 1f) < 0.025f) 1f else rawB
+                            com.aisub.player.desktop.DesktopPlayerEngine.setVideoBrightness(snappedB)
+                            indicator = AppIcons.Brightness to "亮度 ${(snappedB * 100).roundToInt()}%"
+                            interactions++
+                        },
+                        onDragActiveChange = { brightnessDragging = it },
+                    )
+                }
+
+                val volumePill: @Composable (Modifier, Dp) -> Unit = { pillMod, pillHeight ->
+                    DesktopAdjustPill(
+                        icon = volumeIcon,
+                        label = if (isMuted || effectiveVol <= 0.005f) "取消静音" else "静音",
+                        fraction = effectiveVol,
+                        valueText = "${(effectiveVol * 100).roundToInt()}%",
+                        modifier = pillMod,
+                        height = pillHeight,
+                        iconTint = if (isMuted || effectiveVol <= 0.005f) Color(0xFFFF8A80) else Color(0xFFD5DCE6),
+                        centerTick = false,
+                        onIconClick = {
+                            val mutedNow = com.aisub.player.desktop.DesktopPlayerEngine.toggleMute()
+                            val shownPct = (com.aisub.player.desktop.DesktopPlayerEngine.effectiveMasterVolume * 100).roundToInt()
+                            indicator = (if (mutedNow) AppIcons.VolumeOff else AppIcons.Volume) to (if (mutedNow) "已静音" else "音量 $shownPct%")
+                            interactions++
+                        },
+                        onFractionChange = { f ->
+                            com.aisub.player.desktop.DesktopPlayerEngine.setMasterVolume(f)
+                            if (f <= 0.001f) com.aisub.player.desktop.DesktopPlayerEngine.setMuted(true)
+                            interactions++
+                        },
+                        onWheelStep = { dir ->
+                            val nextV = (effectiveVol + dir * 0.05f).coerceIn(0f, 1f)
+                            com.aisub.player.desktop.DesktopPlayerEngine.setMasterVolume(nextV)
+                            if (nextV <= 0.001f) com.aisub.player.desktop.DesktopPlayerEngine.setMuted(true)
+                            val shownPct = (nextV * 100).roundToInt()
+                            val ic = when {
+                                shownPct == 0 -> AppIcons.VolumeOff
+                                shownPct < 50 -> AppIcons.VolumeDown
+                                else -> AppIcons.Volume
+                            }
+                            indicator = ic to "音量 $shownPct%"
+                            interactions++
+                        },
+                        onDragActiveChange = { volumeDragging = it },
+                    )
+                }
+
+                val dockContent: @Composable (Modifier) -> Unit = { dockMod ->
+                    LiquidDock(
+                        count = 7,
+                        activeSlot = targetSlot,
+                        focusedSlot = focusedSlot,
+                        pulsing = pulsing || dragging != null,
+                        modifier = dockMod,
                     ) {
-                        targetSlot = 0; pulseTick++; tracksAi = false; showTracks = true; interactions++
-                    }
-                    DockButton(
-                        icon = AppIcons.AutoAwesome,
-                        label = "AI 字幕",
-                        modifier = Modifier.weight(1f),
-                        iconSize = 22.dp,
-                        active = effectiveSlot == 1 && targetSlot != 3,
-                        onFocusChange = { if (it) focusedSlot = 1 else if (focusedSlot == 1) focusedSlot = -1 },
-                    ) {
-                        targetSlot = 1; pulseTick++; tracksAi = true; showTracks = true; interactions++
-                    }
-                    DockButton(
-                        icon = AppIcons.SkipPrevious,
-                        label = "上一集",
-                        modifier = Modifier.weight(1f),
-                        iconSize = 27.dp,
-                        enabled = canSkip,
-                        active = effectiveSlot == 2 && targetSlot != 3,
-                        onFocusChange = { if (it) focusedSlot = 2 else if (focusedSlot == 2) focusedSlot = -1 },
-                    ) {
-                        targetSlot = 2; pulseTick++; vm.skipInQueue(false, restartFirst = true); interactions++
-                    }
-                    DockButton(
-                        icon = if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow,
-                        label = if (wantsPlay) "暂停" else "播放",
-                        modifier = Modifier.weight(1f).focusRequester(playFocus),
-                        iconSize = 27.dp,
-                        isCenter = true,
-                        active = effectiveSlot == 3,
-                        onFocusChange = { if (it) focusedSlot = 3 else if (focusedSlot == 3) focusedSlot = -1 },
-                    ) {
-                        targetSlot = 3; pulseTick++; vm.togglePlay(); interactions++
-                    }
-                    DockButton(
-                        icon = AppIcons.SkipNext,
-                        label = "下一集",
-                        modifier = Modifier.weight(1f),
-                        iconSize = 27.dp,
-                        enabled = canSkip,
-                        active = effectiveSlot == 4 && targetSlot != 3,
-                        onFocusChange = { if (it) focusedSlot = 4 else if (focusedSlot == 4) focusedSlot = -1 },
-                    ) {
-                        targetSlot = 4; pulseTick++; vm.skipInQueue(true); interactions++
-                    }
-                    if (tv) {
-                        // 电视没有手势调速，放个倍速按钮；也让播放两边对称
                         DockButton(
-                            icon = AppIcons.Speed,
-                            label = "倍速",
+                            icon = AppIcons.Subtitles,
+                            label = "字幕与音轨",
                             modifier = Modifier.weight(1f),
                             iconSize = 22.dp,
-                            active = effectiveSlot == 5 && targetSlot != 3,
-                            onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
+                            active = effectiveSlot == 0 && targetSlot != 3,
+                            onFocusChange = { if (it) focusedSlot = 0 else if (focusedSlot == 0) focusedSlot = -1 },
                         ) {
-                            targetSlot = 5; pulseTick++; dialog = PlayerDialog.SPEED; interactions++
+                            targetSlot = 0; pulseTick++; tracksAi = false; showTracks = true; interactions++
                         }
-                    } else {
                         DockButton(
-                            icon = AppIcons.ScreenRotation,
-                            label = "旋转屏幕",
+                            icon = AppIcons.AutoAwesome,
+                            label = "AI 字幕",
                             modifier = Modifier.weight(1f),
-                            iconSize = 21.dp,
-                            active = effectiveSlot == 5 && targetSlot != 3,
-                            onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
+                            iconSize = 22.dp,
+                            active = effectiveSlot == 1 && targetSlot != 3,
+                            onFocusChange = { if (it) focusedSlot = 1 else if (focusedSlot == 1) focusedSlot = -1 },
                         ) {
-                            targetSlot = 5; pulseTick++
-                            activity?.requestedOrientation =
-                                if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                            interactions++
+                            targetSlot = 1; pulseTick++; tracksAi = true; showTracks = true; interactions++
+                        }
+                        DockButton(
+                            icon = AppIcons.SkipPrevious,
+                            label = "上一集",
+                            modifier = Modifier.weight(1f),
+                            iconSize = 27.dp,
+                            enabled = canSkip,
+                            active = effectiveSlot == 2 && targetSlot != 3,
+                            onFocusChange = { if (it) focusedSlot = 2 else if (focusedSlot == 2) focusedSlot = -1 },
+                        ) {
+                            targetSlot = 2; pulseTick++; vm.skipInQueue(false, restartFirst = true); interactions++
+                        }
+                        DockButton(
+                            icon = if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow,
+                            label = if (wantsPlay) "暂停" else "播放",
+                            modifier = Modifier.weight(1f).focusRequester(playFocus),
+                            iconSize = 27.dp,
+                            isCenter = true,
+                            active = effectiveSlot == 3,
+                            onFocusChange = { if (it) focusedSlot = 3 else if (focusedSlot == 3) focusedSlot = -1 },
+                        ) {
+                            targetSlot = 3; pulseTick++; vm.togglePlay(); interactions++
+                        }
+                        DockButton(
+                            icon = AppIcons.SkipNext,
+                            label = "下一集",
+                            modifier = Modifier.weight(1f),
+                            iconSize = 27.dp,
+                            enabled = canSkip,
+                            active = effectiveSlot == 4 && targetSlot != 3,
+                            onFocusChange = { if (it) focusedSlot = 4 else if (focusedSlot == 4) focusedSlot = -1 },
+                        ) {
+                            targetSlot = 4; pulseTick++; vm.skipInQueue(true); interactions++
+                        }
+                        if (tv) {
+                            // 电视没有手势调速，放个倍速按钮；也让播放两边对称
+                            DockButton(
+                                icon = AppIcons.Speed,
+                                label = "倍速",
+                                modifier = Modifier.weight(1f),
+                                iconSize = 22.dp,
+                                active = effectiveSlot == 5 && targetSlot != 3,
+                                onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
+                            ) {
+                                targetSlot = 5; pulseTick++; dialog = PlayerDialog.SPEED; interactions++
+                            }
+                        } else {
+                            DockButton(
+                                icon = AppIcons.ScreenRotation,
+                                label = "旋转屏幕",
+                                modifier = Modifier.weight(1f),
+                                iconSize = 21.dp,
+                                active = effectiveSlot == 5 && targetSlot != 3,
+                                onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
+                            ) {
+                                targetSlot = 5; pulseTick++
+                                activity?.requestedOrientation =
+                                    if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                interactions++
+                            }
+                        }
+                        DockButton(
+                            icon = AppIcons.MoreHoriz,
+                            label = "更多",
+                            modifier = Modifier.weight(1f),
+                            iconSize = 25.dp,
+                            active = effectiveSlot == 6 && targetSlot != 3,
+                            onFocusChange = { if (it) focusedSlot = 6 else if (focusedSlot == 6) focusedSlot = -1 },
+                        ) {
+                            targetSlot = 6; pulseTick++; showMore = true; interactions++
                         }
                     }
-                    DockButton(
-                        icon = AppIcons.MoreHoriz,
-                        label = "更多",
-                        modifier = Modifier.weight(1f),
-                        iconSize = 25.dp,
-                        active = effectiveSlot == 6 && targetSlot != 3,
-                        onFocusChange = { if (it) focusedSlot = 6 else if (focusedSlot == 6) focusedSlot = -1 },
-                    ) {
-                        targetSlot = 6; pulseTick++; showMore = true; interactions++
+                }
+
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    if (tv) {
+                        dockContent(Modifier.fillMaxWidth())
+                    } else if (maxWidth >= 880.dp) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            brightnessPill(Modifier.width(216.dp).padding(top = 4.dp), 60.dp)
+                            dockContent(Modifier.weight(1f))
+                            volumePill(Modifier.width(216.dp).padding(top = 4.dp), 60.dp)
+                        }
+                    } else {
+                        Column(Modifier.fillMaxWidth()) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                brightnessPill(Modifier.weight(1f), 46.dp)
+                                volumePill(Modifier.weight(1f), 46.dp)
+                            }
+                            dockContent(Modifier.fillMaxWidth())
+                        }
                     }
                 }
             }
@@ -1318,66 +1492,77 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             }
         }
 
-        // ---- 更多菜单（右侧滑出） ----
-        // 点空白处关闭；遥控器的焦点不落到这层上
-        val moreScrim by animateFloatAsState(if (showMore) popupColors().scrim else 0f, label = "moreScrim")
-        if (showMore) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = moreScrim)).focusProperties { canFocus = false }.clickable(onClick = { showMore = false }))
-        AnimatedVisibility(
-            showMore, enter = slideInHorizontally { it }, exit = slideOutHorizontally { it },
-            modifier = Modifier.align(Alignment.CenterEnd).focusRequester(moreFocus),
-        ) {
-            MorePanel(
-                state = state, audioOnly = audioOnly, repeatMode = player.repeatMode, showSyncDiag = showSyncDiag,
-                onAction = { action ->
-                    showMore = false
-                    when (action) {
-                        MoreAction.ASPECT -> {
-                            resizeIndex = (resizeIndex + 1) % RESIZE_MODES.size
-                            indicator = AppIcons.AspectRatio to RESIZE_MODES[resizeIndex].second
-                        }
-                        MoreAction.SLEEP -> dialog = PlayerDialog.SLEEP
-                        MoreAction.SPEED -> dialog = PlayerDialog.SPEED
-                        MoreAction.GOTO -> dialog = PlayerDialog.GOTO
-                        MoreAction.NAVIGATE -> showNav = true
-                        MoreAction.BOOKMARKS -> showBookmarks = true
-                        MoreAction.SKIP -> showSkip = true
-                        MoreAction.EQUALIZER -> dialog = PlayerDialog.EQUALIZER
-                        MoreAction.AUDIO_ONLY -> {
-                            audioOnly = !audioOnly
-                            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, audioOnly).build()
-                        }
-                        MoreAction.PIP -> enterPip(activity)
-                        MoreAction.REPEAT -> {
-                            player.repeatMode = when (player.repeatMode) {
-                                Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ONE
-                                Player.REPEAT_MODE_ONE -> Player.REPEAT_MODE_ALL
-                                else -> Player.REPEAT_MODE_OFF
+        // ---- 更多菜单（右侧悬浮滑出） ----
+        androidx.compose.runtime.CompositionLocalProvider(LocalForceDarkPopup provides true) {
+            val moreScrim by animateFloatAsState(if (showMore) popupColors().scrim else 0f, label = "moreScrim")
+            if (showMore) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = moreScrim))
+                        .focusProperties { canFocus = false }
+                        .dismissOnOutsideClick { showMore = false },
+                )
+            }
+            AnimatedVisibility(
+                showMore, enter = slideInHorizontally { it }, exit = slideOutHorizontally { it },
+                modifier = Modifier.align(Alignment.CenterEnd).focusRequester(moreFocus),
+            ) {
+                MorePanel(
+                    state = state, audioOnly = audioOnly, repeatMode = player.repeatMode, showSyncDiag = showSyncDiag,
+                    onClose = { showMore = false },
+                    onAction = { action ->
+                        showMore = false
+                        when (action) {
+                            MoreAction.ASPECT -> {
+                                resizeIndex = (resizeIndex + 1) % RESIZE_MODES.size
+                                indicator = AppIcons.AspectRatio to RESIZE_MODES[resizeIndex].second
                             }
-                            indicator = AppIcons.Repeat to repeatLabel(player.repeatMode)
+                            MoreAction.SLEEP -> dialog = PlayerDialog.SLEEP
+                            MoreAction.SPEED -> dialog = PlayerDialog.SPEED
+                            MoreAction.GOTO -> dialog = PlayerDialog.GOTO
+                            MoreAction.NAVIGATE -> showNav = true
+                            MoreAction.BOOKMARKS -> showBookmarks = true
+                            MoreAction.SKIP -> showSkip = true
+                            MoreAction.EQUALIZER -> dialog = PlayerDialog.EQUALIZER
+                            MoreAction.AUDIO_ONLY -> {
+                                audioOnly = !audioOnly
+                                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                                    .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, audioOnly).build()
+                            }
+                            MoreAction.PIP -> enterPip(activity)
+                            MoreAction.REPEAT -> {
+                                player.repeatMode = when (player.repeatMode) {
+                                    Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ONE
+                                    Player.REPEAT_MODE_ONE -> Player.REPEAT_MODE_ALL
+                                    else -> Player.REPEAT_MODE_OFF
+                                }
+                                indicator = AppIcons.Repeat to repeatLabel(player.repeatMode)
+                            }
+                            MoreAction.INFO -> dialog = PlayerDialog.INFO
+                            MoreAction.SYNC_DIAG -> {
+                                showSyncDiag = !showSyncDiag
+                                indicator = AppIcons.Info to (if (showSyncDiag) "已开启同步诊断" else "已关闭同步诊断")
+                            }
+                            MoreAction.AB_LOOP -> indicator = AppIcons.Repeat to vm.toggleAbLoop()
+                            MoreAction.SAVE_PLAYLIST -> dialog = PlayerDialog.SAVE_PLAYLIST
+                            MoreAction.SETTINGS -> onOpenSettings()
                         }
-                        MoreAction.INFO -> dialog = PlayerDialog.INFO
-                        MoreAction.SYNC_DIAG -> {
-                            showSyncDiag = !showSyncDiag
-                            indicator = AppIcons.Info to (if (showSyncDiag) "已开启同步诊断" else "已关闭同步诊断")
-                        }
-                        MoreAction.AB_LOOP -> indicator = AppIcons.Repeat to vm.toggleAbLoop()
-                        MoreAction.SAVE_PLAYLIST -> dialog = PlayerDialog.SAVE_PLAYLIST
-                        MoreAction.SETTINGS -> onOpenSettings()
-                    }
-                },
-            )
+                    },
+                )
+            }
         }
     }
 
-    // 面板、对话框跟随系统亮色 / 暗色（画面和控制栏保持黑底）
+    // 播放页内的抽屉与对话框统一采用影院级深色毛玻璃，不遮挡中心画面且不刺眼
     AppTheme {
+    androidx.compose.runtime.CompositionLocalProvider(LocalForceDarkPopup provides true) {
     // ---- 字幕与音轨面板 ----
     if (showTracks) {
         AppSheet(
             onDismissRequest = { showTracks = false },
-            // 三项默认收起，面板按内容高度打开；横屏时半屏放不下三项标题，所以不用半展开
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            title = if (tracksAi) "AI 字幕" else "字幕与音轨",
         ) {
             TrackPanel(
                 vm = vm, state = state, ai = tracksAi,
@@ -1420,7 +1605,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text("选一条作为字幕，之后可以翻译成${state.settings.targetLanguage}", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     tracks.forEach { t ->
-                        Column(Modifier.fillMaxWidth().clickable { vm.useEmbeddedTrack(t) }.padding(vertical = 10.dp)) {
+                        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { vm.useEmbeddedTrack(t) }.padding(horizontal = 8.dp, vertical = 10.dp)) {
                             Text(t.title, fontSize = 16.sp)
                             Text(
                                 "${t.cues.size} 句 · " + t.cues.first().let { c -> listOfNotNull(c.translation, c.text).joinToString(" / ") }.take(60),
@@ -1439,7 +1624,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         AppSheet(
             onDismissRequest = { showRoles = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            
+            title = "角色与配音",
         ) {
             Column(Modifier.verticalScroll(rememberScrollState())) { RolesPanel(vm, state) }
         }
@@ -1457,12 +1642,13 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     // ---- 播放队列 / 直播频道与节目单面板 ----
     if (showChannels) {
+        val channels = vm.queueEntries
+        val currentIndex = channels.indexOfFirst { it.uri == state.current?.uri }
         AppSheet(
             onDismissRequest = { showChannels = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            title = if (isLive) "频道与节目单" else "播放列表（${currentIndex + 1} / ${channels.size}）",
         ) {
-            val channels = vm.queueEntries
-            val currentIndex = channels.indexOfFirst { it.uri == state.current?.uri }
             if (isLive) {
                 LiveChannelEpgSheet(
                     channels = channels,
@@ -1477,8 +1663,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 )
             } else {
                 val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 3).coerceAtLeast(0))
-                Text("播放列表（${currentIndex + 1} / ${channels.size}）", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
-                LazyColumn(Modifier.fillMaxHeight(0.75f), state = listState) {
+                LazyColumn(Modifier.heightIn(max = 620.dp), state = listState, contentPadding = PaddingValues(bottom = 12.dp)) {
                     itemsIndexed(channels) { i, c ->
                         val active = i == currentIndex
                         Row(
@@ -1492,7 +1677,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             )
                             Spacer(Modifier.width(14.dp))
                             Column(Modifier.weight(1f)) {
-                                Text(c.displayTitle, color = if (active) Orange else MaterialTheme.colorScheme.onSurface, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(c.displayTitle, color = if (active) Orange else MaterialTheme.colorScheme.onSurface, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 if (c.folder.isNotBlank()) Text(c.folder, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1)
                             }
                         }
@@ -1504,14 +1689,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     // ---- 章节与片段 ----
     if (showNav) {
-        AppSheet(onDismissRequest = { showNav = false }) {
+        AppSheet(onDismissRequest = { showNav = false }, title = "章节与片段") {
             NavigatorSheet(vm, positionMs) { ms -> player.seekTo(ms); showNav = false }
         }
     }
 
     // ---- 书签与关键帧 ----
     if (showBookmarks) {
-        AppSheet(onDismissRequest = { showBookmarks = false }) {
+        AppSheet(onDismissRequest = { showBookmarks = false }, title = "书签与关键帧") {
             BookmarksSheet(
                 vm,
                 onAdd = { scope.launch { vm.extras.addBookmark(playerView?.videoSurfaceView) } },
@@ -1532,7 +1717,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         AppSheet(
             onDismissRequest = { showSkip = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            
+            title = "片头片尾与跳过",
         ) {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 SkipSheet(
@@ -1551,10 +1736,9 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         AppSheet(
             onDismissRequest = { showStyle = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            
+            title = "字幕样式",
         ) {
-            Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, bottom = 24.dp)) {
-                Text("字幕样式", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+            Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, bottom = 20.dp)) {
                 SubtitleStyleEditor(state.settings) { vm.updateSettings(it) }
             }
         }
@@ -1569,15 +1753,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     if (showCues) {
         AppSheet(
             onDismissRequest = { showCues = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
-            
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            title = "字幕列表",
+            headerActions = {
+                Text("${state.cues.size} 句", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+            },
         ) {
-            Column(Modifier.fillMaxHeight(0.85f)) {
-                Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("字幕列表", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
-                    Text("${state.cues.size} 句", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                }
-                Box(Modifier.padding(16.dp)) {
+            Column(Modifier.fillMaxHeight(0.86f)) {
+                Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                     DisplayModeSelector(state.settings.showOriginal, state.settings.showTranslation) { o, t ->
                         vm.updateSettings(state.settings.copy(showOriginal = o, showTranslation = t))
                     }
@@ -1611,7 +1794,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             title = { Text("先下载识别模型") },
             text = {
                 Text(
-                    "在手机上识别语音要先下载「${model.label}」模型（约 ${model.sizeMb} MB），只下一次，之后识别不用联网、免费。建议连着 Wi-Fi。\n\n" +
+                    "识别语音要先下载「${model.label}」模型（约 ${model.sizeMb} MB），只下一次，之后识别不用联网、免费。\n\n" +
                         "也可以在「设置 → 语音识别」换成云端识别，不用下载，但要填对应服务的 Key。",
                 )
             },
@@ -1702,6 +1885,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             text = { Text(state.error ?: "") },
         )
     }
+    } // LocalForceDarkPopup
     } // AppTheme
 }
 
@@ -1935,8 +2119,7 @@ private fun GestureLayer(
                         accX = 0f; accY = 0f; startX = o.x
                         dragMode = DragMode.NONE
                         seekTarget = player.currentPosition
-                        val cur = activity?.window?.attributes?.screenBrightness ?: -1f
-                        brightness = if (cur < 0) 0.5f else cur
+                        brightness = com.aisub.player.desktop.DesktopPlayerEngine.videoBrightness
                         volumeF = audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
                     },
                     onDragEnd = {
@@ -1965,14 +2148,23 @@ private fun GestureLayer(
                                 onSeekPreview(seekTarget)
                             }
                             DragMode.BRIGHTNESS -> {
-                                brightness = (brightness - delta.y / size.height).coerceIn(0.01f, 1f)
-                                activity?.window?.let { w -> w.attributes = w.attributes.apply { screenBrightness = brightness } }
-                                onIndicator(AppIcons.Brightness to "${(brightness * 100).roundToInt()}%")
+                                val minB = com.aisub.player.desktop.DesktopPlayerEngine.MIN_BRIGHTNESS
+                                val maxB = com.aisub.player.desktop.DesktopPlayerEngine.MAX_BRIGHTNESS
+                                brightness = (brightness - delta.y / size.height * 1.2f).coerceIn(minB, maxB)
+                                val snapped = if (abs(brightness - 1f) < 0.02f) 1f else brightness
+                                com.aisub.player.desktop.DesktopPlayerEngine.setVideoBrightness(snapped)
+                                onIndicator(AppIcons.Brightness to "亮度 ${(snapped * 100).roundToInt()}%")
                             }
                             DragMode.VOLUME -> {
                                 volumeF = (volumeF - delta.y / size.height * maxVolume * 1.5f).coerceIn(0f, maxVolume.toFloat())
+                                val pct = (volumeF / maxVolume * 100).roundToInt()
                                 audio.setStreamVolume(AudioManager.STREAM_MUSIC, volumeF.roundToInt(), 0)
-                                onIndicator(AppIcons.Volume to "${(volumeF / maxVolume * 100).roundToInt()}%")
+                                val ic = when {
+                                    pct == 0 -> AppIcons.VolumeOff
+                                    pct < 50 -> AppIcons.VolumeDown
+                                    else -> AppIcons.Volume
+                                }
+                                onIndicator(ic to "音量 $pct%")
                             }
                             DragMode.NONE -> {}
                         }
@@ -1987,7 +2179,14 @@ private fun GestureLayer(
 private enum class MoreAction { ASPECT, SLEEP, SPEED, GOTO, NAVIGATE, BOOKMARKS, SKIP, EQUALIZER, AUDIO_ONLY, PIP, REPEAT, INFO, SYNC_DIAG, AB_LOOP, SAVE_PLAYLIST, SETTINGS }
 
 @Composable
-private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, showSyncDiag: Boolean = false, onAction: (MoreAction) -> Unit) {
+private fun MorePanel(
+    state: UiState,
+    audioOnly: Boolean,
+    repeatMode: Int,
+    showSyncDiag: Boolean = false,
+    onClose: () -> Unit = {},
+    onAction: (MoreAction) -> Unit,
+) {
     // 最常用的四个放在最上面一排，其余按用途分组
     val quick = listOf(
         Triple(MoreAction.SPEED, AppIcons.Speed, "倍速"),
@@ -2017,35 +2216,55 @@ private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, showS
     )
     PopupTheme {
     val c = LocalPopupColors.current
-    val shape = RoundedCornerShape(28.dp)
+    val glass = LocalLiquidGlassEnabled.current
+    val shape = RoundedCornerShape(22.dp)
+    val maxPanelH = (LocalConfiguration.current.screenHeightDp - 32).coerceAtLeast(240).dp
     Column(
-        Modifier.fillMaxHeight().statusBarsPadding().navigationBarsPadding().padding(12.dp).width(300.dp)
-            .glassShadow(shape, GlassStyle.Sheet, c.shadow)
-            .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface)
-            .statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(vertical = 16.dp),
-    ) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
-            quick.forEach { (action, icon, label) ->
-                Column(
-                    Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).clickable { onAction(action) }.padding(vertical = 10.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(26.dp))
-                    Spacer(Modifier.height(6.dp))
-                    Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp)
+        Modifier
+            .padding(16.dp)
+            .width(380.dp)
+            .heightIn(max = maxPanelH)
+            .let { base ->
+                if (glass) {
+                    base.glassShadow(shape, GlassStyle.Sheet, c.shadow)
+                        .liquidGlass(shape = shape, style = GlassStyle.Sheet, tint = c.surface)
+                } else {
+                    base.shadow(c.shadow, shape).clip(shape).background(c.surface)
                 }
             }
+            .consumeCardPointerEvents(),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 12.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("更多", color = c.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            PopupCloseButton(onClick = onClose)
         }
-        groups.forEach { (title, items) ->
-            Text(title, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(start = 24.dp, top = 16.dp, bottom = 2.dp))
-            items.forEach { (action, icon, label) ->
-                Row(
-                    Modifier.fillMaxWidth().clickable { onAction(action) }.heightIn(min = 50.dp).padding(horizontal = 24.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp))
-                    Spacer(Modifier.width(22.dp))
-                    Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp)
+        Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(bottom = 12.dp)) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+                quick.forEach { (action, icon, label) ->
+                    Column(
+                        Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).clickable { onAction(action) }.padding(vertical = 10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp))
+                        Spacer(Modifier.height(6.dp))
+                        Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp)
+                    }
+                }
+            }
+            groups.forEach { (title, items) ->
+                Text(title, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 2.dp))
+                items.forEach { (action, icon, label) ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable { onAction(action) }.heightIn(min = 46.dp).padding(horizontal = 20.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(22.dp))
+                        Spacer(Modifier.width(18.dp))
+                        Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp)
+                    }
                 }
             }
         }
@@ -2166,9 +2385,9 @@ private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ON
 @Composable
 private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitleAction: (SubtitleAction) -> Unit) {
     val player by vm.playerFlow.collectAsStateWithLifecycle()
-    // 字幕、音频两项默认收起，点哪项展开哪项
-    var audioOpen by remember(state.current?.uri) { mutableStateOf(false) }
-    var embeddedOpen by remember { mutableStateOf(false) }
+    // 桌面端侧边栏空间充足，默认直接展开字幕与音频两栏，点开即可切换，无需二次点按展开
+    var audioOpen by remember(state.current?.uri) { mutableStateOf(true) }
+    var embeddedOpen by remember { mutableStateOf(true) }
     var version by remember { mutableIntStateOf(0) } // 选轨后刷新
 
     val textGroups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT } }
@@ -2184,16 +2403,9 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
     // 兼容模式下直播拿不到字幕的文字
     val canRead = if (live) !vm.usingVlc && hasTextSubtitles else hasTextSubtitles || vm.usingVlc
 
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(vertical = 6.dp)) {
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(top = 2.dp, bottom = 12.dp)) {
         // ---------------- AI 字幕：识别、外挂文件或提取出的字幕，由本应用显示 ----------------
         if (ai) {
-            Text(
-                "AI 字幕",
-                color = MaterialTheme.colorScheme.onSurface,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
-            )
             PanelHint(
                 if (state.cues.isEmpty()) "语音识别、字幕文件或从视频提取的字幕，可以翻译、朗读，样式和位置可调"
                 else "当前 ${state.cues.size} 句" + (state.cues.count { it.translation != null }.takeIf { it > 0 }?.let { "，已翻译 $it 句" } ?: ""),
@@ -2517,14 +2729,57 @@ private fun ChoiceDialog(title: String, options: List<String>, selected: Int, on
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                options.forEachIndexed { i, label ->
-                    Row(
-                        Modifier.fillMaxWidth().clickable { onPick(i) }.padding(vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Box(Modifier.width(36.dp)) { if (i == selected) Icon(AppIcons.Check, null, tint = Orange) }
-                        Text(label, fontSize = 16.sp)
+            val c = LocalPopupColors.current
+            if (options.size >= 6) {
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    options.withIndex().chunked(2).forEach { pair ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            pair.forEach { (i, label) ->
+                                val active = i == selected
+                                Row(
+                                    Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (active) c.selectedBg else c.card.copy(alpha = 0.45f))
+                                        .clickable { onPick(i) }
+                                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        label,
+                                        fontSize = 15.sp,
+                                        color = if (active) c.selectedText else c.textPrimary,
+                                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    if (active) Icon(AppIcons.Check, null, tint = Orange, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                            if (pair.size == 1) Spacer(Modifier.weight(1f))
+                        }
+                    }
+                }
+            } else {
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    options.forEachIndexed { i, label ->
+                        val active = i == selected
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (active) c.selectedBg else Color.Transparent)
+                                .clickable { onPick(i) }
+                                .padding(horizontal = 12.dp, vertical = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(Modifier.width(30.dp)) { if (active) Icon(AppIcons.Check, null, tint = Orange, modifier = Modifier.size(18.dp)) }
+                            Text(
+                                label,
+                                fontSize = 15.sp,
+                                color = if (active) c.selectedText else c.textPrimary,
+                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                        }
                     }
                 }
             }
@@ -2618,18 +2873,19 @@ internal fun AsrLanguageDialog(
     val pick = if (translate) rememberTranslatePick(settings) else null
     var custom by remember { mutableStateOf(if (AsrLanguages.isCommon(current)) "" else current) }
     val parsed = AsrLanguages.normalize(custom)
-    // 能用的识别服务：手机上识别，加上设置里填好了的云端服务
+    // 能用的识别服务：本机离线识别，加上设置里填好了的云端服务
     val engines = remember(settings) { AsrEngine.entries.filter { it == AsrEngine.LOCAL || settings.copy(asrEngine = it).asrProblem() == null } }
     var engine by remember { mutableStateOf(settings.asrEngine) }
     AppDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (translate) "识别、翻译用哪家，视频里说什么语言？" else "用哪家识别、视频里说什么语言？") },
         text = {
+            val c = LocalPopupColors.current
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text("识别服务", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     engines.forEach { e ->
-                        FilterChip(selected = engine == e, onClick = { engine = e }, label = { Text(if (e == AsrEngine.LOCAL) "手机上识别" else e.label) })
+                        FilterChip(selected = engine == e, onClick = { engine = e }, label = { Text(if (e == AsrEngine.LOCAL) "本机离线识别" else e.label) })
                     }
                 }
                 Text(
@@ -2641,17 +2897,37 @@ internal fun AsrLanguageDialog(
                     TranslateModelPicker(pick, settings)
                     Spacer(Modifier.height(12.dp))
                 }
-                Text(languageHint, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                AsrLanguages.COMMON.forEach { (code, label) ->
-                    Row(
-                        Modifier.fillMaxWidth().clickable { onPick(code, engine, pick) }.padding(vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Box(Modifier.width(36.dp)) { if (code == current) Icon(AppIcons.Check, null, tint = Orange) }
-                        Column {
-                            Text(label, fontSize = 16.sp)
-                            // 当前识别引擎不支持这种语言时提前说明
-                            settings.copy(asrEngine = engine, asrLanguage = code).asrLanguageWarning()?.let { Text(it, fontSize = 12.sp, color = Color(0xFFE65100)) }
+                Text(languageHint, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 6.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    AsrLanguages.COMMON.chunked(2).forEach { pair ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            pair.forEach { (code, label) ->
+                                val active = code == current
+                                val warn = settings.copy(asrEngine = engine, asrLanguage = code).asrLanguageWarning()
+                                Row(
+                                    Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (active) c.selectedBg else c.card.copy(alpha = 0.45f))
+                                        .clickable { onPick(code, engine, pick) }
+                                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            label,
+                                            fontSize = 15.sp,
+                                            color = if (active) c.selectedText else c.textPrimary,
+                                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                        )
+                                        if (warn != null) {
+                                            Text(warn, fontSize = 11.sp, color = Color(0xFFFF8A65))
+                                        }
+                                    }
+                                    if (active) Icon(AppIcons.Check, null, tint = Orange, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                            if (pair.size == 1) Spacer(Modifier.weight(1f))
                         }
                     }
                 }

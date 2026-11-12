@@ -856,46 +856,64 @@ private fun ChapterEnd(book: MangaBook, onOpenUrl: ((String, Boolean) -> Unit)?,
     }
 }
 
-/** 缩略图：快速跳到某一页 */
+/** 缩略图：快速跳到某一页（桌面端居中大卡片，点外部或右上角 × 关闭） */
 @Composable
 private fun ThumbnailPanel(pages: List<MangaPage>, current: Int, onPick: (Int) -> Unit, onClose: () -> Unit) {
     val context = LocalContext.current
     val grid = rememberLazyGridState((current - 4).coerceAtLeast(0))
     val focus = remember { FocusRequester() }
-    val sheetShape = RoundedCornerShape(28.dp)
+    val sheetShape = RoundedCornerShape(22.dp)
+    androidx.activity.compose.BackHandler(onBack = onClose)
     LaunchedEffect(Unit) { delay(100); runCatching { focus.requestFocus() } }
-    Box(Modifier.fillMaxSize().background(Color(0x73000000))) {
-        Column(
-            Modifier.fillMaxSize()
-                .statusBarsPadding().navigationBarsPadding()
-                .padding(12.dp)
-                .glassShadow(sheetShape, GlassStyle.Sheet)
-                .liquidGlass(shape = sheetShape, style = GlassStyle.Sheet, tint = GlassTokens.DarkSheetTint)
-                .padding(top = 4.dp, bottom = 8.dp),
-        ) {
-            Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onClose, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Icon(AppIcons.ArrowBack, "返回", tint = Color.White) }
-                Text("目录 · 共 ${pages.size} 页", color = Color.White, style = MaterialTheme.typography.titleMedium)
-            }
-            LazyVerticalGrid(GridCells.Adaptive(110.dp), state = grid, modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
-                itemsIndexed(pages, key = { i, _ -> i }) { i, p ->
-                    val thumb by produceState(MangaImages.cachedThumb(p), p) { if (value == null) value = MangaImages.thumb(context, p) }
-                    Column(
-                        Modifier.padding(4.dp)
-                            .then(if (i == current) Modifier.focusRequester(focus) else Modifier)
-                            .tvFocusRing(RoundedCornerShape(8.dp), scale = true)
-                            .clickable { onPick(i) },
-                        horizontalAlignment = Alignment.CenterHorizontally,
+    androidx.compose.runtime.CompositionLocalProvider(LocalForceDarkPopup provides true) {
+        PopupTheme {
+            BoxWithConstraints(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color(0x73000000))
+                    .dismissOnOutsideClick(onDismiss = onClose),
+            ) {
+                val panelW = (maxWidth * 0.76f).coerceIn(480.dp, 880.dp).coerceAtMost((maxWidth - 48.dp).coerceAtLeast(320.dp))
+                val panelH = (maxHeight * 0.80f).coerceIn(320.dp, 680.dp)
+                Column(
+                    Modifier
+                        .align(Alignment.Center)
+                        .padding(24.dp)
+                        .width(panelW)
+                        .height(panelH)
+                        .glassShadow(sheetShape, GlassStyle.Sheet)
+                        .liquidGlass(shape = sheetShape, style = GlassStyle.Sheet, tint = GlassTokens.DarkSheetTint)
+                        .consumeCardPointerEvents()
+                        .padding(top = 8.dp, bottom = 12.dp),
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 20.dp, end = 14.dp, top = 6.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Box(
-                            Modifier.fillMaxWidth().aspectRatio(0.7f).background(if (i == current) Color(0xFF5A3A00) else Color(0xFF222222), RoundedCornerShape(6.dp)),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            val t = thumb
-                            if (t != null) Image(t, null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
-                            else CircularProgressIndicator(color = Color(0x66FFFFFF), modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                        Text("目录 · 共 ${pages.size} 页", color = Color.White, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                        PopupCloseButton(onClick = onClose)
+                    }
+                    LazyVerticalGrid(GridCells.Adaptive(116.dp), state = grid, modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+                        itemsIndexed(pages, key = { i, _ -> i }) { i, p ->
+                            val thumb by produceState(MangaImages.cachedThumb(p), p) { if (value == null) value = MangaImages.thumb(context, p) }
+                            Column(
+                                Modifier.padding(4.dp)
+                                    .then(if (i == current) Modifier.focusRequester(focus) else Modifier)
+                                    .tvFocusRing(RoundedCornerShape(8.dp), scale = true)
+                                    .clickable { onPick(i) },
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                Box(
+                                    Modifier.fillMaxWidth().aspectRatio(0.7f).background(if (i == current) Color(0xFF5A3A00) else Color(0xFF222222), RoundedCornerShape(6.dp)),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    val t = thumb
+                                    if (t != null) Image(t, null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                                    else CircularProgressIndicator(color = Color(0x66FFFFFF), modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                }
+                                Text("${i + 1}", color = if (i == current) MaterialTheme.colorScheme.primary else Color.White, style = MaterialTheme.typography.labelMedium)
+                            }
                         }
-                        Text("${i + 1}", color = if (i == current) MaterialTheme.colorScheme.primary else Color.White, style = MaterialTheme.typography.labelMedium)
                     }
                 }
             }
@@ -915,12 +933,13 @@ private fun ReaderSettingsDialog(
 ) {
     // 先更新弹窗内的状态，让单选圆点在写入设置的同一帧切换；外层重组后会用实际模式同步。
     var selectedMode by remember(mode) { mutableStateOf(mode) }
+    androidx.compose.runtime.CompositionLocalProvider(LocalForceDarkPopup provides true) {
     AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("阅读设置") },
         confirmButton = { TextButton(onClick = onDismiss, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) { Text("完成") } },
         text = {
-            Column(Modifier.verticalScroll(rememberScrollState()).widthIn(max = 480.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 MangaMode.entries.forEach { m ->
                     Row(
                         Modifier.fillMaxWidth().tvFocusRing(RoundedCornerShape(8.dp)).clickable {
@@ -958,10 +977,12 @@ private fun ReaderSettingsDialog(
                 Text(
                     "设置按网站分别记住。", style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 6.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         },
     )
+    }
 }
 
 @Composable

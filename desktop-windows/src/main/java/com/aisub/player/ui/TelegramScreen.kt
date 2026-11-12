@@ -884,11 +884,20 @@ fun TelegramChatScreen(
             onDismissRequest = { viewing = null },
             properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
         ) {
-            Box(
-                Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black)
-                    .clickable { viewing = null },
-                contentAlignment = Alignment.Center,
-            ) { Image(img, null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
+            androidx.activity.compose.BackHandler { viewing = null }
+            PopupTheme {
+                Box(
+                    Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.88f))
+                        .dismissOnOutsideClick { viewing = null },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Image(img, null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(36.dp))
+                    PopupCloseButton(
+                        onClick = { viewing = null },
+                        modifier = Modifier.align(Alignment.TopEnd).padding(20.dp),
+                    )
+                }
+            }
         }
     }
 }

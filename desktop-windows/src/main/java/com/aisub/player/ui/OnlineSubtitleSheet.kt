@@ -113,13 +113,11 @@ fun OnlineSubtitleSheet(
     AppSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        
+        title = "在线下载字幕",
     ) {
-        Column(Modifier.fillMaxHeight(0.9f).padding(horizontal = 16.dp)) {
-            Text("在线下载字幕", color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.height(12.dp))
-
+        Column(Modifier.fillMaxHeight(0.86f).padding(start = 20.dp, end = 20.dp, bottom = 12.dp)) {
             if (sources.isEmpty()) {
+                Spacer(Modifier.height(4.dp))
                 NoSourceHint(onOpenSettings)
                 return@Column
             }

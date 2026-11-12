@@ -99,7 +99,7 @@ class ContentResolver(private val context: Context) {
         val file = resolveFile(uri)
         val name = file?.name ?: uri.lastPathSegment ?: uri.toString()
         if (file?.isDirectory == true) return DocumentsContract.Document.MIME_TYPE_DIR
-        return guessMimeType(name)
+        return guessMimeType(name, file)
     }
 
     fun takePersistableUriPermission(uri: Uri, modeFlags: Int) {}
@@ -108,7 +108,7 @@ class ContentResolver(private val context: Context) {
         val file = resolveFile(uri) ?: return null
         if (!file.exists()) return null
         val ext = file.extension.lowercase()
-        if (ext in VIDEO_EXTS) {
+        if (ext in VIDEO_EXTS && isValidMediaFile(file, ext, MediaScanKind.VIDEO)) {
             return android.media.MediaMetadataRetriever().use { r ->
                 r.setDataSource(file.absolutePath)
                 r.getScaledFrameAtTime(
@@ -177,7 +177,7 @@ class ContentResolver(private val context: Context) {
                         MediaStore.MediaColumns.DATA -> target.absolutePath
                         MediaStore.MediaColumns.RELATIVE_PATH -> rel
                         MediaStore.MediaColumns.DATE_ADDED, MediaStore.MediaColumns.DATE_MODIFIED -> target.lastModified() / 1000L
-                        MediaStore.MediaColumns.MIME_TYPE -> guessMimeType(target.name)
+                        MediaStore.MediaColumns.MIME_TYPE -> guessMimeType(target.name, target)
                         else -> null
                     }
                 }.toTypedArray<Any?>()
@@ -189,9 +189,10 @@ class ContentResolver(private val context: Context) {
         // 2. 系统媒体库集合扫描（视频 / 音频 / 图片）
         if (uriStr.startsWith("content://media/") && !isSingleMediaItem) {
             val files = when {
-                uriStr.contains("/video/") -> scanMediaFiles(VIDEO_EXTS, listOf("Videos", "Movies", "Downloads"))
-                uriStr.contains("/audio/") -> scanMediaFiles(AUDIO_EXTS, listOf("Music", "Downloads"))
-                uriStr.contains("/images/") -> scanMediaFiles(IMAGE_EXTS, listOf("Pictures", "Downloads"))
+                uriStr.contains("/video/") -> scanMediaFiles(VIDEO_EXTS, listOf("Videos", "Movies", "Downloads"), MediaScanKind.VIDEO)
+                uriStr.contains("/audio/") -> scanMediaFiles(AUDIO_EXTS, listOf("Music", "Downloads"), MediaScanKind.AUDIO)
+                // 桌面端「照片」仅扫描 Pictures（排除 Downloads 下载杂项及自动截屏文件夹）
+                uriStr.contains("/images/") -> scanMediaFiles(IMAGE_EXTS, listOf("Pictures"), MediaScanKind.IMAGE)
                 else -> emptyList()
             }
             val rows = files.map { f ->
@@ -206,7 +207,7 @@ class ContentResolver(private val context: Context) {
                         MediaStore.MediaColumns.RELATIVE_PATH -> rel
                         MediaStore.MediaColumns.DATE_ADDED, MediaStore.MediaColumns.DATE_MODIFIED -> f.lastModified() / 1000L
                         MediaStore.Video.VideoColumns.DURATION -> 0L
-                        MediaStore.MediaColumns.MIME_TYPE -> guessMimeType(f.name)
+                        MediaStore.MediaColumns.MIME_TYPE -> guessMimeType(f.name, f)
                         else -> null
                     }
                 }.toTypedArray<Any?>()
@@ -225,7 +226,7 @@ class ContentResolver(private val context: Context) {
                         DocumentsContract.Document.COLUMN_DOCUMENT_ID -> child.absolutePath
                         DocumentsContract.Document.COLUMN_DISPLAY_NAME, OpenableColumns.DISPLAY_NAME -> child.name
                         DocumentsContract.Document.COLUMN_MIME_TYPE ->
-                            if (child.isDirectory) DocumentsContract.Document.MIME_TYPE_DIR else (guessMimeType(child.name) ?: "application/octet-stream")
+                            if (child.isDirectory) DocumentsContract.Document.MIME_TYPE_DIR else (guessMimeType(child.name, child) ?: "application/octet-stream")
                         else -> null
                     }
                 }.toTypedArray<Any?>()
@@ -245,7 +246,7 @@ class ContentResolver(private val context: Context) {
                 MediaStore.MediaColumns.DATA -> file.absolutePath
                 MediaStore.MediaColumns.RELATIVE_PATH -> rel
                 MediaStore.MediaColumns.DATE_ADDED, MediaStore.MediaColumns.DATE_MODIFIED -> file.lastModified() / 1000L
-                MediaStore.MediaColumns.MIME_TYPE -> guessMimeType(file.name)
+                MediaStore.MediaColumns.MIME_TYPE -> guessMimeType(file.name, file)
                 MediaStore.MediaColumns.WIDTH, MediaStore.MediaColumns.HEIGHT -> 0
                 else -> null
             }
@@ -310,13 +311,52 @@ class ContentResolver(private val context: Context) {
     }
 
     companion object {
+        private enum class MediaScanKind { VIDEO, AUDIO, IMAGE }
+
         private val idToFile = ConcurrentHashMap<Long, File>()
         private val fileToId = ConcurrentHashMap<String, Long>()
         private var nextId = 1000L
 
-        private val VIDEO_EXTS = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "ts", "m2ts", "wmv", "m4v", "mpg", "mpeg", "3gp", "rmvb")
+        private val VIDEO_EXTS = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "ts", "m2ts", "mts", "wmv", "m4v", "mpg", "mpeg", "3gp", "rmvb")
         private val AUDIO_EXTS = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma", "ape", "alac", "aiff", "dsf", "dff")
-        private val IMAGE_EXTS = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
+        private val IMAGE_EXTS = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "avif")
+
+        /** 软件工程、依赖包、构建缓存、系统与应用资源目录（本地媒体扫描时一律跳过） */
+        private val IGNORED_SCAN_DIRS = setOf(
+            "node_modules", "oh_modules", "bower_components", "vendor", "packages",
+            "__pycache__", "venv", ".venv", "env", "target", "build", "dist", "out",
+            "bin", "obj", "src", "lib", "libs", "include", "cmakefiles",
+            "assets", "res", "resources", "static", "public",
+            "test", "tests", "fixtures", "testdata", "docs",
+            "cache", "caches", "temp", "tmp", "logs", "crashreports",
+            "shadercache", "webcache", "code cache", "gpucache",
+            "appdata", "programdata", "windows", "program files", "program files (x86)",
+            "steamapps", "commonredist",
+        )
+
+        /** 屏幕截图与表情缓存文件夹（「本机 → 照片」不混入系统自动保存的桌面截图与聊天表情） */
+        private val IGNORED_IMAGE_DIRS = setOf(
+            "screenshots", "屏幕截图", "截屏", "截图",
+            "snipaste", "sharex", "screenpresso", "pixpin", "faststone",
+            "bandicam", "obs", "captures",
+            "stickers", "emojis", "emoji", "thumbnails", "thumbs", "icons",
+        )
+
+        /** 截屏工具默认命名前缀（即使直接保存在 Pictures 根目录也不计入「照片」） */
+        private val SCREENSHOT_NAME_PREFIXES = listOf(
+            "screenshot", "屏幕截图", "截屏", "截图",
+            "snipaste_", "pixpin_", "sharex_", "qq截图", "微信截图", "bandicam ",
+        )
+
+        /** 代码仓库或解压版软件目录的特征文件（子目录命中时整体跳过，避免把项目内的 .ts 源码或 UI 贴图当成媒体） */
+        private val PROJECT_MARKER_NAMES = setOf(
+            "package.json", "tsconfig.json", "cargo.toml", "pom.xml",
+            "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
+            "pyproject.toml", "requirements.txt", "go.mod", "cmakelists.txt",
+            "makefile", "composer.json", ".git", ".svn",
+        )
+
+        private val SOFTWARE_BINARY_EXTS = setOf("dll", "asar", "pak", "pyd", "pdb", "vcxproj", "sln")
 
         @Synchronized
         internal fun registerFileId(file: File): Long {
@@ -359,48 +399,128 @@ class ContentResolver(private val context: Context) {
             return null
         }
 
-        private fun scanMediaFiles(exts: Set<String>, dirNames: List<String>): List<File> {
+        private fun scanMediaFiles(exts: Set<String>, dirNames: List<String>, kind: MediaScanKind): List<File> {
             val home = Environment.getExternalStorageDirectory()
             val result = mutableListOf<File>()
             val visited = HashSet<String>()
             for (dirName in dirNames) {
                 val root = File(home, dirName)
                 if (!root.isDirectory) continue
-                scanDirRecursive(root, exts, result, visited, maxDepth = 4)
+                scanDirRecursive(root, exts, kind, result, visited, depthFromRoot = 0, maxDepth = 4)
             }
             return result.sortedByDescending { it.lastModified() }
+        }
+
+        private fun shouldSkipSubdir(dir: File, kind: MediaScanKind): Boolean {
+            val name = dir.name
+            if (name.isEmpty() || name.startsWith(".") || name.startsWith("$") || dir.isHidden) return true
+            val lower = name.lowercase()
+            if (lower in IGNORED_SCAN_DIRS) return true
+            if (lower.endsWith("_files") || lower.endsWith(".files")) return true
+            if (kind == MediaScanKind.IMAGE && lower in IGNORED_IMAGE_DIRS) return true
+            return false
+        }
+
+        private fun hasProjectOrSoftwareMarkers(children: Array<File>): Boolean {
+            for (c in children) {
+                val lower = c.name.lowercase()
+                if (lower in PROJECT_MARKER_NAMES) return true
+                if (c.isFile && lower.substringAfterLast('.', "") in SOFTWARE_BINARY_EXTS) return true
+            }
+            return false
+        }
+
+        /**
+         * 校验 .ts / .mts / .m2ts 是否为真正的 MPEG-2 Transport Stream 视频流（而非 TypeScript 源码文本）：
+         * 必须包含连续 3 个包间隔（188 / 192 / 204 字节）的 0x47 同步字，且头部含二进制控制字节。
+         */
+        internal fun isMpegTransportStream(file: File): Boolean {
+            if (!file.isFile || file.length() < 4096L) return false
+            val lower = file.name.lowercase()
+            if (lower.endsWith(".d.ts") || lower.endsWith(".d.mts") || lower.endsWith(".d.cts")) return false
+            return runCatching {
+                val buf = ByteArray(1152)
+                val n = FileInputStream(file).use { it.read(buf) }
+                if (n < 564) return@runCatching false
+                var hasBinary = false
+                for (i in 0 until n) {
+                    val b = buf[i].toInt() and 0xFF
+                    if (b == 0 || b < 9) {
+                        hasBinary = true
+                        break
+                    }
+                }
+                if (!hasBinary) return@runCatching false
+                for (stride in intArrayOf(188, 192, 204)) {
+                    val maxOff = minOf(stride, n - stride * 2)
+                    for (off in 0 until maxOff) {
+                        if (buf[off] == 0x47.toByte() &&
+                            buf[off + stride] == 0x47.toByte() &&
+                            buf[off + stride * 2] == 0x47.toByte()
+                        ) {
+                            return@runCatching true
+                        }
+                    }
+                }
+                false
+            }.getOrDefault(false)
+        }
+
+        private fun isValidMediaFile(file: File, ext: String, kind: MediaScanKind): Boolean {
+            val lowerName = file.name.lowercase()
+            if (lowerName.endsWith(".d.ts") || lowerName.endsWith(".d.mts") || lowerName.endsWith(".d.cts")) return false
+            if (kind == MediaScanKind.IMAGE && SCREENSHOT_NAME_PREFIXES.any { lowerName.startsWith(it) }) return false
+            val len = file.length()
+            val minBytes = when (kind) {
+                MediaScanKind.VIDEO -> 4 * 1024L
+                MediaScanKind.AUDIO -> 4 * 1024L
+                MediaScanKind.IMAGE -> 8 * 1024L
+            }
+            if (len < minBytes) return false
+            if (kind == MediaScanKind.VIDEO && (ext == "ts" || ext == "mts" || ext == "m2ts")) {
+                return isMpegTransportStream(file)
+            }
+            return true
         }
 
         private fun scanDirRecursive(
             dir: File,
             exts: Set<String>,
+            kind: MediaScanKind,
             out: MutableList<File>,
             visited: MutableSet<String>,
+            depthFromRoot: Int,
             maxDepth: Int,
         ) {
-            if (maxDepth < 0 || out.size >= 2000) return
+            if (depthFromRoot > maxDepth || out.size >= 2000) return
             val canonical = runCatching { dir.canonicalPath }.getOrDefault(dir.absolutePath)
             if (!visited.add(canonical)) return
             val children = dir.listFiles() ?: return
+            if (depthFromRoot >= 1 && hasProjectOrSoftwareMarkers(children)) return
             for (f in children) {
-                if (f.name.startsWith(".")) continue
                 if (f.isDirectory) {
-                    scanDirRecursive(f, exts, out, visited, maxDepth - 1)
-                } else if (f.isFile) {
+                    if (!shouldSkipSubdir(f, kind)) {
+                        scanDirRecursive(f, exts, kind, out, visited, depthFromRoot + 1, maxDepth)
+                    }
+                } else if (f.isFile && !f.name.startsWith(".") && !f.isHidden) {
                     val ext = f.extension.lowercase()
-                    if (ext in exts) out.add(f)
+                    if (ext in exts && isValidMediaFile(f, ext, kind)) {
+                        out.add(f)
+                    }
                 }
             }
         }
 
-        fun guessMimeType(name: String): String? {
-            return when (name.substringAfterLast('.', "").lowercase()) {
+        fun guessMimeType(name: String, file: File? = null): String? {
+            val lower = name.lowercase()
+            if (lower.endsWith(".d.ts") || lower.endsWith(".d.mts") || lower.endsWith(".d.cts")) return "text/plain"
+            return when (lower.substringAfterLast('.', "")) {
                 "mp4", "m4v" -> "video/mp4"
                 "mkv" -> "video/x-matroska"
                 "webm" -> "video/webm"
                 "avi" -> "video/x-msvideo"
                 "mov" -> "video/quicktime"
-                "ts", "m2ts" -> "video/mp2t"
+                "ts", "m2ts", "mts" -> if (file != null && file.isFile && !isMpegTransportStream(file)) "text/plain" else "video/mp2t"
                 "flv" -> "video/x-flv"
                 "wmv" -> "video/x-ms-wmv"
                 "mp3" -> "audio/mpeg"
@@ -412,6 +532,7 @@ class ContentResolver(private val context: Context) {
                 "png" -> "image/png"
                 "webp" -> "image/webp"
                 "gif" -> "image/gif"
+                "avif" -> "image/avif"
                 "pdf" -> "application/pdf"
                 "epub" -> "application/epub+zip"
                 "cbz", "zip" -> "application/zip"

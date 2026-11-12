@@ -298,6 +298,7 @@ private fun WebLoginDialog(site: LoginSite, onDismiss: () -> Unit, onDone: (List
         onDismissRequest = onDismiss,
         properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
     ) {
+        androidx.activity.compose.BackHandler(onBack = onDismiss)
         Scaffold(
             modifier = Modifier.fillMaxSize().appMainBackground(),
             containerColor = Color.Transparent,

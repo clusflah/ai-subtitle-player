@@ -272,7 +272,7 @@ private fun FileDialogs(fm: FileManager) {
             val ctx = LocalContext.current
             val rows = listOfNotNull(
                 "名称" to x.name,
-                "位置" to "内部存储/${x.folder}",
+                "位置" to (if (x.folder.isBlank()) "用户目录" else "用户目录/${x.folder}"),
                 "大小" to formatSize(x.sizeBytes),
                 formatDuration(x.durationMs).takeIf { it.isNotEmpty() }?.let { "时长" to it },
                 if (x.width > 0) "分辨率" to "${x.width}×${x.height}" else null,
@@ -298,7 +298,7 @@ private fun FileDialogs(fm: FileManager) {
         is FileDialog.ConfirmDelete -> AppDialog(
             onDismissRequest = { fm.dialog = null },
             title = { Text("删除 ${d.entries.size} 个文件？") },
-            text = { Text("文件会从手机里永久删除，不能恢复。") },
+            text = { Text("文件会从电脑磁盘永久删除，不能恢复。") },
             confirmButton = {
                 TextButton(onClick = { fm.dialog = null; fm.confirmDelete(d.entries) }) { Text("删除", color = MaterialTheme.colorScheme.error) }
             },

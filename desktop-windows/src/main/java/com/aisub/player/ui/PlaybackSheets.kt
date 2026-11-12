@@ -73,10 +73,10 @@ fun NavigatorSheet(vm: MainViewModel, positionMs: Long, onSeek: (Long) -> Unit) 
     LaunchedEffect(Unit) { vm.extras.loadSegments() }
     LazyVerticalGrid(
         GridCells.Adaptive(150.dp),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 20.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = Modifier.fillMaxHeight(0.85f),
+        modifier = Modifier.heightIn(max = 640.dp),
     ) {
         item(span = { GridItemSpan(maxLineSpan) }) { SheetTitle("章节") }
         if (extras.chapters.isEmpty()) {
@@ -118,14 +118,13 @@ fun BookmarksSheet(vm: MainViewModel, onAdd: () -> Unit, onSeek: (Long) -> Unit,
     val extras by vm.extras.state.collectAsStateWithLifecycle()
     LazyVerticalGrid(
         GridCells.Adaptive(150.dp),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 20.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = Modifier.fillMaxHeight(0.85f),
+        modifier = Modifier.heightIn(max = 640.dp),
     ) {
         item(span = { GridItemSpan(maxLineSpan) }) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                SheetTitle("书签与关键帧", Modifier.weight(1f))
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = onAdd) { Text("添加当前画面", color = Orange) }
                 TextButton(onClick = vm.extras::exportBookmarks, enabled = extras.bookmarks.isNotEmpty()) { Text("全部存到相册", color = Orange) }
             }
@@ -171,8 +170,7 @@ fun SkipSheet(
     val extras by vm.extras.state.collectAsStateWithLifecycle()
     val state by vm.state.collectAsStateWithLifecycle()
     val series = vm.extras.canMarkSeries()
-    Column(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 24.dp)) {
-        SheetTitle("片头片尾与跳过")
+    Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 20.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("自动跳过", color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp)
