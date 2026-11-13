@@ -196,9 +196,9 @@ data class AppSettings(
     /** Fanart.tv 个人 API Key：透明标题图、高清背景图 */
     val fanartKey: String = "",
     /** 主界面背景方案、深色模式策略与液态玻璃效果开关 */
-    val appBackground: AppBackground = AppBackground.VERY_LIGHT_GRAY,
+    val appBackground: AppBackground = AppBackground.AURORA_GRAY_WHITE_GRADIENT,
     val appDarkMode: AppDarkMode = AppDarkMode.SYSTEM,
-    val liquidGlass: Boolean = true,
+    val liquidGlass: Boolean = false,
 ) {
     /** 某个服务商的配置，未填的字段用默认值补齐。 */
     fun configOf(p: Provider): ProviderConfig {

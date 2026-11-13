@@ -362,7 +362,7 @@ fun main(args: Array<String>) {
                     )
                 }
                 var savedLiquidGlass by remember {
-                    mutableStateOf(settingsPrefs.getBoolean("liquidGlass", true))
+                    mutableStateOf(settingsPrefs.getBoolean("liquidGlass", false))
                 }
                 LaunchedEffect(Unit) {
                     var tick = 0
@@ -374,7 +374,7 @@ fun main(args: Array<String>) {
                             settingsPrefs.getString("appBackground", null) == "DARK" -> AppDarkMode.DARK
                             else -> AppDarkMode.SYSTEM
                         }
-                        savedLiquidGlass = settingsPrefs.getBoolean("liquidGlass", true)
+                        savedLiquidGlass = settingsPrefs.getBoolean("liquidGlass", false)
                         if (tick++ % 6 == 0) {
                             winSystemDark = queryWindowsDarkTheme()
                         }

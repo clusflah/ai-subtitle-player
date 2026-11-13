@@ -1598,7 +1598,7 @@ private fun MeTab(
             ListRow("检查更新", "当前版本 ${com.aisub.player.BuildConfig.VERSION_NAME}", AppIcons.SystemUpdate,
                 onClick = { activity?.let { com.aisub.player.update.appUpdater.checkNow(it) } })
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-            ListRow("关于", null, AppIcons.Info, onClick = onAbout)
+            ListRow("关于", "版本信息与 GitHub 项目地址", AppIcons.Info, onClick = onAbout)
         }
     }
 }

@@ -64,10 +64,10 @@ android {
     defaultConfig {
         manifestPlaceholders["appLabel"] = "译幕"
         applicationId = "com.aisub.player"
-        minSdk = 26
+        minSdk = 23
         targetSdk = 36
-        versionCode = 146
-        versionName = "2.9.85"
+        versionCode = 147
+        versionName = "2.9.86"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用
@@ -104,6 +104,7 @@ android {
     }
 
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -149,6 +150,7 @@ android {
             )
         }
         jniLibs {
+            useLegacyPackaging = true
             pickFirsts += "lib/*/libc++_shared.so"
         }
     }
@@ -165,6 +167,8 @@ kotlin {
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+
     // 语音识别 + VAD（k2-fsa/sherpa-onnx 官方发布的 AAR）
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
 
@@ -203,6 +207,9 @@ dependencies {
     // 翻译：Claude 官方 Java SDK；OpenAI 兼容接口用 OkHttp 直连
     implementation("com.anthropic:anthropic-java:2.34.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
+    // Android 6/7 上提供现代 TLS 1.3 握手与现代根证书栈
+    implementation("org.conscrypt:conscrypt-android:2.5.3")
 
     // 解压模型包（tar.bz2）
     implementation("org.apache.commons:commons-compress:1.27.1")

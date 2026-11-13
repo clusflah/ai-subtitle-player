@@ -1,29 +1,45 @@
 package com.aisub.player.ui
 
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import com.aisub.player.BuildConfig
 import com.aisub.player.media.Playlist
@@ -175,22 +191,89 @@ fun ServerDialog(initial: Server, hint: String? = null, onDismiss: () -> Unit, o
 
 private fun String.isHttpUrl() = startsWith("http://") || startsWith("https://")
 
+private const val GITHUB_REPO_URL = "https://github.com/clusflah/ai-subtitle-player"
+
 @Composable
 fun AboutDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    val clipboard = LocalClipboardManager.current
+    var copied by remember { mutableStateOf(false) }
+
+    val openGitHub = {
+        val opened = runCatching {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(GITHUB_REPO_URL)))
+            true
+        }.getOrDefault(false) || runCatching {
+            uriHandler.openUri(GITHUB_REPO_URL)
+            true
+        }.getOrDefault(false)
+        if (!opened) {
+            clipboard.setText(AnnotatedString(GITHUB_REPO_URL))
+            copied = true
+        }
+    }
+
     AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("关于") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("译幕 Voxtitle ${BuildConfig.VERSION_NAME}（${com.aisub.player.download.Downloaders.EDITION}）")
+            val c = LocalPopupColors.current
+            val linkShape = RoundedCornerShape(12.dp)
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "译幕 Voxtitle ${BuildConfig.VERSION_NAME}（${com.aisub.player.download.Downloaders.EDITION}）",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
                 Text(
                     "本地 / 云端语音识别生成字幕，大模型翻译。\n\n" +
                         "开源组件：Media3 ExoPlayer、sherpa-onnx、SenseVoice、Silero VAD、OkHttp、Apache Commons Compress。\n\n" +
-                        "本应用以 AGPL-3.0 许可证开源，源代码：\nhttps://github.com/clusflah/ai-subtitle-player",
+                        "开源许可：AGPL-3.0",
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .tvFocusRing(linkShape)
+                        .clip(linkShape)
+                        .background(c.card)
+                        .clickable(onClick = openGitHub)
+                        .padding(start = 12.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        AppIcons.Link,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            "GitHub 项目地址",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            GITHUB_REPO_URL,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            textDecoration = TextDecoration.Underline,
+                        )
+                    }
+                    TextButton(
+                        onClick = {
+                            clipboard.setText(AnnotatedString(GITHUB_REPO_URL))
+                            copied = true
+                        },
+                    ) {
+                        Text(if (copied) "已复制" else "复制")
+                    }
+                }
             }
         },
+        dismissButton = { TextButton(onClick = openGitHub) { Text("打开 GitHub") } },
         confirmButton = { TextButton(onClick = onDismiss) { Text("好") } },
     )
 }

@@ -53,7 +53,7 @@ import com.aisub.player.AppDarkMode
  */
 val Orange = Color(0xFFF28C00)
 
-val LocalAppBackground = compositionLocalOf { AppBackground.VERY_LIGHT_GRAY }
+val LocalAppBackground = compositionLocalOf { AppBackground.AURORA_GRAY_WHITE_GRADIENT }
 val LocalAppDarkMode = compositionLocalOf { AppDarkMode.SYSTEM }
 val LocalLiquidGlassEnabled = compositionLocalOf { true }
 

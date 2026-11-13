@@ -424,7 +424,14 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) = sync()
         }
         val resumed = androidx.lifecycle.LifecycleEventObserver { _, e -> if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) sync() }
-        runCatching { cm?.registerDefaultNetworkCallback(callback) }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+            runCatching { cm?.registerDefaultNetworkCallback(callback) }
+        } else {
+            runCatching {
+                val req = android.net.NetworkRequest.Builder().build()
+                cm?.registerNetworkCallback(req, callback)
+            }
+        }
         lifecycle.addObserver(resumed)
         onDispose {
             runCatching { cm?.unregisterNetworkCallback(callback) }
