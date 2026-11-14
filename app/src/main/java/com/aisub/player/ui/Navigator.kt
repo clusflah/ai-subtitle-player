@@ -50,6 +50,12 @@ sealed interface Screen {
     data object Books : Screen
     /** 看图：同一文件夹里的图片左右滑动切换。 */
     data class ImageViewer(val serverId: String?, val images: List<com.aisub.player.remote.RemoteItem>, val index: Int) : Screen
+    /** 发现页条目进入的影视详情页，支持跳转到 Telegram / 影巢 / 网盘 / 磁力搜索。 */
+    data class DiscoverDetail(val item: com.aisub.player.meta.DiscoverItem) : Screen
+    /** 发现页的流媒体榜单 / 豆瓣与 TMDB 全部分类榜单网格页。 */
+    data class DiscoverChart(val chartId: String? = null) : Screen
+    /** 站内 Telegram 全局跨频道搜索页。 */
+    data class TelegramSearch(val query: String) : Screen
 }
 
 /** 极简页面栈：首页在栈底，返回键逐层弹出。 */

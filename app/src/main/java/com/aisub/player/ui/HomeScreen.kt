@@ -110,8 +110,9 @@ import com.aisub.player.remote.ServerType
  */
 private enum class Tab(val label: String, val icon: ImageVector) {
     HOME("首页", AppIcons.Home),
-    LOCAL("本机", AppIcons.Phone),
+    DISCOVER("发现", AppIcons.Explore),
     BROWSE("浏览", AppIcons.Folder),
+    LOCAL("本机", AppIcons.Phone),
     ME("我的", AppIcons.Person),
 }
 
@@ -229,7 +230,6 @@ fun HomeScreen(
                     Text(
                         text = when (tab) {
                             Tab.HOME -> "译幕"
-                            Tab.BROWSE -> "资源库"
                             else -> tab.label
                         },
                         fontSize = 28.sp,
@@ -373,7 +373,7 @@ fun HomeScreen(
                         Tab.entries.map { t ->
                             LiquidNavTabItem(
                                 value = t,
-                                label = if (t == Tab.BROWSE) "资源库" else t.label,
+                                label = t.label,
                                 icon = t.icon,
                             )
                         }
@@ -392,7 +392,7 @@ fun HomeScreen(
                 Tab.entries.map { t ->
                     LiquidNavTabItem(
                         value = t,
-                        label = if (t == Tab.BROWSE) "资源库" else t.label,
+                        label = t.label,
                         icon = t.icon,
                     )
                 }
@@ -514,6 +514,19 @@ fun HomeScreen(
                         gridState = lib.gridState("local.video"),
                     )
                 }
+                Tab.DISCOVER -> DiscoverTab(
+                    settings = mainUi.settings,
+                    lib = lib,
+                    listState = lib.listState("discover.home"),
+                    onOpenDetail = { nav.push(Screen.DiscoverDetail(it)) },
+                    onOpenChart = { nav.push(Screen.DiscoverChart(it)) },
+                    onOpenTelegramSearch = { nav.push(Screen.TelegramSearch(it)) },
+                    onOpenWeb = { url ->
+                        com.aisub.player.web.WebLaunch.open(url, mangaMode = false)
+                        nav.push(Screen.Web)
+                    },
+                    onOpenMagnet = { mag -> com.aisub.player.meta.MagnetLaunch.pending = mag },
+                )
                 Tab.BROWSE -> BrowseTab(
                     state = state,
                     onRequestPermission = onRequestPermission,

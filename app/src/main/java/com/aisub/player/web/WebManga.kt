@@ -104,8 +104,17 @@ class WebMangaCollector {
     }
 }
 
-/** 别的页面（漫画首页的「继续阅读」）要网页打开一个地址，打开后识别出漫画就直接进阅读模式 */
+/** 别的页面（漫画首页的「继续阅读」或发现页跳转搜索）要网页打开一个地址 */
 object WebLaunch {
     @Volatile
     var pending: String? = null
+
+    /** true 时识别出漫画页会自动进入阅读模式（漫画「继续阅读」使用）；普通搜索网页设为 false */
+    @Volatile
+    var autoReadManga: Boolean = true
+
+    fun open(url: String?, mangaMode: Boolean = false) {
+        autoReadManga = mangaMode
+        pending = url
+    }
 }

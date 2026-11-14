@@ -878,6 +878,20 @@ open class Context {
                 }
                 return
             }
+            if (scheme == "magnet" || scheme == "tg") {
+                val raw = uri.toString()
+                runCatching {
+                    val launched = if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
+                        runCatching { Desktop.getDesktop().browse(URI(raw)); true }.getOrDefault(false)
+                    } else {
+                        false
+                    }
+                    if (!launched) {
+                        ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", raw).start()
+                    }
+                }
+                return
+            }
             val file = ContentResolver.resolveFile(uri)
             if (file != null && file.exists()) {
                 runCatching {

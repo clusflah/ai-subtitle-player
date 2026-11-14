@@ -165,7 +165,13 @@ private val QUICK_SITES = listOf(
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
+fun WebScreen(
+    main: MainViewModel,
+    onBack: () -> Unit,
+    play: (List<MediaEntry>, Int) -> Unit,
+    lib: com.aisub.player.LibraryViewModel? = null,
+    openServer: ((com.aisub.player.remote.Server) -> Unit)? = null,
+) {
     val vm: WebViewModel = viewModel()
     val context = LocalContext.current
     val activity = context as? Activity
@@ -597,8 +603,13 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             }
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                    // 「打开 App」之类的跳转（bilibili://、intent://）不处理，留在网页里
                     val scheme = request.url.scheme?.lowercase()
+                    if (scheme == "magnet") {
+                        val raw = request.url.toString()
+                        view.post { com.aisub.player.meta.MagnetLaunch.pending = raw }
+                        return true
+                    }
+                    // 「打开 App」之类的跳转（bilibili://、intent://）不处理，留在网页里
                     if (scheme != "http" && scheme != "https") return true
                     // 网页脚本把整页带去另一个网站（点一下就跳广告、看着看着自己跳走）：拦下，底部提示可以「仍然打开」。
                     // 点的就是指向那个网站的链接、刚打开网页时的跳转（「正在跳转」页）、服务器重定向照常
@@ -1242,22 +1253,27 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     }
     }
 
-    // 漫画首页点了「继续阅读」：在新标签页（当前是空白页就在当前页）打开，识别出漫画后直接进阅读模式
+    // 漫画首页点了「继续阅读」或发现页跳转搜索：在新标签页（当前是空白页就在当前页）打开
     var autoOpenedPageUrl by remember(tab.id) { mutableStateOf<String?>(null) }
+    var allowAutoManga by remember { mutableStateOf(true) }
     LaunchedEffect(Unit) {
         val url = com.aisub.player.web.WebLaunch.pending ?: return@LaunchedEffect
+        val mangaMode = com.aisub.player.web.WebLaunch.autoReadManga
         com.aisub.player.web.WebLaunch.pending = null
+        com.aisub.player.web.WebLaunch.autoReadManga = true
+        allowAutoManga = mangaMode
         if (tab.url == null) go(url)
         else if (tab.url == url || tab.pageUrl == url) {
             autoOpenedPageUrl = null
-            if (tab.manga.manga != null) openReader()
+            if (mangaMode && tab.manga.manga != null) openReader()
         } else newTab(url)
-        reopenAfter = ""
+        if (mangaMode) reopenAfter = ""
     }
 
-    // Windows 桌面版：网页识别出漫画后自动进入漫画阅读模式（退出阅读模式后留在当前页概览，换下一话时再次自动进入）
+    // Windows 桌面版：仅在漫画阅读流中识别出漫画后自动进入阅读模式；普通搜索网页不自动跳阅读器
     val foundManga = tab.manga.manga
     LaunchedEffect(reopenAfter, foundManga?.pageUrl, foundManga?.pages?.size) {
+        if (!allowAutoManga) return@LaunchedEffect
         if (foundManga != null && foundManga.pageUrl != autoOpenedPageUrl) {
             autoOpenedPageUrl = foundManga.pageUrl
             reopenAfter = null

@@ -193,6 +193,27 @@ class PikPakClient(server: Server) : CloudClient(server) {
         return ResolvedLink(url, validMs = 30 * 60_000L)
     }
 
+    /** 提交磁力或远程链接到 PikPak 离线下载任务，返回任务名或状态说明；失败抛出 IOException。 */
+    suspend fun addOfflineUrl(url: String, parentId: String? = null): String =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val cleanUrl = url.trim()
+            if (cleanUrl.isEmpty()) throw IOException("链接不能为空")
+            val body = JSONObject().apply {
+                put("kind", "drive#file")
+                put("upload_type", "UPLOAD_TYPE_URL")
+                put("url", JSONObject().put("url", cleanUrl))
+                if (parentId.isNullOrBlank()) {
+                    put("folder_type", "DOWNLOAD")
+                } else {
+                    put("parent_id", parentId)
+                }
+            }
+            val res = request("$DRIVE_API/drive/v1/files", method = "POST", body = body)
+            val taskName = res.optJSONObject("task")?.optString("name")?.trim()?.ifEmpty { null }
+                ?: res.optJSONObject("file")?.optString("name")?.trim()?.ifEmpty { null }
+            if (taskName != null) "已添加到 PikPak：$taskName" else "已添加到 PikPak 离线任务"
+        }
+
     companion object {
         private const val USER_API = "https://user.mypikpak.net"
         private const val DRIVE_API = "https://api-drive.mypikpak.net"

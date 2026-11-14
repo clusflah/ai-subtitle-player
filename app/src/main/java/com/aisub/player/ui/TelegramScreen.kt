@@ -1256,3 +1256,410 @@ private fun TgVideo.detailItem(): com.aisub.player.remote.RemoteItem {
     val name = (if (generic) title else fileName).let { if (MediaEntry.isVideoName(it)) it else "$it.mp4" }
     return com.aisub.player.remote.RemoteItem(name, uri, isDir = false, size = size, playUrl = uri)
 }
+
+private enum class TgGlobalSearchMode(val label: String) {
+    ALL("全部消息"),
+    VIDEO("仅视频"),
+    PUBLIC("公开频道"),
+}
+
+/**
+ * 跨频道/群组 Telegram 全局搜索页面：支持从影视详情页跳转直达，搜已加入频道的消息与视频、
+ * 搜公开频道/群，并自动提取消息中的磁力链接与网盘分享链接。
+ */
+@Composable
+fun TelegramGlobalSearchScreen(
+    initialQuery: String,
+    lib: com.aisub.player.LibraryViewModel,
+    onBack: () -> Unit,
+    play: (List<MediaEntry>, Int) -> Unit,
+    openChat: (Long, String) -> Unit,
+    openTelegram: () -> Unit,
+    openWeb: (String) -> Unit,
+    openMagnet: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    val auth by Telegram.auth.collectAsStateWithLifecycle()
+    val libState by lib.state.collectAsStateWithLifecycle()
+    val openDetail = LocalOpenItemDetail.current
+
+    var queryInput by remember(initialQuery) { mutableStateOf(initialQuery) }
+    var appliedQuery by remember(initialQuery) { mutableStateOf(initialQuery.trim()) }
+    var mode by remember { mutableStateOf(TgGlobalSearchMode.ALL) }
+    var loading by remember { mutableStateOf(false) }
+    var loadingMore by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var hits by remember { mutableStateOf<List<com.aisub.player.telegram.TgSearchHit>>(emptyList()) }
+    var publicChats by remember { mutableStateOf<List<TgChat>>(emptyList()) }
+    var nextOffset by remember { mutableStateOf("") }
+    var totalCount by remember { mutableStateOf(0) }
+    var inspectedHit by remember { mutableStateOf<com.aisub.player.telegram.TgSearchHit?>(null) }
+    var statusTip by remember { mutableStateOf<String?>(null) }
+
+    val customTgSources = remember {
+        com.aisub.player.meta.DiscoverSearchStore.sources(context)
+            .filter { it.enabled && it.category == com.aisub.player.meta.SearchCategory.TELEGRAM }
+    }
+
+    LaunchedEffect(Unit) {
+        Telegram.init(context)
+        Telegram.start()
+        lib.reloadStored()
+    }
+
+    val progress = remember(libState.history) {
+        libState.history.filter { Telegram.isTelegram(it.entry.uri) }
+            .associate { it.entry.uri to (it.positionMs to it.entry.durationMs) }
+    }
+
+    fun runSearch(reset: Boolean) {
+        val q = appliedQuery.trim()
+        if (q.isEmpty() || auth !is TgAuth.Ready) return
+        scope.launch {
+            if (reset) {
+                loading = true
+                error = null
+                hits = emptyList()
+                publicChats = emptyList()
+                nextOffset = ""
+                totalCount = 0
+            } else {
+                if (loadingMore || nextOffset.isEmpty()) return@launch
+                loadingMore = true
+            }
+            runCatching {
+                if (mode == TgGlobalSearchMode.PUBLIC) {
+                    Telegram.searchPublic(q)
+                } else {
+                    Telegram.searchGlobal(
+                        query = q,
+                        offset = if (reset) "" else nextOffset,
+                        limit = 40,
+                        videosOnly = (mode == TgGlobalSearchMode.VIDEO),
+                    )
+                }
+            }.onSuccess { result ->
+                if (mode == TgGlobalSearchMode.PUBLIC) {
+                    @Suppress("UNCHECKED_CAST")
+                    publicChats = result as List<TgChat>
+                } else {
+                    val page = result as com.aisub.player.telegram.TgSearchPage
+                    hits = if (reset) page.hits else (hits + page.hits).distinctBy { it.message.chatId to it.message.messageId }
+                    nextOffset = page.nextOffset
+                    totalCount = page.totalCount
+                }
+            }.onFailure { e ->
+                error = e.message ?: "搜索失败"
+            }
+            loading = false
+            loadingMore = false
+        }
+    }
+
+    LaunchedEffect(appliedQuery, mode, auth) {
+        if (auth is TgAuth.Ready && appliedQuery.isNotBlank()) {
+            runSearch(reset = true)
+        }
+    }
+
+    fun playableEntries(): List<MediaEntry> = hits.map { it.message }.filter { it.isVideo }.map { it.entry() }
+
+    DetailScaffold("Telegram 全局搜索", onBack) {
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = queryInput,
+                    onValueChange = { queryInput = it },
+                    singleLine = true,
+                    placeholder = { Text("输入片名、#标签 或 @频道名") },
+                    leadingIcon = { Icon(AppIcons.Search, null) },
+                    trailingIcon = {
+                        if (queryInput.isNotEmpty()) {
+                            IconButton(onClick = { queryInput = ""; appliedQuery = "" }) {
+                                Icon(AppIcons.Close, "清空")
+                            }
+                        }
+                    },
+                    keyboardOptions = KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                        onSearch = { appliedQuery = queryInput.trim() },
+                    ),
+                    colors = appFieldColors(),
+                    phoneLabel = "Telegram 搜索",
+                    modifier = Modifier.weight(1f),
+                )
+                Button(
+                    onClick = { appliedQuery = queryInput.trim() },
+                    enabled = queryInput.isNotBlank(),
+                ) {
+                    Text("搜索")
+                }
+            }
+
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TgGlobalSearchMode.entries.forEach { m ->
+                    androidx.compose.material3.FilterChip(
+                        selected = mode == m,
+                        onClick = { mode = m },
+                        label = { Text(m.label) },
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                if (mode != TgGlobalSearchMode.PUBLIC && totalCount > 0) {
+                    Text(
+                        "约 $totalCount 条",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            statusTip?.let { tip ->
+                Text(
+                    tip,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
+
+            when {
+                auth !is TgAuth.Ready -> {
+                    Column(
+                        Modifier.fillMaxWidth().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        SurfaceCard {
+                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                val unavailable = (auth as? TgAuth.Unsupported)?.reason
+                                Text(
+                                    if (unavailable != null) "当前端暂无法使用内置 Telegram：$unavailable"
+                                    else "尚未登录内置 Telegram 账号",
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                Text(
+                                    "登录 Telegram 后可在所有已加入的频道和群组里直接搜索片源并边下边播；也可以先复制关键词去 Telegram 客户端或自定义搜索站查找。",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button(onClick = openTelegram) { Text("前往 Telegram 登录") }
+                                    TextButton(onClick = {
+                                        val q = queryInput.trim()
+                                        if (q.isNotEmpty()) {
+                                            clipboard.setText(androidx.compose.ui.text.AnnotatedString(q))
+                                            statusTip = "已复制关键词「$q」，可前往 Telegram 粘贴搜索"
+                                        }
+                                        runCatching {
+                                            val intent = android.content.Intent(
+                                                android.content.Intent.ACTION_VIEW,
+                                                android.net.Uri.parse("tg://"),
+                                            )
+                                            context.startActivity(intent)
+                                        }.onFailure {
+                                            openWeb("https://web.telegram.org/")
+                                        }
+                                    }) {
+                                        Text("复制关键词并唤起 TG")
+                                    }
+                                }
+                            }
+                        }
+                        if (customTgSources.isNotEmpty() && queryInput.isNotBlank()) {
+                            Text("自定义 Telegram 搜索源", style = MaterialTheme.typography.titleSmall)
+                            customTgSources.forEach { src ->
+                                Button(onClick = { openWeb(src.buildUrl(queryInput)) }) {
+                                    Text(src.name)
+                                }
+                            }
+                        }
+                    }
+                }
+                appliedQuery.isBlank() -> {
+                    EmptyState("输入关键词后点「搜索」，将在全部已加入的频道、群和对话中检索", icon = AppIcons.Search)
+                }
+                loading -> {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                }
+                error != null -> {
+                    EmptyState("搜索失败：${error}\n点此重试", icon = AppIcons.Telegram)
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        TextButton(onClick = { runSearch(reset = true) }) { Text("重新搜索") }
+                    }
+                }
+                mode == TgGlobalSearchMode.PUBLIC -> {
+                    if (publicChats.isEmpty()) {
+                        EmptyState("没有找到与「$appliedQuery」相关的公开频道或群组", icon = AppIcons.Telegram)
+                    } else {
+                        LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+                            itemsIndexed(publicChats, key = { _, c -> c.id }) { _, c ->
+                                Row(
+                                    Modifier.fillMaxWidth()
+                                        .clickable { openChat(c.id, c.title) }
+                                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                ) {
+                                    ChatAvatar(c)
+                                    Column(Modifier.weight(1f)) {
+                                        Text(c.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        val sub = listOfNotNull(
+                                            c.username?.let { "@$it" },
+                                            c.members.takeIf { it > 0 }?.let { "${countText(it)} 成员" },
+                                        ).joinToString(" · ")
+                                        if (sub.isNotEmpty()) {
+                                            Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    }
+                                    Icon(AppIcons.ArrowForward, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+                    }
+                }
+                hits.isEmpty() -> {
+                    EmptyState("已加入的频道与群里没有找到「$appliedQuery」\n可以切换到「公开频道」试试", icon = AppIcons.Telegram)
+                }
+                else -> {
+                    LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
+                        itemsIndexed(hits, key = { _, h -> "${h.message.chatId}:${h.message.messageId}" }) { index, hit ->
+                            if (index >= hits.size - 4 && nextOffset.isNotEmpty() && !loadingMore) {
+                                LaunchedEffect(hits.size, nextOffset) { runSearch(reset = false) }
+                            }
+                            val v = hit.message
+                            val magnets = remember(v.caption) { com.aisub.player.meta.MagnetLinks.extractMagnets(v.caption) }
+                            val cloudLinks = remember(v.caption) { com.aisub.player.meta.MagnetLinks.extractCloudShareUrls(v.caption) }
+                            Column(Modifier.fillMaxWidth()) {
+                                if (v.isVideo) {
+                                    VideoRow(
+                                        v = v,
+                                        watched = progress[v.uri],
+                                        onInfo = {
+                                            val entries = playableEntries()
+                                            val idx = entries.indexOfFirst { it.uri == v.uri }.coerceAtLeast(0)
+                                            openDetail(v.detailItem(), entries, idx)
+                                        },
+                                        saved = null,
+                                        source = hit.chat.title,
+                                    ) {
+                                        saveHistoryThumb(context, scope, v)
+                                        val entries = playableEntries()
+                                        val idx = entries.indexOfFirst { it.uri == v.uri }.coerceAtLeast(0)
+                                        play(entries, idx)
+                                    }
+                                } else {
+                                    Column(
+                                        Modifier.fillMaxWidth()
+                                            .clickable { inspectedHit = hit }
+                                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        val dateStr = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+                                            .format(java.util.Date(v.date * 1000L))
+                                        Text(
+                                            "${hit.chat.title} · $dateStr",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                        Text(
+                                            v.caption.ifBlank { v.title },
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            maxLines = 4,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                                if (magnets.isNotEmpty() || cloudLinks.isNotEmpty() || !v.isVideo) {
+                                    Row(
+                                        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 6.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        TextButton(onClick = { openChat(hit.chat.id, hit.chat.title) }) {
+                                            Text("进入频道")
+                                        }
+                                        if (magnets.isNotEmpty()) {
+                                            TextButton(onClick = { openMagnet(magnets.first()) }) {
+                                                Text("磁力 (${magnets.size})")
+                                            }
+                                        }
+                                        if (cloudLinks.isNotEmpty()) {
+                                            TextButton(onClick = { openWeb(cloudLinks.first()) }) {
+                                                Text("网盘链接 (${cloudLinks.size})")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (loadingMore) {
+                            item {
+                                Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(Modifier.size(24.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    inspectedHit?.let { hit ->
+        val msgText = hit.message.caption.ifBlank { hit.message.title }
+        val magnets = remember(msgText) { com.aisub.player.meta.MagnetLinks.extractMagnets(msgText) }
+        val shares = remember(msgText) { com.aisub.player.meta.MagnetLinks.extractCloudShareUrls(msgText) }
+        AppDialog(
+            onDismissRequest = { inspectedHit = null },
+            title = { Text(hit.chat.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = {
+                Column(
+                    Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Text(msgText, style = MaterialTheme.typography.bodyMedium)
+                    }
+                    if (magnets.isNotEmpty()) {
+                        Text("检测到磁力链接", style = MaterialTheme.typography.titleSmall)
+                        magnets.forEach { m ->
+                            TextButton(onClick = { inspectedHit = null; openMagnet(m) }) {
+                                Text(com.aisub.player.meta.MagnetLinks.displayName(m), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                    if (shares.isNotEmpty()) {
+                        Text("检测到网盘链接", style = MaterialTheme.typography.titleSmall)
+                        shares.forEach { u ->
+                            TextButton(onClick = { inspectedHit = null; openWeb(u) }) {
+                                Text(u, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    inspectedHit = null
+                    openChat(hit.chat.id, hit.chat.title)
+                }) {
+                    Text("进入频道")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { inspectedHit = null }) { Text("关闭") }
+            },
+        )
+    }
+}

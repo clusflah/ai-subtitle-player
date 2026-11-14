@@ -182,10 +182,19 @@ class MainActivity : ComponentActivity() {
                         )
                         is Screen.History -> HistoryScreen(lib, screen.music, back, play)
                         Screen.Live -> LiveScreen(back, play)
-                        Screen.Web -> WebScreen(main, back, play)
+                        Screen.Web -> WebScreen(
+                            main = main,
+                            onBack = back,
+                            play = play,
+                            lib = lib,
+                            openServer = { s ->
+                                if (s.type.isMediaServer) nav.push(Screen.ServerHome(s.id, s.name))
+                                else nav.push(Screen.Remote(s.id, s.rootPath, s.name))
+                            },
+                        )
                         Screen.Manga -> MangaScreen(
                             back,
-                            openWeb = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
+                            openWeb = { url -> com.aisub.player.web.WebLaunch.open(url, mangaMode = true); nav.push(Screen.Web) },
                             open = { nav.push(Screen.MangaRead(it)) },
                         )
                         is Screen.MangaRead -> MangaReadScreen(screen.open, lib, back)
@@ -253,6 +262,44 @@ class MainActivity : ComponentActivity() {
                                 nav.push(Screen.MangaRead(MangaOpen.Images(folder.substringAfterLast('/').ifEmpty { "图片" }, "images:${screen.serverId ?: "local"}:$folder", pages, i)))
                             },
                         )
+                        is Screen.DiscoverDetail -> com.aisub.player.ui.DiscoverDetailScreen(
+                            item = screen.item,
+                            settings = ui.settings,
+                            lib = lib,
+                            onBack = back,
+                            play = play,
+                            onOpenTelegramSearch = { q -> nav.push(Screen.TelegramSearch(q)) },
+                            onOpenWeb = { url ->
+                                com.aisub.player.web.WebLaunch.open(url, mangaMode = false)
+                                nav.push(Screen.Web)
+                            },
+                            onOpenMagnet = { mag -> com.aisub.player.meta.MagnetLaunch.pending = mag },
+                            onOpenSettings = { nav.push(Screen.Settings) },
+                        )
+                        is Screen.DiscoverChart -> com.aisub.player.ui.DiscoverChartScreen(
+                            initialChartId = screen.chartId,
+                            settings = ui.settings,
+                            onBack = back,
+                            onOpenDetail = { item -> nav.push(Screen.DiscoverDetail(item)) },
+                            onOpenSettings = { nav.push(Screen.Settings) },
+                            onOpenWeb = { url ->
+                                com.aisub.player.web.WebLaunch.open(url, mangaMode = false)
+                                nav.push(Screen.Web)
+                            },
+                        )
+                        is Screen.TelegramSearch -> com.aisub.player.ui.TelegramGlobalSearchScreen(
+                            initialQuery = screen.query,
+                            lib = lib,
+                            onBack = back,
+                            play = play,
+                            openChat = { chatId, title -> nav.push(Screen.TelegramChat(chatId, title)) },
+                            openTelegram = { nav.push(Screen.Telegram) },
+                            openWeb = { url ->
+                                com.aisub.player.web.WebLaunch.open(url, mangaMode = false)
+                                nav.push(Screen.Web)
+                            },
+                            openMagnet = { mag -> com.aisub.player.meta.MagnetLaunch.pending = mag },
+                        )
                     }
                    }
                     // 音乐在播放页外继续放时，页面底部的「正在播放」小条（占自己的位置，不盖住列表），点它回到播放页。
@@ -260,6 +307,18 @@ class MainActivity : ComponentActivity() {
                     if (nav.current != Screen.Player && nav.current != Screen.Home && nav.current !is Screen.MangaRead) NowPlayingBar(
                         main, bottomPadding = 8.dp, onOpen = { nav.push(Screen.Player) },
                     )
+                    com.aisub.player.meta.MagnetLaunch.pending?.let { pendingMagnet ->
+                        com.aisub.player.ui.MagnetActionDialog(
+                            magnetUri = pendingMagnet,
+                            lib = lib,
+                            onDismiss = { com.aisub.player.meta.MagnetLaunch.pending = null },
+                            onOpenServer = { s ->
+                                com.aisub.player.meta.MagnetLaunch.pending = null
+                                if (s.type.isMediaServer) nav.push(Screen.ServerHome(s.id, s.name))
+                                else nav.push(Screen.Remote(s.id, s.rootPath, s.name))
+                            },
+                        )
+                    }
                   }
                 }
             }

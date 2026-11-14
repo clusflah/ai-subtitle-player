@@ -104,6 +104,53 @@ class Pan115Client(server: Server) : CloudClient(server) {
         Unit
     }
 
+    /** 提交磁力 / ed2k / HTTP 链接到 115 离线下载任务，返回任务名或状态说明；失败抛出 IOException。 */
+    suspend fun addOfflineUrl(url: String, saveCid: String? = null): String =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val cleanUrl = url.trim()
+            if (cleanUrl.isEmpty()) throw IOException("链接不能为空")
+            val spaceJson = runCatching {
+                cloudHttp.newCall(request("https://115.com/?ct=offline&ac=space").build()).execute().use { it.json() }
+            }.getOrNull()
+            val sign = spaceJson?.optString("sign").orEmpty()
+            val time = spaceJson?.opt("time")?.toString()?.takeIf { it != "null" && it.isNotBlank() }.orEmpty()
+            var uid = Regex("""UID=([^_;]+)""").find(cookie)?.groupValues?.getOrNull(1).orEmpty()
+            if (uid.isEmpty()) {
+                uid = runCatching {
+                    cloudHttp.newCall(request("https://my.115.com/?ct=ajax&ac=nav").build()).execute().use { it.json() }
+                        .optJSONObject("data")?.opt("user_id")?.toString().orEmpty()
+                }.getOrDefault("")
+            }
+            val form = okhttp3.FormBody.Builder().apply {
+                add("url", cleanUrl)
+                if (uid.isNotEmpty()) add("uid", uid)
+                if (sign.isNotEmpty()) add("sign", sign)
+                if (time.isNotEmpty()) add("time", time)
+                if (!saveCid.isNullOrBlank()) add("wp_path_id", saveCid)
+            }.build()
+            val req = okhttp3.Request.Builder()
+                .url("https://115.com/web/lixian/?ct=lixian&ac=add_task_url")
+                .header("Cookie", cookie)
+                .header("User-Agent", UA)
+                .header("Origin", "https://115.com")
+                .header("Referer", "https://115.com/")
+                .post(form)
+                .build()
+            val json = cloudHttp.newCall(req).execute().use { it.json() }
+            if (!json.optBoolean("state", true)) {
+                val msg = json.optString("error_msg")
+                    .ifEmpty { json.optString("error") }
+                    .ifEmpty { json.optString("msg") }
+                    .ifEmpty { "errcode ${json.optInt("errcode", json.optInt("errno"))}" }
+                if (json.optInt("errno") == 99 || json.optInt("errcode") == 99 || msg.contains("登录")) {
+                    throw IOException("115 登录已失效，请重新扫码")
+                }
+                throw IOException("115 离线添加失败：$msg")
+            }
+            val taskName = json.optString("name").trim()
+            if (taskName.isNotEmpty()) "已添加到 115：$taskName" else "已添加到 115 离线下载"
+        }
+
     private fun check(json: JSONObject) {
         if (json.optBoolean("state", true)) return
         val msg = json.optString("error").ifEmpty { json.optString("msg") }.ifEmpty { "errno ${json.optInt("errno")}" }

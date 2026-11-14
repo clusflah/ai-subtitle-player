@@ -112,6 +112,20 @@ data class TgMsgMeta(
     val mediaHeight: Int,
 )
 
+/** 跨已加入频道/群全局搜索的结果项 */
+data class TgSearchHit(
+    val chat: TgChat,
+    val message: TgVideo,
+    val date: Int,
+)
+
+/** 全局搜索的一页结果与下一页游标 */
+data class TgSearchPage(
+    val hits: List<TgSearchHit>,
+    val nextOffset: String,
+    val totalCount: Int,
+)
+
 /** 频道页列出哪些消息（频道里常有大量文字、图片、广告，默认只看视频） */
 enum class TgMode(val label: String) {
     ALL("全部消息"), VIDEO("仅视频"), VIDEO_PHOTO("视频+图片"), FILES("文件"),
@@ -358,6 +372,40 @@ object Telegram {
         val exact = username?.let { runCatching { send(TdApi.SearchPublicChat(it)).id }.getOrNull() }
         val ids = listOfNotNull(exact) + send(TdApi.SearchPublicChats(query, null)).chatIds.toList()
         return ids.distinct().mapNotNull { chatOf(it, details = true) }
+    }
+
+    /** 在所有已加入的频道、群组和对话中全局搜索消息，支持分页与仅视频过滤 */
+    suspend fun searchGlobal(
+        query: String,
+        offset: String = "",
+        limit: Int = 40,
+        videosOnly: Boolean = false,
+    ): TgSearchPage {
+        val q = query.trim()
+        if (q.isEmpty()) return TgSearchPage(emptyList(), "", 0)
+        val filter: TdApi.SearchMessagesFilter = if (videosOnly) {
+            TdApi.SearchMessagesFilterVideo()
+        } else {
+            TdApi.SearchMessagesFilterEmpty()
+        }
+        val r = send(TdApi.SearchMessages(null, q, offset, limit, filter, null, 0, 0))
+        val chatCache = HashMap<Long, TgChat>()
+        val hits = ArrayList<TgSearchHit>(r.messages.size)
+        for (m in r.messages) {
+            val msg = videoOf(m, null)
+                ?: if (videosOnly) null else (textOf(m) ?: fileOf(m) ?: photoOf(m) ?: otherOf(m))
+            if (msg == null) continue
+            val chat = chatCache.getOrPut(m.chatId) {
+                runCatching { chatOf(m.chatId, details = false) }.getOrNull()
+                    ?: TgChat(m.chatId, "频道 / 对话", isChannel = false)
+            }
+            hits += TgSearchHit(chat = chat, message = msg, date = m.date)
+        }
+        return TgSearchPage(
+            hits = hits,
+            nextOffset = r.nextOffset.orEmpty(),
+            totalCount = r.totalCount,
+        )
     }
 
     private val USERNAME = Regex("""(?:https?://)?(?:t\.me/|@)?([A-Za-z][A-Za-z0-9_]{3,31})/?""")

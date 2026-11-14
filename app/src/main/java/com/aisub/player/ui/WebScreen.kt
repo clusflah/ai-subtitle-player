@@ -165,7 +165,13 @@ private val QUICK_SITES = listOf(
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
+fun WebScreen(
+    main: MainViewModel,
+    onBack: () -> Unit,
+    play: (List<MediaEntry>, Int) -> Unit,
+    lib: com.aisub.player.LibraryViewModel? = null,
+    openServer: ((com.aisub.player.remote.Server) -> Unit)? = null,
+) {
     val vm: WebViewModel = viewModel()
     val context = LocalContext.current
     val activity = context as? Activity
@@ -606,8 +612,12 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             } else false
             webViewClient = object : WebViewClient() {
                 private fun handleOverride(view: WebView, rawUrl: String, isMainFrame: Boolean, isRedirect: Boolean): Boolean {
-                    // 「打开 App」之类的跳转（bilibili://、intent://）不处理，留在网页里
                     val scheme = Uri.parse(rawUrl).scheme?.lowercase()
+                    if (scheme == "magnet") {
+                        view.post { com.aisub.player.meta.MagnetLaunch.pending = rawUrl }
+                        return true
+                    }
+                    // 「打开 App」之类的跳转（bilibili://、intent://）不处理，留在网页里
                     if (scheme != "http" && scheme != "https") return true
                     // 网页脚本把整页带去另一个网站（点一下就跳广告、看着看着自己跳走）：拦下，底部提示可以「仍然打开」。
                     // 点的就是指向那个网站的链接、刚打开网页时的跳转（「正在跳转」页）、服务器重定向照常
@@ -1262,12 +1272,14 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
     }
     }
 
-    // 漫画首页点了「继续阅读」：在新标签页（当前是空白页就在当前页）打开，识别出漫画后直接进阅读模式
+    // 漫画首页点了「继续阅读」或发现页跳转搜索：在新标签页（当前是空白页就在当前页）打开
     LaunchedEffect(Unit) {
         val url = com.aisub.player.web.WebLaunch.pending ?: return@LaunchedEffect
+        val mangaMode = com.aisub.player.web.WebLaunch.autoReadManga
         com.aisub.player.web.WebLaunch.pending = null
+        com.aisub.player.web.WebLaunch.autoReadManga = true
         if (tab.url == null) go(url) else newTab(url)
-        reopenAfter = ""
+        if (mangaMode) reopenAfter = ""
     }
 
     // 上一话 / 下一话打开后：新网页识别出漫画（图片数稳定一会儿）就接着用阅读模式看；太久没识别出来就算了

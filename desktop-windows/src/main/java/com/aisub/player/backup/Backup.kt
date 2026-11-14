@@ -85,6 +85,7 @@ object Backup {
                     data.put("library", PrefsCodec.encode(mapOf("playlists" to playlists)))
                     data.put("meta_overrides", PrefsCodec.encode(prefs("meta_overrides")))
                     data.put("web", PrefsCodec.encode(prefs("web").filterKeys { it != "last" }))
+                    data.put("discover_search", PrefsCodec.encode(prefs("discover_search")))
                 }
             }
             out.put(section.name, data)

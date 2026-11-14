@@ -202,6 +202,10 @@ open class WebView(context: Context = android.content.GlobalDesktopApp) : ViewGr
             evaluateJavascript(targetUrl.substring("javascript:".length), null)
             return
         }
+        if (targetUrl.startsWith("magnet:", ignoreCase = true)) {
+            post { com.aisub.player.meta.MagnetLaunch.pending = targetUrl }
+            return
+        }
         val previousUrl = url
         url = targetUrl
         loadingState = true
@@ -580,6 +584,7 @@ internal object DesktopWebMangaParser {
             }
         }
 
+        val magnetLinks = ArrayList<WebView.ExtractedLink>()
         val links = ArrayList<WebView.ExtractedLink>()
         val seenUrls = HashSet<String>()
         for (aMatch in Regex("""<a\b([^>]*)>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE).findAll(fullHtml)) {
@@ -591,6 +596,23 @@ internal object DesktopWebMangaParser {
                 extractJsNavUrl(href) ?: extractJsNavUrl(extractAttr("<a $attrs>", "onclick")) ?: continue
             } else {
                 href
+            }
+            if (rawTarget.startsWith("magnet:", ignoreCase = true)) {
+                if (seenUrls.add(rawTarget)) {
+                    val titleAttr = extractAttr("<a $attrs>", "title")
+                    val rawLabel = unescapeHtml(stripHtml(inner).ifBlank { titleAttr.orEmpty() })
+                        .replace(Regex("\\s+"), " ").trim()
+                        .ifEmpty { com.aisub.player.meta.MagnetLinks.displayName(rawTarget) }
+                    magnetLinks.add(
+                        WebView.ExtractedLink(
+                            title = "磁力：$rawLabel",
+                            subtitle = rawTarget.take(96),
+                            url = rawTarget,
+                            isChapter = false,
+                        ),
+                    )
+                }
+                continue
             }
             val absUrl = resolveUrl(pageUrl, rawTarget) ?: continue
             if (!absUrl.startsWith("http") || absUrl == pageUrl) continue
@@ -613,6 +635,21 @@ internal object DesktopWebMangaParser {
                 val isChap = CHAPTER_LINK_RE.containsMatchIn(linkTitle) || CHAPTER_LINK_RE.containsMatchIn(absUrl)
                 links.add(WebView.ExtractedLink(title = linkTitle, subtitle = sub, url = absUrl, isChapter = isChap))
             }
+        }
+        for (mag in com.aisub.player.meta.MagnetLinks.extractMagnets(fullHtml).take(40)) {
+            if (seenUrls.add(mag)) {
+                magnetLinks.add(
+                    WebView.ExtractedLink(
+                        title = "磁力：${com.aisub.player.meta.MagnetLinks.displayName(mag)}",
+                        subtitle = mag.take(96),
+                        url = mag,
+                        isChapter = false,
+                    ),
+                )
+            }
+        }
+        if (magnetLinks.isNotEmpty()) {
+            links.addAll(0, magnetLinks)
         }
 
         return ParseResult(
