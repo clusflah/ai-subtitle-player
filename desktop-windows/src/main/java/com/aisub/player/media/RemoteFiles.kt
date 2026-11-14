@@ -14,6 +14,31 @@ import java.io.InputStream
 /** 读取本地、网络位置、网盘里的小文件（图片、文本），鉴权方式与播放时相同。 */
 object RemoteFiles {
 
+    private const val DOUBAN_REFERER = "https://movie.douban.com/"
+    private const val BROWSER_IMAGE_UA =
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
+
+    internal fun buildRequest(
+        realUrl: String,
+        headers: Map<String, String>,
+        truncateMaxBytes: Int? = null,
+    ): Request = Request.Builder().url(realUrl).apply {
+        headers.forEach { (k, v) -> header(k, v) }
+        val lowerUrl = realUrl.lowercase()
+        // 豆瓣图床防盗链：仅带 Referer 不带浏览器 UA（okhttp 默认 UA）也会返回 403
+        if (lowerUrl.contains(".doubanio.com/") || lowerUrl.contains(".douban.com/")) {
+            if (headers.keys.none { it.equals("Referer", ignoreCase = true) }) {
+                header("Referer", DOUBAN_REFERER)
+            }
+            if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
+                header("User-Agent", BROWSER_IMAGE_UA)
+            }
+        }
+        if (truncateMaxBytes != null) {
+            header("Range", "bytes=0-${truncateMaxBytes - 1}")
+        }
+    }.build()
+
     /** 阻塞调用。超过 maxBytes 时：truncate 为 true 截断，否则报错。 */
     fun read(context: Context, url: String, maxBytes: Int, truncate: Boolean = false): ByteArray {
         if (url.startsWith("content://") || url.startsWith("file://")) {
@@ -25,12 +50,7 @@ object RemoteFiles {
         } else {
             Endpoints.rewrite(url).let { it to AuthRegistry.headersFor(it) }
         }
-        val req = Request.Builder().url(realUrl).apply {
-            headers.forEach { (k, v) -> header(k, v) }
-            // 豆瓣图片防盗链：不带豆瓣的 Referer 会返回 418
-            if (realUrl.contains(".doubanio.com/")) header("Referer", "https://movie.douban.com/")
-            if (truncate) header("Range", "bytes=0-${maxBytes - 1}")
-        }.build()
+        val req = buildRequest(realUrl, headers, truncateMaxBytes = if (truncate) maxBytes else null)
         return cloudHttp.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}")
             val body = resp.body ?: throw IOException("没有内容")
@@ -57,7 +77,7 @@ object RemoteFiles {
             } else {
                 Endpoints.rewrite(url).let { it to AuthRegistry.headersFor(it) }
             }
-            val req = Request.Builder().url(realUrl).apply { headers.forEach { (k, v) -> header(k, v) } }.build()
+            val req = buildRequest(realUrl, headers)
             val resp = cloudHttp.newCall(req).execute()
             if (!resp.isSuccessful) { resp.close(); throw IOException("HTTP ${resp.code}") }
             call = resp

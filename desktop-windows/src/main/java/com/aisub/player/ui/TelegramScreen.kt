@@ -1377,35 +1377,32 @@ fun TelegramGlobalSearchScreen(
 
     DetailScaffold("Telegram 全局搜索", onBack) {
         Column(Modifier.fillMaxSize()) {
+            val barHeight = if (LocalTv.current) 48.dp else 44.dp
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                OutlinedTextField(
+                CompactSearchField(
                     value = queryInput,
-                    onValueChange = { queryInput = it },
-                    singleLine = true,
-                    placeholder = { Text("输入片名、#标签 或 @频道名") },
-                    leadingIcon = { Icon(AppIcons.Search, null) },
-                    trailingIcon = {
-                        if (queryInput.isNotEmpty()) {
-                            IconButton(onClick = { queryInput = ""; appliedQuery = "" }) {
-                                Icon(AppIcons.Close, "清空")
-                            }
-                        }
+                    onValueChange = {
+                        queryInput = it
+                        if (it.isEmpty()) appliedQuery = ""
                     },
-                    keyboardOptions = KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
-                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(
-                        onSearch = { appliedQuery = queryInput.trim() },
-                    ),
-                    colors = appFieldColors(),
+                    onSearch = { if (queryInput.isNotBlank()) appliedQuery = queryInput.trim() },
+                    placeholder = "输入片名、#标签 或 @频道名",
                     phoneLabel = "Telegram 搜索",
+                    height = barHeight,
                     modifier = Modifier.weight(1f),
                 )
                 Button(
                     onClick = { appliedQuery = queryInput.trim() },
                     enabled = queryInput.isNotBlank(),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+                    modifier = Modifier
+                        .height(barHeight)
+                        .tvFocusRing(RoundedCornerShape(12.dp)),
                 ) {
                     Text("搜索")
                 }

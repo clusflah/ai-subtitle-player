@@ -204,6 +204,7 @@ fun HomeScreen(
     GlassBackdropBox { backdrop ->
     Scaffold(
         containerColor = Color.Transparent,
+        contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = {
             if (selected.isNotEmpty()) {
                 SelectionBar(

@@ -1,5 +1,6 @@
 package com.aisub.player.meta
 
+import com.aisub.player.media.RemoteFiles
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -224,5 +225,55 @@ class DiscoverTest {
             ),
             shares,
         )
+    }
+
+    @Test
+    fun parseDoubanUpgradesHttpPosterAndReadsCoverUrlFallback() {
+        val json = """
+        {
+          "subject_collection_items": [
+            {
+              "id": "37000001",
+              "title": "HttpPoster",
+              "type": "tv",
+              "cover": { "url": "http://img3.doubanio.com/view/photo/m_ratio_poster/public/p2935903589.jpg" }
+            }
+          ]
+        }
+        """.trimIndent()
+        val list = DiscoverRepository.parseDoubanCollectionJson(json, defaultKind = "tv")
+        assertEquals(1, list.size)
+        assertEquals(
+            "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p2935903589.jpg",
+            list[0].posterUrl,
+        )
+    }
+
+    @Test
+    fun remoteFilesBuildRequestAddsDoubanHeadersOnlyForDoubanAndPreservesCallerHeaders() {
+        val doubanReq = RemoteFiles.buildRequest(
+            realUrl = "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p2935903589.jpg",
+            headers = emptyMap(),
+            truncateMaxBytes = 4096,
+        )
+        assertEquals("https://movie.douban.com/", doubanReq.header("Referer"))
+        val ua = doubanReq.header("User-Agent") ?: ""
+        assertTrue("Expected browser UA for Douban CDN, got: $ua", ua.contains("Mozilla/5.0"))
+        assertEquals("bytes=0-4095", doubanReq.header("Range"))
+
+        val tmdbReq = RemoteFiles.buildRequest(
+            realUrl = "https://image.tmdb.org/t/p/w500/abc.jpg",
+            headers = emptyMap(),
+        )
+        assertNull(tmdbReq.header("Referer"))
+        assertNull(tmdbReq.header("User-Agent"))
+        assertNull(tmdbReq.header("Range"))
+
+        val customReq = RemoteFiles.buildRequest(
+            realUrl = "https://img1.doubanio.com/view/photo/l/public/p1.jpg",
+            headers = mapOf("Referer" to "https://custom.example/", "User-Agent" to "CustomUA/1.0"),
+        )
+        assertEquals("https://custom.example/", customReq.header("Referer"))
+        assertEquals("CustomUA/1.0", customReq.header("User-Agent"))
     }
 }

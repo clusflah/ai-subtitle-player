@@ -429,9 +429,14 @@ object DiscoverRepository {
             else -> defaultKind
         }
         val pic = obj.optJSONObject("pic")
-        val posterUrl = pic?.optString("large")?.takeIf { it.startsWith("http") }
+        val cover = obj.optJSONObject("cover")
+        val rawPoster = pic?.optString("large")?.takeIf { it.startsWith("http") }
             ?: pic?.optString("normal")?.takeIf { it.startsWith("http") }
+            ?: cover?.optString("url")?.takeIf { it.startsWith("http") }
             ?: obj.optString("cover_url").takeIf { it.startsWith("http") }
+        val posterUrl = rawPoster?.let {
+            if (it.startsWith("http://") && it.contains(".doubanio.com/")) "https://" + it.removePrefix("http://") else it
+        }
         val subtitle = obj.optString("card_subtitle").trim()
         val parsed = parseDoubanSubtitle(subtitle)
         val year = obj.optString("year").toIntOrNull() ?: parsed.year

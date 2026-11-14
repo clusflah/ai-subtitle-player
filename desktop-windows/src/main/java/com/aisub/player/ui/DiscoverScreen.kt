@@ -30,8 +30,6 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -66,7 +64,6 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -197,41 +194,32 @@ fun DiscoverTab(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                val searchBarHeight = if (tv) 48.dp else 44.dp
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    OutlinedTextField(
+                    CompactSearchField(
                         value = queryInput,
                         onValueChange = {
                             queryInput = it
                             if (it.isBlank()) appliedQuery = ""
                         },
-                        singleLine = true,
-                        placeholder = { Text("搜电影 / 剧集，或粘贴磁力 / Hash") },
-                        leadingIcon = { Icon(AppIcons.Search, null) },
-                        trailingIcon = {
-                            if (queryInput.isNotEmpty()) {
-                                IconButton(onClick = {
-                                    queryInput = ""
-                                    appliedQuery = ""
-                                }) {
-                                    Icon(AppIcons.Close, "清空")
-                                }
-                            }
-                        },
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                        keyboardActions = KeyboardActions(onSearch = { submitSearch() }),
-                        colors = appFieldColors(),
+                        onSearch = { submitSearch() },
+                        placeholder = "搜电影 / 剧集，或粘贴磁力 / Hash",
                         phoneLabel = "影视发现搜索",
+                        height = searchBarHeight,
                         modifier = Modifier.weight(1f),
                     )
                     Button(
                         onClick = { submitSearch() },
                         colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.tvFocusRing(RoundedCornerShape(10.dp)),
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+                        modifier = Modifier
+                            .height(searchBarHeight)
+                            .tvFocusRing(RoundedCornerShape(12.dp)),
                     ) {
                         Text("搜索")
                     }
@@ -552,6 +540,7 @@ private fun DiscoverChartRowSection(
                     section.chart.title,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onBackground,
                 )
                 Text(
                     section.chart.subtitle,
@@ -684,6 +673,7 @@ fun DiscoverPosterCard(
             text = item.title,
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
@@ -1006,6 +996,7 @@ fun DiscoverDetailScreen(
                             displayTitle,
                             style = MaterialTheme.typography.headlineSmall,
                             fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onBackground,
                         )
                         if (displayOrigTitle.isNotBlank() && displayOrigTitle != displayTitle) {
                             Text(
@@ -1119,7 +1110,13 @@ fun DiscoverDetailScreen(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
                         singleLine = true,
-                        label = { Text("自定义搜索词（下方全部搜索入口共用此词）") },
+                        label = {
+                            Text(
+                                "自定义搜索词（下方全部搜索入口共用此词）",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
                         colors = appFieldColors(),
                         phoneLabel = "搜索关键词",
                         trailingIcon = {
@@ -1730,7 +1727,13 @@ fun SearchSourcesManageDialog(
                     value = newTemplate,
                     onValueChange = { newTemplate = it },
                     singleLine = true,
-                    label = { Text("搜索地址模板（如 https://example.com/s?q={q}）") },
+                    label = {
+                        Text(
+                            "搜索地址模板（如 https://example.com/s?q={q}）",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
                     colors = appFieldColors(),
                     phoneLabel = "搜索模板",
                     modifier = Modifier.fillMaxWidth(),

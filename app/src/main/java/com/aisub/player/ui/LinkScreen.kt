@@ -64,6 +64,7 @@ fun LinkScreen(vm: MainViewModel, onBack: () -> Unit, onDone: () -> Unit) {
 
     Scaffold(
         containerColor = Color.Transparent,
+        contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = {
             TopAppBar(
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -301,6 +302,7 @@ private fun WebLoginDialog(site: LoginSite, onDismiss: () -> Unit, onDone: (List
         Scaffold(
             modifier = Modifier.fillMaxSize().appMainBackground(),
             containerColor = Color.Transparent,
+            contentColor = MaterialTheme.colorScheme.onBackground,
             topBar = {
                 TopAppBar(
                     colors = TopAppBarDefaults.topAppBarColors(

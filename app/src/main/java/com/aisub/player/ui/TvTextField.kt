@@ -1,5 +1,7 @@
 package com.aisub.player.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.rememberScrollState
@@ -8,15 +10,22 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextFieldColors
@@ -29,17 +38,22 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 // App 里所有输入框都用这里的 OutlinedTextField / TextField（和 material3 的同名、参数一样，同一个包里优先用这个）。
@@ -139,6 +153,103 @@ fun TextField(
         value, onValueChange, m, enabled, textStyle = textStyle, placeholder = placeholder, singleLine = singleLine,
         keyboardOptions = kb, keyboardActions = keyboardActions, colors = colors,
     )
+}
+
+/** 单行紧凑搜索框：固定高度、占位符单行截断不换行，保留电视遥控器焦点框与手机扫码输入支持。 */
+@Composable
+fun CompactSearchField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    onSearch: () -> Unit,
+    modifier: Modifier = Modifier,
+    placeholder: String = "",
+    phoneInput: Boolean = true,
+    phoneLabel: String = "",
+    height: Dp = 44.dp,
+) = TvInput(
+    value = value,
+    onValueChange = onValueChange,
+    modifier = modifier,
+    editable = true,
+    phoneInput = phoneInput,
+    phoneLabel = phoneLabel,
+    secret = false,
+    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+) { m, kb ->
+    var isFocused by remember { mutableStateOf(false) }
+    val glass = LocalLiquidGlassEnabled.current
+    val shape = RoundedCornerShape(12.dp)
+    val containerColor = if (glass) {
+        if (isFocused) currentVisualPalette().cardTint else currentVisualPalette().fieldContainerTint
+    } else {
+        if (isFocused) MaterialTheme.colorScheme.surfaceContainerLowest else MaterialTheme.colorScheme.surfaceContainerLow
+    }
+    val borderColor = if (isFocused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+    val borderWidth = if (isFocused) 1.5.dp else 1.dp
+    Row(
+        modifier = m
+            .height(height)
+            .clip(shape)
+            .let {
+                if (glass) {
+                    it.liquidGlass(shape = shape, style = GlassStyle.Pill, tint = containerColor, enableBackdrop = false)
+                } else {
+                    it.background(containerColor, shape)
+                }
+            }
+            .border(borderWidth, borderColor, shape)
+            .padding(start = 12.dp, end = if (value.isNotEmpty()) 4.dp else 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            AppIcons.Search,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                color = MaterialTheme.colorScheme.onSurface,
+            ),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            keyboardOptions = kb,
+            keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+            modifier = Modifier
+                .weight(1f)
+                .onFocusChanged { isFocused = it.isFocused },
+            decorationBox = { innerTextField ->
+                Box(contentAlignment = Alignment.CenterStart) {
+                    if (value.isEmpty() && placeholder.isNotEmpty()) {
+                        Text(
+                            text = placeholder,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    innerTextField()
+                }
+            },
+        )
+        if (value.isNotEmpty()) {
+            IconButton(
+                onClick = { onValueChange("") },
+                modifier = Modifier.size(32.dp),
+            ) {
+                Icon(
+                    AppIcons.Close,
+                    contentDescription = "清空",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
+    }
 }
 
 /** 电视上给输入框加遥控器处理和手机输入按钮；手机上原样画出来 */

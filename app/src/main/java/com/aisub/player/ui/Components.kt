@@ -87,7 +87,13 @@ fun SectionHeader(title: String, actionLabel: String? = null, onAction: (() -> U
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 20.dp, bottom = 6.dp).heightIn(min = 36.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.weight(1f),
+        )
         if (actionLabel != null && onAction != null) TextButton(onClick = onAction) { Text(actionLabel) }
     }
 }
@@ -125,7 +131,7 @@ fun CollapsibleSection(
             .padding(start = 20.dp, end = 8.dp, top = 20.dp, bottom = 6.dp).heightIn(min = 36.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onBackground)
         if (count != null) Text(
             " $count", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -147,6 +153,7 @@ fun SurfaceCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.
     val glass = LocalLiquidGlassEnabled.current
     Surface(
         color = if (glass) Color.Transparent else MaterialTheme.colorScheme.surfaceContainerLowest,
+        contentColor = MaterialTheme.colorScheme.onSurface,
         shape = MaterialTheme.shapes.large,
         modifier = modifier
             .fillMaxWidth()
@@ -192,6 +199,7 @@ fun CollapsibleCard(
     }
     Surface(
         color = if (glass) Color.Transparent else MaterialTheme.colorScheme.surfaceContainerLowest,
+        contentColor = MaterialTheme.colorScheme.onSurface,
         shape = MaterialTheme.shapes.large,
         modifier = modifier
             .fillMaxWidth()
@@ -214,7 +222,7 @@ fun CollapsibleCard(
                 IconBadge(sectionIcon, size = 36.dp)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onBackground)
                     if (!expanded && summary.isNotEmpty()) Text(
                         summary, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis,
                         color = if (warn) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -387,6 +395,7 @@ fun SourceCard(icon: ImageVector, title: String, subtitle: String, modifier: Mod
     Surface(
         onClick = onClick,
         color = if (glass) Color.Transparent else MaterialTheme.colorScheme.surfaceContainerLowest,
+        contentColor = MaterialTheme.colorScheme.onSurface,
         shape = MaterialTheme.shapes.large,
         modifier = modifier
             .tvFocusRing(MaterialTheme.shapes.large)
