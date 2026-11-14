@@ -2,6 +2,7 @@
 // 网页开头注入（每个框架一份）；VoxBridge.cleanPage() 关着就什么都不做。
 (function () {
   'use strict';
+  if (/(^|\.)challenges\.cloudflare\.com$/i.test(location.hostname) || /^\/cdn-cgi\/challenge-platform\b/i.test(location.pathname)) return;
   if (window.__voxClean) return;
   window.__voxClean = true;
 

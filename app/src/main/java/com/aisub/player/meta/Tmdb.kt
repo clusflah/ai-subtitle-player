@@ -7,6 +7,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 
+/** 影视剧播出 / 流媒体来源平台（含可选原平台直达链接）。 */
+data class PlatformSource(
+    val name: String,
+    val url: String? = null,
+)
+
 /** TMDB 上的一部电影或剧集（单集时附带这一集的信息）。 */
 data class MediaInfo(
     /** "movie" 或 "tv" */
@@ -40,11 +46,13 @@ data class MediaInfo(
     val tvdbId: Int? = null,
     /** 透明标题图（Fanart.tv） */
     val logoUrl: String? = null,
+    /** 流媒体 / 出品播出平台列表（Netflix、HBO、腾讯视频、优酷、哔哩哔哩等） */
+    val platforms: List<PlatformSource> = emptyList(),
 ) {
     /** 0 表示不知道 TMDB 编号（只有本地 NFO） */
     val tmdbUrl get() = if (tmdbId > 0) "https://www.themoviedb.org/$kind/$tmdbId" else null
 
-    /** 用远程结果补全本地信息：本地已有的字段保留。 */
+    /** 用远程结果补全本地信息：本地已有的字段保留，来源平台合并去重。 */
     fun fillFrom(remote: MediaInfo): MediaInfo = MediaInfo(
         kind = kind,
         tmdbId = if (tmdbId > 0) tmdbId else remote.tmdbId,
@@ -72,6 +80,7 @@ data class MediaInfo(
         doubanId = doubanId ?: remote.doubanId,
         tvdbId = tvdbId ?: remote.tvdbId,
         logoUrl = logoUrl ?: remote.logoUrl,
+        platforms = PlatformCatalog.merge(platforms, remote.platforms),
     )
 }
 
@@ -160,7 +169,7 @@ class Tmdb(key: String, baseUrl: String, imageBase: String, private val language
     }
 
     private fun details(kind: String, id: Int, season: Int?, episode: Int?): MediaInfo? {
-        val d = get("/$kind/$id", mapOf("append_to_response" to "credits,external_ids"))
+        val d = get("/$kind/$id", mapOf("append_to_response" to "credits,external_ids,watch/providers"))
         if (!d.has("id")) return null
         val credits = d.optJSONObject("credits")
         val directors = if (kind == "movie") {
@@ -177,6 +186,7 @@ class Tmdb(key: String, baseUrl: String, imageBase: String, private val language
             ).joinToString(" · ")
         }
         val date = d.optString(if (kind == "movie") "release_date" else "first_air_date")
+        val platforms = parseTmdbPlatforms(d)
         var info = MediaInfo(
             kind = kind,
             tmdbId = id,
@@ -197,6 +207,7 @@ class Tmdb(key: String, baseUrl: String, imageBase: String, private val language
             countries = d.optJSONArray("production_countries").objects().map { it.optString("name") }
                 .ifEmpty { d.optJSONArray("origin_country").strings() },
             tvdbId = d.optJSONObject("external_ids")?.optInt("tvdb_id")?.takeIf { it > 0 },
+            platforms = platforms,
         )
         if (kind == "tv" && episode != null) {
             val e = runCatching { get("/tv/$id/season/${season ?: 1}/episode/$episode") }.getOrNull()
@@ -217,6 +228,43 @@ class Tmdb(key: String, baseUrl: String, imageBase: String, private val language
     companion object {
         const val DEFAULT_BASE = "https://api.themoviedb.org/3"
         const val DEFAULT_IMAGE_BASE = "https://image.tmdb.org/t/p"
+
+        internal fun parseTmdbPlatforms(d: JSONObject): List<PlatformSource> {
+            val homepage = d.optString("homepage").trim().takeIf { it.startsWith("http://") || it.startsWith("https://") }
+            val homepagePlatform = homepage?.let { PlatformCatalog.detectFromUrl(it) }
+            val raw = mutableListOf<PlatformSource>()
+            // 1. 剧集出品播出网络（Netflix, HBO, Apple TV+, Bilibili, Tencent Video 等）
+            d.optJSONArray("networks").objects().forEach { n ->
+                val name = n.optString("name").trim()
+                if (name.isNotEmpty()) {
+                    val canonical = PlatformCatalog.canonicalName(name)
+                    val directUrl = if (homepagePlatform != null && homepagePlatform == canonical) homepage else null
+                    raw += PlatformSource(canonical, directUrl)
+                }
+            }
+            // 2. watch/providers 各地区流媒体平台
+            val results = d.optJSONObject("watch/providers")?.optJSONObject("results")
+            if (results != null) {
+                for (region in listOf("CN", "HK", "TW", "US", "JP", "KR", "GB")) {
+                    val regObj = results.optJSONObject(region) ?: continue
+                    for (tier in listOf("flatrate", "free", "ads")) {
+                        regObj.optJSONArray(tier).objects().forEach { p ->
+                            val pName = p.optString("provider_name").trim()
+                            if (pName.isNotEmpty()) {
+                                val canonical = PlatformCatalog.canonicalName(pName)
+                                val directUrl = if (homepagePlatform != null && homepagePlatform == canonical) homepage else null
+                                raw += PlatformSource(canonical, directUrl)
+                            }
+                        }
+                    }
+                }
+            }
+            // 3. 若官网本身就是已知流媒体详情页（如电影的 Netflix 官网），补充进去
+            if (homepage != null && homepagePlatform != null) {
+                raw += PlatformSource(homepagePlatform, homepage)
+            }
+            return PlatformCatalog.merge(raw).take(6)
+        }
     }
 }
 

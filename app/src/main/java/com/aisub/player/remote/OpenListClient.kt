@@ -1,9 +1,9 @@
 package com.aisub.player.remote
 
+import com.aisub.player.media.MediaEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
@@ -55,6 +55,53 @@ class OpenListClient(private val server: Server) : RemoteClient {
             else "$base/d" + encodePath(itemPath) + if (sign.isNotEmpty()) "?sign=$sign" else ""
             RemoteItem(name, itemPath, isDir, o.optLong("size"), playUrl)
         }.sortedWith(compareBy({ !it.isDir }, { it.name.lowercase() }))
+    }
+
+    /** 按关键词检索 OpenList 中的视频或剧集目录；若服务端未开启全局索引则回退扫描根目录。 */
+    suspend fun searchVideos(query: String): List<RemoteItem> = withContext(Dispatchers.IO) {
+        val q = query.trim()
+        if (q.isEmpty()) return@withContext emptyList()
+        val rootDir = server.rootPath.ifBlank { "/" }
+        val searched = runCatching {
+            val body = JSONObject()
+                .put("parent", rootDir)
+                .put("keywords", q)
+                .put("scope", 0)
+                .put("page", 1)
+                .put("per_page", 20)
+                .put("password", "")
+            val data = post("/api/fs/search", body, auth = true)
+            val content = data.optJSONArray("content") ?: return@runCatching emptyList()
+            val out = ArrayList<RemoteItem>()
+            for (i in 0 until content.length()) {
+                val o = content.getJSONObject(i)
+                val name = o.optString("name").ifBlank { continue }
+                val isDir = o.optBoolean("is_dir")
+                if (!isDir && !MediaEntry.isVideoName(name)) continue
+                val parent = o.optString("parent").ifBlank { rootDir }
+                val itemPath = joinPath(parent, name)
+                val playUrl = if (isDir) null else resolveFilePlayUrl(itemPath, o.optString("sign"))
+                out += RemoteItem(name, itemPath, isDir, o.optLong("size"), playUrl)
+                if (out.size >= 10) break
+            }
+            out
+        }.getOrDefault(emptyList())
+        if (searched.isNotEmpty()) return@withContext searched
+        runCatching {
+            list(rootDir).filter {
+                it.name.contains(q, ignoreCase = true) && (it.isDir || MediaEntry.isVideoName(it.name))
+            }.take(8)
+        }.getOrDefault(emptyList())
+    }
+
+    private fun resolveFilePlayUrl(itemPath: String, existingSign: String): String {
+        val sign = existingSign.ifBlank {
+            runCatching {
+                post("/api/fs/get", JSONObject().put("path", itemPath).put("password", ""), auth = true)
+                    .optString("sign")
+            }.getOrDefault("")
+        }
+        return "$base/d" + encodePath(itemPath) + if (sign.isNotEmpty()) "?sign=$sign" else ""
     }
 
     override suspend fun rename(parent: String, item: RemoteItem, newName: String) = withContext(Dispatchers.IO) {

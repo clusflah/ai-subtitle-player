@@ -4,6 +4,7 @@
 //    一张图拆成几十个名字随机的 fixed 小块（每块单独都不大）的，按贴着的边合起来认，连同上面盖着的看不见的细条一起藏。
 (function () {
   'use strict';
+  if (/(^|\.)challenges\.cloudflare\.com$/i.test(location.hostname) || /^\/cdn-cgi\/challenge-platform\b/i.test(location.pathname)) return;
   if (window.__voxFloat) return;
   var guard = false;
   try { guard = !!(window.VoxBridge && VoxBridge.adGuard()); } catch (e) {}
@@ -105,8 +106,6 @@
     e.style.setProperty('display', 'none', 'important');
   }
 
-  // 拆成小块的广告（一张图切成 4×10 个 fixed 小格子，每格只有 10% 宽，上面还盖一排看不见的「点一下就跳走」的细条）：
-  // 单看一格不像广告，按贴着的边（上 / 下）合起来看：挨在一起盖住大半个屏幕宽、没有内容（空的或只有背景图）的小块是广告
   function isTile(e, r) {
     if (r.width <= 0 || r.height <= 0 || r.width >= innerWidth * 0.5 || r.height > innerHeight * 0.3) return false;
     if (e.childElementCount > 0 || (e.textContent || '').trim()) return false;
@@ -122,7 +121,6 @@
         if (tiles[ti].edge === edge) group.push(tiles[ti]);
       }
       if (group.length < 3) continue;
-      // 横向盖住的宽度（区间合并）
       var xs = group.map(function (t) {
         return [Math.max(0, t.r.left), Math.min(innerWidth, t.r.right)];
       }).sort(function (a, b) {
@@ -135,7 +133,6 @@
       }
       if (en > s) covered += en - s;
       if (covered < innerWidth * 0.5) continue;
-      // 有背景图的（广告图本身）至少要有 6 块：底部导航一般不超过 5 个图标，免得当成广告
       var bgCount = 0;
       for (var gi = 0; gi < group.length; gi++) {
         if (group[gi].bg) bgCount++;
@@ -148,7 +145,6 @@
     }
   }
 
-  // 藏过的小块按 id、class 记下来写成样式：广告脚本每隔一两秒删掉重建一遍，新建的马上就是藏着的，不会闪一下
   var tileRuleMap = Object.create(null);
   var tileRuleList = [];
   var tileSheet = null;
@@ -176,7 +172,6 @@
   function sweep() {
     timer = 0;
     if (!on || !document.body) return;
-    // 广告脚本一般把浮层挂在 body 上，有的挂在 body 外面（html 下面）
     var all = document.documentElement.querySelectorAll('body *, body ~ *');
     var n = Math.min(all.length, 6000);
     var vh = innerHeight;
@@ -205,7 +200,6 @@
       new MutationObserver(function () { later(tileRuleList.length ? 100 : 800); })
         .observe(document.documentElement, { childList: true, subtree: true });
     } catch (e) {}
-    // 有的广告过一会儿才出来、或者先藏着再显示
     var k = 0;
     var iv = setInterval(function () { sweep(); if (++k > 20) clearInterval(iv); }, 1500);
   }
@@ -214,7 +208,6 @@
   else start();
 
   window.__voxFloat = {
-    /** 点选屏蔽里选了「屏蔽本站浮动广告」：马上生效 */
     enable: function () { if (on) { sweep(); return; } on = true; start(); },
   };
 })();

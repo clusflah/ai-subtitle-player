@@ -35,8 +35,9 @@ data class DiscoverItem(
     val tmdbId: Int? = null,
     val doubanId: String? = null,
     val imdbId: String? = null,
+    val platforms: List<PlatformSource> = emptyList(),
 ) {
-    /** 转为元信息流水线查询参数；详情页用它继续补齐演员、导演、Logo 与多平台评分。 */
+    /** 转为元信息流水线查询参数；详情页用它继续补齐演员、导演、Logo、来源平台与多平台评分。 */
     fun toMetaQuery(): MetaQuery = MetaQuery(
         titles = listOfNotNull(
             title.takeIf { it.isNotBlank() },
@@ -46,6 +47,7 @@ data class DiscoverItem(
         kind = kind,
         tmdbId = tmdbId?.toString(),
         imdbId = imdbId,
+        doubanId = doubanId,
     )
 
     /** 副标题一行摘要，形如「2026 · 日本 · 12集」或「2024 · 美国 · 科幻 / 动作」。 */
@@ -57,6 +59,117 @@ data class DiscoverItem(
             genres.isNotEmpty() -> add(genres.take(2).joinToString(" / "))
         }
     }.joinToString(" · ")
+}
+
+/** 流媒体与影视播出平台规范化目录（名称归一、品牌配色与原平台官方播放/检索跳转地址）。 */
+object PlatformCatalog {
+
+    data class Spec(
+        val canonical: String,
+        val badge: String,
+        val accentHex: Long,
+        val searchUrlTemplate: String,
+    )
+
+    private val specs: List<Spec> = listOf(
+        Spec("Netflix", "N", 0xFFE50914, "https://www.netflix.com/search?q={q}"),
+        Spec("HBO", "HBO", 0xFF7B2CBF, "https://www.max.com/search?q={q}"),
+        Spec("Apple TV+", "tv+", 0xFF2B2F3A, "https://tv.apple.com/search?term={q}"),
+        Spec("Disney+", "D+", 0xFF0063E5, "https://www.disneyplus.com/search/{q}"),
+        Spec("Prime Video", "PRIME", 0xFF00A8E1, "https://www.primevideo.com/search/ref=atv_nb_sr?phrase={q}"),
+        Spec("腾讯视频", "腾讯", 0xFFFF6A00, "https://m.v.qq.com/search.html?keyWord={q}"),
+        Spec("爱奇艺", "爱奇艺", 0xFF00BE06, "https://m.iqiyi.com/search.html?key={q}"),
+        Spec("优酷", "优酷", 0xFF148AFF, "https://so.youku.com/search_video/q_{q}"),
+        Spec("哔哩哔哩", "B站", 0xFFFB7299, "https://m.bilibili.com/search?keyword={q}"),
+        Spec("芒果TV", "芒果", 0xFFFF7A00, "https://m.mgtv.com/so/?k={q}"),
+        Spec("咪咕视频", "咪咕", 0xFFE60012, "https://www.miguvideo.com/p/search/{q}"),
+        Spec("Hulu", "Hulu", 0xFF1CE783, "https://www.hulu.com/search?q={q}"),
+        Spec("Paramount+", "P+", 0xFF0064FF, "https://www.paramountplus.com/search/?q={q}"),
+        Spec("Peacock", "Peacock", 0xFF1E222B, "https://www.peacocktv.com/watch/search?q={q}"),
+        Spec("YouTube", "YT", 0xFFFF0000, "https://m.youtube.com/results?search_query={q}"),
+    )
+
+    fun canonicalName(raw: String): String {
+        val t = raw.trim()
+        val low = t.lowercase()
+        return when {
+            low.contains("netflix") || t.contains("奈飞") || t.contains("网飞") -> "Netflix"
+            low == "hbo" || low == "max" || low.contains("hbo ") || low.contains("hbomax") -> "HBO"
+            low.contains("apple tv") -> "Apple TV+"
+            low.contains("disney") || t.contains("迪士尼") -> "Disney+"
+            low.contains("prime video") || low.contains("amazon") -> "Prime Video"
+            t.contains("腾讯视频") || low == "tencent video" || low == "wetv" -> "腾讯视频"
+            t.contains("爱奇艺") || low.contains("iqiyi") -> "爱奇艺"
+            t.contains("优酷") || low.contains("youku") -> "优酷"
+            t.contains("哔哩") || low.contains("bilibili") || t.equals("B站", ignoreCase = true) -> "哔哩哔哩"
+            t.contains("芒果") || low.contains("mgtv") || low.contains("mango tv") -> "芒果TV"
+            t.contains("咪咕") || low.contains("migu") -> "咪咕视频"
+            low.contains("hulu") -> "Hulu"
+            low.contains("paramount") -> "Paramount+"
+            low.contains("peacock") -> "Peacock"
+            low.contains("youtube") -> "YouTube"
+            else -> t
+        }
+    }
+
+    fun detectFromUrl(url: String): String? {
+        val low = url.lowercase()
+        return when {
+            "netflix.com" in low -> "Netflix"
+            "max.com" in low || "hbo.com" in low -> "HBO"
+            "tv.apple.com" in low -> "Apple TV+"
+            "disneyplus.com" in low -> "Disney+"
+            "primevideo.com" in low || "amazon.com/gp/video" in low -> "Prime Video"
+            "v.qq.com" in low -> "腾讯视频"
+            "iqiyi.com" in low -> "爱奇艺"
+            "youku.com" in low -> "优酷"
+            "bilibili.com" in low -> "哔哩哔哩"
+            "mgtv.com" in low -> "芒果TV"
+            "miguvideo.com" in low -> "咪咕视频"
+            "hulu.com" in low -> "Hulu"
+            else -> null
+        }
+    }
+
+    fun specFor(name: String): Spec? {
+        val c = canonicalName(name)
+        return specs.firstOrNull { it.canonical.equals(c, ignoreCase = true) }
+    }
+
+    fun accentHex(name: String): Long = specFor(name)?.accentHex ?: 0xFF3949AB
+
+    fun resolvePlayUrl(platform: PlatformSource, title: String): String {
+        platform.url?.trim()?.takeIf { it.startsWith("http://") || it.startsWith("https://") }?.let { return it }
+        val q = URLEncoder.encode(title.trim(), "UTF-8").replace("+", "%20")
+        val spec = specFor(platform.name)
+        return spec?.searchUrlTemplate?.replace("{q}", q)
+            ?: "https://www.bing.com/search?q=${URLEncoder.encode("${title.trim()} ${platform.name} 在线观看", "UTF-8")}"
+    }
+
+    /** 兜底主流正版平台列表（当条目为院线或元数据暂未标注流媒体来源时，供原平台播放面板选用）。 */
+    fun fallbackPlatforms(): List<PlatformSource> = listOf(
+        PlatformSource("腾讯视频"),
+        PlatformSource("爱奇艺"),
+        PlatformSource("优酷"),
+        PlatformSource("哔哩哔哩"),
+        PlatformSource("Netflix"),
+    )
+
+    fun merge(first: List<PlatformSource>, second: List<PlatformSource> = emptyList()): List<PlatformSource> {
+        val map = LinkedHashMap<String, PlatformSource>()
+        for (p in first + second) {
+            val c = canonicalName(p.name)
+            if (c.isBlank()) continue
+            val existing = map[c]
+            val cleanUrl = p.url?.trim()?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+            if (existing == null) {
+                map[c] = PlatformSource(c, cleanUrl)
+            } else if (existing.url == null && cleanUrl != null) {
+                map[c] = PlatformSource(c, cleanUrl)
+            }
+        }
+        return map.values.toList()
+    }
 }
 
 /** 发现页顶部的流媒体平台入口（参考 re0.me 的流媒体榜单条）。 */
@@ -100,7 +213,7 @@ object DiscoverCharts {
         StreamingPlatform("hbo", "HBO", "HBO", 0xFF7B2CBF, 49, "tv_american"),
         StreamingPlatform("apple_tv", "Apple TV+", "tv+", 0xFF2B2F3A, 2552, "tv_global_best_weekly"),
         StreamingPlatform("disney_plus", "Disney+", "D+", 0xFF0063E5, 2739, "tv_animation"),
-        StreamingPlatform("prime_video", "Amazon Prime", "PRIME", 0xFF00A8E1, 1024, "tv_american"),
+        StreamingPlatform("prime_video", "Prime Video", "PRIME", 0xFF00A8E1, 1024, "tv_american"),
     )
 
     val homeCharts: List<DiscoverChartDef> = listOf(
@@ -205,8 +318,13 @@ object DiscoverRepository {
                 DiscoverChartPage(chart, items)
             }
             ChartSource.TMDB_NETWORK -> {
+                val matchedPlatform = DiscoverCharts.platforms.firstOrNull { it.tmdbNetworkId.toString() == chart.remoteId }
                 if (hasTmdb) {
-                    val items = fetchTmdbDiscoverNetwork(chart.remoteId, settings, page, forceRefresh)
+                    val items = fetchTmdbDiscoverNetwork(chart.remoteId, settings, page, forceRefresh).map { item ->
+                        if (matchedPlatform != null) {
+                            item.copy(platforms = PlatformCatalog.merge(item.platforms, listOf(PlatformSource(matchedPlatform.name))))
+                        } else item
+                    }
                     DiscoverChartPage(chart, items)
                 } else {
                     val fallbackId = chart.fallbackRemoteId ?: "tv_global_best_weekly"
@@ -280,6 +398,7 @@ object DiscoverRepository {
                     imdbId = cur.imdbId ?: item.imdbId,
                     rating = cur.rating ?: item.rating,
                     ratingLabel = cur.ratingLabel ?: item.ratingLabel,
+                    platforms = PlatformCatalog.merge(cur.platforms, item.platforms),
                 )
             }
         }
@@ -454,6 +573,7 @@ object DiscoverRepository {
         val voteCount = ratingObj?.optInt("count", 0) ?: 0
         val overview = obj.optJSONObject("honor_infos")?.optString("title")
             ?: obj.optString("recommendation_reason").trim()
+        val vendors = Douban.parseDoubanPlatforms(obj)
         return DiscoverItem(
             id = "douban:$doubanId",
             kind = kind,
@@ -469,6 +589,7 @@ object DiscoverRepository {
             episodeInfo = episodeInfo,
             ongoing = ongoing,
             doubanId = doubanId,
+            platforms = vendors,
         )
     }
 
@@ -573,12 +694,27 @@ object DiscoverSearchStore {
     private const val KEY_HISTORY = "history"
     private const val MAX_HISTORY = 20
 
+    /**
+     * 影巢（re0.me）按 TMDB 编号直达详情页地址：
+     * 影巢的 `/movie/{slug}` 与 `/tv/{slug}` 为站内内部标识，使用 TMDB ID 跳转必须走 `/tmdb/{movie|tv}/{tmdbId}` 才不会 404。
+     */
+    fun buildRe0DirectUrl(kind: String, tmdbId: Int): String {
+        val mediaType = if (kind == "tv") "tv" else "movie"
+        return "https://re0.me/tmdb/$mediaType/$tmdbId"
+    }
+
+    /** 构造影巢（re0.me）搜索页地址（同时携带 keyword / search / q 参数，配合内置浏览器自动回填搜索框触发检索）。 */
+    fun buildRe0SearchUrl(query: String): String {
+        val encoded = URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
+        return "https://re0.me/search?keyword=$encoded&search=$encoded&q=$encoded"
+    }
+
     val builtinSources: List<SearchSource> = listOf(
         SearchSource(
             id = "re0_search",
             name = "影巢 (re0.me) 搜索",
             category = SearchCategory.RE0,
-            urlTemplate = "https://re0.me/search?q={q}",
+            urlTemplate = "https://re0.me/search?keyword={q}&search={q}&q={q}",
             description = "在影巢检索片名并查看网友分享的网盘/磁力资源",
             builtin = true,
         ),

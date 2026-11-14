@@ -247,8 +247,8 @@ fun WebScreen(
         field = TextFieldValue(text)
     }
 
-    // 手机版、桌面版网页用的 User-Agent（桌面版按网站记住）
-    val mobileAgent = remember { WebSettings.getDefaultUserAgent(context) }
+    // 手机版、桌面版网页用的 User-Agent：去掉 Android WebView 特有的 "; wv" 与 "Version/4.0"，避免 Cloudflare 识别为内嵌爬虫频繁弹盾
+    val mobileAgent = remember { cleanMobileAgentFor(WebSettings.getDefaultUserAgent(context)) }
     val desktopAgent = remember { desktopAgentFor(mobileAgent) }
 
     /** 打开这个网址前换成它要的 User-Agent；换了返回 true */
@@ -263,6 +263,11 @@ fun WebScreen(
     fun go(input: String) {
         val target = toUrl(input) ?: return
         showAddress(target)
+        extractRe0SearchQuery(target)?.let { q ->
+            tab.pendingRe0Query = q
+            tab.re0RedirectedToSearch = false
+            tab.re0SearchNonce = System.currentTimeMillis()
+        }
         if (tab.url == null) {
             tab.url = target
             tab.pageUrl = target
@@ -591,6 +596,15 @@ fun WebScreen(
                 displayZoomControls = false
                 // 网页开新窗口（window.open、target=_blank）交给 onCreateWindow 判断：广告弹窗拦下，正常链接在当前标签页打开
                 setSupportMultipleWindows(true)
+                userAgentString = mobileAgent
+            }
+            // 支持隐藏 X-Requested-With 包名头的 WebView 内核：清空默认发送列表，降低 Cloudflare Turnstile 误判率
+            runCatching {
+                if (WebViewFeature.isFeatureSupported("REQUESTED_WITH_HEADER_ALLOW_LIST")) {
+                    val cls = Class.forName("androidx.webkit.WebSettingsCompat")
+                    val m = cls.getMethod("setRequestedWithHeaderOriginAllowList", WebSettings::class.java, Set::class.java)
+                    m.invoke(null, getSettings(), emptySet<String>())
+                }
             }
             // 记下点中的链接：点了「第 2 话」却被脚本带去别的网站，就是广告
             setOnTouchListener { v, e ->
@@ -623,7 +637,9 @@ fun WebScreen(
                     // 点的就是指向那个网站的链接、刚打开网页时的跳转（「正在跳转」页）、服务器重定向照常
                     if (isMainFrame && !isRedirect && t.webView === view) {
                         val page = t.pageUrl
-                        if (page != null && page.startsWith("http") && !sameSite(rawUrl, page)) {
+                        if (page != null && page.startsWith("http") && !sameSite(rawUrl, page) &&
+                            !isCloudflareChallengeUrl(rawUrl) && !isCloudflareChallengeUrl(page)
+                        ) {
                             val now = android.os.SystemClock.uptimeMillis()
                             val tapped = now - t.tappedAt < 3_000
                             val link = t.recentLink()
@@ -682,13 +698,16 @@ fun WebScreen(
                 }
 
                 override fun onPageFinished(view: WebView, finishedUrl: String) {
-                    // 不支持开头注入的旧 WebView：加载完再注入（只有顶层页面）
-                    if (!startScript) {
+                    // 不支持开头注入的旧 WebView：加载完再注入（只有顶层页面，且跳过 Cloudflare 验证页）
+                    if (!startScript && !isCloudflareChallengeUrl(finishedUrl)) {
                         view.evaluateJavascript(script, null)
                         view.evaluateJavascript(cleanScript, null)
                         view.evaluateJavascript(mangaScript, null)
                         view.evaluateJavascript(guardScript, null)
                     }
+                    // 及时落盘 Cookie（含过盾后的 cf_clearance），避免后续搜索再次弹盾
+                    runCatching { CookieManager.getInstance().flush() }
+                    maybeRunRe0AutoSearch(view, t, finishedUrl)
                     vm.onPageFinished(view.title, finishedUrl)
                     t.canGoBack = view.canGoBack()
                 }
@@ -696,6 +715,7 @@ fun WebScreen(
                 override fun doUpdateVisitedHistory(view: WebView, visitedUrl: String, isReload: Boolean) {
                     t.canGoBack = view.canGoBack()
                     t.pageUrl = visitedUrl
+                    maybeRunRe0AutoSearch(view, t, visitedUrl)
                     // 单页应用里点进视频只改地址、不重新加载：也记下来，回来时打开的是这个视频
                     saveTabs()
                     if (t.active && !editing) showAddress(visitedUrl)
@@ -739,8 +759,8 @@ fun WebScreen(
                         view.post { temp.destroy() }
                         val scheme = Uri.parse(url).scheme?.lowercase()
                         if (scheme != "http" && scheme != "https") return true
-                        // 点中的链接本身就要开新窗口（target=_blank），或者是本站自己开的：在当前标签页打开（和以前一样）
-                        val own = if (link != null) sameSite(url, link) else sameSite(url, t.pageUrl)
+                        // 点中的链接本身就要开新窗口（target=_blank），或者是本站 / Cloudflare 验证页开的：在当前标签页打开
+                        val own = isCloudflareChallengeUrl(url) || (if (link != null) sameSite(url, link) else sameSite(url, t.pageUrl))
                         if (own) {
                             view.agentFor(url)
                             view.loadUrl(url)
@@ -1774,6 +1794,11 @@ private class WebTab(val id: Long, startUrl: String?) {
 
     /** 当前页面地址（地址栏里可能是正在输入的文字） */
     var pageUrl by mutableStateOf(startUrl)
+
+    /** 影巢（re0.me）待自动回填并触发提交的搜索词（解决过 CF 盾后只停在空白搜索页的问题） */
+    var pendingRe0Query: String? = extractRe0SearchQuery(startUrl)
+    var re0RedirectedToSearch: Boolean = false
+    var re0SearchNonce: Long = System.currentTimeMillis()
     var title by mutableStateOf("")
     var progress by mutableIntStateOf(100)
     var canGoBack by mutableStateOf(false)
@@ -1950,6 +1975,154 @@ private fun toUrl(input: String): String? {
     if (Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://").containsMatchIn(t)) return t
     if (!t.contains(' ') && Regex("^[^/]+\\.[a-zA-Z]{2,}(:\\d+)?(/.*)?$").matches(t)) return "https://$t"
     return "https://www.bing.com/search?q=" + java.net.URLEncoder.encode(t, "UTF-8")
+}
+
+/** 去掉 Android WebView UA 中的 "; wv" 与 "Version/x.y" 标记，伪装为标准移动版 Chrome 降低 CF 弹盾率 */
+private fun cleanMobileAgentFor(raw: String): String = raw
+    .replace(Regex(""";\s*wv\)"""), ")")
+    .replace(Regex(""";\s*wv;"""), ";")
+    .replace(Regex("""\bVersion/\d+(?:\.\d+)*\s+"""), "")
+
+private fun isCloudflareChallengeUrl(url: String?): Boolean {
+    if (url.isNullOrEmpty()) return false
+    val low = url.lowercase()
+    return "challenges.cloudflare.com" in low || "/cdn-cgi/" in low || "__cf_chl_" in low
+}
+
+private fun isRe0Host(url: String?): Boolean {
+    val host = url?.let { runCatching { Uri.parse(it).host?.lowercase() }.getOrNull() } ?: return false
+    return host == "re0.me" || host.endsWith(".re0.me") || host == "hdhive.com" || host.endsWith(".hdhive.com")
+}
+
+private fun extractRe0SearchQuery(url: String?): String? {
+    if (!isRe0Host(url)) return null
+    val u = runCatching { Uri.parse(url) }.getOrNull() ?: return null
+    for (key in listOf("keyword", "search", "q", "query", "wd")) {
+        val v = u.getQueryParameter(key)?.trim()
+        if (!v.isNullOrEmpty()) return v
+    }
+    return null
+}
+
+/**
+ * 影巢（re0.me）自动搜索推进器：
+ * 1. 若当前仍处于 Cloudflare Turnstile 验证页，保留待搜词等待过盾；
+ * 2. 若过盾后被重定向回首页，自动补跳至搜索路由；
+ * 3. 页面水合完成后，若尚未展示结果卡片，通过原生原型 setter 向 React 受控搜索框填入关键词并触发回车检索。
+ */
+private fun maybeRunRe0AutoSearch(view: WebView, tab: WebTab, currentUrl: String?) {
+    val query = tab.pendingRe0Query?.trim()?.takeIf { it.isNotEmpty() } ?: return
+    if (!isRe0Host(currentUrl) || isCloudflareChallengeUrl(currentUrl)) return
+    val tokenKey = "${tab.re0SearchNonce}:$query"
+    val quotedQuery = org.json.JSONObject.quote(query)
+    val quotedToken = org.json.JSONObject.quote(tokenKey)
+    val allowRedirectHome = !tab.re0RedirectedToSearch
+    val js = """
+        (function(q, token, allowHomeRedirect) {
+            try {
+                if (sessionStorage.getItem('__aisub_re0_done') === token) return 'done';
+            } catch (e) {}
+            var titleText = (document.title || '') + ' ' + ((document.body && document.body.innerText) ? document.body.innerText.slice(0, 320) : '');
+            if (window._cf_chl_opt ||
+                document.getElementById('challenge-running') ||
+                document.getElementById('cf-challenge-running') ||
+                document.querySelector('script[src*="challenge-platform"], iframe[src*="challenges.cloudflare.com"]') ||
+                /请稍候|正在进行安全验证|请验证您是真人|Just a moment|Checking your browser/i.test(titleText)) {
+                return 'cf_waiting';
+            }
+            var path = location.pathname || '/';
+            if (path.indexOf('/search') === 0) {
+                var cards = document.querySelectorAll('a[href^="/movie/"], a[href^="/tv/"], a[href*="/tmdb/"], [class*="MediaCard_card"]');
+                if (cards && cards.length > 0) {
+                    try { sessionStorage.setItem('__aisub_re0_done', token); } catch (e) {}
+                    return 'done';
+                }
+            } else if ((path === '/' || path === '') && allowHomeRedirect) {
+                var enc = encodeURIComponent(q);
+                location.replace('https://' + location.host + '/search?keyword=' + enc + '&search=' + enc + '&q=' + enc);
+                return 'redirecting';
+            }
+            if (window.__aisubRe0Running === token) return 'polling';
+            window.__aisubRe0Running = token;
+            var tries = 0;
+            function findInput() {
+                return document.querySelector(
+                    'input[name="search"], .MuiDialog-paper input[type="text"], main input[type="text"], main input[type="search"], input[type="search"], input[placeholder*="搜索"], input[placeholder*="Search"], input[placeholder*="影片"], input[placeholder*="关键词"]'
+                );
+            }
+            function openSearchDialogIfNeeded() {
+                var btn = document.querySelector('button[aria-label*="search"], button[aria-label*="Search"], button[aria-label*="搜索"]');
+                if (!btn) {
+                    var icon = document.querySelector('header svg[data-testid="SearchIcon"]');
+                    if (icon) {
+                        var p = icon.parentElement || icon.parentNode;
+                        while (p && p.tagName && p.tagName.toLowerCase() !== 'button') p = p.parentElement;
+                        if (p) btn = p;
+                    }
+                }
+                if (!btn) {
+                    var btns = document.querySelectorAll('header button');
+                    for (var i = 0; i < btns.length; i++) {
+                        if (btns[i].innerHTML.indexOf('15.5') >= 0) { btn = btns[i]; break; }
+                    }
+                }
+                if (btn) btn.click();
+            }
+            function tick() {
+                tries++;
+                if (location.pathname.indexOf('/search') === 0) {
+                    var existing = document.querySelectorAll('a[href^="/movie/"], a[href^="/tv/"], a[href*="/tmdb/"], [class*="MediaCard_card"]');
+                    if (existing && existing.length > 0) {
+                        try { sessionStorage.setItem('__aisub_re0_done', token); } catch (e) {}
+                        return;
+                    }
+                }
+                var input = findInput();
+                if (!input && tries === 2) {
+                    openSearchDialogIfNeeded();
+                }
+                if (input && input.getAttribute('data-aisub-submitted') !== token) {
+                    input.setAttribute('data-aisub-submitted', token);
+                    try { sessionStorage.setItem('__aisub_re0_done', token); } catch (e) {}
+                    input.focus();
+                    var proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+                    var desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+                    if (desc && desc.set) desc.set.call(input, q); else input.value = q;
+                    if (input._valueTracker) {
+                        try { input._valueTracker.setValue(''); } catch (e) {}
+                    }
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    setTimeout(function() {
+                        var enterOpts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+                        input.dispatchEvent(new KeyboardEvent('keydown', enterOpts));
+                        input.dispatchEvent(new KeyboardEvent('keypress', enterOpts));
+                        input.dispatchEvent(new KeyboardEvent('keyup', enterOpts));
+                        if (input.form) {
+                            try {
+                                if (input.form.requestSubmit) input.form.requestSubmit();
+                                else input.form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                            } catch (e) {}
+                        }
+                        var scope = (input.closest ? input.closest('.MuiDialog-paper, form, .MuiInputBase-root') : input.form) || document;
+                        var submitBtn = scope.querySelector('button[type="submit"]');
+                        if (submitBtn) submitBtn.click();
+                    }, 90);
+                    return;
+                }
+                if (tries < 16) setTimeout(tick, 320);
+            }
+            tick();
+            return 'polling';
+        })($quotedQuery, $quotedToken, $allowRedirectHome)
+    """.trimIndent()
+    view.evaluateJavascript(js) { rawResult ->
+        val res = rawResult?.trim('"').orEmpty()
+        when (res) {
+            "redirecting" -> tab.re0RedirectedToSearch = true
+            "done" -> tab.pendingRe0Query = null
+        }
+    }
 }
 
 /** 手机 WebView 的 User-Agent 改成同版本的电脑 Chrome（网站按它给电脑版网页） */

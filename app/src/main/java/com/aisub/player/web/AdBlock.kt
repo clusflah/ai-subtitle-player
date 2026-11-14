@@ -13,7 +13,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -167,7 +166,6 @@ object AdBlock {
 
     /** 下载打开着的订阅（[onlyMissing] 时只下还没下过的）；返回是否下载过 */
     suspend fun update(context: Context, onlyMissing: Boolean = false): Boolean = withContext(Dispatchers.IO) {
-        // 连着勾了几个订阅：排队，前一个下完再看还缺哪些
         lock.lock()
         try {
             val todo = enabledLists(context).filter { !onlyMissing || !fileOf(context, it).exists() }
@@ -178,7 +176,6 @@ object AdBlock {
                     http.newCall(Request.Builder().url(list.url).build()).execute().use { r ->
                         if (!r.isSuccessful) error("HTTP ${r.code}")
                         val text = r.body!!.string()
-                        // 被劫持成网页的、不是规则的不要
                         val head = text.trimStart().take(200).lowercase()
                         if (head.startsWith("<") || head.contains("<html")) error("不是规则文件")
                         if (text.lineSequence().none { it.isNotBlank() && !it.startsWith("!") && !it.startsWith("[") }) error("里面没有规则")
@@ -217,7 +214,6 @@ object AdBlock {
         }
     }
 
-    /** 勾选、增删订阅后马上显示出来（重新读规则要几秒） */
     private fun showStates(context: Context) {
         _info.update { it.copy(lists = states(context)) }
     }
@@ -238,26 +234,19 @@ object AdBlock {
         }
     }
 
-    /** 读一下订阅的状态（打开「广告过滤规则」时） */
     fun loadInfo(context: Context, scope: CoroutineScope) {
         val app = context.applicationContext
         scope.launch(Dispatchers.IO) { load(app) }
     }
 
-    /** 网页里打开了拦截广告（Service Worker 的请求不经过网页，靠这个判断） */
     @Volatile
     var enabled = false
 
-    /** 拦下一个请求时调（网页菜单里的「本页已拦截」） */
     @Volatile
     var onBlocked: (() -> Unit)? = null
 
     private var swHooked = false
 
-    /**
-     * 有的网站装了 Service Worker，网页的请求都由它转发，不经过 WebView 的 shouldInterceptRequest：
-     * 给 Service Worker 也装上同样的拦截。整个进程装一次。
-     */
     fun hookServiceWorkers() {
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.N) return
         if (swHooked) return
@@ -280,9 +269,14 @@ object AdBlock {
     /** 要拦就返回一个代替的响应（交给 WebView 当作这个请求的结果），不拦返回 null */
     fun intercept(request: WebResourceRequest, pageUrl: String?): WebResourceResponse? {
         if (request.isForMainFrame) return null
+        val reqHost = request.url.host?.lowercase().orEmpty()
+        val reqPath = request.url.encodedPath.orEmpty()
+        // 放行 Cloudflare Turnstile / 安全验证资源，防止验证组件加载失败或反复弹盾
+        if (reqHost == "challenges.cloudflare.com" || reqHost.endsWith(".challenges.cloudflare.com") || reqPath.startsWith("/cdn-cgi/")) {
+            return null
+        }
         val url = request.url.toString()
         val type = typeOf(url, request.requestHeaders["Accept"])
-        // 自己写的规则优先：里面的例外能放行下载的规则误拦的
         val decision = when (val own = custom.decide(url, pageUrl, type)) {
             null -> rules?.decide(url, pageUrl, type)
             else -> own
@@ -301,12 +295,6 @@ object AdBlock {
         return WebResourceResponse("application/json", "utf-8", ByteArrayInputStream(body.toByteArray()))
     }
 
-    // ---- 自己的规则：内置的（影视网站模板自己的广告接口等）+ 用户写的、点选屏蔽加的 ----
-
-    /**
-     * 内置规则，写法同自定义规则。影视网站模板自己的广告接口和正片同一个域名、网站还常换域名，
-     * 下载的规则里没有，按接口路径认
-     */
     private val BUILTIN = """
         ! 新视讯一类影视网站：暂停时的弹窗（getPauseCc）、片头视频广告（getVideoCc）、各处横幅
         /api/mw-movie/anonymous/cc/getPauseCc${'$'}nodata
@@ -318,7 +306,6 @@ object AdBlock {
 
     private fun customFile(context: Context) = File(dir(context), "custom.txt")
 
-    /** 用户写的规则（原文） */
     fun customText(context: Context): String = customFile(context).takeIf { it.exists() }?.readText().orEmpty()
 
     fun saveCustom(context: Context, text: String) {
@@ -326,7 +313,6 @@ object AdBlock {
         reloadCustom(context)
     }
 
-    /** 点选屏蔽：加一条规则（已经有了就不重复加） */
     fun addCustom(context: Context, rule: String) {
         val text = customText(context)
         if (text.lineSequence().any { it.trim() == rule }) return
@@ -340,7 +326,6 @@ object AdBlock {
             .map { it.removeSuffix("##$FLOAT").lowercase() }.filter { it.isNotEmpty() }.toSet()
     }
 
-    /** 自定义规则「网站##:vox-float」：这个网站上贴边的浮动广告（随机名字、拆成小块的）都藏起来 */
     const val FLOAT = ":vox-float"
 
     @Volatile
@@ -356,10 +341,10 @@ object AdBlock {
         }
     }
 
-    /** 这个网站要藏起来的广告元素（CSS）：自己的规则 + 下载的规则 */
-    fun css(host: String): String = custom.css(host) + rules?.css(host).orEmpty()
+    fun css(host: String): String =
+        if (host.equals("challenges.cloudflare.com", ignoreCase = true) || host.endsWith(".challenges.cloudflare.com", ignoreCase = true)) ""
+        else custom.css(host) + rules?.css(host).orEmpty()
 
-    /** 从地址后缀和 Accept 头猜请求类型 */
     private fun typeOf(url: String, accept: String?): AdType? {
         val path = url.substringBefore('?').substringBefore('#').lowercase()
         val ext = path.substringAfterLast('/').substringAfterLast('.', "")

@@ -3,6 +3,7 @@
 // 每个框架都跑（有的网站把漫画放在另一个域名的 iframe 里），各自报告，App 选图最多的那个。
 (function () {
   'use strict';
+  if (/(^|\.)challenges\.cloudflare\.com$/i.test(location.hostname) || /^\/cdn-cgi\/challenge-platform\b/i.test(location.pathname)) return;
   if (window.__voxManga) return;
   var last = '';
   var timer = 0;

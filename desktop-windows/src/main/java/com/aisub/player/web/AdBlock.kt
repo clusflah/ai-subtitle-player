@@ -274,6 +274,12 @@ object AdBlock {
     /** 要拦就返回一个代替的响应（交给 WebView 当作这个请求的结果），不拦返回 null */
     fun intercept(request: WebResourceRequest, pageUrl: String?): WebResourceResponse? {
         if (request.isForMainFrame) return null
+        val reqHost = request.url.host?.lowercase().orEmpty()
+        val reqPath = request.url.encodedPath.orEmpty()
+        // 放行 Cloudflare Turnstile / 安全验证资源，防止验证组件加载失败或反复弹盾
+        if (reqHost == "challenges.cloudflare.com" || reqHost.endsWith(".challenges.cloudflare.com") || reqPath.startsWith("/cdn-cgi/")) {
+            return null
+        }
         val url = request.url.toString()
         val type = typeOf(url, request.requestHeaders["Accept"])
         // 自己写的规则优先：里面的例外能放行下载的规则误拦的
@@ -351,7 +357,9 @@ object AdBlock {
     }
 
     /** 这个网站要藏起来的广告元素（CSS）：自己的规则 + 下载的规则 */
-    fun css(host: String): String = custom.css(host) + rules?.css(host).orEmpty()
+    fun css(host: String): String =
+        if (host.equals("challenges.cloudflare.com", ignoreCase = true) || host.endsWith(".challenges.cloudflare.com", ignoreCase = true)) ""
+        else custom.css(host) + rules?.css(host).orEmpty()
 
     /** 从地址后缀和 Accept 头猜请求类型 */
     private fun typeOf(url: String, accept: String?): AdType? {

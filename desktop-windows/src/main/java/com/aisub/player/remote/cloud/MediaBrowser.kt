@@ -13,6 +13,8 @@ interface MediaBrowser {
     suspend fun item(ratingKey: String): ServerItem?
     /** 剧集的各季、季的各集、歌手的专辑、专辑的曲目 */
     suspend fun children(ratingKey: String): List<ServerItem>
+    /** 按关键词搜索服务器内的电影、剧集或单集（详情页远程资源直达播放用） */
+    suspend fun search(query: String): List<ServerItem> = emptyList()
     suspend fun setWatched(ratingKey: String, watched: Boolean)
 
     /** 报告播放进度（阻塞调用）。state：playing / paused / stopped */

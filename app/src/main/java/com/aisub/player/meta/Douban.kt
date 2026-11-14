@@ -6,14 +6,14 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** 豆瓣条目：评分，以及移动端接口给出的简介、海报、演职员（info）。 */
+/** 豆瓣条目：评分，以及移动端接口给出的简介、海报、演职员、在线播出平台（info）。 */
 data class DoubanRating(val id: String, val title: String, val rating: Double?, val votes: Int?, val info: MediaInfo? = null) {
     val url get() = "https://movie.douban.com/subject/$id/"
 }
 
 /**
  * 豆瓣。没有公开 API，这里用网页自己用的接口：
- * 搜索建议接口（找不到时用移动端搜索）按 IMDb 编号或片名找到条目，再读移动端详情（评分、简介、海报、演职员）。
+ * 搜索建议接口（找不到时用移动端搜索）按 IMDb 编号或片名找到条目，再读移动端详情（评分、简介、海报、演职员、播出平台）。
  * 都是非官方接口，可能被限流或改版。
  */
 object Douban {
@@ -25,7 +25,7 @@ object Douban {
         return cloudHttp.newCall(req).execute().use { if (it.isSuccessful) it.body?.string() else null }
     }
 
-    /** 阻塞调用。imdbId 能精确匹配；否则按片名 + 年份 + 季挑最像的一条。tv 决定详情接口先试哪个。 */
+    /** 阻塞调用。imdbId / doubanId 能精确匹配；否则按片名 + 年份 + 季挑最像的一条。tv 决定详情接口先试哪个。 */
     fun lookup(titles: List<String>, year: Int?, season: Int?, imdbId: String?, tv: Boolean = season != null, doubanId: String? = null): DoubanRating? {
         val id = doubanId
             ?: imdbId?.let { suggest(it).firstOrNull()?.first }
@@ -36,9 +36,9 @@ object Douban {
             ?: return null
         val detail = detail(id, tv)
         if (detail == null) {
-            // 移动端接口被限流时退回网页，只拿评分
-            val (rating, votes) = ratingFromPage(id)
-            return DoubanRating(id, titles.firstOrNull().orEmpty(), rating, votes)
+            // 移动端接口被限流时退回网页，拿评分、IMDb 与播放源平台
+            val pageData = parseSubjectPage(id, titles.firstOrNull().orEmpty(), tv)
+            return DoubanRating(id, pageData.title, pageData.rating, pageData.votes, pageData.info)
         }
         val r = detail.optJSONObject("rating")
         return DoubanRating(
@@ -95,14 +95,44 @@ object Douban {
         return null
     }
 
+    internal fun parseDoubanPlatforms(j: JSONObject): List<PlatformSource> {
+        val out = mutableListOf<PlatformSource>()
+        j.optJSONArray("vendors").objects().forEach { v ->
+            val rawName = v.optString("title").ifBlank { v.optString("name") }.trim()
+            if (rawName.isNotEmpty()) {
+                val webUrl = listOf(v.optString("url"), v.optString("play_url"), v.optString("uri"))
+                    .map { it.trim() }
+                    .firstOrNull { it.startsWith("http://") || it.startsWith("https://") }
+                out += PlatformSource(PlatformCatalog.canonicalName(rawName), webUrl)
+            }
+        }
+        j.optJSONArray("linewatches").objects().forEach { lw ->
+            val rawName = (lw.optJSONObject("source")?.optString("name") ?: lw.optString("name")).trim()
+            if (rawName.isNotEmpty()) {
+                val webUrl = lw.optString("url").trim().takeIf { it.startsWith("http://") || it.startsWith("https://") }
+                out += PlatformSource(PlatformCatalog.canonicalName(rawName), webUrl)
+            }
+        }
+        val station = j.optString("tv_station").trim()
+        if (station.isNotEmpty()) {
+            station.split('/', '、', ',').map { it.trim() }.filter { it.isNotEmpty() }.forEach { s ->
+                out += PlatformSource(PlatformCatalog.canonicalName(s), null)
+            }
+        }
+        return PlatformCatalog.merge(out)
+    }
+
     private fun toInfo(j: JSONObject, tvHint: Boolean): MediaInfo {
         val tv = j.optBoolean("is_tv", tvHint) || j.optString("subtype") == "tv"
         val date = j.optJSONArray("pubdate").strings().firstOrNull()?.substringBefore('(')
         val r = j.optJSONObject("rating")
+        val imdb = j.optString("imdb").ifBlank {
+            j.optJSONObject("info")?.optString("imdb").orEmpty()
+        }.trim().takeIf { it.startsWith("tt") }
         return MediaInfo(
             kind = if (tv) "tv" else "movie",
             tmdbId = 0,
-            imdbId = null,
+            imdbId = imdb,
             title = j.optString("title"),
             originalTitle = j.optString("original_title"),
             year = j.optString("year").ifEmpty { date?.take(4).orEmpty() },
@@ -122,14 +152,59 @@ object Douban {
             doubanRating = r?.optDouble("value", 0.0)?.takeIf { it > 0 },
             doubanVotes = r?.optInt("count")?.takeIf { it > 0 },
             doubanId = j.optString("id").ifEmpty { null },
+            platforms = parseDoubanPlatforms(j),
         )
     }
 
-    private fun ratingFromPage(id: String): Pair<Double?, Int?> {
+    private data class SubjectPageResult(
+        val title: String,
+        val rating: Double?,
+        val votes: Int?,
+        val info: MediaInfo?,
+    )
+
+    private fun parseSubjectPage(id: String, fallbackTitle: String, tv: Boolean): SubjectPageResult {
         val html = runCatching { fetch("https://movie.douban.com/subject/$id/", "https://movie.douban.com/") }.getOrNull()
-            ?: return null to null
+            ?: return SubjectPageResult(fallbackTitle, null, null, null)
         val value = Regex("""property="v:average">\s*([0-9.]+)\s*<""").find(html)?.groupValues?.get(1)?.toDoubleOrNull()
         val votes = Regex("""property="v:votes">\s*(\d+)\s*<""").find(html)?.groupValues?.get(1)?.toIntOrNull()
-        return value to votes
+        val imdb = Regex("""IMDb:</span>\s*(tt\d{7,})""").find(html)?.groupValues?.get(1)
+        val playSources = Regex("""data-cn="([^"]+)"[^>]*href="([^"]*)"|playBtn[^>]*data-cn="([^"]+)"""")
+            .findAll(html)
+            .mapNotNull { m ->
+                val name = m.groupValues[1].ifEmpty { m.groupValues[3] }.trim()
+                val rawHref = m.groupValues[2].trim()
+                if (name.isEmpty()) null else PlatformSource(
+                    name = PlatformCatalog.canonicalName(name),
+                    url = rawHref.takeIf { it.startsWith("http://") || it.startsWith("https://") },
+                )
+            }.toList()
+        val info = if (imdb != null || playSources.isNotEmpty()) {
+            MediaInfo(
+                kind = if (tv) "tv" else "movie",
+                tmdbId = 0,
+                imdbId = imdb,
+                title = fallbackTitle,
+                originalTitle = "",
+                year = "",
+                overview = "",
+                posterUrl = null,
+                backdropUrl = null,
+                genres = emptyList(),
+                length = "",
+                rating = value ?: 0.0,
+                voteCount = votes ?: 0,
+                directors = emptyList(),
+                cast = emptyList(),
+                countries = emptyList(),
+                ratingLabel = "豆瓣",
+                source = "豆瓣",
+                doubanRating = value,
+                doubanVotes = votes,
+                doubanId = id,
+                platforms = PlatformCatalog.merge(playSources),
+            )
+        } else null
+        return SubjectPageResult(fallbackTitle, value, votes, info)
     }
 }

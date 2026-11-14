@@ -232,6 +232,24 @@ class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
         get("/library/metadata/$ratingKey/children").optJSONArray("Metadata").objects().map(::item)
     }
 
+    override suspend fun search(query: String): List<ServerItem> = withContext(Dispatchers.IO) {
+        val q = query.trim()
+        if (q.isEmpty()) return@withContext emptyList()
+        val container = get("/hubs/search?query=${Uri.encode(q)}&limit=10")
+        val hubs = container.optJSONArray("Hub").objects()
+        val allowedTypes = setOf("movie", "show", "episode")
+        val found = ArrayList<ServerItem>()
+        for (h in hubs) {
+            for (m in h.optJSONArray("Metadata").objects()) {
+                val it = item(m)
+                if (it.type in allowedTypes && found.none { e -> e.ratingKey == it.ratingKey }) {
+                    found += it
+                }
+            }
+        }
+        found
+    }
+
     /** 标为已看 / 未看（剧集、季会连带所有集） */
     override suspend fun setWatched(ratingKey: String, watched: Boolean) = withContext(Dispatchers.IO) {
         get("/:/${if (watched) "scrobble" else "unscrobble"}?identifier=com.plexapp.plugins.library&key=$ratingKey")

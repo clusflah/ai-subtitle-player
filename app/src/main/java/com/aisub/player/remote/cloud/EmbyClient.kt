@@ -240,6 +240,18 @@ class EmbyClient(server: Server) : CloudClient(server), MediaBrowser {
         get("/Users/$uid/Items", browseFields + params).optJSONArray("Items").objects().map(::item)
     }
 
+    override suspend fun search(query: String): List<ServerItem> = withContext(Dispatchers.IO) {
+        val q = query.trim()
+        if (q.isEmpty()) return@withContext emptyList()
+        val params = browseFields + mapOf(
+            "Recursive" to "true",
+            "SearchTerm" to q,
+            "IncludeItemTypes" to "Movie,Series,Video,Episode",
+            "Limit" to "12",
+        )
+        get("/Users/$uid/Items", params).optJSONArray("Items").objects().map(::item)
+    }
+
     override suspend fun setWatched(ratingKey: String, watched: Boolean) = withContext(Dispatchers.IO) {
         call("/Users/$uid/PlayedItems/$ratingKey", method = if (watched) "POST" else "DELETE")
         Unit

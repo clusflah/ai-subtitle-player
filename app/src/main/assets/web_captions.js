@@ -7,6 +7,7 @@
 // 2. 边播边识别：拿不到 MSE 数据或解不了时，用 Web Audio 读出正在播放的声音，字幕会晚一两秒。
 // 读不到声音的视频（跨域且没开 CORS、有版权保护）不接管，免得把网页的声音弄没了，改为告诉 App，由 App 想办法。
 (function () {
+  if (/(^|\.)challenges\.cloudflare\.com$/i.test(location.hostname) || /^\/cdn-cgi\/challenge-platform\b/i.test(location.pathname)) return;
   if (window.__voxtitle) return;
   // 调试用：chrome://inspect 里看各个音频缓冲区的情况
   window.__voxtitle = { feeders: function () { return feeders.map(function (f) { return { mime: f.mime, kind: f.kind, segments: f.segments.length, ok: f.ok, failures: f.failures, broken: f.broken, key: msIds.get(f.ms) }; }); } };

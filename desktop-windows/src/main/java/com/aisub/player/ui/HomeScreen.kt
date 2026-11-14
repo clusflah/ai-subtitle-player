@@ -149,6 +149,7 @@ fun HomeScreen(
     var localPhotos by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(tab) { lib.reloadStored() }
     var searching by remember { mutableStateOf(false) }
+    var discoverSearching by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     var dialog by remember { mutableStateOf<HomeDialog?>(null) }
     var barVisible by remember { mutableStateOf(true) }
@@ -198,6 +199,7 @@ fun HomeScreen(
         lib.homeTab = t.ordinal
         selected = emptySet()
         searching = false
+        if (t != Tab.DISCOVER) discoverSearching = false
         query = ""
         barVisible = true
     }
@@ -219,11 +221,17 @@ fun HomeScreen(
                     onDelete = { files.delete(selectedEntries); selected = emptySet() },
                 )
             } else {
+            val isDiscover = tab == Tab.DISCOVER
             Column(
                 Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
-                    .padding(start = 20.dp, end = 16.dp, top = 10.dp, bottom = 6.dp),
+                    .padding(
+                        start = if (isDiscover) 14.dp else 20.dp,
+                        end = if (isDiscover) 12.dp else 16.dp,
+                        top = if (isDiscover) 4.dp else 10.dp,
+                        bottom = if (isDiscover) 2.dp else 6.dp,
+                    ),
             ) {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -234,7 +242,7 @@ fun HomeScreen(
                             Tab.HOME -> "译幕"
                             else -> tab.label
                         },
-                        fontSize = 28.sp,
+                        fontSize = if (isDiscover) 22.sp else 28.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onBackground,
                         modifier = Modifier.weight(1f),
@@ -303,82 +311,92 @@ fun HomeScreen(
                                 )
                             }
                         }
-                        val mediaTab = tab == Tab.LOCAL
-                        // 浏览页与首页右上角：点击「+」直接弹出液态玻璃来源菜单（仿演示视频与截图）
-                        if (tab == Tab.BROWSE || tab == Tab.HOME) {
-                            var addMenu by remember { mutableStateOf(false) }
-                            Box {
+                        if (isDiscover) {
+                            // 发现页：搜索行缩减为右上角搜索图标，替换原有的「···」按钮
+                            LiquidGlassIconButton(
+                                onClick = { discoverSearching = !discoverSearching },
+                                icon = if (discoverSearching) AppIcons.Close else AppIcons.Search,
+                                contentDescription = if (discoverSearching) "收起搜索" else "展开搜索",
+                                size = 38.dp,
+                            )
+                        } else {
+                            val mediaTab = tab == Tab.LOCAL
+                            // 浏览页与首页右上角：点击「+」直接弹出液态玻璃来源菜单（仿演示视频与截图）
+                            if (tab == Tab.BROWSE || tab == Tab.HOME) {
+                                var addMenu by remember { mutableStateOf(false) }
+                                Box {
+                                    LiquidGlassIconButton(
+                                        onClick = { addMenu = true },
+                                        icon = AppIcons.Add,
+                                        contentDescription = "添加",
+                                    )
+                                    AddSourceDropdownMenu(
+                                        expanded = addMenu,
+                                        onDismiss = { addMenu = false },
+                                        onPick = { type ->
+                                            addMenu = false
+                                            dialog = when (type) {
+                                                ServerType.WEBDAV, ServerType.OPENLIST ->
+                                                    HomeDialog.EditServer(Server(type = type, name = if (type == ServerType.OPENLIST) "OpenList" else "", baseUrl = ""))
+                                                else -> HomeDialog.CloudLogin(type, null)
+                                            }
+                                        },
+                                        onLive = { addMenu = false; nav.push(Screen.Live) },
+                                        onStream = { addMenu = false; dialog = HomeDialog.Stream },
+                                        onTelegram = { addMenu = false; nav.push(Screen.Telegram) },
+                                    )
+                                }
+                            }
+                            if (mediaTab) {
                                 LiquidGlassIconButton(
-                                    onClick = { addMenu = true },
-                                    icon = AppIcons.Add,
-                                    contentDescription = "添加",
-                                )
-                                AddSourceDropdownMenu(
-                                    expanded = addMenu,
-                                    onDismiss = { addMenu = false },
-                                    onPick = { type ->
-                                        addMenu = false
-                                        dialog = when (type) {
-                                            ServerType.WEBDAV, ServerType.OPENLIST ->
-                                                HomeDialog.EditServer(Server(type = type, name = if (type == ServerType.OPENLIST) "OpenList" else "", baseUrl = ""))
-                                            else -> HomeDialog.CloudLogin(type, null)
-                                        }
+                                    onClick = {
+                                        searching = !searching
+                                        if (!searching) { query = ""; lib.searchSubtitles("") }
                                     },
-                                    onLive = { addMenu = false; nav.push(Screen.Live) },
-                                    onStream = { addMenu = false; dialog = HomeDialog.Stream },
-                                    onTelegram = { addMenu = false; nav.push(Screen.Telegram) },
+                                    icon = if (searching) AppIcons.Close else AppIcons.Search,
+                                    contentDescription = "搜索",
                                 )
                             }
-                        }
-                        if (mediaTab) {
-                            LiquidGlassIconButton(
-                                onClick = {
-                                    searching = !searching
-                                    if (!searching) { query = ""; lib.searchSubtitles("") }
-                                },
-                                icon = if (searching) AppIcons.Close else AppIcons.Search,
-                                contentDescription = "搜索",
-                            )
-                        }
-                        var menu by remember { mutableStateOf(false) }
-                        Box {
-                            LiquidGlassIconButton(
-                                onClick = { menu = true },
-                                icon = AppIcons.MoreHoriz,
-                                contentDescription = "更多",
-                            )
-                            AppMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                                if (mediaTab) {
-                                    val page = if (localVideo) "video" else "audio"
-                                    val current = if (localVideo) state.videoSort else state.audioSort
-                                    SortOrder.entries.forEach { o ->
-                                        DropdownMenuItem(
-                                            text = { Text("按${o.label}排序") },
-                                            trailingIcon = if (o == current) {
-                                                {
-                                                    Icon(
-                                                        AppIcons.Check,
-                                                        contentDescription = null,
-                                                        tint = MaterialTheme.colorScheme.primary,
-                                                        modifier = Modifier.size(18.dp),
-                                                    )
-                                                }
-                                            } else null,
-                                            onClick = { menu = false; lib.setSort(page, o) },
-                                        )
+                            var menu by remember { mutableStateOf(false) }
+                            Box {
+                                LiquidGlassIconButton(
+                                    onClick = { menu = true },
+                                    icon = AppIcons.MoreHoriz,
+                                    contentDescription = "更多",
+                                )
+                                AppMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                    if (mediaTab) {
+                                        val page = if (localVideo) "video" else "audio"
+                                        val current = if (localVideo) state.videoSort else state.audioSort
+                                        SortOrder.entries.forEach { o ->
+                                            DropdownMenuItem(
+                                                text = { Text("按${o.label}排序") },
+                                                trailingIcon = if (o == current) {
+                                                    {
+                                                        Icon(
+                                                            AppIcons.Check,
+                                                            contentDescription = null,
+                                                            tint = MaterialTheme.colorScheme.primary,
+                                                            modifier = Modifier.size(18.dp),
+                                                        )
+                                                    }
+                                                } else null,
+                                                onClick = { menu = false; lib.setSort(page, o) },
+                                            )
+                                        }
+                                        if (localVideo) {
+                                            DropdownMenuItem(
+                                                text = { Text(if (state.videoGrid) "列表视图" else "网格视图") },
+                                                onClick = { menu = false; lib.setVideoGrid(!state.videoGrid) },
+                                            )
+                                        }
+                                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                                     }
-                                    if (localVideo) {
-                                        DropdownMenuItem(
-                                            text = { Text(if (state.videoGrid) "列表视图" else "网格视图") },
-                                            onClick = { menu = false; lib.setVideoGrid(!state.videoGrid) },
-                                        )
-                                    }
-                                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                                    DropdownMenuItem(text = { Text("刷新媒体库") }, onClick = { menu = false; lib.refreshMedia() })
+                                    DropdownMenuItem(text = { Text("打开文件…") }, onClick = { menu = false; pickFile.launch(arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream")) })
+                                    DropdownMenuItem(text = { Text("隐藏的文件夹") }, onClick = { menu = false; nav.push(Screen.HiddenFolders) })
+                                    DropdownMenuItem(text = { Text("设置") }, onClick = { menu = false; openSettings() })
                                 }
-                                DropdownMenuItem(text = { Text("刷新媒体库") }, onClick = { menu = false; lib.refreshMedia() })
-                                DropdownMenuItem(text = { Text("打开文件…") }, onClick = { menu = false; pickFile.launch(arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream")) })
-                                DropdownMenuItem(text = { Text("隐藏的文件夹") }, onClick = { menu = false; nav.push(Screen.HiddenFolders) })
-                                DropdownMenuItem(text = { Text("设置") }, onClick = { menu = false; openSettings() })
                             }
                         }
                     }
@@ -580,6 +598,8 @@ fun HomeScreen(
                     settings = mainUi.settings,
                     lib = lib,
                     listState = lib.listState("discover.home"),
+                    searchExpanded = discoverSearching,
+                    onSearchExpandedChange = { discoverSearching = it },
                     onOpenDetail = { nav.push(Screen.DiscoverDetail(it)) },
                     onOpenChart = { nav.push(Screen.DiscoverChart(it)) },
                     onOpenTelegramSearch = { nav.push(Screen.TelegramSearch(it)) },

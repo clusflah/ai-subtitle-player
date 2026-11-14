@@ -1,6 +1,7 @@
 package com.aisub.player.meta
 
 import com.aisub.player.media.RemoteFiles
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -179,6 +180,59 @@ class DiscoverTest {
         assertTrue(url.contains("imdb=tt0816692"))
         assertTrue(url.contains("tmdb=157336"))
         assertTrue(url.contains("kind=movie"))
+    }
+
+    @Test
+    fun re0DirectAndSearchUrlsUseTmdbPathAndMultiParams() {
+        assertEquals(
+            "https://re0.me/tmdb/movie/157336",
+            DiscoverSearchStore.buildRe0DirectUrl("movie", 157336),
+        )
+        assertEquals(
+            "https://re0.me/tmdb/tv/94605",
+            DiscoverSearchStore.buildRe0DirectUrl("tv", 94605),
+        )
+        val searchUrl = DiscoverSearchStore.buildRe0SearchUrl("葬送的芙莉莲")
+        assertTrue(searchUrl.startsWith("https://re0.me/search?"))
+        assertTrue(searchUrl.contains("keyword="))
+        assertTrue(searchUrl.contains("search="))
+        assertTrue(searchUrl.contains("q="))
+    }
+
+    @Test
+    fun tmdbAndDoubanPlatformExtractionAndCatalogNormalization() {
+        val tmdbJson = JSONObject(
+            """
+            {
+              "homepage": "https://www.netflix.com/title/81435684",
+              "networks": [{ "name": "Netflix" }],
+              "watch/providers": {
+                "results": {
+                  "CN": { "flatrate": [{ "provider_name": "Bilibili" }] },
+                  "US": { "flatrate": [{ "provider_name": "Max" }] }
+                }
+              }
+            }
+            """.trimIndent(),
+        )
+        val tmdbPlatforms = Tmdb.parseTmdbPlatforms(tmdbJson)
+        assertEquals(listOf("Netflix", "哔哩哔哩", "HBO"), tmdbPlatforms.map { it.name })
+        assertEquals("https://www.netflix.com/title/81435684", tmdbPlatforms[0].url)
+
+        val doubanJson = JSONObject(
+            """
+            {
+              "vendors": [
+                { "title": "腾讯视频", "url": "https://v.qq.com/x/cover/abc.html" },
+                { "title": "优酷视频", "uri": "https://v.youku.com/v_show/id_xyz.html" }
+              ]
+            }
+            """.trimIndent(),
+        )
+        val doubanPlatforms = Douban.parseDoubanPlatforms(doubanJson)
+        assertEquals(listOf("腾讯视频", "优酷"), doubanPlatforms.map { it.name })
+        assertEquals("https://v.qq.com/x/cover/abc.html", PlatformCatalog.resolvePlayUrl(doubanPlatforms[0], "测试剧"))
+        assertTrue(PlatformCatalog.resolvePlayUrl(PlatformSource("HBO"), "The Last of Us").startsWith("https://www.max.com/search?q="))
     }
 
     @Test

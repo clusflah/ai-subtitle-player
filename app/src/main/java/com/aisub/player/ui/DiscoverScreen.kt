@@ -2,6 +2,12 @@ package com.aisub.player.ui
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,6 +23,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -35,6 +42,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -62,12 +71,14 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aisub.player.AppSettings
 import com.aisub.player.LibraryViewModel
@@ -81,20 +92,30 @@ import com.aisub.player.meta.DiscoverSearchStore
 import com.aisub.player.meta.MagnetLinks
 import com.aisub.player.meta.MetaPipeline
 import com.aisub.player.meta.NameParser
+import com.aisub.player.meta.PlatformCatalog
+import com.aisub.player.meta.PlatformSource
 import com.aisub.player.meta.SearchCategory
 import com.aisub.player.meta.SearchSource
 import com.aisub.player.meta.StreamingPlatform
+import com.aisub.player.remote.OpenListClient
+import com.aisub.player.remote.RemoteItem
 import com.aisub.player.remote.Server
 import com.aisub.player.remote.ServerType
+import com.aisub.player.remote.cloud.MediaBrowser
 import com.aisub.player.remote.cloud.Pan115Client
 import com.aisub.player.remote.cloud.PikPakClient
+import com.aisub.player.remote.cloud.ServerItem
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 发现页：参考影巢（re0.me）视觉排布，展示「流媒体榜单」平台入口与各分类横向海报栏；
- * 点开任意海报进入影视详情页，可一键跳转 Telegram 全局搜索、影巢、常用网盘与磁力搜索。
+ * 发现页：紧凑布局，增大海报有效显示面积；
+ * 搜索框收进右上角搜索图标，点击展开单行搜索栏（框内文字滚动显示）并展示搜索历史；
+ * 流媒体平台（Netflix、HBO 等）采用紧凑微缩卡片。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -102,6 +123,8 @@ fun DiscoverTab(
     settings: AppSettings,
     lib: LibraryViewModel,
     listState: LazyListState,
+    searchExpanded: Boolean = false,
+    onSearchExpandedChange: (Boolean) -> Unit = {},
     onOpenDetail: (DiscoverItem) -> Unit,
     onOpenChart: (String?) -> Unit,
     onOpenTelegramSearch: (String) -> Unit,
@@ -109,7 +132,7 @@ fun DiscoverTab(
     onOpenMagnet: (String) -> Unit,
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
     val wide = LocalWideLayout.current
     val tv = LocalTv.current
 
@@ -130,6 +153,21 @@ fun DiscoverTab(
     var history by remember(sourcesVersion) { mutableStateOf(DiscoverSearchStore.history(context)) }
     val allSources = remember(sourcesVersion) {
         DiscoverSearchStore.sources(context).filter { it.enabled }
+    }
+
+    // 收起右上角搜索图标时，清空搜索态回到紧凑榜单页
+    LaunchedEffect(searchExpanded) {
+        if (!searchExpanded) {
+            focusManager.clearFocus()
+            if (appliedQuery.isNotEmpty() || queryInput.isNotEmpty()) {
+                queryInput = ""
+                appliedQuery = ""
+            }
+        }
+    }
+
+    BackHandler(enabled = searchExpanded) {
+        onSearchExpandedChange(false)
     }
 
     LaunchedEffect(settings.tmdbKey, settings.doubanEnabled, reloadNonce) {
@@ -174,6 +212,7 @@ fun DiscoverTab(
         val q = raw.trim()
         queryInput = q
         appliedQuery = q
+        focusManager.clearFocus()
         if (q.isNotEmpty() && MagnetLinks.normalizeMagnet(q) == null) {
             DiscoverSearchStore.recordHistory(context, q)
             history = DiscoverSearchStore.history(context)
@@ -184,158 +223,187 @@ fun DiscoverTab(
 
     LazyColumn(
         state = listState,
-        contentPadding = PaddingValues(top = 6.dp, bottom = 104.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
+        contentPadding = PaddingValues(top = 2.dp, bottom = 82.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
         modifier = Modifier.fillMaxSize(),
     ) {
-        // 搜索框与快捷工具栏
-        item(key = "discover_search_bar") {
-            Column(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+        // 仅在点击右上角搜索图标展开后，才显示搜索框与搜索历史
+        item(key = "discover_search_expandable") {
+            AnimatedVisibility(
+                visible = searchExpanded,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut(),
             ) {
-                val searchBarHeight = if (tv) 48.dp else 44.dp
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 2.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    CompactSearchField(
+                    var sourceMenuOpen by remember { mutableStateOf(false) }
+                    SingleLineKeywordSearchBar(
                         value = queryInput,
                         onValueChange = {
                             queryInput = it
                             if (it.isBlank()) appliedQuery = ""
                         },
                         onSearch = { submitSearch() },
-                        placeholder = "搜电影 / 剧集，或粘贴磁力 / Hash",
-                        phoneLabel = "影视发现搜索",
-                        height = searchBarHeight,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Button(
-                        onClick = { submitSearch() },
-                        colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
-                        modifier = Modifier
-                            .height(searchBarHeight)
-                            .tvFocusRing(RoundedCornerShape(12.dp)),
+                        placeholder = "搜电影 / 剧集，粘贴磁力 / Hash，或点右侧切换搜索源立即检索",
+                        candidates = history.take(8),
+                        onPickCandidate = { kw -> submitSearch(kw) },
+                        sourceLabel = "搜索源 (${allSources.size})",
+                        sourceMenuExpanded = sourceMenuOpen,
+                        onSourceClick = { sourceMenuOpen = true },
+                        onSourceDismiss = { sourceMenuOpen = false },
+                        showSubmitButton = true,
                     ) {
-                        Text("搜索")
-                    }
-                }
-
-                detectedMagnet?.let { mag ->
-                    SurfaceCard(Modifier.fillMaxWidth()) {
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            Icon(AppIcons.Link, null, tint = Orange)
-                            Column(Modifier.weight(1f)) {
-                                Text("识别到磁力链接 / InfoHash", style = MaterialTheme.typography.titleSmall)
-                                Text(
-                                    MagnetLinks.displayName(mag),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
+                        val quickQ = queryInput.trim().ifBlank { appliedQuery.trim() }
+                        if (quickQ.isNotEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text("Telegram 全频道搜「$quickQ」", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                leadingIcon = { Icon(AppIcons.Telegram, null, tint = Orange, modifier = Modifier.size(18.dp)) },
+                                onClick = {
+                                    sourceMenuOpen = false
+                                    DiscoverSearchStore.recordHistory(context, quickQ)
+                                    history = DiscoverSearchStore.history(context)
+                                    onOpenTelegramSearch(quickQ)
+                                },
+                            )
+                            allSources.forEach { src ->
+                                DropdownMenuItem(
+                                    text = { Text("${src.name} 搜「$quickQ」", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                    leadingIcon = { Icon(AppIcons.Web, null, modifier = Modifier.size(17.dp)) },
+                                    onClick = {
+                                        sourceMenuOpen = false
+                                        DiscoverSearchStore.recordHistory(context, quickQ)
+                                        history = DiscoverSearchStore.history(context)
+                                        onOpenWeb(src.buildUrl(quickQ))
+                                    },
                                 )
                             }
-                            Button(onClick = { onOpenMagnet(mag) }) {
-                                Text("离线 / 打开")
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                        DropdownMenuItem(
+                            text = { Text("管理 / 自定义搜索源…") },
+                            leadingIcon = { Icon(AppIcons.Settings, null, modifier = Modifier.size(17.dp)) },
+                            onClick = {
+                                sourceMenuOpen = false
+                                manageSourcesOpen = true
+                            },
+                        )
+                    }
+
+                    detectedMagnet?.let { mag ->
+                        SurfaceCard(Modifier.fillMaxWidth()) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Icon(AppIcons.Link, null, tint = Orange, modifier = Modifier.size(18.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text("识别到磁力链接 / InfoHash", style = MaterialTheme.typography.labelLarge)
+                                    Text(
+                                        MagnetLinks.displayName(mag),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Button(
+                                    onClick = { onOpenMagnet(mag) },
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp),
+                                ) {
+                                    Text("离线 / 打开", fontSize = 12.sp)
+                                }
                             }
                         }
                     }
-                }
 
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        if (settings.tmdbKey.isNotBlank()) "豆瓣热门 + TMDB 流媒体联动" else "豆瓣片单免 Key 直出（填写 TMDB Key 解锁流媒体实时榜）",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = { manageSourcesOpen = true }) {
-                            Text("搜索源 (${allSources.size})")
-                        }
-                        TextButton(onClick = {
-                            DiscoverRepository.clearCache()
-                            reloadNonce++
-                        }) {
-                            Text("刷新")
-                        }
-                    }
-                }
-
-                if (appliedQuery.isBlank() && history.isNotEmpty()) {
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        history.take(8).forEach { h ->
-                            FilterChip(
-                                selected = false,
-                                onClick = { submitSearch(h) },
-                                label = { Text(h, maxLines = 1) },
+                    // 搜索历史仅在点击右上角搜索图标展开后才显示
+                    if (history.isNotEmpty()) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "搜索历史",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                "清空历史",
+                                fontSize = 12.sp,
+                                color = Orange,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable {
+                                        DiscoverSearchStore.clearHistory(context)
+                                        history = emptyList()
+                                    }
+                                    .padding(horizontal = 6.dp, vertical = 2.dp),
                             )
                         }
-                        TextButton(onClick = {
-                            DiscoverSearchStore.clearHistory(context)
-                            history = emptyList()
-                        }) {
-                            Text("清空历史")
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            history.take(10).forEach { h ->
+                                Box(
+                                    Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                                        .tvFocusRing(RoundedCornerShape(8.dp))
+                                        .clickable { submitSearch(h) }
+                                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                                ) {
+                                    Text(h, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        if (appliedQuery.isNotBlank()) {
-            // 搜索态：先展示站内/站外直达卡片，再展示影视匹配结果
+        if (searchExpanded && appliedQuery.isNotBlank()) {
+            // 搜索结果态：紧凑快捷站外直达条 + 海报网格
             item(key = "discover_quick_jump") {
-                SurfaceCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("直接使用关键词「$appliedQuery」找资源", style = MaterialTheme.typography.titleSmall)
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            DiscoverQuickJumpButton(
-                                icon = AppIcons.Telegram,
-                                label = "Telegram 全频道搜索",
-                                onClick = { onOpenTelegramSearch(appliedQuery) },
-                            )
-                            allSources.firstOrNull { it.category == SearchCategory.RE0 }?.let { re0 ->
-                                DiscoverQuickJumpButton(
-                                    icon = AppIcons.Web,
-                                    label = "影巢 re0.me 搜索",
-                                    onClick = { onOpenWeb(re0.buildUrl(appliedQuery)) },
-                                )
-                            }
-                            allSources.filter { it.category == SearchCategory.PAN }.take(2).forEach { src ->
-                                DiscoverQuickJumpButton(
-                                    icon = AppIcons.Cloud,
-                                    label = src.name.substringBefore("（"),
-                                    onClick = { onOpenWeb(src.buildUrl(appliedQuery)) },
-                                )
-                            }
-                            allSources.filter { it.category == SearchCategory.MAGNET }.take(2).forEach { src ->
-                                DiscoverQuickJumpButton(
-                                    icon = AppIcons.Link,
-                                    label = src.name.substringBefore("（"),
-                                    onClick = { onOpenWeb(src.buildUrl(appliedQuery)) },
-                                )
-                            }
-                        }
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    item {
+                        DiscoverQuickJumpButton(
+                            icon = AppIcons.Telegram,
+                            label = "TG 搜「$appliedQuery」",
+                            onClick = { onOpenTelegramSearch(appliedQuery) },
+                        )
+                    }
+                    item {
+                        DiscoverQuickJumpButton(
+                            icon = AppIcons.Web,
+                            label = "影巢 re0.me",
+                            onClick = { onOpenWeb(DiscoverSearchStore.buildRe0SearchUrl(appliedQuery)) },
+                        )
+                    }
+                    items(allSources.filter { it.category == SearchCategory.PAN }.take(2), key = { it.id }) { src ->
+                        DiscoverQuickJumpButton(
+                            icon = AppIcons.Cloud,
+                            label = src.name.substringBefore("（"),
+                            onClick = { onOpenWeb(src.buildUrl(appliedQuery)) },
+                        )
+                    }
+                    items(allSources.filter { it.category == SearchCategory.MAGNET }.take(2), key = { it.id }) { src ->
+                        DiscoverQuickJumpButton(
+                            icon = AppIcons.Link,
+                            label = src.name.substringBefore("（"),
+                            onClick = { onOpenWeb(src.buildUrl(appliedQuery)) },
+                        )
                     }
                 }
             }
@@ -343,29 +411,26 @@ fun DiscoverTab(
             when {
                 searchLoading -> {
                     item(key = "search_loading") {
-                        Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator()
+                        Box(Modifier.fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(Modifier.size(28.dp))
                         }
                     }
                 }
                 searchError != null && searchResults.isEmpty() -> {
                     item(key = "search_error") {
-                        EmptyState("影视数据库搜索失败：$searchError\n仍可使用上方按钮直接去 Telegram / 影巢 / 网盘 / 磁力搜索", icon = AppIcons.Search)
+                        EmptyState("影视数据库搜索失败：$searchError\n可使用上方按钮直接去 Telegram / 影巢 / 网盘搜索", icon = AppIcons.Search)
                     }
                 }
                 searchResults.isEmpty() -> {
                     item(key = "search_empty") {
-                        EmptyState("豆瓣与 TMDB 暂未搜到「$appliedQuery」\n可使用上方快捷按钮直接去 Telegram / 影巢 / 网盘找片源", icon = AppIcons.Movie)
+                        EmptyState("暂未搜到「$appliedQuery」\n可点上方按钮直接去 Telegram / 影巢 / 网盘找片源", icon = AppIcons.Movie)
                     }
                 }
                 else -> {
-                    item(key = "search_results_header") {
-                        SectionHeader("影视条目（点开进详情页搜片源）")
-                    }
                     items(searchResults.chunked(if (wide || tv) 5 else 3), key = { row -> row.first().id }) { row ->
                         Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             val cols = if (wide || tv) 5 else 3
                             for (i in 0 until cols) {
@@ -386,13 +451,66 @@ fun DiscoverTab(
                 }
             }
         } else {
-            // 默认浏览态：流媒体榜单平台条 + 横向海报栏
+            // 默认浏览态：微缩流媒体榜单条 + 紧凑高密度横向海报栏
             item(key = "streaming_platforms") {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    SectionHeader(title = "流媒体榜单")
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "流媒体榜单",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Row(
+                                Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .tvFocusRing(RoundedCornerShape(6.dp))
+                                    .clickable {
+                                        DiscoverRepository.clearCache()
+                                        reloadNonce++
+                                    }
+                                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                            ) {
+                                Icon(
+                                    AppIcons.Refresh,
+                                    contentDescription = "刷新榜单",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(13.dp),
+                                )
+                                Text(
+                                    "刷新",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Text(
+                                text = "全部榜单 →",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Orange,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .tvFocusRing(RoundedCornerShape(6.dp))
+                                    .clickable { onOpenChart(null) }
+                                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
                     LazyRow(
-                        contentPadding = PaddingValues(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(7.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         items(DiscoverCharts.platforms, key = { it.id }) { platform ->
@@ -401,39 +519,15 @@ fun DiscoverTab(
                                 onClick = { onOpenChart("platform_${platform.id}") },
                             )
                         }
-                        item(key = "all_charts_btn") {
-                            Box(
-                                Modifier
-                                    .tvFocusRing(RoundedCornerShape(10.dp), color = Color.White, scale = true)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(Orange)
-                                    .clickable { onOpenChart(null) }
-                                    .padding(horizontal = 18.dp, vertical = 14.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                ) {
-                                    Text(
-                                        "查看全部榜单",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 14.sp,
-                                    )
-                                    Icon(AppIcons.ArrowForward, null, tint = Color.White, modifier = Modifier.size(16.dp))
-                                }
-                            }
-                        }
                     }
                 }
             }
 
             if (homeLoading) {
                 item(key = "home_loading") {
-                    Box(Modifier.fillMaxWidth().padding(48.dp), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            CircularProgressIndicator()
+                    Box(Modifier.fillMaxWidth().padding(36.dp), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CircularProgressIndicator(Modifier.size(28.dp))
                             Text("正在加载剧集与电影榜单…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
@@ -441,17 +535,17 @@ fun DiscoverTab(
             } else if (homeError != null && sections.isEmpty()) {
                 item(key = "home_error") {
                     Column(
-                        Modifier.fillMaxWidth().padding(24.dp),
+                        Modifier.fillMaxWidth().padding(20.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text(homeError!!, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(onClick = { DiscoverRepository.clearCache(); reloadNonce++ }) {
                                 Text("重新加载")
                             }
                             OutlinedButton(onClick = { onOpenWeb("https://re0.me/") }) {
-                                Text("直接访问 re0.me")
+                                Text("访问 re0.me")
                             }
                         }
                     }
@@ -460,7 +554,7 @@ fun DiscoverTab(
                 items(sections, key = { it.chart.id }) { section ->
                     DiscoverChartRowSection(
                         section = section,
-                        cardWidth = if (tv) 148.dp else if (wide) 142.dp else 118.dp,
+                        cardWidth = if (tv) 144.dp else if (wide) 136.dp else 112.dp,
                         onSeeAll = { onOpenChart(section.chart.id) },
                         onOpenDetail = onOpenDetail,
                     )
@@ -477,6 +571,129 @@ fun DiscoverTab(
     }
 }
 
+/**
+ * 单行搜索关键词栏：左侧搜索框（框内文字跑马灯滚动、点击弹出可选关键词并支持键盘输入），右侧搜索源按钮。
+ */
+@Composable
+fun SingleLineKeywordSearchBar(
+    value: String,
+    onValueChange: (String) -> Unit,
+    onSearch: () -> Unit,
+    placeholder: String,
+    candidates: List<String>,
+    onPickCandidate: (String) -> Unit,
+    sourceLabel: String,
+    sourceMenuExpanded: Boolean,
+    onSourceClick: () -> Unit,
+    onSourceDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+    showSubmitButton: Boolean = false,
+    sourceMenuContent: @Composable () -> Unit,
+) {
+    val tv = LocalTv.current
+    val barHeight = if (tv) 44.dp else 40.dp
+    var candidatesPopupOpen by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(Modifier.weight(1f)) {
+            CompactSearchField(
+                value = value,
+                onValueChange = onValueChange,
+                onSearch = {
+                    candidatesPopupOpen = false
+                    onSearch()
+                },
+                placeholder = placeholder,
+                phoneLabel = "搜索关键词",
+                height = barHeight,
+                marqueeText = true,
+                onTapOrFocus = {
+                    if (candidates.isNotEmpty()) candidatesPopupOpen = true
+                },
+                trailingAction = if (showSubmitButton && value.isNotBlank()) {
+                    {
+                        IconButton(
+                            onClick = {
+                                candidatesPopupOpen = false
+                                onSearch()
+                            },
+                            modifier = Modifier.size(28.dp),
+                        ) {
+                            Icon(
+                                AppIcons.ArrowForward,
+                                contentDescription = "执行搜索",
+                                tint = Orange,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
+                } else null,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            // focusable = false 保证弹出可选关键词时不抢占软键盘焦点，用户可随时继续打字输入
+            DropdownMenu(
+                expanded = candidatesPopupOpen && candidates.isNotEmpty(),
+                onDismissRequest = { candidatesPopupOpen = false },
+                properties = PopupProperties(focusable = false),
+                modifier = Modifier.heightIn(max = 240.dp),
+            ) {
+                candidates.forEach { kw ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                kw,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                if (kw == value) AppIcons.Check else AppIcons.History,
+                                contentDescription = null,
+                                tint = if (kw == value) Orange else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        },
+                        onClick = {
+                            candidatesPopupOpen = false
+                            onPickCandidate(kw)
+                        },
+                    )
+                }
+            }
+        }
+
+        Box {
+            OutlinedButton(
+                onClick = onSourceClick,
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                modifier = Modifier
+                    .height(barHeight)
+                    .tvFocusRing(RoundedCornerShape(12.dp)),
+            ) {
+                Icon(AppIcons.Web, null, tint = Orange, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(sourceLabel, fontSize = 12.sp, maxLines = 1)
+                Icon(AppIcons.ArrowDropDown, null, modifier = Modifier.size(16.dp))
+            }
+            AppMenu(
+                expanded = sourceMenuExpanded,
+                onDismissRequest = onSourceDismiss,
+            ) {
+                sourceMenuContent()
+            }
+        }
+    }
+}
+
+/** 缩小后的流媒体平台卡片（Netflix、HBO、Apple TV+、Disney+、Prime Video）。 */
 @Composable
 private fun StreamingPlatformCard(
     platform: StreamingPlatform,
@@ -485,38 +702,38 @@ private fun StreamingPlatformCard(
     val palette = currentVisualPalette()
     val dark = isAppDarkTheme()
     val cardBg = if (dark) Color(0xFF151922) else palette.cardTint
-    val borderColor = if (dark) Color(0x26FFFFFF) else Color(0x18000000)
+    val borderColor = if (dark) Color(0x24FFFFFF) else Color(0x16000000)
 
     Row(
         Modifier
-            .tvFocusRing(RoundedCornerShape(10.dp), scale = true)
-            .clip(RoundedCornerShape(10.dp))
+            .tvFocusRing(RoundedCornerShape(8.dp), scale = true)
+            .clip(RoundedCornerShape(8.dp))
             .background(cardBg)
-            .border(1.dp, borderColor, RoundedCornerShape(10.dp))
+            .border(1.dp, borderColor, RoundedCornerShape(8.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(horizontal = 9.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Box(
             Modifier
-                .clip(RoundedCornerShape(7.dp))
+                .clip(RoundedCornerShape(5.dp))
                 .background(Color(platform.accentHex))
-                .padding(horizontal = 9.dp, vertical = 5.dp),
+                .padding(horizontal = 5.dp, vertical = 2.dp),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 platform.badge,
                 color = Color.White,
-                fontSize = 12.sp,
+                fontSize = 10.sp,
                 fontWeight = FontWeight.ExtraBold,
-                letterSpacing = 0.5.sp,
+                letterSpacing = 0.3.sp,
             )
         }
         Text(
             platform.name,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
         )
@@ -530,33 +747,49 @@ private fun DiscoverChartRowSection(
     onSeeAll: () -> Unit,
     onOpenDetail: (DiscoverItem) -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f)) {
+            Row(
+                Modifier.weight(1f),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 Text(
                     section.chart.title,
-                    style = MaterialTheme.typography.titleLarge,
+                    fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onBackground,
+                    maxLines = 1,
                 )
                 Text(
                     section.chart.subtitle,
-                    style = MaterialTheme.typography.bodySmall,
+                    fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(bottom = 1.dp),
                 )
             }
-            TextButton(onClick = onSeeAll) {
-                Text("查看全部 →")
-            }
+            Text(
+                text = "全部 →",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = Orange,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .tvFocusRing(RoundedCornerShape(6.dp))
+                    .clickable(onClick = onSeeAll)
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            )
         }
         LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(9.dp),
         ) {
             items(section.items, key = { "${section.chart.id}:${it.id}" }) { item ->
                 DiscoverPosterCard(
@@ -572,23 +805,23 @@ private fun DiscoverChartRowSection(
 @Composable
 fun DiscoverPosterCard(
     item: DiscoverItem,
-    width: Dp? = 120.dp,
+    width: Dp? = 112.dp,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
     Column(
         modifier
             .let { if (width != null) it.width(width) else it }
-            .tvFocusRing(RoundedCornerShape(10.dp), scale = true)
-            .clip(RoundedCornerShape(10.dp))
+            .tvFocusRing(RoundedCornerShape(9.dp), scale = true)
+            .clip(RoundedCornerShape(9.dp))
             .clickable(onClick = onClick)
-            .padding(bottom = 4.dp),
+            .padding(bottom = 2.dp),
     ) {
         Box(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
-                .clip(RoundedCornerShape(10.dp))
+                .clip(RoundedCornerShape(9.dp))
                 .background(MaterialTheme.colorScheme.surfaceContainerHigh),
         ) {
             NetImage(
@@ -599,20 +832,20 @@ fun DiscoverPosterCard(
                 fallback = AppIcons.Movie,
             )
 
-            // 左上角状态角标（连载中 / 已完结），参考 re0.me 风格
+            // 左上角状态角标（连载中 / 已完结）
             item.ongoing?.let { isOngoing ->
                 val bg = if (isOngoing) Orange.copy(alpha = 0.92f) else Color(0xCC1E222B)
                 Text(
                     text = if (isOngoing) "连载中" else "已完结",
                     color = Color.White,
-                    fontSize = 10.sp,
+                    fontSize = 9.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .padding(6.dp)
-                        .clip(RoundedCornerShape(5.dp))
+                        .padding(5.dp)
+                        .clip(RoundedCornerShape(4.dp))
                         .background(bg)
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
                 )
             }
 
@@ -625,45 +858,45 @@ fun DiscoverPosterCard(
             Text(
                 text = topRightLabel,
                 color = Color.White,
-                fontSize = 10.sp,
+                fontSize = 9.sp,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(6.dp)
+                    .padding(5.dp)
                     .liquidGlass(
-                        shape = RoundedCornerShape(5.dp),
+                        shape = RoundedCornerShape(4.dp),
                         style = GlassStyle.Pill,
                         tint = GlassTokens.DarkBadgeTint,
                         enableBackdrop = false,
                     )
-                    .padding(horizontal = 5.dp, vertical = 2.dp),
+                    .padding(horizontal = 5.dp, vertical = 1.dp),
             )
 
-            // 左下角评分角标：★ 评分 来源
+            // 左下角评分角标
             item.rating?.let { rating ->
                 Row(
                     Modifier
                         .align(Alignment.BottomStart)
-                        .padding(6.dp)
+                        .padding(5.dp)
                         .liquidGlass(
-                            shape = RoundedCornerShape(6.dp),
+                            shape = RoundedCornerShape(5.dp),
                             style = GlassStyle.Pill,
                             tint = GlassTokens.DarkBadgeTint,
                             enableBackdrop = false,
                         )
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    Icon(AppIcons.Star, null, tint = Color(0xFFFFC107), modifier = Modifier.size(11.dp))
+                    Icon(AppIcons.Star, null, tint = Color(0xFFFFC107), modifier = Modifier.size(10.dp))
                     Text(
                         text = buildString {
                             append("%.1f".format(rating))
                             item.ratingLabel?.let { append(" "); append(it) }
                         },
                         color = Color.White,
-                        fontSize = 10.sp,
+                        fontSize = 9.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
@@ -671,18 +904,18 @@ fun DiscoverPosterCard(
         }
         Text(
             text = item.title,
-            style = MaterialTheme.typography.bodyMedium,
+            fontSize = 13.sp,
             fontWeight = FontWeight.Medium,
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
+            modifier = Modifier.padding(top = 4.dp, start = 2.dp, end = 2.dp),
         )
         val sub = item.subtitleLine()
         if (sub.isNotEmpty()) {
             Text(
                 text = sub,
-                style = MaterialTheme.typography.bodySmall,
+                fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -743,8 +976,8 @@ fun DiscoverChartScreen(
     DetailScaffold(chart.title, onBack) {
         Column(Modifier.fillMaxSize()) {
             LazyRow(
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 items(DiscoverCharts.allCharts, key = { it.id }) { c ->
                     FilterChip(
@@ -754,14 +987,14 @@ fun DiscoverChartScreen(
                                 selectedChartId = c.id
                             }
                         },
-                        label = { Text(c.title) },
+                        label = { Text(c.title, fontSize = 12.sp) },
                     )
                 }
             }
 
             note?.let { msg ->
-                SurfaceCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SurfaceCard(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             TextButton(onClick = onOpenSettings) { Text("去填写 TMDB Key") }
@@ -784,10 +1017,10 @@ fun DiscoverChartScreen(
                 items.isEmpty() -> EmptyState("该榜单暂无条目", icon = AppIcons.Explore)
                 else -> {
                     LazyVerticalGrid(
-                        columns = GridCells.Adaptive(if (LocalTv.current) 156.dp else 112.dp),
-                        contentPadding = PaddingValues(16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        columns = GridCells.Adaptive(if (LocalTv.current) 152.dp else 108.dp),
+                        contentPadding = PaddingValues(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         items(items, key = { it.id }) { item ->
@@ -818,8 +1051,10 @@ fun DiscoverChartScreen(
 }
 
 /**
- * 发现页条目进入的影视详情页：展示海报/背景图/Logo/多平台评分/演职员/简介，
- * 检测本地媒体库是否已有同片可直接播放，并提供 Telegram、影巢（re0.me）、常用网盘与磁力搜索入口。
+ * 发现页条目进入的影视详情页：
+ * 主页面专注展示影视详情（海报、背景、多平台评分、来源播出平台、剧情简介与演职员）；
+ * 提供醒目「立即播放」按钮（一键跳转本地资源、远程服务器/网盘资源或原平台播放）；
+ * 资源搜索相关功能收拢进二级菜单，并在菜单顶部采用单行关键词栏（左搜索框弹可选关键词 + 右搜索源）。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -833,6 +1068,9 @@ fun DiscoverDetailScreen(
     onOpenWeb: (String) -> Unit,
     onOpenMagnet: (String) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenServerDetail: (serverId: String, ratingKey: String) -> Unit = { _, _ -> },
+    onOpenRemote: (server: Server, path: String, title: String) -> Unit = { _, _, _ -> },
+    onOpenLocalLibrary: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -841,12 +1079,16 @@ fun DiscoverDetailScreen(
     val palette = currentVisualPalette()
 
     var detail by remember(item.id) { mutableStateOf(DetailMeta(loading = true)) }
+    var detailReloadNonce by remember { mutableIntStateOf(0) }
     var sourcesVersion by remember { mutableIntStateOf(0) }
+    var playDialogOpen by remember { mutableStateOf(false) }
+    var searchMenuOpen by remember { mutableStateOf(false) }
     var manageSourcesOpen by remember { mutableStateOf(false) }
     var pasteMagnetDialog by remember { mutableStateOf(false) }
     var statusTip by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(item.id, settings.tmdbKey, settings.doubanEnabled, settings.bangumiEnabled, settings.fanartKey) {
+    LaunchedEffect(item.id, settings.tmdbKey, settings.doubanEnabled, settings.bangumiEnabled, settings.fanartKey, detailReloadNonce) {
+        detail = detail.copy(loading = true)
         withContext(Dispatchers.IO) {
             MetaPipeline.run(
                 settings = settings,
@@ -874,8 +1116,11 @@ fun DiscoverDetailScreen(
     val displayTmdbId = info?.tmdbId?.takeIf { it > 0 } ?: item.tmdbId
     val displayImdbId = info?.imdbId ?: item.imdbId
     val displayDoubanId = info?.doubanId ?: item.doubanId
+    val detectedPlatforms = remember(info?.platforms, item.platforms) {
+        PlatformCatalog.merge(info?.platforms.orEmpty(), item.platforms)
+    }
 
-    val queryCandidates = remember(displayTitle, displayOrigTitle, displayYear) {
+    val queryCandidates = remember(displayTitle, displayOrigTitle, displayYear, sourcesVersion) {
         buildList {
             if (displayTitle.isNotBlank()) add(displayTitle)
             if (displayOrigTitle.isNotBlank() && !displayOrigTitle.equals(displayTitle, ignoreCase = true)) {
@@ -884,63 +1129,99 @@ fun DiscoverDetailScreen(
             if (displayTitle.isNotBlank() && !displayYear.isNullOrBlank()) {
                 add("$displayTitle $displayYear")
             }
+            addAll(DiscoverSearchStore.history(context).take(5))
         }.distinct()
     }
     var searchQuery by remember(item.id) { mutableStateOf(item.title) }
-    val enrichedItem = remember(item, displayTmdbId, displayImdbId, displayDoubanId, displayTitle, displayOrigTitle) {
+    val enrichedItem = remember(item, displayTmdbId, displayImdbId, displayDoubanId, displayTitle, displayOrigTitle, detectedPlatforms) {
         item.copy(
             title = displayTitle,
             originalTitle = displayOrigTitle,
             tmdbId = displayTmdbId,
             imdbId = displayImdbId,
             doubanId = displayDoubanId,
+            platforms = detectedPlatforms,
         )
     }
 
-    // 检索本地媒体库/播放历史里是否有同名作品，方便用户搜片前发现“本机已有”
+    // 匹配本地媒体库与本机观看记录
     val localMatches = remember(libState.videos, libState.history, displayTitle, displayOrigTitle) {
         fun norm(s: String) = s.lowercase().replace(Regex("""[\s·・:：\-—_!！?？.'"`()\[\]【】]"""), "")
         val targets = listOfNotNull(displayTitle, displayOrigTitle.ifBlank { null }).map(::norm).filter { it.length >= 2 }
         if (targets.isEmpty()) emptyList()
         else {
-            val all = (libState.videos + libState.history.map { it.entry }).distinctBy { it.uri }
+            val localUris = libState.videos.mapTo(HashSet()) { it.uri }
+            fun isLocalUri(u: String) = u in localUris || u.startsWith("content://") || u.startsWith("file:")
+            val localHistory = libState.history.map { it.entry }.filter { isLocalUri(it.uri) }
+            val all = (libState.videos + localHistory).distinctBy { it.uri }
             all.filter { e ->
                 val parsed = norm(NameParser.parse(e.title).title)
                 val raw = norm(e.title)
                 targets.any { t -> parsed.contains(t) || raw.contains(t) }
-            }.take(5)
+            }.take(6)
+        }
+    }
+
+    // 匹配远程播放历史记录
+    val remoteHistoryMatches = remember(libState.videos, libState.history, displayTitle, displayOrigTitle) {
+        fun norm(s: String) = s.lowercase().replace(Regex("""[\s·・:：\-—_!！?？.'"`()\[\]【】]"""), "")
+        val targets = listOfNotNull(displayTitle, displayOrigTitle.ifBlank { null }).map(::norm).filter { it.length >= 2 }
+        if (targets.isEmpty()) emptyList()
+        else {
+            val localUris = libState.videos.mapTo(HashSet()) { it.uri }
+            fun isLocalUri(u: String) = u in localUris || u.startsWith("content://") || u.startsWith("file:")
+            libState.history.map { it.entry }
+                .filterNot { isLocalUri(it.uri) }
+                .distinctBy { it.uri }
+                .filter { e ->
+                    val parsed = norm(NameParser.parse(e.title).title)
+                    val raw = norm(e.title)
+                    targets.any { t -> parsed.contains(t) || raw.contains(t) }
+                }.take(5)
         }
     }
 
     val allSources = remember(sourcesVersion) {
         DiscoverSearchStore.sources(context).filter { it.enabled }
     }
-    val re0Sources = remember(allSources) { allSources.filter { it.category == SearchCategory.RE0 } }
-    val panSources = remember(allSources) { allSources.filter { it.category == SearchCategory.PAN } }
-    val magnetSources = remember(allSources) { allSources.filter { it.category == SearchCategory.MAGNET } }
-    val telegramSources = remember(allSources) { allSources.filter { it.category == SearchCategory.TELEGRAM } }
 
     fun openExternalUrl(url: String) {
         runCatching {
             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
         }.onFailure {
-            statusTip = "没有可用的外部浏览器打开此链接，已尝试复制地址"
+            statusTip = "没有可用的外部应用打开此链接，已复制地址"
             clipboard.setText(AnnotatedString(url))
         }
     }
 
-    DetailScaffold(displayTitle, onBack) {
+    DetailScaffold(
+        title = displayTitle,
+        onBack = onBack,
+        actions = {
+            IconButton(onClick = { searchMenuOpen = true }) {
+                Icon(AppIcons.Search, "搜索片源")
+            }
+            OverflowMenu(
+                listOf(
+                    MenuAction("搜索片源") { searchMenuOpen = true },
+                    MenuAction("管理搜索源") { manageSourcesOpen = true },
+                    MenuAction("粘贴磁力 / 离线下载") { pasteMagnetDialog = true },
+                    MenuAction("刷新影视详情") { detailReloadNonce++ },
+                ),
+            )
+        },
+    ) {
         Column(
             Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .padding(bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             // 顶部海报 + 横幅背景头部
             Box(Modifier.fillMaxWidth()) {
                 if (displayBackdrop != null) {
-                    Box(Modifier.fillMaxWidth().height(if (wide) 280.dp else 220.dp)) {
+                    Box(Modifier.fillMaxWidth().height(if (wide) 260.dp else 204.dp)) {
                         NetImage(
                             url = displayBackdrop,
                             modifier = Modifier.fillMaxSize(),
@@ -953,7 +1234,7 @@ fun DiscoverDetailScreen(
                                 Brush.verticalGradient(
                                     colors = listOf(
                                         Color(0x44000000),
-                                        palette.backdropFadeColor.copy(alpha = 0.72f),
+                                        palette.backdropFadeColor.copy(alpha = 0.74f),
                                         palette.backdropFadeColor,
                                     ),
                                 ),
@@ -967,26 +1248,26 @@ fun DiscoverDetailScreen(
                         .padding(
                             start = 16.dp,
                             end = 16.dp,
-                            top = if (displayBackdrop != null) (if (wide) 110.dp else 74.dp) else 12.dp,
+                            top = if (displayBackdrop != null) (if (wide) 98.dp else 64.dp) else 10.dp,
                         ),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
                     verticalAlignment = Alignment.Bottom,
                 ) {
                     NetImage(
                         url = displayPoster,
                         modifier = Modifier
-                            .width(if (wide) 136.dp else 108.dp)
+                            .width(if (wide) 132.dp else 104.dp)
                             .aspectRatio(2f / 3f)
                             .clip(RoundedCornerShape(10.dp)),
                         maxSize = 500,
                         contentScale = ContentScale.Crop,
                         fallback = AppIcons.Movie,
                     )
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         if (displayLogo != null) {
                             NetImage(
                                 url = displayLogo,
-                                modifier = Modifier.height(44.dp).fillMaxWidth(),
+                                modifier = Modifier.height(40.dp).fillMaxWidth(),
                                 maxSize = 600,
                                 contentScale = ContentScale.Fit,
                                 fallback = AppIcons.Movie,
@@ -994,15 +1275,17 @@ fun DiscoverDetailScreen(
                         }
                         Text(
                             displayTitle,
-                            style = MaterialTheme.typography.headlineSmall,
+                            style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onBackground,
                         )
                         if (displayOrigTitle.isNotBlank() && displayOrigTitle != displayTitle) {
                             Text(
                                 displayOrigTitle,
-                                style = MaterialTheme.typography.bodyMedium,
+                                style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                         val metaSummary = buildList {
@@ -1021,8 +1304,8 @@ fun DiscoverDetailScreen(
 
                         // 评分胶囊行
                         FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(5.dp),
                         ) {
                             val ratings = detail.ratings.filter { it.value != null || it.loading }
                             if (ratings.isNotEmpty()) {
@@ -1055,274 +1338,232 @@ fun DiscoverDetailScreen(
                 }
             }
 
-            // 本地已有同片：一键直接播放
-            if (localMatches.isNotEmpty()) {
-                SurfaceCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("本地 / 观看记录已有相似视频", style = MaterialTheme.typography.titleSmall, color = Orange)
-                        localMatches.forEachIndexed { idx, entry ->
-                            Row(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable { play(localMatches, idx) }
-                                    .padding(vertical = 6.dp, horizontal = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                Icon(AppIcons.PlayArrow, null, tint = Orange)
-                                Text(
-                                    entry.title,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                Text("播放", style = MaterialTheme.typography.labelLarge, color = Orange)
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 资源搜索关键词切换栏
+            // 来源平台展示栏 + 主播放按钮 & 二级菜单「搜索片源」按钮
             SurfaceCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("资源搜索关键词", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                        TextButton(onClick = { manageSourcesOpen = true }) {
-                            Text("管理搜索源")
-                        }
-                    }
-                    FlowRow(
+                Column(
+                    Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        queryCandidates.forEach { candidate ->
-                            FilterChip(
-                                selected = searchQuery == candidate,
-                                onClick = { searchQuery = candidate },
-                                label = { Text(candidate, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            )
-                        }
-                    }
-                    OutlinedTextField(
-                        value = searchQuery,
-                        onValueChange = { searchQuery = it },
-                        singleLine = true,
-                        label = {
-                            Text(
-                                "自定义搜索词（下方全部搜索入口共用此词）",
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        },
-                        colors = appFieldColors(),
-                        phoneLabel = "搜索关键词",
-                        trailingIcon = {
-                            if (searchQuery.isNotEmpty()) {
-                                IconButton(onClick = { searchQuery = "" }) {
-                                    Icon(AppIcons.Close, "清空")
+                        Text(
+                            "来源平台",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (detectedPlatforms.isNotEmpty()) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                detectedPlatforms.forEach { platform ->
+                                    PlatformBadgeChip(
+                                        platform = platform,
+                                        onClick = {
+                                            onOpenWeb(PlatformCatalog.resolvePlayUrl(platform, displayTitle))
+                                        },
+                                    )
                                 }
                             }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                        } else {
+                            Text(
+                                text = if (detail.loading) "正在识别播出平台…" else "院线 / 暂未标注网播平台",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Button(
+                            onClick = { playDialogOpen = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(44.dp)
+                                .tvFocusRing(RoundedCornerShape(12.dp), color = Color.White),
+                        ) {
+                            Icon(AppIcons.PlayArrow, null, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = when {
+                                    localMatches.isNotEmpty() -> "立即播放（本地已匹配）"
+                                    remoteHistoryMatches.isNotEmpty() -> "立即播放（远程续播）"
+                                    else -> "立即播放"
+                                },
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = { searchMenuOpen = true },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .height(44.dp)
+                                .tvFocusRing(RoundedCornerShape(12.dp)),
+                        ) {
+                            Icon(AppIcons.Search, null, modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("搜索片源")
+                            Icon(AppIcons.ExpandMore, null, modifier = Modifier.size(16.dp))
+                        }
+                    }
+
                     statusTip?.let { tip ->
                         Text(tip, style = MaterialTheme.typography.bodySmall, color = Orange)
                     }
                 }
             }
 
-            // 四大资源搜索跳转区
-            val activeQ = searchQuery.trim().ifBlank { displayTitle }
-
-            // 1. Telegram 搜索
-            ResourceJumpSectionCard(
-                title = "Telegram 搜索",
-                subtitle = "搜索已加入的影视频道 / 群消息并支持直接边下边播",
-                icon = AppIcons.Telegram,
-            ) {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Button(
-                        onClick = { onOpenTelegramSearch(activeQ) },
-                        colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
-                    ) {
-                        Icon(AppIcons.Telegram, null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("站内全频道搜索「$activeQ」")
-                    }
-                    OutlinedButton(onClick = {
-                        clipboard.setText(AnnotatedString(activeQ))
-                        statusTip = "已复制「$activeQ」，正前往 Telegram"
-                        runCatching {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("tg://")))
-                        }.onFailure {
-                            openExternalUrl("https://t.me/")
-                        }
-                    }) {
-                        Icon(AppIcons.OpenInNew, null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("复制并唤起外部 TG")
-                    }
-                    telegramSources.forEach { src ->
-                        ResourceSourceActionRow(
-                            source = src,
-                            url = src.buildUrl(activeQ, enrichedItem),
-                            onOpenInWeb = onOpenWeb,
-                            onOpenExternal = ::openExternalUrl,
-                        )
-                    }
-                }
-            }
-
-            // 2. 影巢 (re0.me) 搜索
-            ResourceJumpSectionCard(
-                title = "影巢（re0.me）搜索",
-                subtitle = "跳转影巢站内检索片源、网友评论与分享的网盘/磁力链接",
-                icon = AppIcons.Web,
-            ) {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    val re0Search = re0Sources.firstOrNull { it.id == "re0_search" }
-                    val re0SearchUrl = (re0Search?.buildUrl(activeQ, enrichedItem))
-                        ?: SearchSource("re0", "影巢", SearchCategory.RE0, "https://re0.me/search?q={q}").buildUrl(activeQ, enrichedItem)
-                    Button(onClick = { onOpenWeb(re0SearchUrl) }) {
-                        Icon(AppIcons.Web, null, modifier = Modifier.size(17.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("内置浏览器搜「$activeQ」")
-                    }
-                    OutlinedButton(onClick = { openExternalUrl(re0SearchUrl) }) {
-                        Icon(AppIcons.OpenInNew, null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("系统浏览器打开")
-                    }
-                    displayTmdbId?.let { tid ->
-                        val directRe0Url = "https://re0.me/${if (enrichedItem.kind == "tv") "tv" else "movie"}/$tid"
-                        OutlinedButton(onClick = { onOpenWeb(directRe0Url) }) {
-                            Text("影巢词条直达")
-                        }
-                    }
-                    re0Sources.filter { it.id != "re0_search" }.forEach { src ->
-                        ResourceSourceActionRow(
-                            source = src,
-                            url = src.buildUrl(activeQ, enrichedItem),
-                            onOpenInWeb = onOpenWeb,
-                            onOpenExternal = ::openExternalUrl,
-                        )
-                    }
-                }
-            }
-
-            // 3. 常用网盘搜索
-            ResourceJumpSectionCard(
-                title = "常用网盘搜索",
-                subtitle = "支持 115、阿里云盘、夸克、百度、迅雷等网盘分享检索（可增删自定义源）",
-                icon = AppIcons.Cloud,
-            ) {
-                if (panSources.isEmpty()) {
-                    TextButton(onClick = { manageSourcesOpen = true }) { Text("当前无启用的网盘搜索源，点此配置") }
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        panSources.forEach { src ->
-                            ResourceSourceActionRow(
-                                source = src,
-                                url = src.buildUrl(activeQ, enrichedItem),
-                                onOpenInWeb = onOpenWeb,
-                                onOpenExternal = ::openExternalUrl,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 4. 磁力链接搜索 & 一键离线
-            ResourceJumpSectionCard(
-                title = "磁力链接搜索 & 离线下载",
-                subtitle = "在内置浏览器打开磁力站时，点击 magnet: 链接将自动弹出复制 / 外部下载 / 115 & PikPak 一键离线",
-                icon = AppIcons.Link,
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { pasteMagnetDialog = true }) {
-                            Icon(AppIcons.Download, null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("粘贴磁力 / Hash 投喂离线")
-                        }
-                    }
-                    if (magnetSources.isEmpty()) {
-                        TextButton(onClick = { manageSourcesOpen = true }) { Text("当前无启用的磁力搜索源，点此配置") }
+            // 剧情简介、演职员与豆瓣/TMDB 参考链接
+            SurfaceCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("影视详情", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    if (displayOverview.isNotBlank()) {
+                        Text(displayOverview, style = MaterialTheme.typography.bodyMedium)
                     } else {
-                        magnetSources.forEach { src ->
-                            ResourceSourceActionRow(
-                                source = src,
-                                url = src.buildUrl(activeQ, enrichedItem),
-                                onOpenInWeb = onOpenWeb,
-                                onOpenExternal = ::openExternalUrl,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
+                        Text(
+                            if (detail.loading) "正在获取剧情简介…" else "暂无剧情简介",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (info?.directors?.isNotEmpty() == true) {
+                        Text(
+                            "导演：${info.directors.joinToString("、")}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (info?.cast?.isNotEmpty() == true) {
+                        Text(
+                            "主演：${info.cast.joinToString("、")}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    val extraLinks = buildList {
+                        addAll(detail.links)
+                        displayDoubanId?.let { did ->
+                            val u = "https://movie.douban.com/subject/$did/"
+                            if (none { it.second == u }) add("在豆瓣查看" to u)
+                        }
+                        displayTmdbId?.let { tid ->
+                            val u = "https://www.themoviedb.org/${enrichedItem.kind}/$tid"
+                            if (none { it.second == u }) add("在 TMDB 查看" to u)
                         }
                     }
-                }
-            }
-
-            // 简介、演职员、豆瓣/TMDB 参考链接
-            if (displayOverview.isNotBlank() || info?.directors?.isNotEmpty() == true || info?.cast?.isNotEmpty() == true) {
-                SurfaceCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("剧情简介与演职员", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                        if (displayOverview.isNotBlank()) {
-                            Text(displayOverview, style = MaterialTheme.typography.bodyMedium)
-                        }
-                        if (info?.directors?.isNotEmpty() == true) {
-                            Text(
-                                "导演：${info.directors.joinToString("、")}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        if (info?.cast?.isNotEmpty() == true) {
-                            Text(
-                                "主演：${info.cast.joinToString("、")}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        val extraLinks = buildList {
-                            addAll(detail.links)
-                            displayDoubanId?.let { did ->
-                                val u = "https://movie.douban.com/subject/$did/"
-                                if (none { it.second == u }) add("在豆瓣查看" to u)
-                            }
-                            displayTmdbId?.let { tid ->
-                                val u = "https://www.themoviedb.org/${enrichedItem.kind}/$tid"
-                                if (none { it.second == u }) add("在 TMDB 查看" to u)
-                            }
-                        }
-                        if (extraLinks.isNotEmpty()) {
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                extraLinks.forEach { (label, url) ->
-                                    TextButton(onClick = { onOpenWeb(url) }) {
-                                        Text(label)
-                                    }
+                    if (extraLinks.isNotEmpty()) {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            extraLinks.forEach { (label, url) ->
+                                TextButton(onClick = { onOpenWeb(url) }) {
+                                    Text(label)
                                 }
                             }
                         }
-                        if (settings.tmdbKey.isBlank()) {
-                            TextButton(onClick = onOpenSettings) {
-                                Text("提示：前往设置填写 TMDB API Key 可显示高清剧照与更多平台评分")
-                            }
+                    }
+                    if (settings.tmdbKey.isBlank()) {
+                        TextButton(onClick = onOpenSettings) {
+                            Text("提示：前往设置填写 TMDB API Key 可识别更多全球流媒体来源平台与高清剧照")
                         }
                     }
                 }
             }
         }
+    }
+
+    // 播放来源选择面板：本地资源 / 远程资源 / 原平台播放
+    if (playDialogOpen) {
+        DiscoverPlaySourceDialog(
+            title = displayTitle,
+            origTitle = displayOrigTitle,
+            detectedPlatforms = detectedPlatforms,
+            localMatches = localMatches,
+            remoteHistoryMatches = remoteHistoryMatches,
+            lib = lib,
+            servers = libState.servers,
+            onDismiss = { playDialogOpen = false },
+            onPlayEntries = { list, idx ->
+                playDialogOpen = false
+                play(list, idx)
+            },
+            onOpenLocalLibrary = {
+                playDialogOpen = false
+                onOpenLocalLibrary()
+            },
+            onOpenServerDetail = { sid, rk ->
+                playDialogOpen = false
+                onOpenServerDetail(sid, rk)
+            },
+            onOpenRemote = { server, path, name ->
+                playDialogOpen = false
+                onOpenRemote(server, path, name)
+            },
+            onOpenWeb = { url ->
+                playDialogOpen = false
+                onOpenWeb(url)
+            },
+            onOpenExternal = { url ->
+                playDialogOpen = false
+                openExternalUrl(url)
+            },
+        )
+    }
+
+    // 二级菜单：资源搜索面板（顶部为单行搜索关键词栏：左搜索框 + 右搜索源）
+    if (searchMenuOpen) {
+        DiscoverResourceSearchDialog(
+            enrichedItem = enrichedItem,
+            searchQuery = searchQuery,
+            onSearchQueryChange = { searchQuery = it },
+            queryCandidates = queryCandidates,
+            allSources = allSources,
+            onDismiss = { searchMenuOpen = false },
+            onManageSources = { manageSourcesOpen = true },
+            onPasteMagnet = { pasteMagnetDialog = true },
+            onOpenTelegramSearch = { q ->
+                DiscoverSearchStore.recordHistory(context, q)
+                sourcesVersion++
+                searchMenuOpen = false
+                onOpenTelegramSearch(q)
+            },
+            onCopyAndLaunchExternalTg = { q ->
+                clipboard.setText(AnnotatedString(q))
+                statusTip = "已复制「$q」，正在唤起外部 Telegram"
+                searchMenuOpen = false
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("tg://")))
+                }.onFailure {
+                    openExternalUrl("https://t.me/")
+                }
+            },
+            onOpenWeb = { url, q ->
+                if (q.isNotBlank()) {
+                    DiscoverSearchStore.recordHistory(context, q)
+                    sourcesVersion++
+                }
+                searchMenuOpen = false
+                onOpenWeb(url)
+            },
+            onOpenExternal = { url, q ->
+                if (q.isNotBlank()) {
+                    DiscoverSearchStore.recordHistory(context, q)
+                    sourcesVersion++
+                }
+                searchMenuOpen = false
+                openExternalUrl(url)
+            },
+        )
     }
 
     if (manageSourcesOpen) {
@@ -1345,6 +1586,558 @@ fun DiscoverDetailScreen(
 }
 
 @Composable
+private fun PlatformBadgeChip(
+    platform: PlatformSource,
+    onClick: () -> Unit,
+) {
+    val spec = PlatformCatalog.specFor(platform.name)
+    val accent = Color(PlatformCatalog.accentHex(platform.name))
+    Row(
+        Modifier
+            .tvFocusRing(RoundedCornerShape(7.dp))
+            .clip(RoundedCornerShape(7.dp))
+            .background(accent.copy(alpha = 0.14f))
+            .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(7.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 7.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .background(accent)
+                .padding(horizontal = 4.dp, vertical = 1.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                spec?.badge ?: platform.name.take(2),
+                color = Color.White,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.ExtraBold,
+            )
+        }
+        Text(
+            platform.name,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+        )
+    }
+}
+
+private sealed interface RemotePlayHit {
+    data class MediaServerHit(val server: Server, val item: ServerItem) : RemotePlayHit
+    data class OpenListHit(val server: Server, val item: RemoteItem) : RemotePlayHit
+}
+
+/** 详情页点击「立即播放」弹出的播放通道选择器：本地资源 / 远程资源 / 原平台播放。 */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DiscoverPlaySourceDialog(
+    title: String,
+    origTitle: String,
+    detectedPlatforms: List<PlatformSource>,
+    localMatches: List<MediaEntry>,
+    remoteHistoryMatches: List<MediaEntry>,
+    lib: LibraryViewModel,
+    servers: List<Server>,
+    onDismiss: () -> Unit,
+    onPlayEntries: (List<MediaEntry>, Int) -> Unit,
+    onOpenLocalLibrary: () -> Unit,
+    onOpenServerDetail: (serverId: String, ratingKey: String) -> Unit,
+    onOpenRemote: (server: Server, path: String, title: String) -> Unit,
+    onOpenWeb: (String) -> Unit,
+    onOpenExternal: (String) -> Unit,
+) {
+    var remoteHits by remember(title, origTitle, servers) { mutableStateOf<List<RemotePlayHit>>(emptyList()) }
+    var searchingRemote by remember(title, origTitle, servers) { mutableStateOf(false) }
+
+    LaunchedEffect(title, origTitle, servers) {
+        val searchable = servers.filter { it.type.isMediaServer || it.type == ServerType.OPENLIST }
+        if (searchable.isEmpty()) {
+            remoteHits = emptyList()
+            searchingRemote = false
+            return@LaunchedEffect
+        }
+        searchingRemote = true
+        val found = withContext(Dispatchers.IO) {
+            coroutineScope {
+                searchable.map { srv ->
+                    async {
+                        runCatching {
+                            when (val client = lib.client(srv)) {
+                                is MediaBrowser -> {
+                                    val primary = client.search(title)
+                                    val merged = if (primary.isNotEmpty() || origTitle.isBlank() || origTitle == title) {
+                                        primary
+                                    } else {
+                                        client.search(origTitle)
+                                    }
+                                    merged.take(5).map { RemotePlayHit.MediaServerHit(srv, it) }
+                                }
+                                is OpenListClient -> {
+                                    val primary = client.searchVideos(title)
+                                    val merged = if (primary.isNotEmpty() || origTitle.isBlank() || origTitle == title) {
+                                        primary
+                                    } else {
+                                        client.searchVideos(origTitle)
+                                    }
+                                    merged.take(5).map { RemotePlayHit.OpenListHit(srv, it) }
+                                }
+                                else -> emptyList()
+                            }
+                        }.getOrDefault(emptyList())
+                    }
+                }.awaitAll().flatten()
+            }
+        }
+        remoteHits = found
+        searchingRemote = false
+    }
+
+    val platformOptions = remember(detectedPlatforms) {
+        if (detectedPlatforms.isNotEmpty()) {
+            PlatformCatalog.merge(detectedPlatforms, PlatformCatalog.fallbackPlatforms().take(3))
+        } else {
+            PlatformCatalog.fallbackPlatforms()
+        }
+    }
+
+    AppDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("播放「$title」", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                // 1. 本地资源
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(AppIcons.Phone, null, tint = Orange, modifier = Modifier.size(18.dp))
+                        Text("本地资源", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        TextButton(onClick = onOpenLocalLibrary) { Text("浏览本机", fontSize = 12.sp) }
+                    }
+                    if (localMatches.isEmpty()) {
+                        Text(
+                            "本机未扫描到同名视频，可点右侧「浏览本机」选择本地文件播放。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        localMatches.forEachIndexed { idx, entry ->
+                            PlayOptionRow(
+                                title = entry.displayTitle,
+                                subtitle = entry.folder.ifBlank { "本机视频 / 播放记录" },
+                                actionText = "直接播放",
+                                onClick = { onPlayEntries(localMatches, idx) },
+                            )
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                // 2. 远程资源
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(AppIcons.Cloud, null, tint = Orange, modifier = Modifier.size(18.dp))
+                        Text("远程资源", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        if (searchingRemote) {
+                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                        }
+                    }
+
+                    remoteHistoryMatches.forEachIndexed { idx, entry ->
+                        PlayOptionRow(
+                            title = entry.displayTitle,
+                            subtitle = "远程播放记录 · 点击继续播放",
+                            actionText = "续播",
+                            onClick = { onPlayEntries(remoteHistoryMatches, idx) },
+                        )
+                    }
+
+                    remoteHits.forEach { hit ->
+                        when (hit) {
+                            is RemotePlayHit.MediaServerHit -> {
+                                val it = hit.item
+                                val sub = buildString {
+                                    append(hit.server.name)
+                                    append(" (${hit.server.type.label})")
+                                    it.year?.let { y -> append(" · $y") }
+                                    it.episodeLabel?.let { ep -> append(" · $ep") }
+                                }
+                                PlayOptionRow(
+                                    title = it.title,
+                                    subtitle = sub,
+                                    actionText = if (!it.isFolder && it.playUrl != null && it.fileName != null) "直接播放" else "选集",
+                                    onClick = {
+                                        if (!it.isFolder && it.playUrl != null && it.fileName != null) {
+                                            onPlayEntries(listOf(MediaEntry(it.playUrl, it.fileName, isVideo = it.type != "track")), 0)
+                                        } else {
+                                            onOpenServerDetail(hit.server.id, it.ratingKey)
+                                        }
+                                    },
+                                )
+                            }
+                            is RemotePlayHit.OpenListHit -> {
+                                val it = hit.item
+                                PlayOptionRow(
+                                    title = it.name,
+                                    subtitle = "${hit.server.name} (OpenList) · ${it.path}",
+                                    actionText = if (!it.isDir && it.playUrl != null) "直接播放" else "打开目录",
+                                    onClick = {
+                                        if (!it.isDir && it.playUrl != null) {
+                                            onPlayEntries(listOf(MediaEntry(it.playUrl, it.name)), 0)
+                                        } else {
+                                            onOpenRemote(hit.server, it.path, it.name)
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+
+                    if (servers.isEmpty()) {
+                        Text(
+                            "尚未添加媒体服务器或网盘（可在「浏览 → +」添加 Emby / Jellyfin / Plex / OpenList / WebDAV / 115 / PikPak）。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            servers.forEach { srv ->
+                                OutlinedButton(
+                                    onClick = { onOpenRemote(srv, srv.rootPath, srv.name) },
+                                    shape = RoundedCornerShape(9.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp),
+                                ) {
+                                    Text("${srv.name} (${srv.type.label})", fontSize = 12.sp, maxLines = 1)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                // 3. 原平台播放
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(AppIcons.Live, null, tint = Orange, modifier = Modifier.size(18.dp))
+                        Text("原平台播放", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    }
+                    Text(
+                        "点平台名称使用内置浏览器打开（支持实时生成 AI 字幕），点右侧图标唤起外部原平台 App 或浏览器。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    platformOptions.forEach { p ->
+                        val isOfficialSource = detectedPlatforms.any { it.name.equals(p.name, ignoreCase = true) }
+                        val targetUrl = PlatformCatalog.resolvePlayUrl(p, title)
+                        val accent = Color(PlatformCatalog.accentHex(p.name))
+                        val badge = PlatformCatalog.specFor(p.name)?.badge ?: p.name.take(2)
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.75f))
+                                .tvFocusRing(RoundedCornerShape(10.dp))
+                                .clickable { onOpenWeb(targetUrl) }
+                                .padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Box(
+                                Modifier
+                                    .clip(RoundedCornerShape(5.dp))
+                                    .background(accent)
+                                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                            ) {
+                                Text(badge, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+                            }
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    text = if (isOfficialSource) "${p.name}（本片来源平台）" else p.name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = if (isOfficialSource) FontWeight.SemiBold else FontWeight.Normal,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = if (p.url != null) "官方直达链接 · 内置网页 AI 字幕" else "站内检索直达 · 内置网页 AI 字幕",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                )
+                            }
+                            IconButton(
+                                onClick = { onOpenExternal(targetUrl) },
+                                modifier = Modifier.size(34.dp),
+                            ) {
+                                Icon(AppIcons.OpenInNew, "外部打开", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(17.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+    )
+}
+
+@Composable
+private fun PlayOptionRow(
+    title: String,
+    subtitle: String,
+    actionText: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(9.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.75f))
+            .tvFocusRing(RoundedCornerShape(9.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(AppIcons.PlayArrow, null, tint = Orange, modifier = Modifier.size(18.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Text(actionText, style = MaterialTheme.typography.labelMedium, color = Orange, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/**
+ * 影视详情页的「搜索片源」二级菜单弹窗：
+ * 顶部缩减为一行（左侧搜索框点击弹可选关键词并支持键盘输入，右侧搜索源切换/管理），下方展示对应资源搜索入口。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DiscoverResourceSearchDialog(
+    enrichedItem: DiscoverItem,
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit,
+    queryCandidates: List<String>,
+    allSources: List<SearchSource>,
+    onDismiss: () -> Unit,
+    onManageSources: () -> Unit,
+    onPasteMagnet: () -> Unit,
+    onOpenTelegramSearch: (String) -> Unit,
+    onCopyAndLaunchExternalTg: (String) -> Unit,
+    onOpenWeb: (url: String, query: String) -> Unit,
+    onOpenExternal: (url: String, query: String) -> Unit,
+) {
+    var selectedCategory by remember { mutableStateOf<SearchCategory?>(null) }
+    var sourceMenuOpen by remember { mutableStateOf(false) }
+
+    val activeQ = searchQuery.trim().ifBlank { enrichedItem.title }
+    val re0Sources = remember(allSources) { allSources.filter { it.category == SearchCategory.RE0 } }
+    val panSources = remember(allSources) { allSources.filter { it.category == SearchCategory.PAN } }
+    val magnetSources = remember(allSources) { allSources.filter { it.category == SearchCategory.MAGNET } }
+    val telegramSources = remember(allSources) { allSources.filter { it.category == SearchCategory.TELEGRAM } }
+
+    val sourceButtonLabel = selectedCategory?.label ?: "搜索源 (${allSources.size})"
+
+    AppDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("搜索片源", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                // 单行关键词栏：左搜索框（弹可选关键词且支持直接输入），右搜索源
+                SingleLineKeywordSearchBar(
+                    value = searchQuery,
+                    onValueChange = onSearchQueryChange,
+                    onSearch = {
+                        onOpenWeb(DiscoverSearchStore.buildRe0SearchUrl(activeQ), activeQ)
+                    },
+                    placeholder = "点击选关键词或直接输入片名",
+                    candidates = queryCandidates,
+                    onPickCandidate = { kw -> onSearchQueryChange(kw) },
+                    sourceLabel = sourceButtonLabel,
+                    sourceMenuExpanded = sourceMenuOpen,
+                    onSourceClick = { sourceMenuOpen = true },
+                    onSourceDismiss = { sourceMenuOpen = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("全部搜索源 (${allSources.size})") },
+                        trailingIcon = if (selectedCategory == null) {
+                            { Icon(AppIcons.Check, null, tint = Orange, modifier = Modifier.size(16.dp)) }
+                        } else null,
+                        onClick = {
+                            selectedCategory = null
+                            sourceMenuOpen = false
+                        },
+                    )
+                    SearchCategory.entries.forEach { cat ->
+                        DropdownMenuItem(
+                            text = { Text(cat.label) },
+                            trailingIcon = if (selectedCategory == cat) {
+                                { Icon(AppIcons.Check, null, tint = Orange, modifier = Modifier.size(16.dp)) }
+                            } else null,
+                            onClick = {
+                                selectedCategory = cat
+                                sourceMenuOpen = false
+                            },
+                        )
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    DropdownMenuItem(
+                        text = { Text("管理 / 增删搜索源…") },
+                        leadingIcon = { Icon(AppIcons.Settings, null, modifier = Modifier.size(16.dp)) },
+                        onClick = {
+                            sourceMenuOpen = false
+                            onManageSources()
+                        },
+                    )
+                }
+
+                // 1. 影巢 (re0.me) 搜索与词条直达
+                if (selectedCategory == null || selectedCategory == SearchCategory.RE0) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("影巢（re0.me）", style = MaterialTheme.typography.labelLarge, color = Orange)
+                        val re0Search = re0Sources.firstOrNull { it.id == "re0_search" }
+                        val re0SearchUrl = re0Search?.buildUrl(activeQ, enrichedItem)
+                            ?: DiscoverSearchStore.buildRe0SearchUrl(activeQ)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Button(
+                                onClick = { onOpenWeb(re0SearchUrl, activeQ) },
+                                colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
+                            ) {
+                                Icon(AppIcons.Web, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text("内置浏览器搜「$activeQ」", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            enrichedItem.tmdbId?.let { tid ->
+                                // 使用 /tmdb/{movie|tv}/{tmdbId} 路由直达影巢词条详情页，修复旧版 /movie/{tid} 404 错误
+                                val directRe0Url = DiscoverSearchStore.buildRe0DirectUrl(enrichedItem.kind, tid)
+                                OutlinedButton(onClick = { onOpenWeb(directRe0Url, activeQ) }) {
+                                    Text("影巢词条直达")
+                                }
+                            }
+                            OutlinedButton(onClick = { onOpenExternal(re0SearchUrl, activeQ) }) {
+                                Icon(AppIcons.OpenInNew, null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("系统浏览器")
+                            }
+                        }
+                        re0Sources.filter { it.id != "re0_search" }.forEach { src ->
+                            ResourceSourceActionRow(
+                                source = src,
+                                url = src.buildUrl(activeQ, enrichedItem),
+                                onOpenInWeb = { onOpenWeb(it, activeQ) },
+                                onOpenExternal = { onOpenExternal(it, activeQ) },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+
+                // 2. Telegram 搜索
+                if (selectedCategory == null || selectedCategory == SearchCategory.TELEGRAM) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Telegram 频道 / 群组", style = MaterialTheme.typography.labelLarge, color = Orange)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Button(onClick = { onOpenTelegramSearch(activeQ) }) {
+                                Icon(AppIcons.Telegram, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text("站内全频道搜「$activeQ」", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            OutlinedButton(onClick = { onCopyAndLaunchExternalTg(activeQ) }) {
+                                Icon(AppIcons.OpenInNew, null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("外部 TG")
+                            }
+                        }
+                        telegramSources.forEach { src ->
+                            ResourceSourceActionRow(
+                                source = src,
+                                url = src.buildUrl(activeQ, enrichedItem),
+                                onOpenInWeb = { onOpenWeb(it, activeQ) },
+                                onOpenExternal = { onOpenExternal(it, activeQ) },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+
+                // 3. 常用网盘搜索
+                if (selectedCategory == null || selectedCategory == SearchCategory.PAN) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("网盘资源搜索", style = MaterialTheme.typography.labelLarge, color = Orange)
+                        if (panSources.isEmpty()) {
+                            TextButton(onClick = onManageSources) { Text("当前无启用的网盘搜索源，点此配置") }
+                        } else {
+                            panSources.forEach { src ->
+                                ResourceSourceActionRow(
+                                    source = src,
+                                    url = src.buildUrl(activeQ, enrichedItem),
+                                    onOpenInWeb = { onOpenWeb(it, activeQ) },
+                                    onOpenExternal = { onOpenExternal(it, activeQ) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 4. 磁力链接搜索 & 离线下载
+                if (selectedCategory == null || selectedCategory == SearchCategory.MAGNET) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("磁力搜索 & 离线下载", style = MaterialTheme.typography.labelLarge, color = Orange, modifier = Modifier.weight(1f))
+                            TextButton(onClick = onPasteMagnet) {
+                                Icon(AppIcons.Download, null, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("粘贴磁力离线", fontSize = 12.sp)
+                            }
+                        }
+                        if (magnetSources.isEmpty()) {
+                            TextButton(onClick = onManageSources) { Text("当前无启用的磁力搜索源，点此配置") }
+                        } else {
+                            magnetSources.forEach { src ->
+                                ResourceSourceActionRow(
+                                    source = src,
+                                    url = src.buildUrl(activeQ, enrichedItem),
+                                    onOpenInWeb = { onOpenWeb(it, activeQ) },
+                                    onOpenExternal = { onOpenExternal(it, activeQ) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+    )
+}
+
+@Composable
 private fun DiscoverQuickJumpButton(
     icon: ImageVector,
     label: String,
@@ -1352,33 +2145,15 @@ private fun DiscoverQuickJumpButton(
 ) {
     OutlinedButton(
         onClick = onClick,
-        shape = RoundedCornerShape(10.dp),
-        modifier = Modifier.tvFocusRing(RoundedCornerShape(10.dp)),
+        shape = RoundedCornerShape(9.dp),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+        modifier = Modifier
+            .height(34.dp)
+            .tvFocusRing(RoundedCornerShape(9.dp)),
     ) {
-        Icon(icon, null, modifier = Modifier.size(16.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(label, maxLines = 1)
-    }
-}
-
-@Composable
-private fun ResourceJumpSectionCard(
-    title: String,
-    subtitle: String,
-    icon: ImageVector,
-    content: @Composable () -> Unit,
-) {
-    SurfaceCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Icon(icon, null, tint = Orange, modifier = Modifier.size(20.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            content()
-        }
+        Icon(icon, null, modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(4.dp))
+        Text(label, fontSize = 12.sp, maxLines = 1)
     }
 }
 
@@ -1392,30 +2167,30 @@ private fun ResourceSourceActionRow(
 ) {
     Row(
         modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.7f))
-            .tvFocusRing(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(9.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.72f))
+            .tvFocusRing(RoundedCornerShape(9.dp))
             .clickable { onOpenInWeb(url) }
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 10.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Column(Modifier.weight(1f)) {
-            Text(source.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+            Text(source.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
             if (source.description.isNotBlank()) {
                 Text(
                     source.description,
-                    style = MaterialTheme.typography.bodySmall,
+                    fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
         }
-        IconButton(onClick = { onOpenExternal(url) }) {
-            Icon(AppIcons.OpenInNew, "系统浏览器打开", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        IconButton(onClick = { onOpenExternal(url) }, modifier = Modifier.size(32.dp)) {
+            Icon(AppIcons.OpenInNew, "系统浏览器打开", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
         }
-        Icon(AppIcons.ArrowForward, null, tint = Orange, modifier = Modifier.size(18.dp))
+        Icon(AppIcons.ArrowForward, null, tint = Orange, modifier = Modifier.size(16.dp))
     }
 }
 
@@ -1428,13 +2203,13 @@ private fun DiscoverRatingChip(
 ) {
     Row(
         Modifier
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(7.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-            .padding(horizontal = 9.dp, vertical = 4.dp),
+            .padding(horizontal = 8.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Icon(AppIcons.Star, null, tint = Color(0xFFFFC107), modifier = Modifier.size(14.dp))
+        Icon(AppIcons.Star, null, tint = Color(0xFFFFC107), modifier = Modifier.size(13.dp))
         Text(
             text = when {
                 loading -> "$label …"

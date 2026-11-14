@@ -57,11 +57,9 @@ import com.aisub.player.ui.PipState
 import com.aisub.player.ui.NowPlayingBar
 import com.aisub.player.ui.OnboardingScreen
 import com.aisub.player.ui.PlaylistDetailScreen
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.aisub.player.ui.ServerDetailScreen
@@ -290,6 +288,21 @@ class MainActivity : ComponentActivity() {
                             },
                             onOpenMagnet = { mag -> com.aisub.player.meta.MagnetLaunch.pending = mag },
                             onOpenSettings = { nav.push(Screen.Settings) },
+                            onOpenServerDetail = { serverId, ratingKey ->
+                                nav.push(Screen.ServerDetail(serverId, ratingKey))
+                            },
+                            onOpenRemote = { server, path, title ->
+                                if (server.type.isMediaServer && path.isEmpty()) {
+                                    nav.push(Screen.ServerHome(server.id, server.name))
+                                } else {
+                                    nav.push(Screen.Remote(server.id, path, title))
+                                }
+                            },
+                            onOpenLocalLibrary = {
+                                lib.homeTab = 3 // Tab.LOCAL
+                                lib.localShowsVideo = true
+                                while (nav.stack.size > 1) nav.pop()
+                            },
                         )
                         is Screen.DiscoverChart -> com.aisub.player.ui.DiscoverChartScreen(
                             initialChartId = screen.chartId,

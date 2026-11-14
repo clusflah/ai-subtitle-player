@@ -1,8 +1,12 @@
 package com.aisub.player.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -38,6 +42,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -45,6 +50,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -155,7 +162,11 @@ fun TextField(
     )
 }
 
-/** 单行紧凑搜索框：固定高度、占位符单行截断不换行，保留电视遥控器焦点框与手机扫码输入支持。 */
+/**
+ * 单行紧凑搜索框：固定高度，支持框内文字跑马灯滚动（marqueeText）、点击/聚焦弹出可选关键词回调，
+ * 同时保留软键盘直接输入、电视遥控器焦点框与手机扫码输入支持。
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun CompactSearchField(
     value: String,
@@ -165,7 +176,10 @@ fun CompactSearchField(
     placeholder: String = "",
     phoneInput: Boolean = true,
     phoneLabel: String = "",
-    height: Dp = 44.dp,
+    height: Dp = 42.dp,
+    marqueeText: Boolean = false,
+    onTapOrFocus: (() -> Unit)? = null,
+    trailingAction: (@Composable () -> Unit)? = null,
 ) = TvInput(
     value = value,
     onValueChange = onValueChange,
@@ -198,16 +212,26 @@ fun CompactSearchField(
                 }
             }
             .border(borderWidth, borderColor, shape)
-            .padding(start = 12.dp, end = if (value.isNotEmpty()) 4.dp else 12.dp),
+            .let {
+                if (onTapOrFocus != null) {
+                    it.pointerInput(onTapOrFocus) {
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            onTapOrFocus()
+                        }
+                    }
+                } else it
+            }
+            .padding(start = 10.dp, end = if (value.isNotEmpty() || trailingAction != null) 4.dp else 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             AppIcons.Search,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(18.dp),
+            modifier = Modifier.size(17.dp),
         )
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(6.dp))
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
@@ -220,35 +244,57 @@ fun CompactSearchField(
             keyboardActions = KeyboardActions(onSearch = { onSearch() }),
             modifier = Modifier
                 .weight(1f)
-                .onFocusChanged { isFocused = it.isFocused },
+                .onFocusChanged {
+                    val gained = !isFocused && it.isFocused
+                    isFocused = it.isFocused
+                    if (gained) onTapOrFocus?.invoke()
+                },
             decorationBox = { innerTextField ->
-                Box(contentAlignment = Alignment.CenterStart) {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
                     if (value.isEmpty() && placeholder.isNotEmpty()) {
                         Text(
                             text = placeholder,
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                            softWrap = false,
+                            overflow = if (marqueeText) TextOverflow.Clip else TextOverflow.Ellipsis,
+                            modifier = if (marqueeText) {
+                                Modifier.fillMaxWidth().basicMarquee(iterations = Int.MAX_VALUE)
+                            } else Modifier,
                         )
                     }
-                    innerTextField()
+                    if (!isFocused && marqueeText && value.isNotEmpty()) {
+                        Box(Modifier.alpha(0f)) { innerTextField() }
+                        Text(
+                            text = value,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Clip,
+                            modifier = Modifier.fillMaxWidth().basicMarquee(iterations = Int.MAX_VALUE),
+                        )
+                    } else {
+                        innerTextField()
+                    }
                 }
             },
         )
         if (value.isNotEmpty()) {
             IconButton(
                 onClick = { onValueChange("") },
-                modifier = Modifier.size(32.dp),
+                modifier = Modifier.size(28.dp),
             ) {
                 Icon(
                     AppIcons.Close,
                     contentDescription = "清空",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(16.dp),
+                    modifier = Modifier.size(15.dp),
                 )
             }
         }
+        trailingAction?.invoke()
     }
 }
 

@@ -10,7 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
-/** 查影片信息的条件：片名候选、年份、季集，以及媒体服务器给出的外部编号。 */
+/** 查影片信息的条件：片名候选、年份、季集，以及媒体服务器或发现页给出的外部编号。 */
 data class MetaQuery(
     val titles: List<String>,
     val year: Int? = null,
@@ -20,8 +20,9 @@ data class MetaQuery(
     val kind: String? = null,
     val tmdbId: String? = null,
     val imdbId: String? = null,
+    val doubanId: String? = null,
 ) {
-    val key get() = listOf(titles.firstOrNull(), year, season, episode, kind, tmdbId, imdbId).joinToString("|")
+    val key get() = listOf(titles.firstOrNull(), year, season, episode, kind, tmdbId, imdbId, doubanId).joinToString("|")
     val episodic get() = kind == "tv" || season != null || episode != null
 
     companion object {
@@ -67,19 +68,18 @@ object MetaRepository {
         return memo("tmdb|${q.key}") { Tmdb(settings.tmdbKey, settings.tmdbBaseUrl, settings.tmdbImageBase).lookup(q) }
     }
 
-    /** 豆瓣：优先用已查到的 IMDb 编号、豆瓣编号和中文片名。 */
+    /** 豆瓣：优先用已查到的豆瓣编号、IMDb 编号和中文片名。 */
     suspend fun douban(q: MetaQuery, info: MediaInfo?): DoubanRating? {
         val titles = (listOfNotNull(info?.title, info?.originalTitle) + q.titles).filter { it.isNotEmpty() }.distinct()
         val imdb = info?.imdbId ?: q.imdbId
         val year = q.year ?: info?.year?.toIntOrNull()?.takeIf { q.season == null || q.season <= 1 }
-        val id = info?.doubanId
+        val id = info?.doubanId ?: q.doubanId
         return memo("douban|" + listOf(id, imdb, titles.firstOrNull(), year, q.season).joinToString("|")) {
             Douban.lookup(titles, year, q.season, imdb, tv = q.episodic || info?.kind == "tv", doubanId = id)
         }
     }
 
     suspend fun bangumi(q: MetaQuery, info: MediaInfo?): BangumiResult? {
-        // Bangumi 的中文名和原名（日文）都可以搜，原名更准
         val titles = (listOfNotNull(info?.originalTitle, info?.title) + q.titles).filter { it.isNotEmpty() }.distinct()
         val year = info?.year?.toIntOrNull() ?: q.year
         return memo("bgm|" + listOf(titles.firstOrNull(), year, q.season, q.episode).joinToString("|")) {
@@ -103,13 +103,8 @@ object MetaRepository {
         }
     }
 
-    /** 海报墙同时查在线海报的数量：豆瓣请求太密会被限流 */
     private val posterGate = kotlinx.coroutines.sync.Semaphore(2)
 
-    /**
-     * 媒体服务器没有海报（或加载失败）的条目，到网上找一张：有 TMDB Key 先查 TMDB（服务器给了 TMDB 编号时最准），
-     * 再查豆瓣。单集不查（截图是横的，海报对不上）。找不到返回 null。
-     */
     suspend fun poster(settings: AppSettings, item: RemoteItem): String? {
         val kind = item.meta?.kind
         if (!settings.metaOnline || kind == "episode" || item.meta?.title == null) return null
@@ -122,7 +117,6 @@ object MetaRepository {
 
     private fun prefs(context: Context) = context.getSharedPreferences("meta_overrides", Context.MODE_PRIVATE)
 
-    /** 用户在「重新匹配」里填的片名和年份。 */
     fun override(context: Context, fileKey: String): Pair<String, Int?>? =
         prefs(context).getString(fileKey, null)?.let { v -> v.substringBefore('\n') to v.substringAfter('\n', "").toIntOrNull() }
 
@@ -134,7 +128,6 @@ object MetaRepository {
 
     private fun offPrefs(context: Context) = context.getSharedPreferences("meta_disabled", Context.MODE_PRIVATE)
 
-    /** 这个视频关掉了在线识别（不是电影电视剧，匹配出来的是错的）：不查简介、封面，用视频自己的画面 */
     fun isDisabled(context: Context, fileKey: String): Boolean = offPrefs(context).getBoolean(fileKey, false)
 
     fun setDisabled(context: Context, fileKey: String, disabled: Boolean) {
@@ -142,11 +135,9 @@ object MetaRepository {
         disabledVersion++
     }
 
-    /** 改过单个视频的识别开关就加一，界面（首页继续观看）据此重新判断 */
     var disabledVersion by androidx.compose.runtime.mutableIntStateOf(0)
         private set
 
-    /** 这个视频要不要到网上识别：总开关开着、并且没单独关掉 */
     fun onlineAllowed(context: Context, settings: AppSettings, fileKey: String): Boolean =
         settings.metaOnline && !isDisabled(context, fileKey)
 }
