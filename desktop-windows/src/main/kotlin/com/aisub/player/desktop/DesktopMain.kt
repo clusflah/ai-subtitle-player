@@ -14,9 +14,12 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -24,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -31,8 +35,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -43,6 +49,8 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -50,10 +58,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Tray
+import androidx.compose.ui.window.DialogWindow
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
+import androidx.compose.ui.window.rememberDialogState
 import androidx.compose.ui.window.rememberWindowState
 import androidx.lifecycle.DesktopLifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -74,18 +83,36 @@ import com.sun.jna.Library
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.platform.win32.Advapi32Util
+import com.sun.jna.platform.win32.User32
+import com.sun.jna.platform.win32.WinDef
 import com.sun.jna.platform.win32.WinReg
+import com.sun.jna.platform.win32.WinUser
 import com.sun.jna.ptr.IntByReference
 import kotlinx.coroutines.delay
+import java.awt.Font
+import java.awt.GraphicsEnvironment
+import java.awt.MouseInfo
+import java.awt.Point
+import java.awt.Rectangle
 import java.awt.RenderingHints
+import java.awt.SystemTray
+import java.awt.Toolkit
+import java.awt.TrayIcon
 import java.awt.datatransfer.DataFlavor
 import java.awt.dnd.DnDConstants
 import java.awt.dnd.DropTarget
 import java.awt.dnd.DropTargetAdapter
 import java.awt.dnd.DropTargetDropEvent
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
+import java.awt.event.WindowEvent
+import java.awt.event.WindowFocusListener
 import java.awt.image.BufferedImage
 import java.io.File
+import javax.swing.SwingUtilities
 import javax.swing.UIManager
+import javax.swing.plaf.FontUIResource
+import kotlin.math.roundToInt
 
 object DesktopAppRestarter {
     @Volatile
@@ -170,6 +197,328 @@ private fun applyWindowDarkTitleBar(window: java.awt.Window, dark: Boolean) {
     }
 }
 
+private fun ensureSwingCjkFallbackFont() {
+    runCatching {
+        val probe = UIManager.getFont("MenuItem.font") ?: UIManager.getFont("Label.font") ?: return
+        if (probe.canDisplay('中')) return
+        val families = GraphicsEnvironment.getLocalGraphicsEnvironment().availableFontFamilyNames.toSet()
+        val chosen = listOf("Microsoft YaHei UI", "Microsoft YaHei", "SimSun", Font.DIALOG)
+            .firstOrNull { it in families || it == Font.DIALOG } ?: return
+        val defaults = UIManager.getLookAndFeelDefaults()
+        for (key in defaults.keys.toList()) {
+            val f = defaults[key] as? Font ?: continue
+            if (!f.canDisplay('中')) {
+                UIManager.put(key, FontUIResource(Font(chosen, f.style, f.size)))
+            }
+        }
+    }
+}
+
+internal fun computeTrayMenuPosition(
+    anchorX: Int,
+    anchorY: Int,
+    menuWidth: Int,
+    menuHeight: Int,
+    workArea: Rectangle,
+    margin: Int = 8,
+): Point {
+    val minX = workArea.x + margin
+    val maxX = (workArea.x + workArea.width - menuWidth - margin).coerceAtLeast(minX)
+    val x = (anchorX - menuWidth / 2).coerceIn(minX, maxX)
+
+    val minY = workArea.y + margin
+    val maxY = (workArea.y + workArea.height - menuHeight - margin).coerceAtLeast(minY)
+    val aboveY = anchorY - menuHeight - 6
+    val rawY = if (aboveY >= minY) aboveY else anchorY + 6
+    val y = rawY.coerceIn(minY, maxY)
+    return Point(x, y)
+}
+
+private fun configureTrayPopupWindow(window: java.awt.Window) {
+    runCatching {
+        val ptr = Native.getComponentPointer(window) ?: return
+        val hwnd = WinDef.HWND(ptr)
+        val user32 = User32.INSTANCE
+        val exStyle = user32.GetWindowLong(hwnd, WinUser.GWL_EXSTYLE)
+        // WS_EX_TOOLWINDOW (0x80) 隐藏任务栏与 Alt+Tab 图标；清除 WS_EX_APPWINDOW (0x40000)
+        val nextStyle = (exStyle or 0x00000080) and 0x00040000.inv()
+        if (nextStyle != exStyle) {
+            user32.SetWindowLong(hwnd, WinUser.GWL_EXSTYLE, nextStyle)
+        }
+        user32.SetForegroundWindow(hwnd)
+    }
+}
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun DesktopSystemTray(
+    appIcon: BufferedImage,
+    darkTheme: Boolean,
+    showFloatingSubtitles: Boolean,
+    clickThrough: Boolean,
+    onShowMainWindow: () -> Unit,
+    onToggleFloatingSubtitles: () -> Unit,
+    onDisableClickThrough: () -> Unit,
+    onExit: () -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    var menuAnchorX by remember { mutableStateOf(0) }
+    var menuAnchorY by remember { mutableStateOf(0) }
+    var menuWorkArea by remember { mutableStateOf(Rectangle(0, 0, 1920, 1080)) }
+    var menuOpenNonce by remember { mutableStateOf(0) }
+
+    val currentOnShowMainWindow by rememberUpdatedState(onShowMainWindow)
+
+    DisposableEffect(appIcon) {
+        if (!SystemTray.isSupported()) {
+            return@DisposableEffect onDispose {}
+        }
+        // 使用无原生 PopupMenu 的 TrayIcon，避免 Windows UTF-8 环境下 AWT 菜单把中文渲染成方框
+        val trayIcon = TrayIcon(appIcon, "译幕 Voxtitle (Windows)").apply {
+            isImageAutoSize = true
+        }
+        trayIcon.addActionListener {
+            SwingUtilities.invokeLater {
+                menuOpen = false
+                currentOnShowMainWindow()
+            }
+        }
+        trayIcon.addMouseListener(
+            object : MouseAdapter() {
+                override fun mouseReleased(e: MouseEvent) {
+                    if (e.button == MouseEvent.BUTTON3 || e.isPopupTrigger) {
+                        val pointer = runCatching { MouseInfo.getPointerInfo() }.getOrNull()
+                        val gc = pointer?.device?.defaultConfiguration
+                            ?: GraphicsEnvironment.getLocalGraphicsEnvironment().defaultScreenDevice.defaultConfiguration
+                        val pt = pointer?.location ?: run {
+                            val sx = gc.defaultTransform.scaleX.coerceAtLeast(1.0)
+                            val sy = gc.defaultTransform.scaleY.coerceAtLeast(1.0)
+                            Point((e.xOnScreen / sx).roundToInt(), (e.yOnScreen / sy).roundToInt())
+                        }
+                        val bounds = gc.bounds
+                        val insets = Toolkit.getDefaultToolkit().getScreenInsets(gc)
+                        val work = Rectangle(
+                            bounds.x + insets.left,
+                            bounds.y + insets.top,
+                            (bounds.width - insets.left - insets.right).coerceAtLeast(240),
+                            (bounds.height - insets.top - insets.bottom).coerceAtLeast(240),
+                        )
+                        SwingUtilities.invokeLater {
+                            menuAnchorX = pt.x
+                            menuAnchorY = pt.y
+                            menuWorkArea = work
+                            menuOpenNonce++
+                            menuOpen = true
+                        }
+                    } else if (e.button == MouseEvent.BUTTON1) {
+                        SwingUtilities.invokeLater {
+                            if (menuOpen) {
+                                menuOpen = false
+                            } else {
+                                currentOnShowMainWindow()
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        val systemTray = runCatching { SystemTray.getSystemTray() }.getOrNull()
+        val added = systemTray != null && runCatching { systemTray.add(trayIcon) }.isSuccess
+        onDispose {
+            if (added) {
+                runCatching { systemTray.remove(trayIcon) }
+            }
+        }
+    }
+
+    if (menuOpen) {
+        val hasClickThrough = showFloatingSubtitles && clickThrough
+        val menuWidthDp = 216
+        val menuHeightDp = if (hasClickThrough) 192 else 154
+        val pos = computeTrayMenuPosition(menuAnchorX, menuAnchorY, menuWidthDp, menuHeightDp, menuWorkArea)
+        val dialogState = rememberDialogState(
+            position = WindowPosition(pos.x.dp, pos.y.dp),
+            size = DpSize(menuWidthDp.dp, menuHeightDp.dp),
+        )
+        LaunchedEffect(pos, menuWidthDp, menuHeightDp, menuOpenNonce) {
+            dialogState.size = DpSize(menuWidthDp.dp, menuHeightDp.dp)
+            dialogState.position = WindowPosition(pos.x.dp, pos.y.dp)
+        }
+
+        DialogWindow(
+            onCloseRequest = { menuOpen = false },
+            state = dialogState,
+            title = "译幕菜单",
+            undecorated = true,
+            transparent = true,
+            resizable = false,
+            focusable = true,
+            alwaysOnTop = true,
+            onPreviewKeyEvent = { ev ->
+                if (ev.type == KeyEventType.KeyDown && ev.key == Key.Escape) {
+                    menuOpen = false
+                    true
+                } else {
+                    false
+                }
+            },
+        ) {
+            DisposableEffect(window) {
+                var focusArmed = false
+                val focusListener = object : WindowFocusListener {
+                    override fun windowGainedFocus(e: WindowEvent?) {
+                        focusArmed = true
+                    }
+
+                    override fun windowLostFocus(e: WindowEvent?) {
+                        if (focusArmed) menuOpen = false
+                    }
+                }
+                window.addWindowFocusListener(focusListener)
+                SwingUtilities.invokeLater {
+                    configureTrayPopupWindow(window)
+                    window.toFront()
+                    window.requestFocus()
+                }
+                onDispose {
+                    window.removeWindowFocusListener(focusListener)
+                }
+            }
+
+            LaunchedEffect(window, menuOpenNonce) {
+                delay(180L)
+                configureTrayPopupWindow(window)
+                while (true) {
+                    val down = runCatching {
+                        (User32.INSTANCE.GetAsyncKeyState(0x01).toInt() and 0x8000) != 0 ||
+                            (User32.INSTANCE.GetAsyncKeyState(0x02).toInt() and 0x8000) != 0
+                    }.getOrDefault(false)
+                    if (down) {
+                        val p = runCatching { MouseInfo.getPointerInfo()?.location }.getOrNull()
+                        if (p != null && !window.bounds.contains(p)) {
+                            menuOpen = false
+                            break
+                        }
+                    }
+                    delay(40L)
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(6.dp),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    shadowElevation = 8.dp,
+                    color = if (darkTheme) Color(0xFF22242E) else Color(0xFFFCFCFD),
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        if (darkTheme) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.10f),
+                    ),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                    ) {
+                        TrayMenuItemRow(
+                            label = "显示主窗口",
+                            darkTheme = darkTheme,
+                            onClick = {
+                                menuOpen = false
+                                onShowMainWindow()
+                            },
+                        )
+                        TrayMenuItemRow(
+                            label = if (showFloatingSubtitles) "关闭桌面全局字幕" else "开启桌面全局字幕",
+                            darkTheme = darkTheme,
+                            onClick = {
+                                menuOpen = false
+                                onToggleFloatingSubtitles()
+                            },
+                        )
+                        if (hasClickThrough) {
+                            TrayMenuItemRow(
+                                label = "解除字幕鼠标穿透",
+                                darkTheme = darkTheme,
+                                onClick = {
+                                    menuOpen = false
+                                    onDisableClickThrough()
+                                },
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                                .height(1.dp)
+                                .background(
+                                    if (darkTheme) Color.White.copy(alpha = 0.10f)
+                                    else Color.Black.copy(alpha = 0.08f),
+                                ),
+                        )
+                        TrayMenuItemRow(
+                            label = "退出译幕",
+                            isDestructive = true,
+                            darkTheme = darkTheme,
+                            onClick = {
+                                menuOpen = false
+                                onExit()
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun TrayMenuItemRow(
+    label: String,
+    isDestructive: Boolean = false,
+    darkTheme: Boolean,
+    onClick: () -> Unit,
+) {
+    var hovered by remember { mutableStateOf(false) }
+    val hoverBg = if (darkTheme) {
+        Color.White.copy(alpha = 0.10f)
+    } else {
+        Color.Black.copy(alpha = 0.06f)
+    }
+    val textColor = when {
+        isDestructive && hovered -> if (darkTheme) Color(0xFFFF7B72) else Color(0xFFD32F2F)
+        isDestructive -> if (darkTheme) Color(0xFFFF9B93) else Color(0xFFC62828)
+        darkTheme -> Color(0xFFF3F4F8)
+        else -> Color(0xFF1A1C24)
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 6.dp)
+            .height(36.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (hovered) hoverBg else Color.Transparent)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = label,
+            fontSize = 13.5.sp,
+            fontWeight = FontWeight.Medium,
+            color = textColor,
+            maxLines = 1,
+        )
+    }
+}
+
 fun main(args: Array<String>) {
     runCatching {
         System.setProperty("jna.encoding", "UTF-8")
@@ -177,6 +526,7 @@ fun main(args: Array<String>) {
             System.setProperty("skiko.renderApi", "OPENGL")
         }
         UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName())
+        ensureSwingCjkFallbackFont()
     }
 
     val voxApp = VoxtitleApp()
@@ -222,6 +572,44 @@ fun main(args: Array<String>) {
             position = WindowPosition(Alignment.Center),
         )
         val iconPainter = remember { BitmapPainter(appIcon.toComposeImageBitmap()) }
+        var mainAwtWindow by remember { mutableStateOf<java.awt.Window?>(null) }
+        val restoreMainWindow: () -> Unit = {
+            showMainWindow = true
+            windowState.isMinimized = false
+            mainAwtWindow?.toFront()
+        }
+
+        var toastMessage by remember { mutableStateOf<String?>(null) }
+        var winSystemDark by remember { mutableStateOf(queryWindowsDarkTheme()) }
+        val settingsPrefs = remember { voxApp.getSharedPreferences("settings", 0) }
+        var savedDarkMode by remember {
+            mutableStateOf(
+                runCatching {
+                    AppDarkMode.valueOf(settingsPrefs.getString("appDarkMode", AppDarkMode.SYSTEM.name)!!)
+                }.getOrDefault(AppDarkMode.SYSTEM),
+            )
+        }
+        var savedLiquidGlass by remember {
+            mutableStateOf(settingsPrefs.getBoolean("liquidGlass", false))
+        }
+        LaunchedEffect(Unit) {
+            var tick = 0
+            while (true) {
+                toastMessage = Toast.currentMessage
+                val rawMode = settingsPrefs.getString("appDarkMode", null)
+                savedDarkMode = when {
+                    rawMode != null -> runCatching { AppDarkMode.valueOf(rawMode) }.getOrDefault(AppDarkMode.SYSTEM)
+                    settingsPrefs.getString("appBackground", null) == "DARK" -> AppDarkMode.DARK
+                    else -> AppDarkMode.SYSTEM
+                }
+                savedLiquidGlass = settingsPrefs.getBoolean("liquidGlass", false)
+                if (tick++ % 6 == 0) {
+                    winSystemDark = queryWindowsDarkTheme()
+                }
+                delay(150)
+            }
+        }
+        val windowDark = savedDarkMode.isDarkResolved(winSystemDark)
 
         DisposableEffect(Unit) {
             DesktopAppRestarter.onRestart = {
@@ -245,32 +633,26 @@ fun main(args: Array<String>) {
             }
         }
 
-        // Windows 系统托盘图标与快捷菜单
-        Tray(
-            icon = iconPainter,
-            tooltip = "译幕 Voxtitle (Windows)",
-            onAction = { showMainWindow = true },
-            menu = {
-                Item("显示主窗口") { showMainWindow = true }
-                Item(if (showFloatingSubtitles) "关闭桌面全局字幕" else "开启桌面全局字幕") {
-                    if (showFloatingSubtitles) {
-                        liveTranscriber.stop()
-                        showFloatingSubtitles = false
-                    } else {
-                        showFloatingSubtitles = true
-                    }
-                }
-                if (showFloatingSubtitles && floatingState.clickThrough) {
-                    Item("解除字幕鼠标穿透") {
-                        liveTranscriber.setClickThrough(false)
-                    }
-                }
-                Separator()
-                Item("退出译幕") {
+        // Windows 系统托盘图标与自定义 Compose 菜单
+        DesktopSystemTray(
+            appIcon = appIcon,
+            darkTheme = windowDark,
+            showFloatingSubtitles = showFloatingSubtitles,
+            clickThrough = floatingState.clickThrough,
+            onShowMainWindow = restoreMainWindow,
+            onToggleFloatingSubtitles = {
+                if (showFloatingSubtitles) {
                     liveTranscriber.stop()
-                    activeActivity.dispatchOnStop()
-                    exitApplication()
+                    showFloatingSubtitles = false
+                } else {
+                    showFloatingSubtitles = true
                 }
+            },
+            onDisableClickThrough = { liveTranscriber.setClickThrough(false) },
+            onExit = {
+                liveTranscriber.stop()
+                activeActivity.dispatchOnStop()
+                exitApplication()
             },
         )
 
@@ -307,6 +689,7 @@ fun main(args: Array<String>) {
             ) {
                 // 支持把本地视频、音频、漫画压缩包、PDF、电子书或视频网址直接拖进窗口打开
                 DisposableEffect(window) {
+                    mainAwtWindow = window
                     val dropTarget = DropTarget(
                         window,
                         DnDConstants.ACTION_COPY,
@@ -336,7 +719,10 @@ fun main(args: Array<String>) {
                         },
                     )
                     window.dropTarget = dropTarget
-                    onDispose { window.dropTarget = null }
+                    onDispose {
+                        window.dropTarget = null
+                        if (mainAwtWindow === window) mainAwtWindow = null
+                    }
                 }
 
                 val density = LocalDensity.current
@@ -351,37 +737,6 @@ fun main(args: Array<String>) {
                     )
                 }
 
-                var toastMessage by remember { mutableStateOf<String?>(null) }
-                var winSystemDark by remember { mutableStateOf(queryWindowsDarkTheme()) }
-                val settingsPrefs = remember { voxApp.getSharedPreferences("settings", 0) }
-                var savedDarkMode by remember {
-                    mutableStateOf(
-                        runCatching {
-                            AppDarkMode.valueOf(settingsPrefs.getString("appDarkMode", AppDarkMode.SYSTEM.name)!!)
-                        }.getOrDefault(AppDarkMode.SYSTEM),
-                    )
-                }
-                var savedLiquidGlass by remember {
-                    mutableStateOf(settingsPrefs.getBoolean("liquidGlass", false))
-                }
-                LaunchedEffect(Unit) {
-                    var tick = 0
-                    while (true) {
-                        toastMessage = Toast.currentMessage
-                        val rawMode = settingsPrefs.getString("appDarkMode", null)
-                        savedDarkMode = when {
-                            rawMode != null -> runCatching { AppDarkMode.valueOf(rawMode) }.getOrDefault(AppDarkMode.SYSTEM)
-                            settingsPrefs.getString("appBackground", null) == "DARK" -> AppDarkMode.DARK
-                            else -> AppDarkMode.SYSTEM
-                        }
-                        savedLiquidGlass = settingsPrefs.getBoolean("liquidGlass", false)
-                        if (tick++ % 6 == 0) {
-                            winSystemDark = queryWindowsDarkTheme()
-                        }
-                        delay(150)
-                    }
-                }
-                val windowDark = savedDarkMode.isDarkResolved(winSystemDark)
                 LaunchedEffect(window, windowDark) {
                     applyWindowDarkTitleBar(window, windowDark)
                 }
