@@ -444,6 +444,10 @@
   /** App 要求从头识别（换了视频语言）的次数：变了就把还留着数据的段重新解码送一遍 */
   var generation = -1;
 
+  function isConnected(n) {
+    return !!n && (n.isConnected !== undefined ? n.isConnected : !!(document.documentElement && document.documentElement.contains(n)));
+  }
+
   function tick() {
     var was = enabled;
     try { enabled = B.enabled(); } catch (e) { return; }
@@ -465,7 +469,7 @@
     }
     var v = pick();
     if (!v) {
-      if (active && (active.paused || !active.isConnected)) {
+      if (active && (active.paused || !isConnected(active))) {
         report(active, true);
       }
       return;
@@ -501,7 +505,7 @@
   function report(v, paused) {
     // 顶层页面里的视频报告它在屏幕上的位置（CSS 像素），App 把字幕放在视频下沿；iframe 里的算不出相对整页的位置
     var top = -1, bottom = -1;
-    if (window === window.top && !document.fullscreenElement && v.isConnected) {
+    if (window === window.top && !(document.fullscreenElement || document.webkitFullscreenElement) && isConnected(v)) {
       var r = v.getBoundingClientRect();
       top = r.top; bottom = r.bottom;
     }

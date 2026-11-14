@@ -211,7 +211,7 @@ object MusicLookup {
         .replace(Regex("""[(（\[【].*?[)）\]】]"""), "")
         .replace(Regex("""[\s\p{P}\p{S}]"""), "")
 
-    internal fun hasHan(s: String) = s.codePoints().anyMatch { Character.UnicodeScript.of(it) == Character.UnicodeScript.HAN }
+    internal fun hasHan(s: String) = com.aisub.player.util.UnicodeCompat.containsHan(s)
 
     private fun JSONArray?.objects(): List<JSONObject> =
         if (this == null) emptyList() else List(length()) { optJSONObject(it) }.filterNotNull()

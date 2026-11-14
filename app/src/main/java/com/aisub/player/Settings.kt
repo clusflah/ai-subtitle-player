@@ -151,7 +151,7 @@ data class AppSettings(
     /** 下载版：链接下载的最高分辨率，0 为不限 */
     val dlQuality: Int = 1080,
     /** 下载版：平台没有字幕时自动 AI 识别 */
-    val dlAutoAsr: Boolean = true,
+    val dlAutoAsr: Boolean = false,
     /** 中文译文的每个字上方标注拼音 */
     val showPinyin: Boolean = false,
     /** 播放时跟随字幕时间朗读译文 */
@@ -198,7 +198,7 @@ data class AppSettings(
     /** 主界面背景方案、深色模式策略与液态玻璃效果开关 */
     val appBackground: AppBackground = AppBackground.AURORA_GRAY_WHITE_GRADIENT,
     val appDarkMode: AppDarkMode = AppDarkMode.SYSTEM,
-    val liquidGlass: Boolean = true,
+    val liquidGlass: Boolean = false,
 ) {
     /** 某个服务商的配置，未填的字段用默认值补齐。 */
     fun configOf(p: Provider): ProviderConfig {

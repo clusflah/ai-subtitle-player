@@ -10,3 +10,4 @@ dist/
 keystore/
 *.jks
 *.keystore
+**/.cxx/

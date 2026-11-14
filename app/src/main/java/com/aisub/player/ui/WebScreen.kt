@@ -142,7 +142,7 @@ private val TV_ACTIVE_JS = """
 
 /** 电视上网页全屏时遥控器控制视频：确认键暂停 / 继续，左右键快退 / 快进 10 秒 */
 private fun tvMediaJs(action: String) = """
-    (function(){var v=null,a=0;document.querySelectorAll('video').forEach(function(e){var r=e.getBoundingClientRect(),s=r.width*r.height;if(s>a){a=s;v=e}});
+    (function(){var v=null,a=0,vs=document.querySelectorAll('video');for(var i=0;i<vs.length;i++){var e=vs[i],r=e.getBoundingClientRect(),s=r.width*r.height;if(s>a){a=s;v=e}}
     if(!v)return;var f=document.fullscreenElement||document.webkitFullscreenElement;if(f&&f!==v&&!f.contains(v)&&f.querySelector('video'))v=f.querySelector('video');
     ${TV_ACTIVE_JS.replace("\n", "")};
     if('$action'==='toggle'){if(v.paused)v.play();else v.pause()}
@@ -396,7 +396,7 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
         onDispose {
             // 用进入时的值判断：到这里时 fullscreen 已经是 null 了
             if (inFullscreen && window != null) {
-                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                activity.restorePortraitIfPhone()
                 WindowCompat.getInsetsController(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
             }
         }
@@ -428,7 +428,9 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             runCatching { cm?.registerDefaultNetworkCallback(callback) }
         } else {
             runCatching {
-                val req = android.net.NetworkRequest.Builder().build()
+                val req = android.net.NetworkRequest.Builder()
+                    .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build()
                 cm?.registerNetworkCallback(req, callback)
             }
         }
@@ -516,15 +518,15 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                     "var t=up(document.elementFromPoint(fx*innerWidth,fy*innerHeight))||up(document.elementFromPoint(innerWidth/2,innerHeight/2));" +
                     "if(!t){var se=document.scrollingElement||document.documentElement;" +
                     "var win=dy?(dy>0?innerHeight+scrollY<se.scrollHeight-1:scrollY>0):(dx>0?innerWidth+scrollX<se.scrollWidth-1:scrollX>0);" +
-                    "if(!win){var area=0;document.querySelectorAll('body *').forEach(function(e){if(e.clientHeight<40||!can(e))return;" +
+                    "if(!win){var area=0,els=document.querySelectorAll('body *');for(var i=0;i<els.length;i++){var e=els[i];if(e.clientHeight<40||!can(e))continue;" +
                     "var r=e.getBoundingClientRect(),a=Math.max(0,Math.min(r.right,innerWidth)-Math.max(r.left,0))*Math.max(0,Math.min(r.bottom,innerHeight)-Math.max(r.top,0));" +
-                    "if(a>area){area=a;t=e}})}" +
+                    "if(a>area){area=a;t=e}}}" +
                     // 什么都滚不动、但有元素超出画面（比如比电视屏幕还高的固定弹窗，下面的按钮点不到）：把它整个挪上来 / 挪下去
-                    "if(!t&&!win&&dy){var best=null;[[fx,fy],[0.5,0.5]].some(function(p){var e=document.elementFromPoint(p[0]*innerWidth,p[1]*innerHeight);" +
-                    "while(e&&e!==document.body&&e!==document.documentElement){var r=e.getBoundingClientRect();if(dy>0?r.bottom>innerHeight+1:r.top<-1)best=e;e=e.parentElement}return best});" +
+                    "if(!t&&!win&&dy){var best=null,pts=[[fx,fy],[0.5,0.5]];for(var pi=0;pi<pts.length;pi++){var e=document.elementFromPoint(pts[pi][0]*innerWidth,pts[pi][1]*innerHeight);" +
+                    "while(e&&e!==document.body&&e!==document.documentElement){var r=e.getBoundingClientRect();if(dy>0?r.bottom>innerHeight+1:r.top<-1)best=e;e=e.parentElement}if(best)break}" +
                     "if(best){var r=best.getBoundingClientRect(),d=dy>0?-Math.min(dy,r.bottom-innerHeight+16):Math.min(-dy,16-r.top);" +
-                    "var cur=parseFloat(best.dataset.aisubShift||'0')+d;best.dataset.aisubShift=cur;best.style.transition='translate .2s';best.style.translate='0 '+cur+'px';return}}}" +
-                    "(t||window).scrollBy({left:dx,top:dy,behavior:'smooth'})})" +
+                    "var cur=parseFloat(best.getAttribute('data-aisub-shift')||'0')+d;best.setAttribute('data-aisub-shift',cur);best.style.transition='transform .2s';best.style.transform='translateY('+cur+'px)';return}}}" +
+                    "try{(t||window).scrollBy({left:dx,top:dy,behavior:'smooth'})}catch(e){if(t){t.scrollLeft+=dx;t.scrollTop+=dy}else window.scrollBy(dx,dy)}})" +
                     "(${c.x / w.width},${c.y / w.height},${if (overX) dx else 0},${if (overY) dy else 0})",
                 null,
             )
@@ -595,33 +597,32 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
             }
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             addJavascriptInterface(vm.Bridge({ t.active }, t.manga) { url -> post { blockedPopup(url) } }, "VoxBridge")
-            val startScript = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
-            if (startScript) {
+            val startScript = if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 WebViewCompat.addDocumentStartJavaScript(this, script, setOf("*"))
                 WebViewCompat.addDocumentStartJavaScript(this, cleanScript, setOf("*"))
                 WebViewCompat.addDocumentStartJavaScript(this, mangaScript, setOf("*"))
                 WebViewCompat.addDocumentStartJavaScript(this, guardScript, setOf("*"))
-            }
+                true
+            } else false
             webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                private fun handleOverride(view: WebView, rawUrl: String, isMainFrame: Boolean, isRedirect: Boolean): Boolean {
                     // 「打开 App」之类的跳转（bilibili://、intent://）不处理，留在网页里
-                    val scheme = request.url.scheme?.lowercase()
+                    val scheme = Uri.parse(rawUrl).scheme?.lowercase()
                     if (scheme != "http" && scheme != "https") return true
                     // 网页脚本把整页带去另一个网站（点一下就跳广告、看着看着自己跳走）：拦下，底部提示可以「仍然打开」。
                     // 点的就是指向那个网站的链接、刚打开网页时的跳转（「正在跳转」页）、服务器重定向照常
-                    if (request.isForMainFrame && !request.isRedirect && t.webView === view) {
-                        val target = request.url.toString()
+                    if (isMainFrame && !isRedirect && t.webView === view) {
                         val page = t.pageUrl
-                        if (page != null && page.startsWith("http") && !sameSite(target, page)) {
+                        if (page != null && page.startsWith("http") && !sameSite(rawUrl, page)) {
                             val now = android.os.SystemClock.uptimeMillis()
                             val tapped = now - t.tappedAt < 3_000
                             val link = t.recentLink()
                             // 网页刚打开两秒内的跳转（「正在跳转」页、搜索结果的中转页）照常
                             val age = now - t.startedAt
-                            val hijack = age > 2_000 && if (tapped) link == null || !sameSite(target, link) else age > 5_000
+                            val hijack = age > 2_000 && if (tapped) link == null || !sameSite(rawUrl, link) else age > 5_000
                             if (hijack) {
                                 t.tappedLink = null
-                                blockedPopup(target)
+                                blockedPopup(rawUrl)
                                 // 点的是本站链接却被带走：照常打开点的那个
                                 if (link != null && sameSite(link, page) && (link.startsWith("http://") || link.startsWith("https://"))) view.loadUrl(link)
                                 return true
@@ -629,14 +630,24 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                         }
                     }
                     // 去的网站要换手机版、桌面版：换好再打开
-                    if (request.isForMainFrame && view.agentFor(request.url.toString())) {
-                        view.loadUrl(request.url.toString())
+                    if (isMainFrame && view.agentFor(rawUrl)) {
+                        view.loadUrl(rawUrl)
                         return true
                     }
                     return false
                 }
 
+                @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.N)
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
+                    handleOverride(view, request.url.toString(), request.isForMainFrame, request.isRedirect)
+
+                @Deprecated("Deprecated in Java")
+                @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+                override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean =
+                    handleOverride(view, url, isMainFrame = true, isRedirect = false)
+
                 // 网页进程崩了（有的广告页会把它搞崩）：不处理的话整个 App 会被系统杀掉。换一个新网页重新打开
+                @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.O)
                 override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
                     (view.parent as? ViewGroup)?.removeView(view)
                     if (t.webView === view) {
@@ -727,13 +738,20 @@ fun WebScreen(main: MainViewModel, onBack: () -> Unit, play: (List<MediaEntry>, 
                         return true
                     }
                     temp.webViewClient = object : WebViewClient() {
+                        @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.N)
                         override fun shouldOverrideUrlLoading(v: WebView, request: WebResourceRequest): Boolean =
                             decide(request.url.toString())
+
+                        @Deprecated("Deprecated in Java")
+                        @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+                        override fun shouldOverrideUrlLoading(v: WebView, url: String): Boolean =
+                            decide(url)
 
                         override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) {
                             if (decide(url)) v.stopLoading()
                         }
 
+                        @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.O)
                         override fun onRenderProcessGone(v: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
                             decided = true
                             v.destroy()
@@ -1772,7 +1790,7 @@ private class WebTab(val id: Long, startUrl: String?) {
 
 /** 切走的标签页：网页里的视频、音乐先停下 */
 private fun pauseMedia(view: WebView) =
-    view.evaluateJavascript("document.querySelectorAll('video,audio').forEach(function(m){try{m.pause()}catch(e){}})", null)
+    view.evaluateJavascript("(function(){var ms=document.querySelectorAll('video,audio');for(var i=0;i<ms.length;i++){try{ms[i].pause()}catch(e){}}})()", null)
 
 /** 标签页列表：点一个切过去，叉号关掉 */
 @Composable

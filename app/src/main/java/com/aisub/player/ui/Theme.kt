@@ -55,7 +55,7 @@ val Orange = Color(0xFFF28C00)
 
 val LocalAppBackground = compositionLocalOf { AppBackground.AURORA_GRAY_WHITE_GRADIENT }
 val LocalAppDarkMode = compositionLocalOf { AppDarkMode.SYSTEM }
-val LocalLiquidGlassEnabled = compositionLocalOf { true }
+val LocalLiquidGlassEnabled = compositionLocalOf { false }
 
 /** 桌面端可注入实时监听的 Windows 系统深色状态；Android 端为 null 时直接使用系统 isSystemInDarkTheme() */
 val LocalSystemDarkOverride = compositionLocalOf<Boolean?> { null }

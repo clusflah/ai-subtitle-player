@@ -66,12 +66,23 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 23
         targetSdk = 36
-        versionCode = 147
-        versionName = "2.9.86"
+        versionCode = 148
+        versionName = "2.9.87"
 
         ndk {
             // 真机基本都是 arm64；x86_64 给模拟器用
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=none")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
         }
     }
 
@@ -125,6 +136,8 @@ android {
         }
         create("ytdlp") {
             dimension = "edition"
+            // 内置的 youtubedl-android 含 Python 3.12 运行时，最低要求 Android 7.0 (API 24)；Android 6.0 使用标准版 standard
+            minSdk = 24
             versionNameSuffix = "-dl"
         }
     }
@@ -150,7 +163,6 @@ android {
             )
         }
         jniLibs {
-            useLegacyPackaging = true
             pickFirsts += "lib/*/libc++_shared.so"
         }
     }
@@ -167,7 +179,7 @@ kotlin {
 }
 
 dependencies {
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.4")
 
     // 语音识别 + VAD（k2-fsa/sherpa-onnx 官方发布的 AAR）
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
@@ -222,8 +234,14 @@ dependencies {
     testImplementation("org.json:json:20240303") // android.jar 里的 org.json 只是空壳
     // 需要真实 Android 类（Html、Bundle 等）的测试，如读取视频内嵌字幕
     testImplementation("org.robolectric:robolectric:4.14.1")
+    // Robolectric 在 JVM 上加载 Conscrypt 时需桌面版 JNI，避免阴影到 android aar 的无 JNI 实现
+    testImplementation("org.conscrypt:conscrypt-openjdk-uber:2.5.2")
     // 流式识别：用本地 WebSocket 服务器模拟各家协议
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+}
+
+configurations.matching { it.name.contains("UnitTest") }.configureEach {
+    exclude(group = "org.conscrypt", module = "conscrypt-android")
 }
 
 androidComponents {

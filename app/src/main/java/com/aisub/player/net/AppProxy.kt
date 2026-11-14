@@ -49,32 +49,62 @@ object AppProxy {
     /** 应用里的 OkHttp 都从这里建：直接用 [selector]，不受系统改默认 ProxySelector 的影响 */
     fun builder(): OkHttpClient.Builder {
         val b = OkHttpClient.Builder().proxySelector(selector)
-        applyCompatSsl(b)
+        compatSsl()?.let { (sf, tm) -> b.sslSocketFactory(sf, tm) }
         return b
     }
 
+    @Volatile
     private var compatSslPair: Pair<javax.net.ssl.SSLSocketFactory, javax.net.ssl.X509TrustManager>? = null
 
-    private fun applyCompatSsl(builder: OkHttpClient.Builder) {
+    /** Android 6/7 兼容：安装 Conscrypt TLS 1.3 并追加现代公共根证书，同时设为全局默认 SSLSocketFactory。 */
+    fun initCompatTls(context: Context) {
         if (android.os.Build.VERSION.SDK_INT > android.os.Build.VERSION_CODES.N_MR1) return
-        val pair = compatSslPair ?: synchronized(this) {
-            compatSslPair ?: runCatching {
-                if (java.security.Security.getProvider(org.conscrypt.Conscrypt.newProvider().name) == null) {
-                    java.security.Security.insertProviderAt(org.conscrypt.Conscrypt.newProvider(), 1)
+        if (compatSslPair != null) return
+        synchronized(this) {
+            if (compatSslPair != null) return
+            runCatching {
+                val newProvider = org.conscrypt.Conscrypt.newProvider()
+                val provider = java.security.Security.getProvider(newProvider.name) ?: newProvider.also {
+                    java.security.Security.insertProviderAt(it, 1)
                 }
                 val cf = java.security.cert.CertificateFactory.getInstance("X.509")
-                val isrgCert = ISRG_ROOT_X1_PEM.byteInputStream().use { cf.generateCertificate(it) as java.security.cert.X509Certificate }
-                val certificates = okhttp3.tls.HandshakeCertificates.Builder()
-                    .addPlatformTrustedCertificates()
-                    .addTrustedCertificate(isrgCert)
+                val certs = context.resources.openRawResource(com.aisub.player.R.raw.compat_ca_roots).use { ins ->
+                    cf.generateCertificates(ins).filterIsInstance<java.security.cert.X509Certificate>()
+                }
+                val hb = okhttp3.tls.HandshakeCertificates.Builder().addPlatformTrustedCertificates()
+                for (cert in certs) hb.addTrustedCertificate(cert)
+                val certificates = hb.build()
+                val sslContext = javax.net.ssl.SSLContext.getInstance("TLS", provider).apply {
+                    init(arrayOf(certificates.keyManager), arrayOf(certificates.trustManager), java.security.SecureRandom())
+                }
+                javax.net.ssl.SSLContext.setDefault(sslContext)
+                javax.net.ssl.HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.socketFactory)
+                compatSslPair = sslContext.socketFactory to certificates.trustManager
+            }.onFailure { android.util.Log.w("Voxtitle", "初始化兼容 TLS 失败", it) }
+        }
+    }
+
+    fun compatSsl(): Pair<javax.net.ssl.SSLSocketFactory, javax.net.ssl.X509TrustManager>? = compatSslPair
+
+    fun currentProxy(): Proxy? = proxy.takeIf { it != Proxy.NO_PROXY }
+
+    /** 兼容 API 23 的默认网络变化监听：统一加 NET_CAPABILITY_INTERNET 与异常保护。 */
+    fun observeDefaultNetwork(context: Context, callback: ConnectivityManager.NetworkCallback) {
+        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return
+        runCatching {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                cm.registerDefaultNetworkCallback(callback)
+            } else {
+                val req = android.net.NetworkRequest.Builder()
+                    .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
                     .build()
-                (certificates.sslSocketFactory() to certificates.trustManager).also { compatSslPair = it }
-            }.getOrNull()
-        } ?: return
-        builder.sslSocketFactory(pair.first, pair.second)
+                cm.registerNetworkCallback(req, callback)
+            }
+        }
     }
 
     fun install(context: Context) {
+        initCompatTls(context)
         ProxySelector.setDefault(selector)
         // 网络切换（WiFi ↔ 移动数据）、系统代理变化时，系统会把每个进程的默认 ProxySelector 换回它自己的
         // （android.net.Proxy.setHttpProxyConfiguration），之后新建的连接就不走这里的代理了。收到变化后装回来；
@@ -86,19 +116,10 @@ object AppProxy {
             main.postDelayed(reinstall, 1000)
             main.postDelayed(reinstall, 5000)
         }
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-            context.getSystemService(ConnectivityManager::class.java)?.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) = later()
-                override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) = later()
-            })
-        } else {
-            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            val req = android.net.NetworkRequest.Builder().build()
-            cm?.registerNetworkCallback(req, object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) = later()
-                override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) = later()
-            })
-        }
+        observeDefaultNetwork(context, object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = later()
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) = later()
+        })
         ContextCompat.registerReceiver(context, object : BroadcastReceiver() {
             override fun onReceive(c: Context, intent: Intent) = later()
         }, IntentFilter(android.net.Proxy.PROXY_CHANGE_ACTION), ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -169,36 +190,3 @@ object AppProxy {
         return p[0] == 127 || p[0] == 10 || (p[0] == 192 && p[1] == 168) || (p[0] == 172 && p[1] in 16..31) || (p[0] == 169 && p[1] == 254)
     }
 }
-
-/** Let's Encrypt ISRG Root X1 根证书（Android 7.1.1 及以下系统未内置，此处嵌入供 Conscrypt / OkHttp-TLS 信任） */
-private const val ISRG_ROOT_X1_PEM = """-----BEGIN CERTIFICATE-----
-MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
-TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
-cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
-WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu
-ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY
-MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygc
-h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+
-0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6U
-A5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sW
-T8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyH
-B5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UC
-B5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUv
-KBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWn
-OlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTn
-jh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbw
-qHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CI
-rU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNV
-HRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkq
-hkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZL
-ubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ
-3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KK
-NFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5
-ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7Ur
-TkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdC
-jNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVc
-oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
-4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA
-mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
-emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
------END CERTIFICATE-----"""

@@ -272,9 +272,14 @@ class NowPlayingWidget : AppWidgetProvider() {
             val openApp = PendingIntent.getActivity(context, 2, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             v.setOnClickPendingIntent(R.id.widget_root, openApp)
             // 没在播放：有听过的歌就直接启动后台播放服务（不经过广播，系统允许小组件这样启动前台服务），没有就打开译幕
+            val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             val play = when {
                 p != null -> broadcast(context, ACTION_TOGGLE, 10)
-                recent != null -> PendingIntent.getForegroundService(context, 13, playIntent(context), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                recent != null -> if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    PendingIntent.getForegroundService(context, 13, playIntent(context), flags)
+                } else {
+                    PendingIntent.getService(context, 13, playIntent(context), flags)
+                }
                 else -> openApp
             }
             v.setOnClickPendingIntent(R.id.widget_play, play)

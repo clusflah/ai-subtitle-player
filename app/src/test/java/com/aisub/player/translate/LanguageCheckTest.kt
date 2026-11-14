@@ -69,4 +69,34 @@ class LanguageCheckTest {
         assertFalse(same("Hello", null))
         assertFalse(same("♪", null))
     }
+
+    @Test
+    fun unicodeCompatMatchesJvmUnicodeScript() {
+        val samples = listOf(
+            "你好漢字𠀀", // 简繁与扩展 B 区生僻字 (U+20000)
+            "あいうアイウｱｲｳ", // 平假名、片假名、半角片假名
+            "안녕하세요ㄱㅏ", // 韩文谚文
+            "HelloCafénaïveＷ", // 拉丁字母、带重音字母、全角拉丁
+            "Приветمرحبا", // 西里尔、阿拉伯文
+            "123♪。、😀", // 数字与符号
+        )
+        for (s in samples) {
+            com.aisub.player.util.UnicodeCompat.forEachCodePoint(s) { cp ->
+                val expected = when (Character.UnicodeScript.of(cp)) {
+                    Character.UnicodeScript.HAN -> com.aisub.player.util.UnicodeCompat.ScriptKind.HAN
+                    Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA ->
+                        com.aisub.player.util.UnicodeCompat.ScriptKind.KANA
+                    Character.UnicodeScript.HANGUL -> com.aisub.player.util.UnicodeCompat.ScriptKind.HANGUL
+                    Character.UnicodeScript.LATIN -> com.aisub.player.util.UnicodeCompat.ScriptKind.LATIN
+                    else -> if (Character.isLetter(cp)) com.aisub.player.util.UnicodeCompat.ScriptKind.OTHER_LETTER
+                    else com.aisub.player.util.UnicodeCompat.ScriptKind.NON_LETTER
+                }
+                assertEquals(
+                    "Mismatch for U+${cp.toString(16)}",
+                    expected,
+                    com.aisub.player.util.UnicodeCompat.scriptOfCompat(cp),
+                )
+            }
+        }
+    }
 }

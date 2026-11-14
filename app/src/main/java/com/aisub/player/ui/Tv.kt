@@ -51,6 +51,17 @@ fun isTvDevice(context: Context): Boolean =
         (com.aisub.player.BuildConfig.DEBUG && java.io.File(context.filesDir, "force_tv").exists())
 
 /**
+ * 手机端退出全屏或离开/恢复播放器时强制切回竖屏，避免从画中画、小窗或横屏退出后再次进入仍停在横屏。
+ * 电视端始终保持系统横向布局，不做竖屏覆盖。
+ */
+fun android.app.Activity.restorePortraitIfPhone() {
+    if (isTvDevice(this)) return
+    if (requestedOrientation != android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT) {
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    }
+}
+
+/**
  * 提供 LocalTv / LocalWideLayout。电视上字号整体放大一点，
  * 获得焦点的按钮、列表项用品牌橙色的明显底色（手机上焦点基本用不到，保持原样）。
  */

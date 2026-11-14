@@ -148,7 +148,7 @@ class AudioDecoder(
                         val f = codec.outputFormat
                         sampleRate = f.getInteger(MediaFormat.KEY_SAMPLE_RATE)
                         channels = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-                        if (f.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N && f.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
                             encoding = f.getInteger(MediaFormat.KEY_PCM_ENCODING)
                         }
                         resampler = LinearResampler(sampleRate, targetRate)

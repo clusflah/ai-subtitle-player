@@ -1,7 +1,8 @@
 package com.aisub.player.subtitle
 
-import android.icu.text.Transliterator
 import android.os.Build
+import androidx.annotation.RequiresApi
+import com.aisub.player.util.UnicodeCompat
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -17,13 +18,10 @@ object Pinyin {
 
     private val cache = ConcurrentHashMap<Int, String>()
 
-    private val transliterator: Transliterator? by lazy {
-        if (available) runCatching { Transliterator.getInstance("Han-Latin") }.getOrNull() else null
-    }
-
-    fun isHan(codePoint: Int) = Character.UnicodeScript.of(codePoint) == Character.UnicodeScript.HAN
+    fun isHan(codePoint: Int): Boolean = UnicodeCompat.isHan(codePoint)
 
     fun segments(text: String): List<Segment> {
+        val ready = available && Icu29.ready
         val out = ArrayList<Segment>()
         val plain = StringBuilder()
         val han = ArrayList<String>()
@@ -32,7 +30,7 @@ object Pinyin {
         }
         fun flushHan() {
             if (han.isEmpty()) return
-            val readings = readings(han)
+            val readings = if (available) Icu29.readings(han) else han.map { null }
             han.forEachIndexed { k, ch -> out += Segment(ch, readings[k]) }
             han.clear()
         }
@@ -40,7 +38,7 @@ object Pinyin {
         while (i < text.length) {
             val cp = text.codePointAt(i)
             val ch = String(Character.toChars(cp))
-            if (isHan(cp) && transliterator != null) {
+            if (isHan(cp) && ready) {
                 flushPlain()
                 han += ch
             } else {
@@ -54,26 +52,35 @@ object Pinyin {
         return out
     }
 
-    /**
-     * 连续的一串汉字整体转换：ICU 对少数词有专门读音（如「重庆」读 chóng），
-     * 结果按空格拆开后和字数对得上就用整体结果，否则逐字转换。
-     */
-    private fun readings(chars: List<String>): List<String?> {
-        val t = transliterator ?: return chars.map { null }
-        if (chars.size > 1) {
-            val whole = synchronized(t) { t.transliterate(chars.joinToString("")) }.trim().split(Regex("\\s+"))
-            if (whole.size == chars.size && whole.none { w -> w.codePoints().anyMatch(::isHan) }) return whole
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private object Icu29 {
+        private val transliterator: android.icu.text.Transliterator? by lazy {
+            runCatching { android.icu.text.Transliterator.getInstance("Han-Latin") }.getOrNull()
         }
-        return chars.map { of(it.codePointAt(0)) }
-    }
 
-    private fun of(codePoint: Int): String? {
-        cache[codePoint]?.let { return it }
-        val t = transliterator ?: return null
-        val py = synchronized(t) { t.transliterate(String(Character.toChars(codePoint))) }.trim()
-        // 没有对应读音时 ICU 会原样返回汉字
-        if (py.isEmpty() || py.codePoints().anyMatch(::isHan)) return null
-        cache[codePoint] = py
-        return py
+        val ready: Boolean get() = transliterator != null
+
+        /**
+         * 连续的一串汉字整体转换：ICU 对少数词有专门读音（如「重庆」读 chóng），
+         * 结果按空格拆开后和字数对得上就用整体结果，否则逐字转换。
+         */
+        fun readings(chars: List<String>): List<String?> {
+            val t = transliterator ?: return chars.map { null }
+            if (chars.size > 1) {
+                val whole = synchronized(t) { t.transliterate(chars.joinToString("")) }.trim().split(Regex("\\s+"))
+                if (whole.size == chars.size && whole.none { UnicodeCompat.containsHan(it) }) return whole
+            }
+            return chars.map { of(it.codePointAt(0)) }
+        }
+
+        private fun of(codePoint: Int): String? {
+            cache[codePoint]?.let { return it }
+            val t = transliterator ?: return null
+            val py = synchronized(t) { t.transliterate(String(Character.toChars(codePoint))) }.trim()
+            // 没有对应读音时 ICU 会原样返回汉字
+            if (py.isEmpty() || UnicodeCompat.containsHan(py)) return null
+            cache[codePoint] = py
+            return py
+        }
     }
 }

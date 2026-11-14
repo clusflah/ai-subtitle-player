@@ -15,6 +15,13 @@ class ClaudeTranslator(apiKey: String, private val model: String) : Translator {
 
     private val client: AnthropicClient = AnthropicOkHttpClient.builder()
         .apiKey(apiKey)
+        .apply {
+            com.aisub.player.net.AppProxy.currentProxy()?.let { proxy(it) }
+            com.aisub.player.net.AppProxy.compatSsl()?.let { (sf, tm) ->
+                sslSocketFactory(sf)
+                trustManager(tm)
+            }
+        }
         .build()
 
     override suspend fun translate(

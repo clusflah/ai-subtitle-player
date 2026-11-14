@@ -87,8 +87,79 @@ object MangaFetcher {
  * 只留最近打开的几个，免得占满空间。
  */
 object MangaArchive {
+    private interface ZipHandle : java.io.Closeable {
+        fun entryNames(): List<String>
+        fun readEntry(name: String, maxBytes: Long = Long.MAX_VALUE): ByteArray?
+    }
+
+    @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.N)
+    private class SystemZipHandle(file: File, charset: java.nio.charset.Charset) : ZipHandle {
+        private val zip = ZipFile(file, charset)
+
+        init {
+            try {
+                // 提前遍历条目，确保 UTF-8 解码失败时抛出异常触发 GBK 回退
+                val entries = zip.entries()
+                while (entries.hasMoreElements()) entries.nextElement().name
+            } catch (t: Throwable) {
+                runCatching { zip.close() }
+                throw t
+            }
+        }
+
+        override fun entryNames(): List<String> =
+            zip.entries().asSequence().filter { !it.isDirectory }.map { it.name }.toList()
+
+        override fun readEntry(name: String, maxBytes: Long): ByteArray? {
+            val e = zip.getEntry(name) ?: return null
+            if (e.size > maxBytes) return null
+            return zip.getInputStream(e).use { it.readBytes() }
+        }
+
+        override fun close() = zip.close()
+    }
+
+    private class CommonsZipHandle(file: File, charset: java.nio.charset.Charset) : ZipHandle {
+        private val zip = org.apache.commons.compress.archivers.zip.ZipFile.builder()
+            .setFile(file)
+            .setCharset(charset)
+            .get()
+
+        init {
+            try {
+                val entries = zip.entries
+                val checkUtf8 = charset == Charsets.UTF_8
+                while (entries.hasMoreElements()) {
+                    val n = entries.nextElement().name
+                    if (checkUtf8 && '\uFFFD' in n) throw IllegalArgumentException("Invalid UTF-8 zip entry")
+                }
+            } catch (t: Throwable) {
+                runCatching { zip.close() }
+                throw t
+            }
+        }
+
+        override fun entryNames(): List<String> {
+            val out = ArrayList<String>()
+            val entries = zip.entries
+            while (entries.hasMoreElements()) {
+                val e = entries.nextElement()
+                if (!e.isDirectory) out += e.name
+            }
+            return out
+        }
+
+        override fun readEntry(name: String, maxBytes: Long): ByteArray? {
+            val e = zip.getEntry(name) ?: return null
+            if (e.size > maxBytes) return null
+            return zip.getInputStream(e).use { it.readBytes() }
+        }
+
+        override fun close() = zip.close()
+    }
+
     private val lock = Mutex()
-    private val open = LinkedHashMap<String, ZipFile>()
+    private val open = LinkedHashMap<String, ZipHandle>()
 
     fun isArchiveName(name: String) = name.substringAfterLast('.', "").lowercase() in setOf("cbz", "zip", "pdf", "epub", "mobi", "azw3", "azw")
 
@@ -170,11 +241,11 @@ object MangaArchive {
             return@withContext records.map { MangaPage(url, entry = "$MOBI$it") }
         }
         val zip = zipFor(url, file)
-        val names = zip.entries().asSequence().filter { !it.isDirectory }.map { it.name }.toList()
+        val names = zip.entryNames()
         // EPUB：按书里的阅读顺序
         val epub = runCatching {
             Epub.imageOrder(names) { name ->
-                zip.getEntry(name)?.takeIf { it.size in 0..(8L * 1024 * 1024) }?.let { e -> zip.getInputStream(e).use { String(it.readBytes(), Charsets.UTF_8) } }
+                zip.readEntry(name, 8L * 1024 * 1024)?.let { String(it, Charsets.UTF_8) }
             }
         }.getOrNull()
         if (epub != null) return@withContext epub.map { MangaPage(url, entry = it) }
@@ -195,17 +266,20 @@ object MangaArchive {
         val zip = zipFor(url, localFile(context, url))
         // ZipFile 可以多线程读，但同一个条目的流要自己读完；加锁省得低端机同时解压太多
         return lock.withLock {
-            val e = zip.getEntry(entry) ?: throw IOException("压缩包里没有 $entry")
-            zip.getInputStream(e).use { it.readBytes() }
+            zip.readEntry(entry) ?: throw IOException("压缩包里没有 $entry")
         }
     }
 
-    private suspend fun zipFor(url: String, file: File): ZipFile = lock.withLock {
+    private fun openZip(file: File, charset: java.nio.charset.Charset): ZipHandle =
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) SystemZipHandle(file, charset)
+        else CommonsZipHandle(file, charset)
+
+    private suspend fun zipFor(url: String, file: File): ZipHandle = lock.withLock {
         open[url] ?: run {
             if (!file.exists()) throw IOException("压缩包不见了，请重新打开")
             // 中文系统上打的包文件名常是 GBK：按 UTF-8 读文件名出错就换 GBK
-            val zip = runCatching { ZipFile(file, Charsets.UTF_8).also { z -> z.entries().asSequence().forEach { it.name } } }
-                .getOrElse { ZipFile(file, charset("GBK")) }
+            val zip = runCatching { openZip(file, Charsets.UTF_8) }
+                .getOrElse { openZip(file, charset("GBK")) }
             open[url] = zip
             // 最多同时开着 3 个
             while (open.size > 3) open.remove(open.keys.first())?.let { runCatching { it.close() } }

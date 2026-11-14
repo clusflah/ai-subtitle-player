@@ -270,9 +270,24 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         }
         onDispose {}
     }
+    LaunchedEffect(Unit) {
+        val a = activity ?: return@LaunchedEffect
+        val inMultiWindow = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && a.isInMultiWindowMode
+        if (!isTvDevice(a) && !PipState.inPip && !inMultiWindow &&
+            (a.requestedOrientation in setOf(
+                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
+                ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE,
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE,
+                ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE,
+            ) || a.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+        ) {
+            a.restorePortraitIfPhone()
+        }
+    }
+
     DisposableEffect(Unit) {
         onDispose {
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            activity?.restorePortraitIfPhone()
             activity?.window?.let { w ->
                 val insets = WindowCompat.getInsetsController(w, w.decorView)
                 insets.show(WindowInsetsCompat.Type.systemBars())
@@ -1075,8 +1090,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
                         ) {
                             targetSlot = 5; pulseTick++
+                            val liveLandscape =
+                                (activity?.resources?.configuration?.orientation ?: view.resources.configuration.orientation) == Configuration.ORIENTATION_LANDSCAPE ||
+                                    view.width > view.height
                             activity?.requestedOrientation =
-                                if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                if (liveLandscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                             interactions++
                         }
                     }

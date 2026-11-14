@@ -33,6 +33,8 @@ import com.aisub.player.ui.TelegramSavedScreen
 import com.aisub.player.ui.LocalOpenDetail
 import com.aisub.player.ui.LocalTv
 import com.aisub.player.ui.ProvideScreenClass
+import com.aisub.player.ui.isTvDevice
+import com.aisub.player.ui.restorePortraitIfPhone
 import androidx.compose.foundation.layout.padding
 import com.aisub.player.ui.toRemoteItem
 import androidx.core.content.ContextCompat
@@ -72,6 +74,16 @@ import com.aisub.player.ui.SettingsScreen
 class MainActivity : ComponentActivity() {
 
     private val main: MainViewModel by viewModels()
+    /** 处于画中画或系统小窗时离开/切后台，待重新回到前台全屏态再补一次竖屏恢复 */
+    private var restorePortraitOnStart = false
+
+    override fun onStart() {
+        super.onStart()
+        if (restorePortraitOnStart && !isInPopoutMode()) {
+            restorePortraitOnStart = false
+            restorePortraitIfPhone()
+        }
+    }
     private val lib: LibraryViewModel by viewModels()
     private val nav = Navigator()
 
@@ -84,9 +96,12 @@ class MainActivity : ComponentActivity() {
             arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
 
-    private fun hasMediaPermission() = mediaPermissions.any {
-        ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-    }
+    private fun hasMediaPermission(): Boolean =
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+            mediaPermissions.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
+        } else {
+            mediaPermissions.any { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -266,16 +281,46 @@ class MainActivity : ComponentActivity() {
         } }
     }
 
+    private fun isInMultiWindowCompat(): Boolean =
+        android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N && isInMultiWindowMode
+
+    private fun isInPopoutMode(): Boolean =
+        PipState.inPip || isInMultiWindowCompat() ||
+            (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N && isInPictureInPictureMode)
+
+    private fun handlePopoutModeChanged(inPopout: Boolean) {
+        if (inPopout) {
+            if (!isTvDevice(this)) restorePortraitOnStart = true
+        } else if (!isInPopoutMode()) {
+            restorePortraitIfPhone()
+            if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                restorePortraitOnStart = false
+            }
+        }
+    }
+
     /** 离开播放页：视频暂停；音乐（开了后台播放时）继续放，底部显示「正在播放」小条。 */
     private fun leavePlayer() {
         if (!main.keepMusicPlayingOutsidePlayer()) main.player.pause()
         main.savePosition()
         lib.reloadStored()
+        if (isInPopoutMode()) {
+            if (!isTvDevice(this)) restorePortraitOnStart = true
+        } else {
+            restorePortraitOnStart = false
+            restorePortraitIfPhone()
+        }
     }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: android.content.res.Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         PipState.inPip = isInPictureInPictureMode
+        handlePopoutModeChanged(isInPictureInPictureMode)
+    }
+
+    override fun onMultiWindowModeChanged(isInMultiWindowMode: Boolean, newConfig: android.content.res.Configuration) {
+        super.onMultiWindowModeChanged(isInMultiWindowMode, newConfig)
+        handlePopoutModeChanged(isInMultiWindowMode)
     }
 
     override fun onNewIntent(intent: Intent) {

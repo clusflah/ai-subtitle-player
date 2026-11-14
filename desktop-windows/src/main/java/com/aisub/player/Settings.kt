@@ -151,7 +151,7 @@ data class AppSettings(
     /** 下载版：链接下载的最高分辨率，0 为不限 */
     val dlQuality: Int = 1080,
     /** 下载版：平台没有字幕时自动 AI 识别 */
-    val dlAutoAsr: Boolean = true,
+    val dlAutoAsr: Boolean = false,
     /** 中文译文的每个字上方标注拼音 */
     val showPinyin: Boolean = false,
     /** 播放时跟随字幕时间朗读译文 */

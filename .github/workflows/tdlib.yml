@@ -36,8 +36,8 @@ jobs:
         run: |
           ./fetch-sdk.sh SDK "$NDK"
           ./build-openssl.sh SDK "$NDK" openssl OpenSSL_1_1_1w
-          # 最低 Android 8（API 26，和 App 一样）；架构和 App 的分包一样
-          ./build-tdlib.sh SDK "$NDK" openssl c++_static Java 26 "arm64-v8a armeabi-v7a x86_64"
+          # 最低 Android 6.0（API 23，和 App 一样）；架构和 App 的分包一样
+          ./build-tdlib.sh SDK "$NDK" openssl c++_static Java 23 "arm64-v8a armeabi-v7a x86_64"
 
       - name: Release
         env:
@@ -52,4 +52,4 @@ jobs:
           echo "$sha  $tag.zip"
           gh release create "$tag" "$tag.zip" --repo "${{ github.repository }}" --prerelease --latest=false \
             --title "TDLib $version (${commit:0:10})" \
-            --notes "从 https://github.com/tdlib/td/commit/$commit 用官方 example/android 脚本编译（NDK $NDK、OpenSSL 1.1.1w、API 26）。App 编译时下载，不是译幕的发布版本。SHA-256: $sha"
+            --notes "从 https://github.com/tdlib/td/commit/$commit 用官方 example/android 脚本编译（NDK $NDK、OpenSSL 1.1.1w、API 23）。App 编译时下载，不是译幕的发布版本。SHA-256: $sha"

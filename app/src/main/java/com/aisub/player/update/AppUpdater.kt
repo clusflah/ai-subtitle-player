@@ -137,7 +137,12 @@ class AppUpdater(
             .setNegativeButton("取消") { _, _ -> cancelled.set(true) }
             .show()
         Thread {
-            val dir = File(activity.cacheDir, DIR).apply { deleteRecursively(); mkdirs() }
+            val baseDir = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                activity.cacheDir
+            } else {
+                activity.externalCacheDir ?: activity.cacheDir
+            }
+            val dir = File(baseDir, DIR).apply { deleteRecursively(); mkdirs() }
             val file = File(dir, rel.fileName)
             val result = runCatching {
                 val conn = URL(rel.url).openConnection() as HttpURLConnection
@@ -146,7 +151,7 @@ class AppUpdater(
                     conn.readTimeout = 30_000
                     conn.instanceFollowRedirects = true
                     if (conn.responseCode !in 200..299) throw java.io.IOException("下载失败 ${conn.responseCode}")
-                    val total = conn.contentLengthLong.takeIf { it > 0 } ?: rel.size
+                    val total = conn.getHeaderField("Content-Length")?.toLongOrNull()?.takeIf { it > 0 } ?: rel.size
                     var done = 0L
                     var shown = -1
                     conn.inputStream.use { ins ->
@@ -172,6 +177,10 @@ class AppUpdater(
                 // 核对包名：下错了（别的 App、别的版本线）就不装
                 val info = activity.packageManager.getPackageArchiveInfo(file.path, 0)
                 if (info?.packageName != activity.packageName) throw IllegalStateException("安装包不是这个 App 的（${info?.packageName ?: "无法读取"}）")
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+                    dir.setExecutable(true, false)
+                    file.setReadable(true, false)
+                }
                 file
             }
             main.post {
@@ -210,11 +219,18 @@ class AppUpdater(
                 .show()
             return
         }
-        val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.update", file)
+        val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            FileProvider.getUriForFile(activity, "${activity.packageName}.update", file)
+        } else {
+            Uri.fromFile(file)
+        }
         runCatching {
             activity.startActivity(Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, "application/vnd.android.package-archive")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
             })
         }.onFailure { Toast.makeText(activity, "无法打开安装程序：${it.message}", Toast.LENGTH_LONG).show() }
     }
@@ -294,7 +310,7 @@ class AppUpdater(
 val appUpdater = AppUpdater(
     repo = "clusflah/ai-subtitle-player",
     pickAsset = { names ->
-        val dl = com.aisub.player.BuildConfig.VERSION_NAME.endsWith("-dl")
+        val dl = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && com.aisub.player.BuildConfig.VERSION_NAME.endsWith("-dl")
         val prefix = if (dl) "Voxtitle-dl-" else "Voxtitle-"
         val ours = names.filter { it.startsWith(prefix) && it.endsWith(".apk") && (dl || !it.startsWith("Voxtitle-dl-")) }
         AppUpdater.abis.firstNotNullOfOrNull { abi -> ours.firstOrNull { it.endsWith("-$abi.apk") } }

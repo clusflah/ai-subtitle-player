@@ -197,13 +197,13 @@ class GeminiStreamingTranscriber(
 
         /** 按字数估一句话说了多久：中日韩一个字约 0.22 秒，其他语言一个词约 0.35 秒 */
         internal fun estimateMs(text: String): Long {
-            val cjk = text.count { Character.UnicodeScript.of(it.code) in CJK }
-            val words = text.filterNot { Character.UnicodeScript.of(it.code) in CJK }.split(Regex("\\s+")).count { it.any(Char::isLetterOrDigit) }
+            var cjk = 0
+            val nonCjk = StringBuilder(text.length)
+            com.aisub.player.util.UnicodeCompat.forEachCodePoint(text) { cp ->
+                if (com.aisub.player.util.UnicodeCompat.isCjk(cp)) cjk++ else nonCjk.appendCodePoint(cp)
+            }
+            val words = nonCjk.toString().split(Regex("\\s+")).count { it.any(Char::isLetterOrDigit) }
             return (cjk * 220L + words * 350L).coerceIn(600L, 10_000L)
         }
-
-        private val CJK = setOf(
-            Character.UnicodeScript.HAN, Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA, Character.UnicodeScript.HANGUL,
-        )
     }
 }

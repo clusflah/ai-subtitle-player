@@ -564,6 +564,7 @@ class PlaybackFeatures(
     }
 
     private suspend fun copySurface(view: SurfaceView): Bitmap? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return null
         if (view.width <= 0 || view.height <= 0 || !view.holder.surface.isValid) return null
         val vs = player().videoSize
         val (w, h) = if (vs.width > 0 && vs.height > 0) {
@@ -571,14 +572,18 @@ class PlaybackFeatures(
             (vs.width * vs.pixelWidthHeightRatio * scale).toInt() to (vs.height * scale).toInt()
         } else view.width to view.height
         val bmp = Bitmap.createBitmap(w.coerceAtLeast(1), h.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
-        return suspendCancellableCoroutine { cont ->
+        return copySurfaceApi24(view, bmp)
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.N)
+    private suspend fun copySurfaceApi24(view: SurfaceView, bmp: Bitmap): Bitmap? =
+        suspendCancellableCoroutine { cont ->
             try {
                 PixelCopy.request(view, bmp, { result -> cont.resume(if (result == PixelCopy.SUCCESS) bmp else null) }, Handler(Looper.getMainLooper()))
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 cont.resume(null)
             }
         }
-    }
 
     /** 截图存到相册的 Pictures/译幕 */
     suspend fun saveToGallery(bmp: Bitmap, positionMs: Long): Boolean = withContext(Dispatchers.IO) {

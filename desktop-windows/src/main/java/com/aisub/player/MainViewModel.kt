@@ -861,8 +861,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         extras.onEntryChanged(entry)
-        // 上次只识别了一部分：打开后接着识别
-        if (coverageActive && entry.isVideo && !entry.isLive) viewModelScope.launch { transcribeJob?.join(); resumePartialSubtitles() }
         music.onEntryChanged(entry)
         library.recordHistory(entry, 0)
     }
@@ -1162,7 +1160,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val gap = if (remote) {
                 val position = player.currentPosition
                 // 从播放位置到结尾都识别过了：结束（不然一直算"识别中"，播完不会自动放下一集）；
-                // 前面没识别的部分：拖回去时接着识别（[startGapWatch]），下次打开这个视频时也会接着识别
+                // 前面没识别的部分：用户启动识别后，拖回去时接着识别（[startGapWatch]）
                 val ahead = coverage.nextGap((position - LEAD_IN_MS).coerceAtLeast(0), duration) ?: run {
                     startGapWatch(uri)
                     break
@@ -1636,14 +1634,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         coverageActive = false
         coverage.clear()
         store.clearCoverage(uri)
-    }
-
-    /** 打开上次没识别完的视频：接着识别（识别设置不完整或要下载模型时不自动做）。 */
-    private fun resumePartialSubtitles() {
-        val s = _state.value.asrSettings
-        if (s.asrProblem() != null) return
-        if (s.asrEngine == AsrEngine.LOCAL && !models.isReady(ModelCatalog.byId(s.localModel))) return
-        generateSubtitles(alsoTranslate = false, resume = true)
     }
 
     /** 这次识别用流式：打开了流式识别开关、引擎支持、正在放直播或远程视频（本地视频照用分段识别，跑得比播放快） */

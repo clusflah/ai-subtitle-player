@@ -28,6 +28,7 @@ object SidecarSrt {
         return name
     }
 
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
     private fun writeMediaStore(context: Context, video: Uri, dir: String, name: String, bytes: ByteArray) {
         val resolver = context.contentResolver
         val collection = MediaStore.Files.getContentUri(MediaStore.getVolumeName(video))

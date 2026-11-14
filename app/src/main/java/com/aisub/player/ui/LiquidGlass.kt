@@ -133,7 +133,7 @@ fun rememberGlassBackdrop(): GlassBackdropState {
  * 标记作为液态玻璃背景源的内容层（必须与开启 `sampleBackdrop = true` 的悬浮栏处于兄弟层级，不可嵌套）。
  */
 fun Modifier.glassBackdropSource(state: GlassBackdropState?): Modifier = composed {
-    if (state == null || !LocalLiquidGlassEnabled.current) return@composed this
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || state == null || !LocalLiquidGlassEnabled.current) return@composed this
     this
         .onGloballyPositioned { coords: LayoutCoordinates ->
             if (coords.isAttached) {
@@ -165,7 +165,7 @@ fun GlassBackdropBox(
     @Suppress("UNUSED_PARAMETER") captureContent: Boolean = false,
     content: @Composable BoxScope.(GlassBackdropState) -> Unit,
 ) {
-    val enabled = LocalLiquidGlassEnabled.current
+    val enabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && LocalLiquidGlassEnabled.current
     val backdrop = rememberGlassBackdrop()
     CompositionLocalProvider(LocalGlassBackdrop provides if (enabled) backdrop else null) {
         Box(modifier = modifier) {

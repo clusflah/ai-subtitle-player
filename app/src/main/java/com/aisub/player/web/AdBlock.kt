@@ -259,8 +259,14 @@ object AdBlock {
      * 给 Service Worker 也装上同样的拦截。整个进程装一次。
      */
     fun hookServiceWorkers() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.N) return
         if (swHooked) return
         swHooked = true
+        hookServiceWorkersApi24()
+    }
+
+    @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.N)
+    private fun hookServiceWorkersApi24() {
         runCatching {
             android.webkit.ServiceWorkerController.getInstance().setServiceWorkerClient(object : android.webkit.ServiceWorkerClient() {
                 override fun shouldInterceptRequest(request: WebResourceRequest): WebResourceResponse? {

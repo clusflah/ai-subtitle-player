@@ -121,7 +121,7 @@ data class TrackTags(
         internal fun fixGbk(s: String): String {
             if (s.any { it.code > 0xFF } || s.none { it.code >= 0x80 }) return s
             val gbk = runCatching { String(s.toByteArray(Charsets.ISO_8859_1), Charset.forName("GBK")) }.getOrNull() ?: return s
-            return if (gbk.contains('�') || gbk.none { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.HAN }) s else gbk
+            return if (gbk.contains('�') || !com.aisub.player.util.UnicodeCompat.containsHan(gbk)) s else gbk
         }
 
         /** ID3 USLT：编码(1) + 语言(3) + 描述（以 0 结尾）+ 歌词正文。 */

@@ -55,11 +55,20 @@ object Downloads {
                 Endpoints.rewrite(url).let { it to AuthRegistry.headersFor(it) }
             }
             val sub = listOf(ROOT, job.relativeDir).filter { it.isNotEmpty() }.joinToString("/")
+            val relPath = "$sub/${safe(job.item.name)}"
             val request = DownloadManager.Request(Uri.parse(realUrl))
                 .setTitle(job.item.name)
                 .setDescription("译幕")
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "$sub/${safe(job.item.name)}")
+            val canWritePublic = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q ||
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    context, android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (canWritePublic) {
+                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, relPath)
+            } else {
+                request.setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, relPath)
+            }
             headers.forEach { (k, v) -> request.addRequestHeader(k, v) }
             dm.enqueue(request)
             n++

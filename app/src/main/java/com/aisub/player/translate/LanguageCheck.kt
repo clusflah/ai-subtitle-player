@@ -1,7 +1,8 @@
 package com.aisub.player.translate
 
-import android.icu.text.Transliterator
 import android.os.Build
+import androidx.annotation.RequiresApi
+import com.aisub.player.util.UnicodeCompat
 
 /**
  * 判断一句字幕是否已经是目标语言：是的话不用发给大模型翻译，原文直接当译文。
@@ -19,13 +20,14 @@ object LanguageCheck {
         var hangul = 0
         var latin = 0
         var other = 0
-        text.codePoints().forEach { cp ->
-            when (Character.UnicodeScript.of(cp)) {
-                Character.UnicodeScript.HAN -> han++
-                Character.UnicodeScript.HIRAGANA, Character.UnicodeScript.KATAKANA -> kana++
-                Character.UnicodeScript.HANGUL -> hangul++
-                Character.UnicodeScript.LATIN -> latin++
-                else -> if (Character.isLetter(cp)) other++
+        UnicodeCompat.forEachCodePoint(text) { cp ->
+            when (UnicodeCompat.scriptOf(cp)) {
+                UnicodeCompat.ScriptKind.HAN -> han++
+                UnicodeCompat.ScriptKind.KANA -> kana++
+                UnicodeCompat.ScriptKind.HANGUL -> hangul++
+                UnicodeCompat.ScriptKind.LATIN -> latin++
+                UnicodeCompat.ScriptKind.OTHER_LETTER -> other++
+                UnicodeCompat.ScriptKind.NON_LETTER -> Unit
             }
         }
         return when {
@@ -81,26 +83,36 @@ object LanguageCheck {
 
 /** 用系统 ICU 的简繁转换判断中文是简体还是繁体（Android 10 起提供 Transliterator）。 */
 object ChineseScript {
-    private val toHans: Transliterator? by lazy { create("Traditional-Simplified") }
-    private val toHant: Transliterator? by lazy { create("Simplified-Traditional") }
+    private val available = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
 
     /** 繁体转简体；系统不支持时原样返回。 */
-    fun toSimplified(text: String): String = toHans?.let { s -> synchronized(s) { s.transliterate(text) } } ?: text
-
-    private fun create(id: String) =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) runCatching { Transliterator.getInstance(id) }.getOrNull() else null
+    fun toSimplified(text: String): String = if (available) Icu29.toSimplified(text) else text
 
     /** hans / hant / neutral（简繁写法相同）/ mixed；系统不支持时返回 null。 */
-    fun variant(text: String): String? {
-        val s = toHans ?: return null
-        val t = toHant ?: return null
-        val asHans = synchronized(s) { s.transliterate(text) }
-        val asHant = synchronized(t) { t.transliterate(text) }
-        return when {
-            asHans == text && asHant == text -> "neutral"
-            asHans == text -> "hans"
-            asHant == text -> "hant"
-            else -> "mixed"
+    fun variant(text: String): String? = if (available) Icu29.variant(text) else null
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private object Icu29 {
+        private val toHans: android.icu.text.Transliterator? by lazy { create("Traditional-Simplified") }
+        private val toHant: android.icu.text.Transliterator? by lazy { create("Simplified-Traditional") }
+
+        private fun create(id: String) =
+            runCatching { android.icu.text.Transliterator.getInstance(id) }.getOrNull()
+
+        fun toSimplified(text: String): String =
+            toHans?.let { s -> synchronized(s) { s.transliterate(text) } } ?: text
+
+        fun variant(text: String): String? {
+            val s = toHans ?: return null
+            val t = toHant ?: return null
+            val asHans = synchronized(s) { s.transliterate(text) }
+            val asHant = synchronized(t) { t.transliterate(text) }
+            return when {
+                asHans == text && asHant == text -> "neutral"
+                asHans == text -> "hans"
+                asHant == text -> "hant"
+                else -> "mixed"
+            }
         }
     }
 }
