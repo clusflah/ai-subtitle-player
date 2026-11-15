@@ -18,6 +18,7 @@ import java.io.IOException
 class Pan115Client(server: Server) : CloudClient(server) {
 
     private val cookie get() = creds.optString("cookie")
+    private val resolveLock = Any()
 
     private fun request(url: String) = Request.Builder().url(url)
         .header("User-Agent", UA)
@@ -57,7 +58,7 @@ class Pan115Client(server: Server) : CloudClient(server) {
         items.sortedWith(compareBy({ !it.isDir }, { it.name.lowercase() }))
     }
 
-    override fun resolve(fileRef: String): ResolvedLink {
+    override fun resolve(fileRef: String): ResolvedLink = synchronized(resolveLock) {
         val key = M115.generateKey()
         val data = M115.encode(JSONObject().put("pickcode", fileRef).toString().toByteArray(), key)
         val url = "https://proapi.115.com/app/chrome/downurl?t=${System.currentTimeMillis() / 1000}"
@@ -71,7 +72,7 @@ class Pan115Client(server: Server) : CloudClient(server) {
         if (link.isEmpty()) throw IOException("115：文件暂时无法下载")
         // 下载链接与获取它时的 UA、Cookie 绑定，播放时要原样带上
         val cookies = (listOf(cookie) + setCookies.map { it.substringBefore(';') }).filter { it.isNotBlank() }
-        return ResolvedLink(link, mapOf("User-Agent" to UA, "Cookie" to cookies.joinToString("; ")), validMs = 30 * 60_000L)
+        ResolvedLink(link, mapOf("User-Agent" to UA, "Cookie" to cookies.joinToString("; ")), validMs = 30 * 60_000L)
     }
 
     private fun postForm(url: String, form: FormBody): JSONObject {

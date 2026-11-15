@@ -9,7 +9,7 @@ import androidx.media3.datasource.TransferListener
 /** 按地址分流：Telegram 的视频（tg://）交给 [TgDataSource]，其余交给原来的数据源 */
 @UnstableApi
 class RoutingDataSource(private val default: DataSource, private val telegram: DataSource) : DataSource {
-    private var current: DataSource? = null
+    @Volatile private var current: DataSource? = null
 
     override fun addTransferListener(transferListener: TransferListener) {
         default.addTransferListener(transferListener)
@@ -22,17 +22,22 @@ class RoutingDataSource(private val default: DataSource, private val telegram: D
         return source.open(dataSpec)
     }
 
-    override fun read(buffer: ByteArray, offset: Int, length: Int): Int = current!!.read(buffer, offset, length)
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        val c = current ?: return androidx.media3.common.C.RESULT_END_OF_INPUT
+        return c.read(buffer, offset, length)
+    }
 
     override fun getUri(): Uri? = current?.uri
 
     override fun getResponseHeaders(): Map<String, List<String>> = current?.responseHeaders ?: emptyMap()
 
     override fun close() {
+        val c = current
+        current = null
         try {
-            current?.close()
+            c?.close()
         } finally {
-            current = null
+            if (c !== default) runCatching { default.close() }
         }
     }
 

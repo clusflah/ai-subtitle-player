@@ -81,7 +81,11 @@ abstract class BaseDataSource(protected val isNetwork: Boolean) : DataSource {
     override fun addTransferListener(transferListener: TransferListener) {}
     protected fun transferInitializing(dataSpec: DataSpec) {}
     protected fun transferStarted(dataSpec: DataSpec) {}
-    protected fun bytesTransferred(bytesTransferred: Int) {}
+    protected open fun bytesTransferred(bytesTransferred: Int) {
+        if (isNetwork && bytesTransferred > 0) {
+            com.aisub.player.desktop.DesktopPlayerEngine.recordNetworkBytes(bytesTransferred.toLong())
+        }
+    }
     protected fun transferEnded() {}
 }
 
@@ -140,77 +144,106 @@ class FileDataSource : BaseDataSource(false) {
 class DefaultHttpDataSource private constructor(
     private val defaultRequestProperties: Map<String, String>,
 ) : BaseDataSource(true) {
-    private var activeCall: Call? = null
-    private var activeResponse: Response? = null
-    private var input: InputStream? = null
-    private var currentUri: Uri? = null
-    private var bytesRemaining: Long = C.LENGTH_UNSET.toLong()
-    private var responseHeadersMap: Map<String, List<String>> = emptyMap()
+    @Volatile private var activeCall: Call? = null
+    @Volatile private var activeResponse: Response? = null
+    @Volatile private var input: InputStream? = null
+    @Volatile private var currentUri: Uri? = null
+    @Volatile private var bytesRemaining: Long = C.LENGTH_UNSET.toLong()
+    @Volatile private var responseHeadersMap: Map<String, List<String>> = emptyMap()
+    @Volatile private var isLoopbackHost: Boolean = false
+    @Volatile private var openedOnce: Boolean = false
+    @Volatile private var opening: Boolean = false
+    @Volatile private var cancelledExternally: Boolean = false
 
     override fun getResponseHeaders(): Map<String, List<String>> = responseHeadersMap
     override fun getUri(): Uri? = currentUri
 
     override fun open(dataSpec: DataSpec): Long {
-        close()
-        currentUri = dataSpec.uri
-        var targetUrl = URL(dataSpec.uri.toString())
-        val initialHost = targetUrl.host
-        var redirectCount = 0
-        var resp: Response
-
-        while (true) {
-            val httpUrl = targetUrl.toString().toHttpUrlOrNull()
-                ?: throw IOException("无效的 HTTP URL: $targetUrl")
-            val reqBuilder = Request.Builder()
-                .url(httpUrl)
-                .header("Accept-Encoding", "identity")
-            defaultRequestProperties.forEach { (k, v) -> reqBuilder.header(k, v) }
-            dataSpec.httpRequestHeaders.forEach { (k, v) ->
-                if (!k.equals("Authorization", ignoreCase = true) || targetUrl.host.equals(initialHost, ignoreCase = true)) {
-                    reqBuilder.header(k, v)
-                }
-            }
-            if (dataSpec.position > 0 || dataSpec.length != C.LENGTH_UNSET.toLong()) {
-                val end = if (dataSpec.length != C.LENGTH_UNSET.toLong()) (dataSpec.position + dataSpec.length - 1).toString() else ""
-                reqBuilder.header("Range", "bytes=${dataSpec.position}-$end")
-            }
-
-            val call = sharedHttpClient.newCall(reqBuilder.build())
-            activeCall = call
-            resp = call.execute()
-            val code = resp.code
-            responseHeadersMap = resp.headers.toMultimap()
-
-            if (code in intArrayOf(301, 302, 303, 307, 308)) {
-                val location = resp.header("Location")
-                resp.close()
-                activeCall = null
-                if (location.isNullOrBlank() || ++redirectCount > 10) {
-                    throw HttpDataSource.InvalidResponseCodeException(code, resp.message, null, responseHeadersMap, dataSpec, ByteArray(0))
-                }
-                targetUrl = URL(targetUrl, location)
-                continue
-            }
-            if (code !in 200..299) {
-                val msg = resp.message
-                resp.close()
-                activeCall = null
-                throw HttpDataSource.InvalidResponseCodeException(code, msg, null, responseHeadersMap, dataSpec, ByteArray(0))
-            }
-            break
+        if (cancelledExternally) {
+            cancelledExternally = false
+            throw java.io.InterruptedIOException("DataSource cancelled before open")
         }
+        openedOnce = true
+        opening = true
+        try {
+            closeCurrentResources()
+            currentUri = dataSpec.uri
+            var targetUrl = URL(dataSpec.uri.toString())
+            val initialHost = targetUrl.host
+            var redirectCount = 0
+            var resp: Response
 
-        activeResponse = resp
-        currentUri = Uri.parse(resp.request.url.toString())
-        val body = resp.body ?: throw IOException("空 HTTP 响应体")
-        input = body.byteStream()
-        val contentLen = body.contentLength()
-        bytesRemaining = when {
-            dataSpec.length != C.LENGTH_UNSET.toLong() -> if (contentLen >= 0) minOf(dataSpec.length, contentLen) else dataSpec.length
-            contentLen >= 0 -> contentLen
-            else -> C.LENGTH_UNSET.toLong()
+            while (true) {
+                val httpUrl = targetUrl.toString().toHttpUrlOrNull()
+                    ?: throw IOException("无效的 HTTP URL: $targetUrl")
+                val reqBuilder = Request.Builder()
+                    .url(httpUrl)
+                    .header("Accept-Encoding", "identity")
+                defaultRequestProperties.forEach { (k, v) -> reqBuilder.header(k, v) }
+                dataSpec.httpRequestHeaders.forEach { (k, v) ->
+                    if (!k.equals("Authorization", ignoreCase = true) || targetUrl.host.equals(initialHost, ignoreCase = true)) {
+                        reqBuilder.header(k, v)
+                    }
+                }
+                if (dataSpec.position > 0 || dataSpec.length != C.LENGTH_UNSET.toLong()) {
+                    val end = if (dataSpec.length != C.LENGTH_UNSET.toLong()) (dataSpec.position + dataSpec.length - 1).toString() else ""
+                    reqBuilder.header("Range", "bytes=${dataSpec.position}-$end")
+                }
+
+                val call = sharedHttpClient.newCall(reqBuilder.build())
+                activeCall = call
+                if (cancelledExternally) {
+                    runCatching { call.cancel() }
+                    activeCall = null
+                    cancelledExternally = false
+                    throw java.io.InterruptedIOException("DataSource cancelled during open")
+                }
+                resp = call.execute()
+                if (cancelledExternally) {
+                    runCatching { call.cancel() }
+                    runCatching { resp.close() }
+                    activeCall = null
+                    cancelledExternally = false
+                    throw java.io.InterruptedIOException("DataSource cancelled during open")
+                }
+                val code = resp.code
+                responseHeadersMap = resp.headers.toMultimap()
+
+                if (code in intArrayOf(301, 302, 303, 307, 308)) {
+                    val location = resp.header("Location")
+                    resp.close()
+                    activeCall = null
+                    if (location.isNullOrBlank() || ++redirectCount > 10) {
+                        throw HttpDataSource.InvalidResponseCodeException(code, resp.message, null, responseHeadersMap, dataSpec, ByteArray(0))
+                    }
+                    targetUrl = URL(targetUrl, location)
+                    continue
+                }
+                if (code !in 200..299) {
+                    val msg = resp.message
+                    resp.close()
+                    activeCall = null
+                    throw HttpDataSource.InvalidResponseCodeException(code, msg, null, responseHeadersMap, dataSpec, ByteArray(0))
+                }
+                break
+            }
+
+            activeResponse = resp
+            currentUri = Uri.parse(resp.request.url.toString())
+            val host = resp.request.url.host.lowercase()
+            isLoopbackHost = host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]"
+            val body = resp.body ?: throw IOException("空 HTTP 响应体")
+            input = body.byteStream()
+            val contentLen = body.contentLength()
+            bytesRemaining = when {
+                dataSpec.length != C.LENGTH_UNSET.toLong() -> if (contentLen >= 0) minOf(dataSpec.length, contentLen) else dataSpec.length
+                contentLen >= 0 -> contentLen
+                else -> C.LENGTH_UNSET.toLong()
+            }
+            return bytesRemaining
+        } finally {
+            opening = false
         }
-        return bytesRemaining
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
@@ -221,22 +254,30 @@ class DefaultHttpDataSource private constructor(
         val n = ins.read(buffer, offset, toRead)
         if (n < 0) return C.RESULT_END_OF_INPUT
         if (bytesRemaining != C.LENGTH_UNSET.toLong()) bytesRemaining -= n
+        if (n > 0 && !isLoopbackHost) bytesTransferred(n)
         return n
     }
 
-    override fun close() {
+    private fun closeCurrentResources() {
         val call = activeCall
         val resp = activeResponse
         val ins = input
         activeCall = null
         activeResponse = null
         input = null
-        // 若尚未读完就被上游关闭（例如 VLC Range 跳转），主动 cancel 以免阻塞等待读完大文件；若已读完，close() 会归还连接至连接池
-        if (bytesRemaining == C.LENGTH_UNSET.toLong() || bytesRemaining > 65_536L) {
+        // 若尚未读完就被上游关闭（例如 Range 跳转或抢占），主动 cancel 以立刻断开底层连接并避免排空阻塞
+        if (bytesRemaining != 0L) {
             runCatching { call?.cancel() }
         }
         runCatching { ins?.close() }
         runCatching { resp?.close() }
+    }
+
+    override fun close() {
+        if (!openedOnce || opening) {
+            cancelledExternally = true
+        }
+        closeCurrentResources()
     }
 
     class Factory : DataSource.Factory {
@@ -268,7 +309,7 @@ class DefaultDataSource(
     private val baseDataSource: DataSource,
 ) : DataSource {
     private val fileDataSource = FileDataSource()
-    private var active: DataSource? = null
+    @Volatile private var active: DataSource? = null
 
     override fun addTransferListener(transferListener: TransferListener) {}
 
@@ -286,8 +327,12 @@ class DefaultDataSource(
     override fun getResponseHeaders(): Map<String, List<String>> = active?.getResponseHeaders() ?: emptyMap()
 
     override fun close() {
-        active?.close()
+        val a = active
         active = null
+        runCatching { a?.close() }
+        if (a !== baseDataSource) {
+            runCatching { baseDataSource.close() }
+        }
     }
 
     class Factory(

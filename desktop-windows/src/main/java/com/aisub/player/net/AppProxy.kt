@@ -35,9 +35,11 @@ object AppProxy {
 
     val selector: ProxySelector = object : ProxySelector() {
         override fun select(uri: URI?): List<Proxy> {
+            // 本机与局域网地址始终直连，不受应用内代理或系统代理影响
+            if (isLocal(uri?.host)) return listOf(Proxy.NO_PROXY)
             val p = proxy
             // 代理连不上（电脑关了、代理软件没开局域网连接）时接着直连，免得什么都打不开
-            if (p != Proxy.NO_PROXY && !isLocal(uri?.host)) return listOf(p, Proxy.NO_PROXY)
+            if (p != Proxy.NO_PROXY) return listOf(p, Proxy.NO_PROXY)
             return system?.select(uri) ?: listOf(Proxy.NO_PROXY)
         }
 

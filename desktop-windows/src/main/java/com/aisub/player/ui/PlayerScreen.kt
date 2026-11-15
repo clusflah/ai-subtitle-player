@@ -238,12 +238,36 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     // 按钮图标跟随"想要播放"，缓冲时也显示暂停，避免看起来像没反应
     var wantsPlay by remember { mutableStateOf(player.playWhenReady) }
     var buffering by remember { mutableStateOf(false) }
+    var bufferSpeedText by remember { mutableStateOf("") }
+    var lastSpeedSampleMs by remember { mutableLongStateOf(0L) }
     LaunchedEffect(player) {
         while (true) {
             positionMs = player.currentPosition
             isPlaying = player.isPlaying
             wantsPlay = player.playWhenReady && player.playbackState != Player.STATE_IDLE && player.playbackState != Player.STATE_ENDED
-            buffering = player.playbackState == Player.STATE_BUFFERING
+            val isBuf = player.playbackState == Player.STATE_BUFFERING
+            buffering = isBuf
+            if (isBuf) {
+                val now = System.currentTimeMillis()
+                if (bufferSpeedText.isEmpty() || now - lastSpeedSampleMs >= 250L) {
+                    lastSpeedSampleMs = now
+                    val curUri = state.current?.uri.orEmpty()
+                    val isLocal = curUri.isEmpty() ||
+                        curUri.startsWith("file://", ignoreCase = true) ||
+                        curUri.startsWith("content://", ignoreCase = true) ||
+                        (curUri.length >= 2 && curUri[1] == ':')
+                    bufferSpeedText = if (isLocal) {
+                        ""
+                    } else {
+                        com.aisub.player.desktop.DesktopPlayerEngine.formatNetworkSpeed(
+                            com.aisub.player.desktop.DesktopPlayerEngine.currentDownloadSpeedBytesPerSec(now),
+                        )
+                    }
+                }
+            } else if (bufferSpeedText.isNotEmpty()) {
+                bufferSpeedText = ""
+                lastSpeedSampleMs = 0L
+            }
             vm.checkAbLoop(positionMs)
             vm.extras.checkSkip(positionMs)
             delay(50)
@@ -763,6 +787,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 CircularProgressIndicator(color = Orange)
                 Spacer(Modifier.height(8.dp))
                 Text("正在缓冲…", color = Color.White, fontSize = 13.sp)
+                if (bufferSpeedText.isNotEmpty()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(bufferSpeedText, color = Color.White.copy(alpha = 0.82f), fontSize = 12.sp)
+                }
             }
         }
 

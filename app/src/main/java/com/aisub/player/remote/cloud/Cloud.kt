@@ -46,6 +46,7 @@ abstract class CloudClient(protected var server: Server) : RemoteClient {
 object CloudRegistry {
     private val clients = ConcurrentHashMap<String, CloudClient>()
     private val linkCache = ConcurrentHashMap<String, Pair<ResolvedLink, Long>>()
+    private val resolveLocks = ConcurrentHashMap<String, Any>()
 
     /** 由应用启动时设置：按 ID 取服务器配置、保存刷新后的凭据。 */
     var serverLookup: (String) -> Server? = { null }
@@ -59,6 +60,7 @@ object CloudRegistry {
     fun forget(serverId: String) {
         clients.remove(serverId)
         linkCache.keys.removeAll { it.startsWith("${CloudClient.SCHEME}://$serverId/") }
+        resolveLocks.keys.removeAll { it.startsWith("${CloudClient.SCHEME}://$serverId/") }
     }
 
     fun isCloud(uri: String) = uri.startsWith("${CloudClient.SCHEME}://")
@@ -76,16 +78,20 @@ object CloudRegistry {
 
     private fun resolveCached(uri: String): ResolvedLink {
         linkCache[uri]?.let { (link, expiry) -> if (System.currentTimeMillis() < expiry) return link }
-        val parsed = Uri.parse(uri)
-        val serverId = parsed.host ?: throw IOException("无效的网盘地址")
-        val fileRef = Uri.decode(parsed.encodedPath.orEmpty().removePrefix("/"))
-        val server = serverLookup(serverId) ?: throw IOException("网盘账号已被删除")
-        val client = client(server) ?: throw IOException("不支持的网盘类型")
-        val link = client.resolve(fileRef)
-        // 诊断：多久申请一次直链（申请太频繁会被网盘风控）
-        android.util.Log.i("Voxtitle", "网盘直链：重新获取（${server.type}）")
-        linkCache[uri] = link to System.currentTimeMillis() + link.validMs
-        return link
+        val lock = resolveLocks.computeIfAbsent(uri) { Any() }
+        synchronized(lock) {
+            linkCache[uri]?.let { (link, expiry) -> if (System.currentTimeMillis() < expiry) return link }
+            val parsed = Uri.parse(uri)
+            val serverId = parsed.host ?: throw IOException("无效的网盘地址")
+            val fileRef = Uri.decode(parsed.encodedPath.orEmpty().removePrefix("/"))
+            val server = serverLookup(serverId) ?: throw IOException("网盘账号已被删除")
+            val client = client(server) ?: throw IOException("不支持的网盘类型")
+            val link = client.resolve(fileRef)
+            // 诊断：多久申请一次直链（申请太频繁会被网盘风控）
+            android.util.Log.i("Voxtitle", "网盘直链：重新获取（${server.type}）")
+            linkCache[uri] = link to System.currentTimeMillis() + link.validMs
+            return link
+        }
     }
 
     private fun create(server: Server): CloudClient? = when (server.type) {

@@ -199,7 +199,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** VLC 内核：ISO 光盘镜像，或用户在 ExoPlayer 播放失败后手动切换。用到时才创建。 */
     private var vlcPlayer: VlcPlayer? = null
-    private val proxy by lazy { MediaProxy(authDataSourceFactory(app)) }
+    private var proxyInstance: MediaProxy? = null
+    private fun mediaProxy(): MediaProxy =
+        proxyInstance ?: MediaProxy(authDataSourceFactory(getApplication(), wrapCloudSingleConn = false)).also { proxyInstance = it }
 
     private val _player = MutableStateFlow<Player>(exoPlayer)
     /** 当前使用的播放内核，切换时播放页会重新绑定画面 */
@@ -590,7 +592,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun vlc(): VlcPlayer = vlcPlayer ?: VlcPlayer(getApplication(), proxy).also {
+    private fun vlc(): VlcPlayer = vlcPlayer ?: VlcPlayer(getApplication(), mediaProxy()).also {
         it.addListener(listener)
         vlcPlayer = it
     }
@@ -881,6 +883,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun onEntryChanged(entry: MediaEntry) {
         if (_state.value.current?.uri == entry.uri) return
         cancelAll()
+        com.aisub.player.net.NetworkSpeedTracker.resetNetworkSpeed()
         EmbeddedSubtitles.resetDemuxCache()
         sawFirstFrame = false
         frameWatch?.cancel()
@@ -2271,7 +2274,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val tracks = withContext(Dispatchers.IO) {
                     EmbeddedSubtitles.extract(
                         uri = uri,
-                        dataSourceFactory = authDataSourceFactory(getApplication()),
+                        dataSourceFactory = authDataSourceFactory(getApplication(), wrapCloudSingleConn = false),
                         isActive = { isActive },
                         startMs = startMs,
                         onPartial = { partial ->
@@ -2902,6 +2905,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         exoPlayer.release()
         assHandler.release()
         vlcPlayer?.release()
+        proxyInstance?.close()
+        proxyInstance = null
     }
 
     companion object {
@@ -3000,10 +3005,21 @@ private fun captionLines(cues: List<androidx.media3.common.text.Cue>): List<Stri
 
 /** 给已登记的 WebDAV 地址加上鉴权头，其他地址原样访问。 */
 @UnstableApi
-internal fun authDataSourceFactory(app: Application): DataSource.Factory {
-    val http = DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true)
+internal fun authDataSourceFactory(app: Application, wrapCloudSingleConn: Boolean = true): DataSource.Factory {
+    val http = DefaultHttpDataSource.Factory()
+        .setAllowCrossProtocolRedirects(true)
+        .setConnectTimeoutMs(15_000)
+        .setReadTimeoutMs(20_000)
+        .setTransferListener(com.aisub.player.net.NetworkSpeedTracker.transferListener)
+    val resolved = resolvingFactory(app, http)
+    val base = if (wrapCloudSingleConn) com.aisub.player.media.CloudStreamDataSource.Factory(resolved) else resolved
     // Telegram 的视频（tg://）边下边播，其余照常
-    return com.aisub.player.telegram.RoutingDataSource.Factory(resolvingFactory(app, http), com.aisub.player.telegram.TgDataSource.Factory())
+    val tg = DataSource.Factory {
+        com.aisub.player.telegram.TgDataSource().also {
+            it.addTransferListener(com.aisub.player.net.NetworkSpeedTracker.transferListener)
+        }
+    }
+    return com.aisub.player.telegram.RoutingDataSource.Factory(base, tg)
 }
 
 @UnstableApi

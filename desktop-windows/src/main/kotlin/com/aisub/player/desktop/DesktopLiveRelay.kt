@@ -949,6 +949,7 @@ object DesktopLiveRelay {
                             val n = ins.read(buf)
                             if (n < 0) break
                             if (n > 0) {
+                                DesktopPlayerEngine.recordNetworkBytes(n.toLong())
                                 readAnyBytes = true
                                 chunker.feed(buf, 0, n, System.currentTimeMillis())
                                 if (ring.chunkCount > 0) everProduced = true

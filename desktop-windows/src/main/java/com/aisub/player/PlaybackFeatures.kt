@@ -139,7 +139,11 @@ class PlaybackFeatures(
         _state.value = PlaybackExtras(bookmarks = store.bookmarks(e.uri))
         applyTrackDefaults()
         refreshSkipRanges()
-        if (!VlcPlayer.needsVlc(e.title) && MkvChapters.isMatroska(e.title)) {
+        if (!VlcPlayer.needsVlc(e.title) &&
+            MkvChapters.isMatroska(e.title) &&
+            !com.aisub.player.remote.cloud.CloudRegistry.isCloud(e.uri) &&
+            player() !is com.aisub.player.desktop.DesktopExoPlayer
+        ) {
             // 在 IO 线程读文件，回到主线程再更新（播放器只能在主线程访问）
             chapterJob = scope.launch {
                 val list = withContext(Dispatchers.IO) {
@@ -161,8 +165,13 @@ class PlaybackFeatures(
         // 时长这时一般已经知道了，按离结尾的距离记的片尾才能换算
         refreshSkipRanges()
         val p = player()
-        if (p is VlcPlayer && _state.value.chapters.isEmpty()) {
-            p.chapters().takeIf { it.isNotEmpty() }?.let(::setChapters)
+        if (_state.value.chapters.isEmpty()) {
+            val vlcChapters = when (p) {
+                is VlcPlayer -> p.chapters()
+                is com.aisub.player.desktop.DesktopExoPlayer -> p.chapters()
+                else -> emptyList()
+            }
+            if (vlcChapters.isNotEmpty()) setChapters(vlcChapters)
         }
         if (tracks.groups.isNotEmpty()) pendingTrackMemory?.let { m ->
             pendingTrackMemory = null
@@ -191,9 +200,29 @@ class PlaybackFeatures(
         if (!e.isVideo || e.isLive || player().isCurrentMediaItemLive) return
         if (!com.aisub.player.ui.HistoryThumbs.needed(e.uri) || VlcPlayer.needsVlc(e.title)) return
         if (onlyIfMissing && com.aisub.player.ui.HistoryThumbs.file(app, e.uri).exists()) return
+        // Windows 桌面端直接从内存渲染帧截图，避免另起 FFmpeg 进程抢占 115 等单连接网盘
+        val p = player()
+        if (p is com.aisub.player.desktop.DesktopExoPlayer) {
+            val ramBmp = com.aisub.player.desktop.DesktopPlayerEngine.latestFrameBitmap
+            if (ramBmp != null && !isMostlyBlack(ramBmp)) {
+                historyThumbJob?.cancel()
+                historyThumbJob = scope.launch(Dispatchers.IO) {
+                    val maxW = 480
+                    val thumb = if (ramBmp.width > maxW && ramBmp.height > 0) {
+                        val dstH = (ramBmp.height * maxW.toDouble() / ramBmp.width.toDouble()).toInt().coerceAtLeast(1)
+                        Bitmap.createScaledBitmap(ramBmp, maxW, dstH, true)
+                    } else {
+                        ramBmp
+                    }
+                    runCatching { com.aisub.player.ui.HistoryThumbs.save(app, e.uri, thumb) }
+                }
+                return
+            }
+            if (com.aisub.player.remote.cloud.CloudRegistry.isCloud(e.uri)) return
+        }
         // 开头几秒常是黑场，太靠前时改取全片约 10% 处
         val d = player().duration
-        val pos = player().currentPosition.let { p -> if (p < 5_000 && d > 0) d / 10 else p }
+        val pos = player().currentPosition.let { posMs -> if (posMs < 5_000 && d > 0) d / 10 else posMs }
         historyThumbJob?.cancel()
         historyThumbJob = scope.launch {
             val bmp = withContext(grabDispatcher) { if (entry == e) grabber()?.frameAt(pos, maxWidth = 480) else null } ?: return@launch
@@ -219,7 +248,7 @@ class PlaybackFeatures(
 
     private fun grabber(): FrameGrabber? {
         val e = entry ?: return null
-        if (VlcPlayer.needsVlc(e.title)) return null
+        if (VlcPlayer.needsVlc(e.title) || com.aisub.player.remote.cloud.CloudRegistry.isCloud(e.uri)) return null
         return grabber ?: FrameGrabber(app, e.uri).also { grabber = it }
     }
 

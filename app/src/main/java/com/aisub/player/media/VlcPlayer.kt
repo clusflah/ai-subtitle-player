@@ -73,12 +73,18 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         mp.setEventListener { e -> onVlcEvent(e) }
     }
 
+    /** 当前媒体是否绕过 MediaProxy 直接由 libVLC 拉远端流，用于轮询统计输入字节并换算网速 */
+    @Volatile
+    private var directRemoteStream = false
+    private var lastDirectReadBytes = -1L
+
     private fun startVlcKernel(): Pair<LibVLC, MediaPlayer> {
         val useAAudio = VlcAudioBridge.isAAudioSupported()
         val vlcOptions = if (useAAudio) {
             arrayListOf(
                 "--network-caching=1200",
                 "--live-caching=1200",
+                "--prefetch-buffer-size=16384",
                 "--avcodec-skiploopfilter=1",
                 "--http-reconnect",
                 "--audio-time-stretch",
@@ -88,6 +94,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
             arrayListOf(
                 "--network-caching=1200",
                 "--live-caching=1200",
+                "--prefetch-buffer-size=16384",
                 "--audio-desync=-160",
                 "--avcodec-skiploopfilter=1",
                 "--http-reconnect",
@@ -98,6 +105,22 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         val player = MediaPlayer(vlc)
         audioBridge.attach(vlc, player)
         return vlc to player
+    }
+
+    /** 轮询 libVLC 直连远端流时的输入读取字节增量并计入实时网速（本地代理流已由 http TransferListener 统计）。 */
+    fun pollDirectNetworkBytes() {
+        if (!directRemoteStream) return
+        val m = mp.media ?: return
+        val total = try {
+            m.stats?.readBytes?.toLong()?.and(0xFFFFFFFFL) ?: return
+        } finally {
+            m.release()
+        }
+        val prev = lastDirectReadBytes
+        if (prev >= 0L && total > prev) {
+            com.aisub.player.net.NetworkSpeedTracker.recordNetworkBytes(total - prev)
+        }
+        lastDirectReadBytes = total
     }
 
     /** 注册或清除实时 AI 字幕识别的 16kHz 单声道音频分流回调（无需另开网络连接）。 */
@@ -258,8 +281,14 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
                     ?.let { addOption(":http-referrer=$it") }
             }
         } else {
-            Media(libVlc, Uri.parse(proxy.register(uri, name)))
+            Media(libVlc, Uri.parse(proxy.register(uri, name))).apply {
+                if (!isLive && CloudRegistry.isCloud(raw)) {
+                    addOption(":network-caching=2500")
+                }
+            }
         }
+        directRemoteStream = openDirectly
+        lastDirectReadBytes = -1L
 
         media.setHWDecoderEnabled(true, false)
         // 光盘镜像不进菜单，直接播放正片（应用里没有光盘菜单的操作界面）
@@ -378,12 +407,16 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
     }
 
     override fun handleStop(): ListenableFuture<*> {
+        directRemoteStream = false
+        lastDirectReadBytes = -1L
         mp.stop()
         playbackState = Player.STATE_IDLE
         return Futures.immediateVoidFuture()
     }
 
     override fun handleRelease(): ListenableFuture<*> {
+        directRemoteStream = false
+        lastDirectReadBytes = -1L
         mp.setEventListener(null)
         mp.stop()
         audioBridge.detach()

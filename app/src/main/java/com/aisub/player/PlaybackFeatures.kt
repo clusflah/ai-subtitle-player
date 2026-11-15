@@ -96,6 +96,11 @@ class PlaybackFeatures(
     private var chapterJob: Job? = null
     private var detectJob: Job? = null
     private var segmentJob: Job? = null
+    private var activeVideoView = java.lang.ref.WeakReference<View>(null)
+
+    fun attachVideoView(view: View?) {
+        activeVideoView = java.lang.ref.WeakReference(view)
+    }
 
     // ---- 画面读取：同一时间只在一个线程里用 ----
     private val grabDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
@@ -139,7 +144,7 @@ class PlaybackFeatures(
         _state.value = PlaybackExtras(bookmarks = store.bookmarks(e.uri))
         applyTrackDefaults()
         refreshSkipRanges()
-        if (!VlcPlayer.needsVlc(e.title) && MkvChapters.isMatroska(e.title)) {
+        if (!VlcPlayer.needsVlc(e.title) && MkvChapters.isMatroska(e.title) && !com.aisub.player.remote.cloud.CloudRegistry.isCloud(e.uri)) {
             // 在 IO 线程读文件，回到主线程再更新（播放器只能在主线程访问）
             chapterJob = scope.launch {
                 val list = withContext(Dispatchers.IO) {
@@ -191,11 +196,20 @@ class PlaybackFeatures(
         if (!e.isVideo || e.isLive || player().isCurrentMediaItemLive) return
         if (!com.aisub.player.ui.HistoryThumbs.needed(e.uri) || VlcPlayer.needsVlc(e.title)) return
         if (onlyIfMissing && com.aisub.player.ui.HistoryThumbs.file(app, e.uri).exists()) return
+        val isCloud = com.aisub.player.remote.cloud.CloudRegistry.isCloud(e.uri)
+        val view = activeVideoView.get()
         // 开头几秒常是黑场，太靠前时改取全片约 10% 处
         val d = player().duration
-        val pos = player().currentPosition.let { p -> if (p < 5_000 && d > 0) d / 10 else p }
+        val pos = player().currentPosition.let { posMs -> if (posMs < 5_000 && d > 0) d / 10 else posMs }
         historyThumbJob?.cancel()
         historyThumbJob = scope.launch {
+            val viewBmp = captureViewOnly(view, maxWidth = 480)
+            if (viewBmp != null && !isMostlyBlack(viewBmp)) {
+                withContext(Dispatchers.IO) { runCatching { com.aisub.player.ui.HistoryThumbs.save(app, e.uri, viewBmp) } }
+                return@launch
+            }
+            // 云盘流（如 115 单连接）绝不另起 MediaMetadataRetriever 抢占播放连接
+            if (isCloud) return@launch
             val bmp = withContext(grabDispatcher) { if (entry == e) grabber()?.frameAt(pos, maxWidth = 480) else null } ?: return@launch
             // 黑场（或者网盘视频取帧失败给的全黑图）不存，留着以前的或者显示图标，别让卡片一片黑
             if (isMostlyBlack(bmp)) return@launch
@@ -219,7 +233,7 @@ class PlaybackFeatures(
 
     private fun grabber(): FrameGrabber? {
         val e = entry ?: return null
-        if (VlcPlayer.needsVlc(e.title)) return null
+        if (VlcPlayer.needsVlc(e.title) || com.aisub.player.remote.cloud.CloudRegistry.isCloud(e.uri)) return null
         return grabber ?: FrameGrabber(app, e.uri).also { grabber = it }
     }
 
@@ -548,19 +562,28 @@ class PlaybackFeatures(
         return target
     }
 
+    private suspend fun captureViewOnly(videoView: View?, maxWidth: Int = 0): Bitmap? {
+        val fromView = when (videoView) {
+            is TextureView -> videoView.bitmap
+            is SurfaceView -> copySurface(videoView)
+            else -> null
+        } ?: return null
+        return if (maxWidth > 0 && fromView.width > maxWidth && fromView.height > 0) {
+            Bitmap.createScaledBitmap(fromView, maxWidth, (fromView.height * maxWidth / fromView.width).coerceAtLeast(1), true)
+        } else {
+            fromView
+        }
+    }
+
     /**
      * 取当前画面：优先从播放画面直接复制（快、和看到的一样），不行再从文件里解码那一帧。
      * @param videoView PlayerView 里的 SurfaceView / TextureView
      */
     suspend fun captureFrame(videoView: View?, maxWidth: Int = 0): Bitmap? {
         val pos = player().currentPosition
-        val fromView = when (videoView) {
-            is TextureView -> videoView.bitmap
-            is SurfaceView -> copySurface(videoView)
-            else -> null
-        }
-        val bmp = fromView ?: withContext(grabDispatcher) { grabber()?.frameAt(pos, exact = true, maxWidth = 0) }
-        return bmp?.let { if (maxWidth > 0 && it.width > maxWidth) Bitmap.createScaledBitmap(it, maxWidth, it.height * maxWidth / it.width, true) else it }
+        captureViewOnly(videoView, maxWidth)?.let { return it }
+        val bmp = withContext(grabDispatcher) { grabber()?.frameAt(pos, exact = true, maxWidth = 0) }
+        return bmp?.let { if (maxWidth > 0 && it.width > maxWidth && it.height > 0) Bitmap.createScaledBitmap(it, maxWidth, (it.height * maxWidth / it.width).coerceAtLeast(1), true) else it }
     }
 
     private suspend fun copySurface(view: SurfaceView): Bitmap? {
