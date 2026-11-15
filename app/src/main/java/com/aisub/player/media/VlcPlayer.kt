@@ -19,6 +19,10 @@ import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import com.aisub.player.live.LiveHeaders
+import com.aisub.player.remote.AuthRegistry
+import com.aisub.player.remote.Endpoints
+import com.aisub.player.remote.cloud.CloudRegistry
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import org.videolan.libvlc.LibVLC
@@ -27,16 +31,21 @@ import org.videolan.libvlc.MediaPlayer
 import org.videolan.libvlc.interfaces.IVLCVout
 
 /**
- * 用 libVLC 实现的 Media3 [Player]：播放 ISO（DVD / 蓝光镜像）和 ExoPlayer 解不了的格式。
+ * 用 libVLC 实现的 Media3 [Player]：播放 ISO（DVD / 蓝光镜像）、ExoPlayer 解不了的格式以及单连接/特殊封装直播源。
  * 对外和 ExoPlayer 一样是 Player 接口，播放页的控制、手势、字幕叠加都不用改。
- * 媒体通过 [MediaProxy] 转成本机地址交给 VLC，网盘和 WebDAV 的鉴权沿用应用自己的实现。
- * 一次只播一个文件（不做播放队列）。
+ * 音频通过 [VlcAudioBridge] 接管原生回调：
+ * - Android 8.1+ 走 C++ AAudio 低延迟直出；
+ * - Android 6.0 老电视自动回退到 Java AudioTrack，并配合 `--audio-desync=-160` 抵消环形缓冲延迟；
+ * - 开启 AI 字幕时在 C++ 层同步重采样出 16kHz 单声道音频喂给识别引擎，单连接源无需第二路连接即可出字幕。
  */
 @UnstableApi
 class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePlayer(Looper.getMainLooper()) {
 
-    private val libVlc = LibVLC(context.applicationContext, arrayListOf("--http-reconnect", "--network-caching=2000", "--audio-time-stretch"))
-    private val mp = MediaPlayer(libVlc)
+    private val appContext = context.applicationContext
+    private val audioBridge = VlcAudioBridge()
+    private val kernel = startVlcKernel()
+    private val libVlc: LibVLC = kernel.first
+    private val mp: MediaPlayer = kernel.second
 
     private var items: List<MediaItem> = emptyList()
     private var startPositionMs = 0L
@@ -64,6 +73,45 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         mp.setEventListener { e -> onVlcEvent(e) }
     }
 
+    private fun startVlcKernel(): Pair<LibVLC, MediaPlayer> {
+        val useAAudio = VlcAudioBridge.isAAudioSupported()
+        val vlcOptions = if (useAAudio) {
+            arrayListOf(
+                "--network-caching=1200",
+                "--live-caching=1200",
+                "--avcodec-skiploopfilter=1",
+                "--http-reconnect",
+                "--audio-time-stretch",
+            )
+        } else {
+            // Android 6.0 老电视等走 Java AudioTrack 回退路径：提前 160ms 送出音频，刚好抵消 AudioTrack 环形缓冲延迟，嘴型瞬间对齐
+            arrayListOf(
+                "--network-caching=1200",
+                "--live-caching=1200",
+                "--audio-desync=-160",
+                "--avcodec-skiploopfilter=1",
+                "--http-reconnect",
+                "--audio-time-stretch",
+            )
+        }
+        val vlc = LibVLC(appContext, vlcOptions)
+        val player = MediaPlayer(vlc)
+        audioBridge.attach(vlc, player)
+        return vlc to player
+    }
+
+    /** 注册或清除实时 AI 字幕识别的 16kHz 单声道音频分流回调（无需另开网络连接）。 */
+    fun setAsrAudioConsumer(
+        onChunk: ((FloatArray) -> Unit)?,
+        onDiscontinuity: (() -> Unit)? = null,
+    ) {
+        audioBridge.setAsrConsumer(onChunk, onDiscontinuity)
+    }
+
+    /** 当前实际生效的音频输出路径描述（AAudio 低延迟直出 / AudioTrack + -160ms 同步补偿）。 */
+    val audioBackendLabel: String
+        get() = audioBridge.activeBackendLabel()
+
     private fun onVlcEvent(e: MediaPlayer.Event) {
         when (e.type) {
             MediaPlayer.Event.Opening -> playbackState = Player.STATE_BUFFERING
@@ -81,8 +129,10 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
                 playWhenReady = false
             }
             MediaPlayer.Event.EncounteredError -> {
+                val isLive = items.firstOrNull()?.localConfiguration?.tag == "live"
                 error = PlaybackException(
-                    "VLC 无法打开这个文件（可能是加密的蓝光、损坏的镜像或网络中断）",
+                    if (isLive) "VLC 内核无法打开这个直播源（可能源已失效、地址受限或网络中断）"
+                    else "VLC 无法打开这个文件（可能是加密的蓝光、损坏的镜像或网络中断）",
                     null, PlaybackException.ERROR_CODE_UNSPECIFIED,
                 )
                 playbackState = Player.STATE_IDLE
@@ -138,11 +188,12 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
             Player.COMMAND_RELEASE,
         ).build()
         val playlist = items.mapIndexed { i, item ->
+            val isLiveItem = item.localConfiguration?.tag == "live" && durationMs == C.TIME_UNSET
             MediaItemData.Builder(item.mediaId.ifEmpty { "item$i" })
                 .setMediaItem(item)
                 .setMediaMetadata(item.mediaMetadata)
                 .setDurationUs(if (durationMs == C.TIME_UNSET) C.TIME_UNSET else durationMs * 1000)
-                .setIsSeekable(true)
+                .setIsSeekable(!isLiveItem)
                 .setTracks(tracks)
                 .build()
         }
@@ -183,19 +234,48 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         val item = items.firstOrNull() ?: return Futures.immediateVoidFuture()
         val uri = item.localConfiguration?.uri ?: Uri.parse(item.mediaId)
         val name = item.mediaMetadata.title?.toString() ?: uri.lastPathSegment.orEmpty()
+        val isLive = item.localConfiguration?.tag == "live"
         error = null
-        val media = Media(libVlc, Uri.parse(proxy.register(uri, name)))
+
+        val raw = uri.toString()
+        val scheme = uri.scheme?.lowercase().orEmpty()
+        val routed = if (!CloudRegistry.isCloud(raw)) Endpoints.rewrite(raw) else raw
+        val authHeaders = if (!CloudRegistry.isCloud(raw)) AuthRegistry.headersFor(routed) else emptyMap()
+        val liveHeaders = if (!CloudRegistry.isCloud(raw)) LiveHeaders.headersFor(routed) else emptyMap()
+
+        // 直播流（HLS m3u8 相对分片、FLV/TS 单连接源）及 RTSP/RTMP/UDP/RTP 等流协议直接交给 libVLC 打开，
+        // 避免本机 MediaProxy 破坏 m3u8 相对分片路径或不支持非 HTTP 协议；本地文件、网盘与 WebDAV 鉴权仍走 MediaProxy。
+        val openDirectly = scheme in DIRECT_STREAM_SCHEMES ||
+            (isLive && (scheme == "http" || scheme == "https") && !CloudRegistry.isCloud(raw) && authHeaders.isEmpty())
+
+        val media = if (openDirectly) {
+            Media(libVlc, Uri.parse(routed)).apply {
+                liveHeaders.entries.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { addOption(":http-user-agent=$it") }
+                liveHeaders.entries.firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { addOption(":http-referrer=$it") }
+            }
+        } else {
+            Media(libVlc, Uri.parse(proxy.register(uri, name)))
+        }
+
         media.setHWDecoderEnabled(true, false)
         // 光盘镜像不进菜单，直接播放正片（应用里没有光盘菜单的操作界面）
         media.addOption(":no-dvdnav-menu")
         media.addOption(":no-bluray-menu")
-        if (startPositionMs > 0) media.addOption(":start-time=${startPositionMs / 1000.0}")
+        if (!isLive && startPositionMs > 0) media.addOption(":start-time=${startPositionMs / 1000.0}")
+        audioBridge.rebindCallbacks(mp)
         mp.media = media
         media.release()
         playbackState = Player.STATE_BUFFERING
         // VLC 在打开过程中暂停容易卡住，所以未要求播放时先不启动，等 setPlayWhenReady(true) 再开始
         started = playWhenReady
-        if (playWhenReady) mp.play()
+        if (playWhenReady) {
+            audioBridge.rebindCallbacks(mp)
+            mp.play()
+        }
         return Futures.immediateVoidFuture()
     }
 
@@ -203,6 +283,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         this.playWhenReady = playWhenReady
         if (playWhenReady && !started && items.isNotEmpty() && playbackState != Player.STATE_IDLE) {
             started = true
+            audioBridge.rebindCallbacks(mp)
             mp.play()
             return Futures.immediateVoidFuture()
         }
@@ -218,6 +299,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
             pendingSeekMs = target
             playbackState = Player.STATE_BUFFERING
             mp.stop()
+            audioBridge.rebindCallbacks(mp)
             mp.play()
         } else {
             mp.setTime(target)
@@ -234,15 +316,26 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
     override fun handleSetVolume(volume: Float, volumeOperationType: Int): ListenableFuture<*> {
         this.volume = volume
         mp.volume = (volume * 100).toInt()
+        val effective = if (C.TRACK_TYPE_AUDIO in trackParams.disabledTrackTypes) 0f else volume
+        audioBridge.setVolume(effective)
         return Futures.immediateVoidFuture()
     }
 
     override fun handleSetTrackSelectionParameters(trackSelectionParameters: TrackSelectionParameters): ListenableFuture<*> {
         trackParams = trackSelectionParameters
+        val audioDisabled = C.TRACK_TYPE_AUDIO in trackSelectionParameters.disabledTrackTypes
         val audioOverride = trackSelectionParameters.overrides.values.firstOrNull { it.type == C.TRACK_TYPE_AUDIO }
-        when {
-            C.TRACK_TYPE_AUDIO in trackSelectionParameters.disabledTrackTypes -> mp.setAudioTrack(-1)
-            audioOverride != null -> audioOverride.mediaTrackGroup.id.removePrefix("a").toIntOrNull()?.let { mp.setAudioTrack(it) }
+        if (audioBridge.isAttached) {
+            // 原生音频桥接管时：静音只关闭扬声器输出，保留音频解码以便后台继续做 AI 语音识别
+            audioBridge.setVolume(if (audioDisabled) 0f else volume)
+            if (!audioDisabled && audioOverride != null) {
+                audioOverride.mediaTrackGroup.id.removePrefix("a").toIntOrNull()?.let { mp.setAudioTrack(it) }
+            }
+        } else {
+            when {
+                audioDisabled -> mp.setAudioTrack(-1)
+                audioOverride != null -> audioOverride.mediaTrackGroup.id.removePrefix("a").toIntOrNull()?.let { mp.setAudioTrack(it) }
+            }
         }
         val textOverride = trackSelectionParameters.overrides.values.firstOrNull { it.type == C.TRACK_TYPE_TEXT }
         when {
@@ -293,6 +386,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
     override fun handleRelease(): ListenableFuture<*> {
         mp.setEventListener(null)
         mp.stop()
+        audioBridge.detach()
         if (mp.vlcVout.areViewsAttached()) mp.vlcVout.detachViews()
         mp.release()
         libVlc.release()
@@ -300,6 +394,8 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
     }
 
     companion object {
+        private val DIRECT_STREAM_SCHEMES = setOf("rtsp", "rtsps", "rtmp", "rtmps", "rtp", "udp", "mms", "mmsh")
+
         /** 需要用 VLC 内核的文件：光盘镜像。 */
         fun needsVlc(name: String) = name.substringAfterLast('.', "").lowercase() == "iso"
     }

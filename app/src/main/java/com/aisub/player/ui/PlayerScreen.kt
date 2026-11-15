@@ -227,6 +227,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     val state by vm.state.collectAsStateWithLifecycle()
     // 播放内核可能在 ExoPlayer 和 VLC 之间切换
     val player by vm.playerFlow.collectAsStateWithLifecycle()
+    val usingVlc = player !== vm.exoPlayer
     val context = LocalContext.current
     val activity = context as? Activity
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -656,7 +657,13 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 }
                 Row(Modifier.focusRequester(errorFocus)) {
                     TextButton(onClick = { vm.togglePlay() }) { Text("重试", color = Orange) }
-                    if (!vm.usingVlc) TextButton(onClick = { vm.switchToVlc() }) { Text("兼容模式播放", color = Orange) }
+                    if (!usingVlc) {
+                        TextButton(onClick = { vm.switchToVlc() }) {
+                            Text(if (isLive) "切换 VLC 内核" else "兼容模式播放", color = Orange)
+                        }
+                    } else if (isLive) {
+                        TextButton(onClick = { vm.setLiveKernel(false) }) { Text("切换默认内核", color = Orange) }
+                    }
                 }
             }
         }
@@ -680,7 +687,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 Spacer(Modifier.height(10.dp))
                 Row(Modifier.focusRequester(errorFocus)) {
                     if (vm.canTranscode) TextButton(onClick = vm::playTranscoded) { Text("服务器转码播放", color = Orange) }
-                    if (!vm.usingVlc) TextButton(onClick = vm::switchToVlc) { Text("兼容模式播放", color = Orange) }
+                    if (!usingVlc) TextButton(onClick = vm::switchToVlc) { Text("兼容模式播放", color = Orange) }
                     TextButton(onClick = vm::dismissVideoProblem) { Text("只听声音", color = Color(0xFFCCCCCC)) }
                 }
             }
@@ -750,7 +757,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         ) {
                             Text("节目单", color = Color.White)
                         }
-                    } else if (vm.queueSize > 1 && !vm.usingVlc) {
+                    } else if (vm.queueSize > 1 && !usingVlc) {
                         TextButton(
                             onClick = { showChannels = true },
                             modifier = Modifier.tvFocusRing(RoundedCornerShape(50), color = Color.White, scale = true, fillBackground = true),
@@ -786,24 +793,16 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     )
                 }
                 // 没有目标语言字幕的视频：一键翻译外语字幕，或识别 + 翻译，不用去面板里找
-                val quick = remember(state.cues, embeddedTracks, state.settings.targetLanguage, state.asrSettings.asrLanguage, isLive) {
+                val quick = remember(state.cues, embeddedTracks, state.settings.targetLanguage, state.asrSettings.asrLanguage, isLive, usingVlc) {
                     val target = state.settings.ttsLocale
-                    // 直播流里的文字字幕（多是隐藏式字幕）优先边播边翻译，没有才实时识别；兼容模式拿不到字幕的文字
-                    val tracks = if (isLive && vm.usingVlc) embeddedTracks.filter { QuickSubtitles.isTargetTrack(it, target) } else embeddedTracks
+                    // 默认内核直播优先边播边翻自带字幕；VLC 内核下通过原生音频回调分流实时语音识别生成字幕
+                    val tracks = if (isLive && usingVlc) embeddedTracks.filter { QuickSubtitles.isTargetTrack(it, target) } else embeddedTracks
                     QuickSubtitles.decide(state.cues, tracks, target) {
                         LanguageCheck.alreadyTarget(it, target, state.asrSettings.asrLanguage, ChineseScript::variant)
                     }
                 }
                 val idle = !state.transcribing && !state.translating && !state.extractingEmbedded && !state.liveCaptions && state.playbackError == null
-                if (isLive && vm.usingVlc && state.playbackError == null) {
-                    // 兼容模式下直播不能出字幕：直接说明，不显示「实时生成字幕」
-                    Text(
-                        MainViewModel.VLC_NO_SUBTITLES, color = Color.White, fontSize = 12.sp,
-                        modifier = Modifier.padding(start = 52.dp, bottom = 4.dp)
-                            .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = GlassTokens.DarkBadgeTint)
-                            .padding(horizontal = 10.dp, vertical = 3.dp),
-                    )
-                } else if (quick != null && idle && (state.current?.isVideo == true || isLive) && !aiChipDismissed) {
+                if (quick != null && idle && (state.current?.isVideo == true || isLive) && !aiChipDismissed) {
                     var quickFocused by remember { mutableStateOf(false) }
                     val quickHighlight = tv && quickFocused
                     Row(Modifier.padding(start = 52.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -918,12 +917,12 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                 }
                 if (isLive) {
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        Spacer(Modifier.weight(1f))
-                        // 实时字幕和画面对不上时手动对齐：字幕早了点「推后」，晚了点「提前」；点中间的数字细调
-                        if (state.transcribing || state.cues.isNotEmpty()) {
-                            val step = 500L
+                    val showDelayControls = state.transcribing || state.cues.isNotEmpty()
+                    val compactLiveRow = LocalConfiguration.current.screenWidthDp < 400 && showDelayControls
+                    @Composable
+                    fun SubtitleDelayInline() {
+                        val step = 500L
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("字幕", color = Color.White, fontSize = 13.sp)
                             TextButton(
                                 onClick = { vm.setSubtitleDelay(state.subtitleDelayMs - step); interactions++ },
@@ -945,6 +944,49 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                                 modifier = Modifier.tvFocusRing(RoundedCornerShape(8.dp), color = Color.White, fillBackground = true),
                             ) {
                                 Text("推后", color = Color.White, fontSize = 13.sp)
+                            }
+                        }
+                    }
+                    if (compactLiveRow) {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                Spacer(Modifier.weight(1f))
+                                LiveKernelSwitch(
+                                    usingVlc = usingVlc,
+                                    tv = tv,
+                                    onSelect = { targetVlc ->
+                                        if (targetVlc != usingVlc) {
+                                            vm.setLiveKernel(targetVlc)
+                                            indicator = null to if (targetVlc) "已切换至 VLC 内核" else "已切换至默认内核"
+                                        }
+                                        interactions++
+                                    },
+                                )
+                            }
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                                SubtitleDelayInline()
+                            }
+                        }
+                    } else {
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.width(10.dp))
+                            LiveKernelSwitch(
+                                usingVlc = usingVlc,
+                                tv = tv,
+                                onSelect = { targetVlc ->
+                                    if (targetVlc != usingVlc) {
+                                        vm.setLiveKernel(targetVlc)
+                                        indicator = null to if (targetVlc) "已切换至 VLC 内核" else "已切换至默认内核"
+                                    }
+                                    interactions++
+                                },
+                            )
+                            Spacer(Modifier.weight(1f))
+                            // 实时字幕和画面对不上时手动对齐：字幕早了点「推后」，晚了点「提前」；点中间的数字细调
+                            if (showDelayControls) {
+                                SubtitleDelayInline()
                             }
                         }
                     }
@@ -1008,7 +1050,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 } else Spacer(Modifier.height(4.dp))
                 // 播放键居中，左右各一个上一集/下一集；外侧两组对称：
                 // 手机左=字幕、AI 字幕，右=旋转、更多；电视左=字幕、AI 字幕，右=倍速、更多（电视不能转屏）
-                val canSkip = vm.queueSize > 1 && !vm.usingVlc
+                val canSkip = vm.queueSize > 1 && (!usingVlc || isLive)
                 LiquidDock(
                     count = 7,
                     activeSlot = targetSlot,
@@ -1222,7 +1264,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             modifier = Modifier.align(Alignment.CenterEnd).focusRequester(moreFocus),
         ) {
             MorePanel(
-                state = state, audioOnly = audioOnly, repeatMode = player.repeatMode,
+                state = state, audioOnly = audioOnly, repeatMode = player.repeatMode, usingVlc = usingVlc,
                 onAction = { action ->
                     showMore = false
                     when (action) {
@@ -1250,6 +1292,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                                 else -> Player.REPEAT_MODE_OFF
                             }
                             indicator = AppIcons.Repeat to repeatLabel(player.repeatMode)
+                        }
+                        MoreAction.SWITCH_KERNEL -> {
+                            val nextVlc = !usingVlc
+                            vm.setLiveKernel(nextVlc)
+                            indicator = null to if (nextVlc) "已切换至 VLC 内核" else "已切换至默认内核"
                         }
                         MoreAction.INFO -> dialog = PlayerDialog.INFO
                         MoreAction.AB_LOOP -> indicator = AppIcons.Repeat to vm.toggleAbLoop()
@@ -1875,10 +1922,10 @@ private fun GestureLayer(
 
 // ---------------- 更多菜单 ----------------
 
-private enum class MoreAction { ASPECT, SLEEP, SPEED, GOTO, NAVIGATE, BOOKMARKS, SKIP, EQUALIZER, AUDIO_ONLY, PIP, REPEAT, INFO, AB_LOOP, SAVE_PLAYLIST, SETTINGS }
+private enum class MoreAction { ASPECT, SLEEP, SPEED, GOTO, NAVIGATE, BOOKMARKS, SKIP, SWITCH_KERNEL, EQUALIZER, AUDIO_ONLY, PIP, REPEAT, INFO, AB_LOOP, SAVE_PLAYLIST, SETTINGS }
 
 @Composable
-private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAction: (MoreAction) -> Unit) {
+private fun MorePanel(usingVlc: Boolean, state: UiState, audioOnly: Boolean, repeatMode: Int, onAction: (MoreAction) -> Unit) {
     // 最常用的四个放在最上面一排，其余按用途分组
     val quick = listOf(
         Triple(MoreAction.SPEED, AppIcons.Speed, "倍速"),
@@ -1887,12 +1934,15 @@ private fun MorePanel(state: UiState, audioOnly: Boolean, repeatMode: Int, onAct
         Triple(MoreAction.SLEEP, AppIcons.Timer, if (state.sleepAt != null) "定时中" else "定时关闭"),
     )
     val groups = listOf(
-        "播放" to listOf(
-            Triple(MoreAction.REPEAT, AppIcons.Repeat, "循环：${repeatLabel(repeatMode)}"),
-            Triple(MoreAction.AB_LOOP, AppIcons.Repeat, if (state.loopA == null) "A-B 循环" else if (state.loopB == null) "A-B 循环：设置 B 点" else "关闭 A-B 循环"),
-            Triple(MoreAction.GOTO, AppIcons.AccessTime, "转到时间"),
-            Triple(MoreAction.AUDIO_ONLY, AppIcons.MusicNote, if (audioOnly) "恢复视频画面" else "只播放声音"),
-        ),
+        "播放" to buildList {
+            if (state.current?.isLive == true) {
+                add(Triple(MoreAction.SWITCH_KERNEL, AppIcons.PlayArrow, if (usingVlc) "内核：VLC 内核（点此切回默认）" else "内核：默认内核（点此切换 VLC）"))
+            }
+            add(Triple(MoreAction.REPEAT, AppIcons.Repeat, "循环：${repeatLabel(repeatMode)}"))
+            add(Triple(MoreAction.AB_LOOP, AppIcons.Repeat, if (state.loopA == null) "A-B 循环" else if (state.loopB == null) "A-B 循环：设置 B 点" else "关闭 A-B 循环"))
+            add(Triple(MoreAction.GOTO, AppIcons.AccessTime, "转到时间"))
+            add(Triple(MoreAction.AUDIO_ONLY, AppIcons.MusicNote, if (audioOnly) "恢复视频画面" else "只播放声音"))
+        },
         "跳转" to listOf(
             Triple(MoreAction.NAVIGATE, AppIcons.GridView, "章节与片段"),
             Triple(MoreAction.BOOKMARKS, AppIcons.Star, "书签与关键帧"),
@@ -1970,8 +2020,10 @@ private fun openSystemEqualizer(context: Context, sessionId: Int) {
 @Composable
 private fun EqualizerDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
+    val player by vm.playerFlow.collectAsStateWithLifecycle()
+    val usingVlc = player !== vm.exoPlayer
     val ctrl = vm.equalizer
-    val eq = remember { if (vm.usingVlc) null else ctrl.attach() }
+    val eq = remember(usingVlc) { if (usingVlc) null else ctrl.attach() }
     var enabled by remember { mutableStateOf(ctrl.enabled) }
     var preset by remember { mutableStateOf(ctrl.preset) }
     val range = remember(eq) { eq?.let { runCatching { it.bandLevelRange }.getOrNull() } }
@@ -2000,7 +2052,7 @@ private fun EqualizerDialog(vm: MainViewModel, onDismiss: () -> Unit) {
         },
         text = {
             if (eq == null || range == null || bands == 0) {
-                Text(if (vm.usingVlc) "兼容模式（VLC 内核）下不能用均衡器" else "这台设备不支持应用内均衡器，可以试试系统均衡器")
+                Text(if (usingVlc) "兼容模式（VLC 内核）下不能用均衡器" else "这台设备不支持应用内均衡器，可以试试系统均衡器")
             } else Column(Modifier.verticalScroll(rememberScrollState())) {
                 if (presets.isNotEmpty()) {
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2034,7 +2086,7 @@ private fun EqualizerDialog(vm: MainViewModel, onDismiss: () -> Unit) {
         dismissButton = {
             TextButton(onClick = {
                 onDismiss()
-                openSystemEqualizer(context, if (vm.usingVlc) 0 else vm.exoPlayer.audioSessionId)
+                openSystemEqualizer(context, if (usingVlc) 0 else vm.exoPlayer.audioSessionId)
             }) { Text("系统均衡器") }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
@@ -2056,6 +2108,7 @@ private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ON
 @Composable
 private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitleAction: (SubtitleAction) -> Unit) {
     val player by vm.playerFlow.collectAsStateWithLifecycle()
+    val usingVlc = player !== vm.exoPlayer
     // 字幕、音频两项默认收起，点哪项展开哪项
     var audioOpen by remember(state.current?.uri) { mutableStateOf(false) }
     var embeddedOpen by remember { mutableStateOf(false) }
@@ -2071,8 +2124,8 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
         }
     }
     val live = state.current?.isLive == true
-    // 兼容模式下直播拿不到字幕的文字
-    val canRead = if (live) !vm.usingVlc && hasTextSubtitles else hasTextSubtitles || vm.usingVlc
+    // VLC 内核下直播通过「语音识别生成字幕」走原生音频分流，不走内嵌字幕文字提取
+    val canRead = if (live) !usingVlc && hasTextSubtitles else hasTextSubtitles || usingVlc
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(vertical = 6.dp)) {
         // ---------------- AI 字幕：识别、外挂文件或提取出的字幕，由本应用显示 ----------------
@@ -2162,7 +2215,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
         SheetHeader("字幕", embeddedOpen) { embeddedOpen = !embeddedOpen }
         if (embeddedOpen) {
             PanelHint("视频文件里的字幕轨，按字幕文件原样显示（ASS 的位置、字体、特效由文件决定）")
-            if (textGroups.isEmpty() && !vm.usingVlc) {
+            if (textGroups.isEmpty() && !usingVlc) {
                 TrackRow("这个视频没有自带字幕", false, enabled = false) {}
             } else {
                 val textDisabled = remember(version, player) { C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes }
@@ -2613,10 +2666,60 @@ private fun DelayDialog(delayMs: Long, onChange: (Long) -> Unit, onDismiss: () -
     )
 }
 
+@Composable
+private fun LiveKernelSwitch(
+    usingVlc: Boolean,
+    tv: Boolean,
+    onSelect: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val outerShape = RoundedCornerShape(50)
+    Row(
+        modifier = modifier
+            .liquidGlass(shape = outerShape, style = GlassStyle.Pill, tint = GlassTokens.DarkControlTint)
+            .padding(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        listOf(false to "默认内核", true to "VLC 内核").forEach { (isVlcOption, label) ->
+            val selected = usingVlc == isVlcOption
+            var focused by remember { mutableStateOf(false) }
+            val highlight = tv && focused
+            val pillShape = RoundedCornerShape(50)
+            Box(
+                modifier = Modifier
+                    .onFocusChanged { focused = it.isFocused }
+                    .tvFocusRing(pillShape, color = Color.White, scale = true)
+                    .clip(pillShape)
+                    .background(
+                        when {
+                            highlight -> Color(0xFFFFB74D)
+                            selected -> Orange.copy(alpha = 0.88f)
+                            else -> Color.Transparent
+                        },
+                    )
+                    .clickable { onSelect(isVlcOption) }
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = label,
+                    color = when {
+                        highlight || selected -> Color(0xFF1F1100)
+                        else -> Color(0xFFD5DCE6)
+                    },
+                    fontSize = 12.sp,
+                    fontWeight = if (selected || highlight) FontWeight.SemiBold else FontWeight.Normal,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
-    val p = vm.player
+    val p by vm.playerFlow.collectAsStateWithLifecycle()
     val exo = p as? androidx.media3.exoplayer.ExoPlayer
     val v = exo?.videoFormat
     val a = exo?.audioFormat
@@ -2624,7 +2727,8 @@ private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     val rows = listOfNotNull(
         "文件" to (entry?.title ?: ""),
         "时长" to formatClock(p.duration.coerceAtLeast(0)),
-        "播放内核" to if (exo != null) "ExoPlayer" else "VLC",
+        "播放内核" to if (exo != null) "默认内核（ExoPlayer）" else "VLC 内核",
+        if (exo == null) vm.vlcAudioBackendLabel?.let { "音频输出" to it } else null,
         if (exo == null && p.videoSize.width > 0) "画面" to "${p.videoSize.width}×${p.videoSize.height}" else null,
         v?.let { "画面" to "${it.width}×${it.height}" + (it.frameRate.takeIf { f -> f > 0 }?.let { f -> " · %.0f fps".format(f) } ?: "") },
         v?.let { "视频编码" to (it.sampleMimeType ?: "") + (it.codecs?.let { c -> " ($c)" } ?: "") },

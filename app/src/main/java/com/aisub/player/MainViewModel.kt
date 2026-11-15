@@ -206,6 +206,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val playerFlow: StateFlow<Player> = _player.asStateFlow()
     val player: Player get() = _player.value
     val usingVlc: Boolean get() = player !== exoPlayer
+    val vlcAudioBackendLabel: String? get() = vlcPlayer?.takeIf { usingVlc }?.audioBackendLabel
 
     /** 应用没开着时从桌面小组件开始的后台播放：先停掉它，界面打开后接着放（见 [resumeWidgetPlayback]） */
     private var widgetHandover = WidgetPlayback.takeOver()
@@ -469,11 +470,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (recoverLive(error)) return
             if (retryLiveAsOtherType(error)) return
             if (autoSwitchLiveToVlc(error)) return
-            // 记住要用兼容模式的频道，兼容模式也打不开：忘掉，下次先用默认内核试
-            _state.value.current?.takeIf { usingVlc && it.isLive }?.let { forgetVlcChannel(it.uri) }
-            // 识别另开了一路连接：直播源、网盘限制同时连接数时，可能就是它把画面挤断了
-            val extra = _state.value.takeIf { s -> s.transcribing && s.current?.let { it.isLive || isRemote(it) } == true }
-                ?.let { s -> "\n\n$CONCURRENCY_HINT。可以先停止识别再播放" + if (s.current?.isLive == true) "，有自带字幕时改用「翻译自带字幕」" else "" }
+            // 自动记住要用兼容模式的频道，兼容模式也打不开：忘掉，下次先用默认内核试（手动切核除外）
+            _state.value.current?.takeIf { usingVlc && it.isLive && manualLiveKernel[it.uri] != true }?.let { forgetVlcChannel(it.uri) }
+            // 默认内核下识别另开了一路连接（VLC 内核走原生音频回调分流，不占第二路连接）
+            val extra = _state.value.takeIf { s -> s.transcribing && !usingVlc && s.current?.let { it.isLive || isRemote(it) } == true }
+                ?.let { s ->
+                    "\n\n$CONCURRENCY_HINT。" + if (s.current?.isLive == true) {
+                        "单连接直播源可切换为「VLC 内核」（无需第二路连接即可生成 AI 字幕），或有自带字幕时改用「翻译自带字幕」"
+                    } else {
+                        "可以先停止识别再播放"
+                    }
+                }
             _state.update { it.copy(playbackError = describePlaybackError(error) + extra.orEmpty()) }
         }
 
@@ -649,6 +656,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 这次打开后已经自动换过兼容模式的频道，兼容模式也不行时不再来回换 */
     private val vlcAutoTried = HashSet<String>()
 
+    /** 用户在直播播放页手动指定的内核（true = VLC 内核，false = 默认内核），避免自动回退覆盖手动选择 */
+    private val manualLiveKernel = HashMap<String, Boolean>()
+
     private fun rememberVlcChannel(uri: String) {
         if (vlcChannels.add(uri)) playbackPrefs.edit().putStringSet("vlcChannels", HashSet(vlcChannels)).apply()
     }
@@ -663,7 +673,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun autoSwitchLiveToVlc(error: PlaybackException): Boolean {
         val entry = _state.value.current?.takeIf { it.isLive } ?: return false
-        if (usingVlc || !vlcAutoTried.add(entry.uri)) return false
+        if (usingVlc || manualLiveKernel[entry.uri] == false || !vlcAutoTried.add(entry.uri)) return false
         if (error.errorCode in setOf(
                 PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
                 PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
@@ -671,7 +681,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
         ) return false
         android.util.Log.i("Voxtitle", "直播默认内核打不开，自动换兼容模式：${entry.uri}")
-        switchToVlc()
+        switchLiveKernelInternal(entry, useVlc = true, manual = false)
         return true
     }
 
@@ -682,7 +692,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         queue = channels ?: listOf(entry)
         val v = vlc()
         v.setMediaItem(itemOf(entry), positionMs)
-        _state.update { it.copy(playbackError = null) }
+        _state.update { it.copy(playbackError = null, videoProblem = null) }
         v.prepare()
         v.play()
         startPlaybackService()
@@ -694,16 +704,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var vlcLiveWatch: Job? = null
 
     /**
-     * 记成要用兼容模式的直播频道，兼容模式一直放不出来（不报错，只是黑屏不动）：忘掉，改回默认内核。
-     * 每个频道只回退一次，免得两个内核来回换。
+     * 自动记成要用兼容模式的直播频道，若一直放不出来（黑屏不动）：忘掉，改回默认内核。
+     * 用户手动指定 VLC 内核时不自动切回，避免干扰手动切换。
      */
     private fun watchVlcLive(entry: MediaEntry) {
         vlcLiveWatch?.cancel()
+        if (manualLiveKernel[entry.uri] == true) return
         vlcLiveWatch = viewModelScope.launch {
             delay(VLC_LIVE_START_MS)
             val v = vlcPlayer ?: return@launch
             if (!usingVlc || _state.value.current?.uri != entry.uri || v.playbackState == Player.STATE_READY) return@launch
-            if (!vlcFallbackTried.add(entry.uri)) return@launch
+            if (manualLiveKernel[entry.uri] == true || !vlcFallbackTried.add(entry.uri)) return@launch
             android.util.Log.w("Voxtitle", "兼容模式 ${VLC_LIVE_START_MS / 1000} 秒还没放出直播，改回默认内核：${entry.uri}")
             forgetVlcChannel(entry.uri)
             vlcAutoTried += entry.uri
@@ -715,14 +726,71 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 这次打开后已经从兼容模式退回过默认内核的频道 */
     private val vlcFallbackTried = HashSet<String>()
 
+    /** 直播播放页手动切换「默认内核 / VLC 内核」，切换后若原本开着 AI 字幕则自动在新内核上无缝续跑。 */
+    fun setLiveKernel(useVlc: Boolean) {
+        val entry = _state.value.current ?: return
+        if (!entry.isLive) {
+            if (useVlc && !usingVlc) switchToVlc()
+            return
+        }
+        if (useVlc == usingVlc) return
+        switchLiveKernelInternal(entry, useVlc = useVlc, manual = true)
+    }
+
+    fun toggleLiveKernel() = setLiveKernel(!usingVlc)
+
+    private fun switchLiveKernelInternal(entry: MediaEntry, useVlc: Boolean, manual: Boolean) {
+        if (manual) {
+            manualLiveKernel[entry.uri] = useVlc
+        }
+        if (useVlc) rememberVlcChannel(entry.uri) else forgetVlcChannel(entry.uri)
+
+        val resumeAsr = transcribeJob?.isActive == true
+        val resumeTranslate = lastAlsoTranslate || (translateJob?.isActive == true)
+        if (resumeAsr || translateJob?.isActive == true || captionJob?.isActive == true || embeddedJob?.isActive == true) {
+            cancelAll()
+        }
+        vlcLiveWatch?.cancel()
+        vlcPlayer?.setAsrAudioConsumer(null, null)
+        _state.update {
+            it.copy(
+                cues = emptyList(),
+                liveClock = null,
+                liveHint = null,
+                liveCaptions = false,
+                playbackError = null,
+                videoProblem = null,
+                error = null,
+                failedTask = null,
+                status = "",
+            )
+        }
+
+        if (useVlc) {
+            playWithVlc(entry, 0, queue.takeIf { it.isNotEmpty() })
+        } else {
+            vlcPlayer?.stop()
+            _player.value = exoPlayer
+            val channels = queue.takeIf { it.isNotEmpty() } ?: listOf(entry)
+            val cleanQueue = channels.filter { it == entry || !VlcPlayer.needsVlc(it.title) }
+            queue = cleanQueue
+            val targetIdx = cleanQueue.indexOfFirst { it.uri == entry.uri }.coerceAtLeast(0)
+            exoPlayer.setMediaItems(cleanQueue.map(::itemOf), targetIdx, 0L)
+            exoPlayer.prepare()
+            exoPlayer.play()
+            startPlaybackService()
+        }
+
+        if (resumeAsr) {
+            generateSubtitles(alsoTranslate = resumeTranslate)
+        }
+    }
+
     /** ExoPlayer 播放失败时，从当前位置改用 VLC 内核重试。 */
     fun switchToVlc() {
         val entry = _state.value.current ?: return
         if (entry.isLive) {
-            rememberVlcChannel(entry.uri)
-            // 换内核前先停掉实时字幕：兼容模式下字幕无法工作
-            cancelAll()
-            playWithVlc(entry, 0, queue.takeIf { entry in it })
+            switchLiveKernelInternal(entry, useVlc = true, manual = true)
         } else {
             playWithVlc(entry, exoPlayer.currentPosition.coerceAtLeast(0))
         }
@@ -763,6 +831,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             playWithVlc(start, 0, entries)
             return
         }
+        vlcLiveWatch?.cancel()
+        vlcPlayer?.setAsrAudioConsumer(null, null)
         vlcPlayer?.stop()
         _player.value = exoPlayer
         // 连播队列里跳过光盘镜像，ExoPlayer 打不开
@@ -1053,10 +1123,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!resume) lastAlsoTranslate = alsoTranslate
         coverageKey = key
         val live = _state.value.current?.isLive == true
-        if (live && usingVlc) {
-            _state.update { it.copy(error = VLC_NO_SUBTITLES, failedTask = Task.TRANSCRIBE) }
-            return
-        }
         translateJob?.cancel()
         // 手动改用语音识别：停掉直播自带字幕的翻译
         captionJob?.cancel()
@@ -1308,14 +1374,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private suspend fun runLive(settings: AppSettings) {
         val entry = _state.value.current ?: return
+        val vlcMode = usingVlc
         val item = itemOf(entry)
         val anchors = LiveAnchors()
         liveDelayAdded = 0
         liveDelayChangedAt = 0
         _state.update {
             it.copy(
-                cues = emptyList(), progress = null, status = "正在连接直播的声音…",
-                liveClock = if (usingVlc) LiveClock.Arrival(android.os.SystemClock.elapsedRealtime()) else LiveClock.Stream,
+                cues = emptyList(), progress = null,
+                status = if (vlcMode) "正在从 VLC 内核获取实时音频…" else "正在连接直播的声音…",
+                liveClock = if (vlcMode) LiveClock.Arrival(android.os.SystemClock.elapsedRealtime()) else LiveClock.Stream,
             )
         }
         val incoming = java.util.concurrent.ConcurrentLinkedQueue<Pair<Cue, Long>>()
@@ -1330,6 +1398,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             language = settings.asrLanguage.takeIf { it != "auto" }?.let { com.aisub.player.asr.AsrLanguages.label(it) },
             streaming = _state.value.streamingAsr,
             onDevice = settings.asrEngine == AsrEngine.LOCAL,
+            vlcKernel = vlcMode,
         )
         val shower = viewModelScope.launch {
             val waiting = ArrayList<Pair<Cue, Long>>()
@@ -1360,7 +1429,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         try {
             withContext(dispatcher) {
                 createEngine(settings, live = true).use { engine ->
-                    (engine as? com.aisub.player.asr.cloud.ChunkedCloudEngine)?.useChunks(LIVE_FIRST_CHUNK_SEC, LIVE_CHUNK_SEC)
+                    (engine as? com.aisub.player.asr.cloud.ChunkedCloudEngine)?.useChunks(
+                        if (vlcMode) LIVE_VLC_FIRST_CHUNK_SEC else LIVE_FIRST_CHUNK_SEC,
+                        if (vlcMode) LIVE_VLC_CHUNK_SEC else LIVE_CHUNK_SEC,
+                    )
                     val cancelHandle = coroutineContext.job.invokeOnCompletion { engine.cancel() }
                     val onCue: (Cue) -> Unit = { incoming.add(it to android.os.SystemClock.elapsedRealtime()) }
                     // 解码和识别分开两条线程：识别引擎会等（流式识别控制发送速度、断线重连，
@@ -1383,6 +1455,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                     try {
+                        if (vlcMode) {
+                            val v = vlc()
+                            var firstLogged = false
+                            val startedAt = System.currentTimeMillis()
+                            android.util.Log.i("Voxtitle", "直播声音：通过 VLC 原生音频回调直取 16kHz 单声道音频（单连接模式） ${entry.uri}")
+                            try {
+                                v.setAsrAudioConsumer(
+                                    onChunk = { chunk ->
+                                        if (!firstLogged) {
+                                            firstLogged = true
+                                            android.util.Log.i("Voxtitle", "VLC 直播音频分流已就绪，${System.currentTimeMillis() - startedAt} ms 收到首段 16kHz PCM")
+                                        }
+                                        samples.addAndGet(chunk.size.toLong())
+                                        heard.set(true)
+                                        // 限制待识别队列最多缓存约 30 秒音频，兼顾 32 位 Android 6.0 老电视内存与实时性
+                                        while (pending.size > LIVE_VLC_MAX_PENDING_CHUNKS) {
+                                            pending.poll()
+                                        }
+                                        pending.offer(chunk)
+                                    },
+                                    onDiscontinuity = {
+                                        pending.offer(LIVE_RECONNECTED)
+                                    },
+                                )
+                                while (coroutineContext.isActive && usingVlc && _state.value.current?.uri == entry.uri) {
+                                    delay(250)
+                                }
+                            } finally {
+                                v.setAsrAudioConsumer(null, null)
+                            }
+                        } else {
                         // 直播流断了或一连上就结束时，重连几次
                         var quickEnds = 0
                         var connects = 0
@@ -1449,6 +1552,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             if (System.currentTimeMillis() - startedAt < 10_000) quickEnds++ else quickEnds = 0
                             delay(500)
                         }
+                        }
                         // 等识别把已经收到的声音处理完
                         decodingDone.set(true)
                         feeder.join()
@@ -1460,9 +1564,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
-            delay(2000)
-            if (_state.value.cues.isEmpty() && lastError != null) throw java.io.IOException("直播的声音连不上：$lastError。$CONCURRENCY_HINT；直播有自带字幕时可改用「翻译自带字幕」，连不上也能读屏幕上的字幕")
-            _state.update { it.copy(status = "直播字幕已停止：直播的声音断了" + (lastError?.let { "（$it）" } ?: "")) }
+            if (!vlcMode) {
+                delay(2000)
+                if (_state.value.cues.isEmpty() && lastError != null) {
+                    throw java.io.IOException("直播的声音连不上：$lastError。$CONCURRENCY_HINT；单连接直播源可切换为「VLC 内核」直接生成字幕，或有自带字幕时改用「翻译自带字幕」")
+                }
+                _state.update { it.copy(status = "直播字幕已停止：直播的声音断了" + (lastError?.let { "（$it）" } ?: "")) }
+            }
         } finally {
             shower.cancel()
             // 时钟留着：已有字幕的时间是按它算的，清掉后会按播放器的窗口位置比，旧字幕反复冒出来。
@@ -1520,12 +1628,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         } else {
             val now = wall - (clock as LiveClock.Arrival).baseMs
-            // 积压太多（翻译或识别变慢）时不再排队，直接显示最新的
-            var cursor = if (ps.lastEnd - now > LIVE_MAX_BACKLOG_MS) now else maxOf(now, ps.lastEnd)
+            // VLC 原生音频回调是和画面同步的实时流：新一句识别出来时立即接上显示（前一句已显示满最短时间则提前收尾），避免排队越积越晚
+            var cursor = when {
+                usingVlc -> now
+                ps.lastEnd - now > LIVE_MAX_BACKLOG_MS -> now
+                else -> maxOf(now, ps.lastEnd)
+            }
             val first = waiting.first().first.startMs
             for ((c, _) in waiting) {
                 val length = (c.endMs - c.startMs).coerceIn(LIVE_MIN_CUE_MS, 6_000)
-                // 保持这一批里各句原来的间隔
+                // 保持同一批里各句原来的间隔
                 val start = maxOf(cursor, now + (c.startMs - first))
                 cursor = start + length
                 shown += Cue(nextCueId++, start, cursor, c.text, c.translation)
@@ -1534,9 +1646,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             waiting.clear()
         }
         if (shown.isEmpty()) return
+        val firstNewStart = shown.first().startMs
         _state.update { st ->
+            val prev = if (clock is LiveClock.Arrival && usingVlc && st.cues.isNotEmpty()) {
+                st.cues.mapIndexed { idx, c ->
+                    if (idx == st.cues.lastIndex && c.endMs > firstNewStart) {
+                        c.copy(endMs = maxOf(c.startMs + 800L, firstNewStart))
+                    } else c
+                }
+            } else {
+                st.cues
+            }
             st.copy(
-                cues = (st.cues + shown).sortedBy { it.startMs }.takeLast(LIVE_KEEP_CUES),
+                cues = (prev + shown).sortedBy { it.startMs }.takeLast(LIVE_KEEP_CUES),
                 status = if (liveDelayAdded > 0) "实时字幕 · 画面延后了 ${liveDelayAdded / 1000} 秒，和说话对齐" else "实时字幕",
             )
         }
@@ -1651,7 +1773,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun createChunkedEngine(settings: AppSettings, live: Boolean = false): SpeechEngine = when (settings.asrEngine) {
         AsrEngine.LOCAL -> {
             val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
-            Transcriber(ModelCatalog.byId(settings.localModel), models, com.aisub.player.asr.AsrLanguages.primary(settings.asrLanguage), threads, if (live) 6f else 12f)
+            val maxSec = when {
+                live && usingVlc -> 4.5f
+                live -> 6f
+                else -> 12f
+            }
+            val minSilence = if (live && usingVlc) 0.28f else 0.35f
+            Transcriber(ModelCatalog.byId(settings.localModel), models, com.aisub.player.asr.AsrLanguages.primary(settings.asrLanguage), threads, maxSec, minSilence)
         }
         else -> settings.createCloudEngine().also { e ->
             if (e is com.aisub.player.asr.cloud.GeminiTranscriber && inlineTranslate) e.translateTo = settings.targetLanguage
@@ -2001,6 +2129,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 点 AI 字幕面板的「翻译字幕」时，是否应该读取并翻译视频自带字幕。 */
     fun shouldExtractEmbeddedOnTranslate(): Boolean {
         val s = _state.value
+        if (s.current?.isLive == true && usingVlc) return false
         if (s.cues.isEmpty()) return true
         val hasTextSubtitles = !usingVlc && exoPlayer.currentTracks.groups.any { g ->
             g.type == C.TRACK_TYPE_TEXT && (0 until g.length).any { i ->
@@ -2199,7 +2328,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun startLiveCaptions() {
         val entry = _state.value.current?.takeIf { it.isLive } ?: return
         if (usingVlc) {
-            _state.update { it.copy(error = VLC_NO_SUBTITLES) }
+            _state.update { it.copy(error = "VLC 内核下自带字幕直接在画面上显示，暂不支持提取文字翻译；请点「AI 字幕 → 语音识别生成字幕」，或切回「默认内核」翻译自带字幕") }
             return
         }
         val p = exoPlayer
@@ -2628,12 +2757,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 切到队列里的第 index 个。直播从最新画面开始，其他的从上次看到的地方继续。 */
     fun playQueueIndex(index: Int) {
         if (index !in queue.indices) return
-        // 兼容模式下没有播放队列：直播换台时重新打开，按这个频道记住的内核播放
-        if (usingVlc) {
-            if (queue[index].isLive) play(queue, index)
+        val e = queue[index]
+        // 兼容模式下没有播放队列，或目标直播频道记住了要用 VLC 内核：重新按该频道记住的内核打开
+        if (usingVlc || (e.isLive && e.uri in vlcChannels)) {
+            if (e.isLive) play(queue, index)
             return
         }
-        val e = queue[index]
         savePosition()
         if (e.isLive) exoPlayer.seekToDefaultPosition(index) else exoPlayer.seekTo(index, resumePosition(e))
         exoPlayer.play()
@@ -2673,7 +2802,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * restartFirst 时「上一个」在播放超过 3 秒时先回到开头，和常见音乐播放器的按钮一样。
      */
     fun skipInQueue(next: Boolean, restartFirst: Boolean = false) {
-        if (usingVlc) return
+        if (usingVlc) {
+            if (_state.value.current?.isLive == true && queue.size > 1) {
+                val cur = queue.indexOfFirst { it.uri == _state.value.current?.uri }.coerceAtLeast(0)
+                val target = (cur + if (next) 1 else -1).mod(queue.size)
+                playQueueIndex(target)
+            }
+            return
+        }
         if (!next && restartFirst && exoPlayer.currentPosition > 3000 && _state.value.current?.isLive != true) {
             exoPlayer.seekTo(0)
             return
@@ -2801,6 +2937,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         /** 直播云端识别的分段（秒）：段越短字幕越早出来，太短识别不准 */
         private const val LIVE_FIRST_CHUNK_SEC = 4
         private const val LIVE_CHUNK_SEC = 6
+        private const val LIVE_VLC_FIRST_CHUNK_SEC = 3
+        private const val LIVE_VLC_CHUNK_SEC = 5
+        private const val LIVE_VLC_MAX_PENDING_CHUNKS = 300
 
         /** 直播声音重连时塞进识别队列的记号 */
         private val LIVE_RECONNECTED = FloatArray(0)
