@@ -2135,23 +2135,26 @@ private fun DiscoverResourceSearchDialog(
                     }
                 }
 
-                // 2. Telegram 搜索
+                // 2. Telegram 搜索（固定单行双按钮：搜索 + 打开tg）
                 if (selectedCategory == null || selectedCategory == SearchCategory.TELEGRAM) {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("Telegram 频道 / 群组", style = MaterialTheme.typography.labelLarge, color = Orange)
-                        FlowRow(
+                        Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Button(onClick = { onOpenTelegramSearch(activeQ) }) {
+                            Button(
+                                onClick = { onOpenTelegramSearch(activeQ) },
+                                colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
+                            ) {
                                 Icon(AppIcons.Telegram, null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(5.dp))
-                                Text("站内全频道搜「$activeQ」", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("搜索", maxLines = 1)
                             }
                             OutlinedButton(onClick = { onCopyAndLaunchExternalTg(activeQ) }) {
                                 Icon(AppIcons.OpenInNew, null, modifier = Modifier.size(15.dp))
                                 Spacer(Modifier.width(4.dp))
-                                Text("外部 TG")
+                                Text("打开tg", maxLines = 1)
                             }
                         }
                         telegramSources.forEach { src ->
