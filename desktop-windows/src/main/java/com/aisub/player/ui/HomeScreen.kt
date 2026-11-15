@@ -149,7 +149,7 @@ fun HomeScreen(
     var localPhotos by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(tab) { lib.reloadStored() }
     var searching by remember { mutableStateOf(false) }
-    var discoverSearching by rememberSaveable { mutableStateOf(false) }
+    var discoverSearching by remember { mutableStateOf(com.aisub.player.meta.DiscoverRepository.sessionSearchExpanded) }
     var query by rememberSaveable { mutableStateOf("") }
     var dialog by remember { mutableStateOf<HomeDialog?>(null) }
     var barVisible by remember { mutableStateOf(true) }
@@ -199,7 +199,10 @@ fun HomeScreen(
         lib.homeTab = t.ordinal
         selected = emptySet()
         searching = false
-        if (t != Tab.DISCOVER) discoverSearching = false
+        if (t != Tab.DISCOVER) {
+            discoverSearching = false
+            com.aisub.player.meta.DiscoverRepository.setSessionSearchExpanded(false)
+        }
         query = ""
         barVisible = true
     }
@@ -314,7 +317,7 @@ fun HomeScreen(
                         if (isDiscover) {
                             // 发现页：搜索行缩减为右上角搜索图标，替换原有的「···」按钮
                             LiquidGlassIconButton(
-                                onClick = { discoverSearching = !discoverSearching },
+                                onClick = { val next = !discoverSearching; discoverSearching = next; com.aisub.player.meta.DiscoverRepository.setSessionSearchExpanded(next) },
                                 icon = if (discoverSearching) AppIcons.Close else AppIcons.Search,
                                 contentDescription = if (discoverSearching) "收起搜索" else "展开搜索",
                                 size = 38.dp,
@@ -599,7 +602,10 @@ fun HomeScreen(
                     lib = lib,
                     listState = lib.listState("discover.home"),
                     searchExpanded = discoverSearching,
-                    onSearchExpandedChange = { discoverSearching = it },
+                    onSearchExpandedChange = {
+                        discoverSearching = it
+                        com.aisub.player.meta.DiscoverRepository.setSessionSearchExpanded(it)
+                    },
                     onOpenDetail = { nav.push(Screen.DiscoverDetail(it)) },
                     onOpenChart = { nav.push(Screen.DiscoverChart(it)) },
                     onOpenTelegramSearch = { nav.push(Screen.TelegramSearch(it)) },

@@ -136,17 +136,27 @@ fun DiscoverTab(
     val wide = LocalWideLayout.current
     val tv = LocalTv.current
 
-    var queryInput by rememberSaveable { mutableStateOf("") }
-    var appliedQuery by rememberSaveable { mutableStateOf("") }
+    var queryInput by remember { mutableStateOf(DiscoverRepository.sessionQueryInput) }
+    var appliedQuery by remember { mutableStateOf(DiscoverRepository.sessionAppliedQuery) }
     var reloadNonce by remember { mutableIntStateOf(0) }
     var manageSourcesOpen by remember { mutableStateOf(false) }
     var sourcesVersion by remember { mutableIntStateOf(0) }
 
-    var sections by remember { mutableStateOf<List<DiscoverHomeSection>>(emptyList()) }
-    var homeLoading by remember { mutableStateOf(true) }
+    val initialSections = remember(settings.tmdbKey, settings.doubanEnabled) {
+        DiscoverRepository.peekHomeSections(settings)
+    }
+    var sections by remember(settings.tmdbKey, settings.doubanEnabled) {
+        mutableStateOf(initialSections)
+    }
+    var homeLoading by remember(settings.tmdbKey, settings.doubanEnabled) {
+        mutableStateOf(initialSections.isEmpty())
+    }
     var homeError by remember { mutableStateOf<String?>(null) }
 
-    var searchResults by remember { mutableStateOf<List<DiscoverItem>>(emptyList()) }
+    val initialSearch = remember(appliedQuery, settings.tmdbKey, settings.doubanEnabled) {
+        DiscoverRepository.peekSearchResults(settings, appliedQuery)
+    }
+    var searchResults by remember { mutableStateOf(initialSearch.orEmpty()) }
     var searchLoading by remember { mutableStateOf(false) }
     var searchError by remember { mutableStateOf<String?>(null) }
 
@@ -155,8 +165,15 @@ fun DiscoverTab(
         DiscoverSearchStore.sources(context).filter { it.enabled }
     }
 
+    fun openSystemBrowser(url: String) {
+        runCatching {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+    }
+
     // 收起右上角搜索图标时，清空搜索态回到紧凑榜单页
     LaunchedEffect(searchExpanded) {
+        DiscoverRepository.setSessionSearchExpanded(searchExpanded)
         if (!searchExpanded) {
             focusManager.clearFocus()
             if (appliedQuery.isNotEmpty() || queryInput.isNotEmpty()) {
@@ -171,6 +188,16 @@ fun DiscoverTab(
     }
 
     LaunchedEffect(settings.tmdbKey, settings.doubanEnabled, reloadNonce) {
+        // 首次加载完成后，进入详情页/榜单页再退回时不重复刷新，避免频繁转圈；仅在点「刷新」或修改配置时重新拉取
+        if (reloadNonce == 0) {
+            val cached = DiscoverRepository.peekHomeSections(settings)
+            if (cached.isNotEmpty()) {
+                if (sections != cached) sections = cached
+                homeLoading = false
+                homeError = null
+                return@LaunchedEffect
+            }
+        }
         homeLoading = sections.isEmpty()
         homeError = null
         runCatching {
@@ -188,8 +215,15 @@ fun DiscoverTab(
 
     LaunchedEffect(appliedQuery, settings.tmdbKey, settings.doubanEnabled) {
         val q = appliedQuery.trim()
+        DiscoverRepository.sessionAppliedQuery = q
         if (q.isEmpty()) {
             searchResults = emptyList()
+            searchError = null
+            searchLoading = false
+            return@LaunchedEffect
+        }
+        DiscoverRepository.peekSearchResults(settings, q)?.let { cached ->
+            searchResults = cached
             searchError = null
             searchLoading = false
             return@LaunchedEffect
@@ -212,6 +246,8 @@ fun DiscoverTab(
         val q = raw.trim()
         queryInput = q
         appliedQuery = q
+        DiscoverRepository.sessionQueryInput = q
+        DiscoverRepository.sessionAppliedQuery = q
         focusManager.clearFocus()
         if (q.isNotEmpty() && MagnetLinks.normalizeMagnet(q) == null) {
             DiscoverSearchStore.recordHistory(context, q)
@@ -245,7 +281,11 @@ fun DiscoverTab(
                         value = queryInput,
                         onValueChange = {
                             queryInput = it
-                            if (it.isBlank()) appliedQuery = ""
+                            DiscoverRepository.sessionQueryInput = it
+                            if (it.isBlank()) {
+                                appliedQuery = ""
+                                DiscoverRepository.sessionAppliedQuery = ""
+                            }
                         },
                         onSearch = { submitSearch() },
                         placeholder = "搜电影 / 剧集，粘贴磁力 / Hash，或点右侧切换搜索源立即检索",
@@ -270,14 +310,27 @@ fun DiscoverTab(
                                 },
                             )
                             allSources.forEach { src ->
+                                val isRe0Builtin = src.id == "re0_search"
                                 DropdownMenuItem(
-                                    text = { Text("${src.name} 搜「$quickQ」", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                    leadingIcon = { Icon(AppIcons.Web, null, modifier = Modifier.size(17.dp)) },
+                                    text = {
+                                        Text(
+                                            if (isRe0Builtin) "影巢 · 系统浏览器搜「$quickQ」" else "${src.name} 搜「$quickQ」",
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(if (isRe0Builtin) AppIcons.OpenInNew else AppIcons.Web, null, modifier = Modifier.size(17.dp))
+                                    },
                                     onClick = {
                                         sourceMenuOpen = false
                                         DiscoverSearchStore.recordHistory(context, quickQ)
                                         history = DiscoverSearchStore.history(context)
-                                        onOpenWeb(src.buildUrl(quickQ))
+                                        if (isRe0Builtin) {
+                                            openSystemBrowser(src.buildUrl(quickQ))
+                                        } else {
+                                            onOpenWeb(src.buildUrl(quickQ))
+                                        }
                                     },
                                 )
                             }
@@ -384,11 +437,31 @@ fun DiscoverTab(
                             onClick = { onOpenTelegramSearch(appliedQuery) },
                         )
                     }
-                    item {
+                    val directTarget = searchResults.firstOrNull { it.tmdbId != null }
+                    if (directTarget?.tmdbId != null) {
+                        item(key = "re0_direct_jump") {
+                            DiscoverQuickJumpButton(
+                                icon = AppIcons.Web,
+                                label = "影巢 · 词条直达",
+                                onClick = {
+                                    onOpenWeb(DiscoverSearchStore.buildRe0DirectUrl(directTarget.kind, directTarget.tmdbId))
+                                },
+                            )
+                        }
+                    }
+                    item(key = "re0_external_jump") {
                         DiscoverQuickJumpButton(
-                            icon = AppIcons.Web,
-                            label = "影巢 re0.me",
-                            onClick = { onOpenWeb(DiscoverSearchStore.buildRe0SearchUrl(appliedQuery)) },
+                            icon = AppIcons.OpenInNew,
+                            label = "影巢 · 系统浏览器",
+                            onClick = {
+                                val targetUrl = directTarget?.tmdbId?.takeIf {
+                                    directTarget.title.equals(appliedQuery.trim(), ignoreCase = true) ||
+                                        directTarget.originalTitle.equals(appliedQuery.trim(), ignoreCase = true)
+                                }?.let { tid ->
+                                    DiscoverSearchStore.buildRe0DirectUrl(directTarget.kind, tid)
+                                } ?: DiscoverSearchStore.buildRe0SearchUrl(appliedQuery)
+                                openSystemBrowser(targetUrl)
+                            },
                         )
                     }
                     items(allSources.filter { it.category == SearchCategory.PAN }.take(2), key = { it.id }) { src ->
@@ -509,6 +582,7 @@ fun DiscoverTab(
                         }
                     }
                     LazyRow(
+                        state = lib.listState("discover.platforms"),
                         contentPadding = PaddingValues(horizontal = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(7.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -540,13 +614,8 @@ fun DiscoverTab(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text(homeError!!, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = { DiscoverRepository.clearCache(); reloadNonce++ }) {
-                                Text("重新加载")
-                            }
-                            OutlinedButton(onClick = { onOpenWeb("https://re0.me/") }) {
-                                Text("访问 re0.me")
-                            }
+                        Button(onClick = { DiscoverRepository.clearCache(); reloadNonce++ }) {
+                            Text("重新加载")
                         }
                     }
                 }
@@ -554,6 +623,7 @@ fun DiscoverTab(
                 items(sections, key = { it.chart.id }) { section ->
                     DiscoverChartRowSection(
                         section = section,
+                        rowState = lib.listState("discover.row.${section.chart.id}"),
                         cardWidth = if (tv) 144.dp else if (wide) 136.dp else 112.dp,
                         onSeeAll = { onOpenChart(section.chart.id) },
                         onOpenDetail = onOpenDetail,
@@ -743,6 +813,7 @@ private fun StreamingPlatformCard(
 @Composable
 private fun DiscoverChartRowSection(
     section: DiscoverHomeSection,
+    rowState: LazyListState,
     cardWidth: Dp,
     onSeeAll: () -> Unit,
     onOpenDetail: (DiscoverItem) -> Unit,
@@ -788,6 +859,7 @@ private fun DiscoverChartRowSection(
             )
         }
         LazyRow(
+            state = rowState,
             contentPadding = PaddingValues(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(9.dp),
         ) {
@@ -941,15 +1013,22 @@ fun DiscoverChartScreen(
     val chart = remember(selectedChartId) {
         DiscoverCharts.findChart(selectedChartId) ?: DiscoverCharts.allCharts.first()
     }
+    val cachedFirstPage = remember(selectedChartId, settings.tmdbKey, settings.doubanEnabled) {
+        DiscoverRepository.peekChartFirstPage(chart, settings)
+    }
     var page by remember(selectedChartId) { mutableIntStateOf(1) }
-    var items by remember(selectedChartId) { mutableStateOf<List<DiscoverItem>>(emptyList()) }
-    var note by remember(selectedChartId) { mutableStateOf<String?>(null) }
-    var loading by remember(selectedChartId) { mutableStateOf(true) }
+    var items by remember(selectedChartId) { mutableStateOf(cachedFirstPage?.items.orEmpty()) }
+    var note by remember(selectedChartId) { mutableStateOf(cachedFirstPage?.note) }
+    var loading by remember(selectedChartId) { mutableStateOf(cachedFirstPage == null) }
     var loadingMore by remember(selectedChartId) { mutableStateOf(false) }
     var error by remember(selectedChartId) { mutableStateOf<String?>(null) }
     var endReached by remember(selectedChartId) { mutableStateOf(false) }
 
     LaunchedEffect(selectedChartId, page, settings.tmdbKey) {
+        if (page == 1 && items.isNotEmpty()) {
+            loading = false
+            return@LaunchedEffect
+        }
         if (page == 1) loading = true else loadingMore = true
         error = null
         runCatching {
@@ -998,7 +1077,6 @@ fun DiscoverChartScreen(
                         Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             TextButton(onClick = onOpenSettings) { Text("去填写 TMDB Key") }
-                            TextButton(onClick = { onOpenWeb("https://re0.me/") }) { Text("打开影巢 re0.me") }
                         }
                     }
                 }
@@ -1053,7 +1131,7 @@ fun DiscoverChartScreen(
 /**
  * 发现页条目进入的影视详情页：
  * 主页面专注展示影视详情（海报、背景、多平台评分、来源播出平台、剧情简介与演职员）；
- * 提供醒目「立即播放」按钮（一键跳转本地资源、远程服务器/网盘资源或原平台播放）；
+ * 提供醒目「播放」按钮（一键跳转本地资源、远程服务器/网盘资源或原平台播放）；
  * 资源搜索相关功能收拢进二级菜单，并在菜单顶部采用单行关键词栏（左搜索框弹可选关键词 + 右搜索源）。
  */
 @OptIn(ExperimentalLayoutApi::class)
@@ -1396,11 +1474,7 @@ fun DiscoverDetailScreen(
                             Icon(AppIcons.PlayArrow, null, modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                text = when {
-                                    localMatches.isNotEmpty() -> "立即播放（本地已匹配）"
-                                    remoteHistoryMatches.isNotEmpty() -> "立即播放（远程续播）"
-                                    else -> "立即播放"
-                                },
+                                text = "播放",
                                 fontWeight = FontWeight.SemiBold,
                             )
                         }
@@ -1632,7 +1706,7 @@ private sealed interface RemotePlayHit {
     data class OpenListHit(val server: Server, val item: RemoteItem) : RemotePlayHit
 }
 
-/** 详情页点击「立即播放」弹出的播放通道选择器：本地资源 / 远程资源 / 原平台播放。 */
+/** 详情页点击「播放」弹出的播放通道选择器：本地资源 / 远程资源 / 原平台播放。 */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DiscoverPlaySourceDialog(
@@ -1941,6 +2015,7 @@ private fun DiscoverResourceSearchDialog(
     onOpenWeb: (url: String, query: String) -> Unit,
     onOpenExternal: (url: String, query: String) -> Unit,
 ) {
+    val focusManager = LocalFocusManager.current
     var selectedCategory by remember { mutableStateOf<SearchCategory?>(null) }
     var sourceMenuOpen by remember { mutableStateOf(false) }
 
@@ -1965,7 +2040,7 @@ private fun DiscoverResourceSearchDialog(
                     value = searchQuery,
                     onValueChange = onSearchQueryChange,
                     onSearch = {
-                        onOpenWeb(DiscoverSearchStore.buildRe0SearchUrl(activeQ), activeQ)
+                        focusManager.clearFocus()
                     },
                     placeholder = "点击选关键词或直接输入片名",
                     candidates = queryCandidates,
@@ -2008,39 +2083,47 @@ private fun DiscoverResourceSearchDialog(
                     )
                 }
 
-                // 1. 影巢 (re0.me) 搜索与词条直达
+                // 1. 影巢 (re0.me)：仅保留「词条直达」与「系统浏览器」
                 if (selectedCategory == null || selectedCategory == SearchCategory.RE0) {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("影巢（re0.me）", style = MaterialTheme.typography.labelLarge, color = Orange)
                         val re0Search = re0Sources.firstOrNull { it.id == "re0_search" }
                         val re0SearchUrl = re0Search?.buildUrl(activeQ, enrichedItem)
                             ?: DiscoverSearchStore.buildRe0SearchUrl(activeQ)
+                        val directRe0Url = enrichedItem.tmdbId?.let { tid ->
+                            DiscoverSearchStore.buildRe0DirectUrl(enrichedItem.kind, tid)
+                        }
+                        val externalRe0Url = if (directRe0Url != null && (
+                                activeQ.equals(enrichedItem.title.trim(), ignoreCase = true) ||
+                                    activeQ.equals(enrichedItem.originalTitle.trim(), ignoreCase = true)
+                                )
+                        ) {
+                            directRe0Url
+                        } else {
+                            re0SearchUrl
+                        }
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            Button(
-                                onClick = { onOpenWeb(re0SearchUrl, activeQ) },
-                                colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
-                            ) {
-                                Icon(AppIcons.Web, null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.width(5.dp))
-                                Text("内置浏览器搜「$activeQ」", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            enrichedItem.tmdbId?.let { tid ->
-                                // 使用 /tmdb/{movie|tv}/{tmdbId} 路由直达影巢词条详情页，修复旧版 /movie/{tid} 404 错误
-                                val directRe0Url = DiscoverSearchStore.buildRe0DirectUrl(enrichedItem.kind, tid)
-                                OutlinedButton(onClick = { onOpenWeb(directRe0Url, activeQ) }) {
-                                    Text("影巢词条直达")
+                            if (directRe0Url != null) {
+                                // 使用 /tmdb/{movie|tv}/{tmdbId} 路由直达影巢词条详情页
+                                Button(
+                                    onClick = { onOpenWeb(directRe0Url, activeQ) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
+                                ) {
+                                    Icon(AppIcons.Web, null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(5.dp))
+                                    Text("词条直达")
                                 }
                             }
-                            OutlinedButton(onClick = { onOpenExternal(re0SearchUrl, activeQ) }) {
+                            OutlinedButton(onClick = { onOpenExternal(externalRe0Url, activeQ) }) {
                                 Icon(AppIcons.OpenInNew, null, modifier = Modifier.size(15.dp))
                                 Spacer(Modifier.width(4.dp))
                                 Text("系统浏览器")
                             }
                         }
-                        re0Sources.filter { it.id != "re0_search" }.forEach { src ->
+                        re0Sources.filter { !it.builtin }.forEach { src ->
                             ResourceSourceActionRow(
                                 source = src,
                                 url = src.buildUrl(activeQ, enrichedItem),

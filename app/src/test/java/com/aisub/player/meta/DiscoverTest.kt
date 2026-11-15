@@ -197,6 +197,7 @@ class DiscoverTest {
         assertTrue(searchUrl.contains("keyword="))
         assertTrue(searchUrl.contains("search="))
         assertTrue(searchUrl.contains("q="))
+        assertFalse(DiscoverSearchStore.builtinSources.any { it.id == "re0_home" })
     }
 
     @Test

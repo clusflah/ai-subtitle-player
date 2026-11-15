@@ -259,6 +259,57 @@ object DiscoverRepository {
 
     private val listCache = ConcurrentHashMap<String, CacheEntry<List<DiscoverItem>>>()
 
+    @Volatile
+    private var cachedHomeConfigKey: String? = null
+
+    @Volatile
+    private var cachedHomeSections: List<DiscoverHomeSection> = emptyList()
+
+    private val chartFirstPageCache = ConcurrentHashMap<String, DiscoverChartPage>()
+    private val searchSnapshotCache = ConcurrentHashMap<String, List<DiscoverItem>>()
+
+    @Volatile
+    var sessionSearchExpanded: Boolean = false
+        private set
+
+    @Volatile
+    var sessionQueryInput: String = ""
+
+    @Volatile
+    var sessionAppliedQuery: String = ""
+
+    fun setSessionSearchExpanded(expanded: Boolean) {
+        sessionSearchExpanded = expanded
+        if (!expanded) {
+            sessionQueryInput = ""
+            sessionAppliedQuery = ""
+        }
+    }
+
+    private fun homeConfigKey(settings: AppSettings): String =
+        "${settings.tmdbKey.trim()}|${settings.doubanEnabled}"
+
+    private fun chartFirstPageKey(chart: DiscoverChartDef, settings: AppSettings): String =
+        "${chart.id}|${settings.tmdbKey.isNotBlank()}|${settings.doubanEnabled}"
+
+    private fun searchSnapshotKey(settings: AppSettings, query: String): String =
+        "${settings.tmdbKey.isNotBlank()}|${settings.doubanEnabled}|${query.trim()}"
+
+    /** 读取当前会话已加载过的发现页首页快照，从详情页/榜单页退回时不重复触发刷新转圈。 */
+    fun peekHomeSections(settings: AppSettings): List<DiscoverHomeSection> =
+        if (cachedHomeConfigKey == homeConfigKey(settings)) cachedHomeSections else emptyList()
+
+    /** 读取当前会话已加载过的单榜单首屏快照，从详情页退回时直接复用。 */
+    fun peekChartFirstPage(chart: DiscoverChartDef, settings: AppSettings): DiscoverChartPage? =
+        chartFirstPageCache[chartFirstPageKey(chart, settings)]
+
+    /** 读取当前会话已搜索过的关键词结果快照，从详情页退回时免重复请求。 */
+    fun peekSearchResults(settings: AppSettings, query: String): List<DiscoverItem>? {
+        val q = query.trim()
+        if (q.isEmpty()) return emptyList()
+        return searchSnapshotCache[searchSnapshotKey(settings, q)]
+    }
+
     private val tmdbGenreMap = mapOf(
         12 to "冒险", 14 to "奇幻", 16 to "动画", 18 to "剧情", 27 to "恐怖", 28 to "动作",
         35 to "喜剧", 36 to "历史", 37 to "西部", 53 to "惊悚", 80 to "犯罪", 99 to "纪录片",
@@ -275,10 +326,18 @@ object DiscoverRepository {
 
     fun clearCache() {
         listCache.clear()
+        cachedHomeConfigKey = null
+        cachedHomeSections = emptyList()
+        chartFirstPageCache.clear()
+        searchSnapshotCache.clear()
     }
 
     /** 加载发现页首页的榜单行；优先展示豆瓣免 Key 榜单，TMDB Key 存在时追加趋势榜。 */
     fun loadHomeSections(settings: AppSettings, forceRefresh: Boolean = false): List<DiscoverHomeSection> {
+        val cfgKey = homeConfigKey(settings)
+        if (!forceRefresh && cachedHomeConfigKey == cfgKey && cachedHomeSections.isNotEmpty()) {
+            return cachedHomeSections
+        }
         val charts = buildList {
             addAll(DiscoverCharts.homeCharts)
             if (settings.tmdbKey.isNotBlank()) {
@@ -286,12 +345,17 @@ object DiscoverRepository {
                 DiscoverCharts.findChart("tmdb_trending_movie")?.let { add(it) }
             }
         }
-        return charts.mapNotNull { chart ->
+        val loaded = charts.mapNotNull { chart ->
             val items = runCatching {
                 fetchDoubanOrTmdbChart(chart, settings, page = 1, count = 18, forceRefresh = forceRefresh).items
             }.getOrDefault(emptyList())
             if (items.isEmpty()) null else DiscoverHomeSection(chart, items)
         }
+        if (loaded.isNotEmpty()) {
+            cachedHomeSections = loaded
+            cachedHomeConfigKey = cfgKey
+        }
+        return loaded
     }
 
     /** 加载指定榜单页面；当 TMDB Key 缺失时自动回落到对应的豆瓣榜单。 */
@@ -301,7 +365,17 @@ object DiscoverRepository {
         page: Int = 1,
         count: Int = 24,
         forceRefresh: Boolean = false,
-    ): DiscoverChartPage = fetchDoubanOrTmdbChart(chart, settings, page, count, forceRefresh)
+    ): DiscoverChartPage {
+        val key = chartFirstPageKey(chart, settings)
+        if (page == 1 && !forceRefresh) {
+            chartFirstPageCache[key]?.let { return it }
+        }
+        return fetchDoubanOrTmdbChart(chart, settings, page, count, forceRefresh).also { res ->
+            if (page == 1 && res.items.isNotEmpty()) {
+                chartFirstPageCache[key] = res
+            }
+        }
+    }
 
     private fun fetchDoubanOrTmdbChart(
         chart: DiscoverChartDef,
@@ -361,8 +435,13 @@ object DiscoverRepository {
     fun search(settings: AppSettings, query: String): List<DiscoverItem> {
         val q = query.trim()
         if (q.isEmpty()) return emptyList()
+        val snapKey = searchSnapshotKey(settings, q)
+        searchSnapshotCache[snapKey]?.let { return it }
         val cacheKey = "search:${settings.tmdbKey.isNotBlank()}:$q"
-        if (cached(cacheKey) != null) return cached(cacheKey)!!
+        cached(cacheKey)?.let {
+            searchSnapshotCache[snapKey] = it
+            return it
+        }
 
         val results = mutableListOf<DiscoverItem>()
         if (settings.tmdbKey.isNotBlank()) {
@@ -373,6 +452,7 @@ object DiscoverRepository {
         }
         val merged = mergeSearchResults(results)
         putCache(cacheKey, merged)
+        searchSnapshotCache[snapKey] = merged
         return merged
     }
 
@@ -712,18 +792,10 @@ object DiscoverSearchStore {
     val builtinSources: List<SearchSource> = listOf(
         SearchSource(
             id = "re0_search",
-            name = "影巢 (re0.me) 搜索",
+            name = "影巢 (re0.me)",
             category = SearchCategory.RE0,
             urlTemplate = "https://re0.me/search?keyword={q}&search={q}&q={q}",
-            description = "在影巢检索片名并查看网友分享的网盘/磁力资源",
-            builtin = true,
-        ),
-        SearchSource(
-            id = "re0_home",
-            name = "影巢 (re0.me) 首页 / 榜单",
-            category = SearchCategory.RE0,
-            urlTemplate = "https://re0.me/",
-            description = "直接访问影巢主页与流媒体片单",
+            description = "通过系统浏览器检索影巢片源（详情页支持词条直达）",
             builtin = true,
         ),
         SearchSource(
@@ -799,7 +871,7 @@ object DiscoverSearchStore {
         val p = prefs(ctx)
         val disabled = parseStringList(p.getString(KEY_DISABLED_BUILTIN, null)).toSet()
         val builtins = builtinSources.map { it.copy(enabled = it.id !in disabled) }
-        val custom = parseCustomSources(p.getString(KEY_CUSTOM_SOURCES, null))
+        val custom = parseCustomSources(p.getString(KEY_CUSTOM_SOURCES, null)).filterNot { it.id == "re0_home" }
         return builtins + custom
     }
 
