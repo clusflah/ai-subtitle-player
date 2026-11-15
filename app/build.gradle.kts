@@ -1,3 +1,4 @@
+import com.android.build.api.variant.VariantOutputConfiguration.OutputType
 import java.net.URI
 import java.security.MessageDigest
 import java.util.zip.ZipFile
@@ -245,8 +246,11 @@ configurations.matching { it.name.contains("UnitTest") }.configureEach {
 }
 
 androidComponents {
-    // yt-dlp 要直接运行 so 里的 Python，原生库必须解压到磁盘
+    // yt-dlp 要直接运行 so 里的 Python，原生库必须解压到磁盘；同时下载版不出通用包（太大且不发布）
     onVariants(selector().withFlavor("edition" to "ytdlp")) { variant ->
         variant.packaging.jniLibs.useLegacyPackaging.set(true)
+        variant.outputs
+            .filter { it.outputType == OutputType.UNIVERSAL }
+            .forEach { it.enabled.set(false) }
     }
 }
