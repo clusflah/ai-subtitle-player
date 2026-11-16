@@ -31,3 +31,18 @@ target_link_options(vlc_audio_bridge PRIVATE
 )
 
 target_link_libraries(vlc_audio_bridge dl log m)
+
+add_library(mpv_player_bridge SHARED mpv_player_bridge.cpp)
+
+target_compile_options(mpv_player_bridge PRIVATE
+    -O2
+    -fno-exceptions
+    -fno-rtti
+    -fvisibility=hidden
+)
+
+target_link_options(mpv_player_bridge PRIVATE
+    -Wl,-z,max-page-size=16384
+)
+
+target_link_libraries(mpv_player_bridge dl log m)

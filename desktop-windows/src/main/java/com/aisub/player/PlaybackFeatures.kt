@@ -168,6 +168,7 @@ class PlaybackFeatures(
         if (_state.value.chapters.isEmpty()) {
             val vlcChapters = when (p) {
                 is VlcPlayer -> p.chapters()
+                is com.aisub.player.media.MpvPlayer -> p.chapters()
                 is com.aisub.player.desktop.DesktopExoPlayer -> p.chapters()
                 else -> emptyList()
             }
@@ -202,7 +203,7 @@ class PlaybackFeatures(
         if (onlyIfMissing && com.aisub.player.ui.HistoryThumbs.file(app, e.uri).exists()) return
         // Windows 桌面端直接从内存渲染帧截图，避免另起 FFmpeg 进程抢占 115 等单连接网盘
         val p = player()
-        if (p is com.aisub.player.desktop.DesktopExoPlayer) {
+        if (p is com.aisub.player.desktop.DesktopExoPlayer || p is com.aisub.player.media.MpvPlayer) {
             val ramBmp = com.aisub.player.desktop.DesktopPlayerEngine.latestFrameBitmap
             if (ramBmp != null && !isMostlyBlack(ramBmp)) {
                 historyThumbJob?.cancel()

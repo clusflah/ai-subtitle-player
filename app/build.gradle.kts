@@ -67,11 +67,11 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 23
         targetSdk = 36
-        versionCode = 156
-        versionName = "2.9.95"
+        versionCode = 157
+        versionName = "2.9.96"
 
         ndk {
-            // 真机基本都是 arm64；x86_64 给模拟器用
+            // 真机基本都是 arm64；armeabi-v7a 给 32 位老电视用；x86_64 给模拟器用
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
         externalNativeBuild {
@@ -143,7 +143,7 @@ android {
         }
     }
 
-    // 每个 CPU 架构单独出一个 APK（onnxruntime 原生库很大），另外保留一个通用包
+    // 每个 CPU 架构单独出一个 APK（onnxruntime / libmpv / libvlc 原生库较大），另外保留一个通用包
     splits {
         abi {
             isEnable = true
@@ -164,7 +164,16 @@ android {
             )
         }
         jniLibs {
-            pickFirsts += "lib/*/libc++_shared.so"
+            pickFirsts += listOf(
+                "lib/*/libc++_shared.so",
+                "lib/*/libavcodec.so",
+                "lib/*/libavformat.so",
+                "lib/*/libavutil.so",
+                "lib/*/libavfilter.so",
+                "lib/*/libswresample.so",
+                "lib/*/libswscale.so",
+                "lib/*/libass.so",
+            )
         }
     }
 
@@ -206,10 +215,13 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-rtsp:1.9.0")
     // AC3、E-AC3、DTS、TrueHD 等手机系统通常不支持的音频格式，用 FFmpeg 软解（Jellyfin 预编译，版本需与 Media3 一致）
     implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1")
-    // ISO（DVD / 蓝光镜像）以及 ExoPlayer 解不了的格式改用 VLC 内核
+    // MPV 内核（含 libmpv + FFmpeg + libplacebo 动态色调映射 + dav1d + libass）：
+    // 解决杜比视界 Profile 5 (IPTPQc2) 紫绿偏色与冷门编码解码；放在 VLC/ass-media 前面保留更新的 libc++_shared.so。
+    // 选用 0.5.1 避开 1.0.0 中 Mbed TLS 3.6.6 在老内核 Android TV 上读取 /dev/random 导致的 HTTPS 握手卡顿。
+    implementation("dev.jdtech.mpv:libmpv:0.5.1")
+    // ISO（DVD / 蓝光镜像）以及单连接原生音频分流直播源使用 VLC 内核
     implementation("org.videolan.android:libvlc-all:3.7.7")
     // 视频自带的 ASS / SSA 字幕用 libass 渲染（位置、多行避让、特效和 Plex、VLC 一致；ExoPlayer 自带的只会把所有行堆在底部）
-    // 放在 VLC 后面：两者都带 libc++_shared.so，保留 VLC 那份（NDK 更新，向下兼容）
     implementation("io.github.peerless2012:ass-media:0.5.1")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")

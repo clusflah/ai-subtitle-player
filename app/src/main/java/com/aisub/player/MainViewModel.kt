@@ -35,7 +35,10 @@ import io.github.peerless2012.ass.media.parser.AssSubtitleParserFactory
 import io.github.peerless2012.ass.media.type.AssRenderType
 import com.aisub.player.media.AppStore
 import com.aisub.player.media.MediaEntry
+import com.aisub.player.media.DolbyAwareRenderersFactory
+import com.aisub.player.media.DolbyVisionHelper
 import com.aisub.player.media.MediaProxy
+import com.aisub.player.media.MpvPlayer
 import com.aisub.player.media.VlcPlayer
 import com.aisub.player.remote.AuthRegistry
 import com.aisub.player.remote.Endpoints
@@ -175,13 +178,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 视频自带 ASS / SSA 字幕的 libass 渲染；播放页创建画面时把它的图层加到字幕视图上 */
     val assHandler = AssHandler(AssRenderType.OVERLAY_OPEN_GL)
 
+    /** 用户在播放页对某个视频/频道手动指定的内核（优先级高于自动切核，防止手动切回默认内核后又被自动切走） */
+    private val manualEntryKernel = HashMap<String, PlayerKernel>()
+
+    /** 当前条目是否由杜比视界色彩保护自动切入 MPV 内核 */
+    @Volatile
+    var isCurrentDolbyShunted: Boolean = false
+        private set
+
+    private fun isManualExoLockedForCurrent(): Boolean {
+        val uri = _state.value.current?.uri
+        return (uri != null && manualEntryKernel[uri] == PlayerKernel.EXO) || !_state.value.settings.autoDolbyMpv
+    }
+
     /** 默认播放内核 */
     val exoPlayer: ExoPlayer = run {
         val assParsers = AssSubtitleParserFactory(assHandler)
         val sources = DefaultMediaSourceFactory(authDataSourceFactory(app), DefaultExtractorsFactory().withAssMkvSupport(assParsers, assHandler).withAiff())
         sources.setSubtitleParserFactory(assParsers)
         ExoPlayer.Builder(app)
-            .setRenderersFactory(renderersFactory(app).withAssSupport(assHandler))
+            .setRenderersFactory(renderersFactory(app) { isManualExoLockedForCurrent() }.withAssSupport(assHandler))
             .setMediaSourceFactory(sources)
             // 后台播放需要：来电、别的应用放声音时暂停，拔耳机暂停，锁屏后播放网络文件不断
             .setAudioAttributes(
@@ -197,7 +213,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 应用内均衡器，挂在默认内核上 */
     val equalizer = AudioEqualizer(app, exoPlayer)
 
-    /** VLC 内核：ISO 光盘镜像，或用户在 ExoPlayer 播放失败后手动切换。用到时才创建。 */
+    /** MPV 内核：杜比视界 Profile 5 / 7 / 8 动态色调映射（libplacebo）与全格式软硬解。用到时才创建。 */
+    private var mpvPlayer: MpvPlayer? = null
+
+    /** VLC 内核：ISO 光盘镜像、单连接直播音频分流，或兼容回退。用到时才创建。 */
     private var vlcPlayer: VlcPlayer? = null
     private var proxyInstance: MediaProxy? = null
     private fun mediaProxy(): MediaProxy =
@@ -207,8 +226,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 当前使用的播放内核，切换时播放页会重新绑定画面 */
     val playerFlow: StateFlow<Player> = _player.asStateFlow()
     val player: Player get() = _player.value
-    val usingVlc: Boolean get() = player !== exoPlayer
+    val activeKernel: PlayerKernel
+        get() = when {
+            mpvPlayer != null && player === mpvPlayer -> PlayerKernel.MPV
+            vlcPlayer != null && player === vlcPlayer -> PlayerKernel.VLC
+            else -> PlayerKernel.EXO
+        }
+    val usingMpv: Boolean get() = activeKernel == PlayerKernel.MPV
+    val usingVlc: Boolean get() = activeKernel == PlayerKernel.VLC
+    val usingExternalKernel: Boolean get() = player !== exoPlayer
+    val mpvPipelineLabel: String? get() = mpvPlayer?.takeIf { usingMpv }?.pipelineSummary
+    val mpvVideoCodecLabel: String? get() = mpvPlayer?.takeIf { usingMpv }?.activeVideoCodec
+    val mpvAudioCodecLabel: String? get() = mpvPlayer?.takeIf { usingMpv }?.activeAudioCodec
+    val mpvHwdecPref: Boolean? get() = mpvPlayer?.userForceHwdec
     val vlcAudioBackendLabel: String? get() = vlcPlayer?.takeIf { usingVlc }?.audioBackendLabel
+
+    fun setMpvHwdecPreference(forceHwdec: Boolean?) {
+        mpv().setHwdecPreference(forceHwdec)
+    }
 
     /** 应用没开着时从桌面小组件开始的后台播放：先停掉它，界面打开后接着放（见 [resumeWidgetPlayback]） */
     private var widgetHandover = WidgetPlayback.takeOver()
@@ -257,7 +292,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 视频开始播放后 6 秒还没出第一帧（或解码器明说不支持），就提示 */
     private fun watchFirstFrame() {
-        if (usingVlc || sawFirstFrame || frameWatch?.isActive == true) return
+        if (usingExternalKernel || sawFirstFrame || frameWatch?.isActive == true) return
         val e = _state.value.current?.takeIf { it.isVideo && !it.isLive } ?: return
         frameWatch = viewModelScope.launch {
             delay(6000)
@@ -438,6 +473,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 音乐的歌词与封面 */
     val music = com.aisub.player.music.MusicFeatures(app, viewModelScope, player = { player }, settings = { _state.value.settings })
 
+    /** 本次会话中已因硬解报错自动尝试过切入 MPV 的普通视频地址，防止死循环 */
+    private val mpvAutoTried = HashSet<String>()
+
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             val counting = playbackStatsJob?.isActive == true
@@ -446,7 +484,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) _state.value.current?.let { prev ->
                 ServerProgress.find(prev.uri)?.let { p -> reportPlex(prev.uri, "stopped", p.durationMs, p.durationMs) }
             }
-            if (!usingVlc) queue.getOrNull(exoPlayer.currentMediaItemIndex)?.let(::onEntryChanged)
+            if (!usingExternalKernel) queue.getOrNull(exoPlayer.currentMediaItemIndex)?.let(::onEntryChanged)
             if (counting) _state.value.current?.let { library.recordPlayback(it, 0, started = true) }
         }
 
@@ -463,18 +501,44 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+            // 默认内核下检测到需要色彩保护的杜比视界（如无兼容底流的 Profile 5），在首帧上屏前无感切换至 MPV 内核动态映射色彩
+            val cur = _state.value.current
+            if (cur != null && cur.isVideo && !cur.isLive && !usingExternalKernel &&
+                _state.value.settings.autoDolbyMpv && manualEntryKernel[cur.uri] != PlayerKernel.EXO
+            ) {
+                val dvFormat = tracks.groups
+                    .asSequence()
+                    .filter { it.type == C.TRACK_TYPE_VIDEO }
+                    .flatMap { g -> (0 until g.length).asSequence().map { g.getTrackFormat(it) } }
+                    .firstOrNull { DolbyVisionHelper.requiresMpvForColorAccuracy(getApplication(), it) }
+                if (dvFormat != null) {
+                    val desc = DolbyVisionHelper.describeFormat(dvFormat) ?: "杜比视界"
+                    android.util.Log.i("Voxtitle", "检测到 $desc 且当前屏幕不支持原生直出，自动切换 MPV 内核（libplacebo 色调映射）：${cur.uri}")
+                    switchKernel(
+                        target = PlayerKernel.MPV,
+                        manual = false,
+                        dolbyP5Hint = DolbyVisionHelper.isProfile5(dvFormat),
+                        reasonBanner = "检测到 $desc，已自动切换 MPV 内核映射标准色彩",
+                    )
+                    return
+                }
+            }
+            if (usingMpv && mpvPlayer?.detectedDolbyProfile != null) {
+                isCurrentDolbyShunted = true
+            }
             extras.onTracksChanged(tracks)
             music.onTracksChanged(tracks)
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            android.util.Log.e("Voxtitle", "播放失败", error)
+            android.util.Log.e("Voxtitle", "播放失败 (${activeKernel.name})", error)
             if (recoverLive(error)) return
             if (retryLiveAsOtherType(error)) return
+            if (autoSwitchVideoToMpv(error)) return
             if (autoSwitchLiveToVlc(error)) return
             // 自动记住要用兼容模式的频道，兼容模式也打不开：忘掉，下次先用默认内核试（手动切核除外）
-            _state.value.current?.takeIf { usingVlc && it.isLive && manualLiveKernel[it.uri] != true }?.let { forgetVlcChannel(it.uri) }
-            // 默认内核下识别另开了一路连接（VLC 内核走原生音频回调分流，不占第二路连接）
+            _state.value.current?.takeIf { usingVlc && it.isLive && manualEntryKernel[it.uri] != PlayerKernel.VLC }?.let { forgetVlcChannel(it.uri) }
+            // 默认/MPV 内核下直播或远程识别另开了一路连接（VLC 内核走原生音频回调分流，不占第二路连接）
             val extra = _state.value.takeIf { s -> s.transcribing && !usingVlc && s.current?.let { it.isLive || isRemote(it) } == true }
                 ?.let { s ->
                     "\n\n$CONCURRENCY_HINT。" + if (s.current?.isLive == true) {
@@ -489,7 +553,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         override fun onPlaybackStateChanged(playbackState: Int) {
             if (playbackState == Player.STATE_READY) {
                 _state.update { it.copy(playbackError = null) }
-                _state.value.current?.takeIf { it.isLive && !usingVlc }?.let { liveWorked += it.uri }
+                _state.value.current?.takeIf { it.isLive && !usingExternalKernel }?.let { liveWorked += it.uri }
+            } else if (playbackState == Player.STATE_ENDED && usingMpv) {
+                // MPV 内核单集播完后：若未在识别/翻译且队列还有下一集，自动连播下一集
+                val cur = _state.value.current
+                val busy = _state.value.transcribing || _state.value.translating
+                if (cur != null && !cur.isLive && !busy && queue.size > 1) {
+                    val idx = queue.indexOfFirst { it.uri == cur.uri }
+                    val nextIdx = when {
+                        idx >= 0 && idx + 1 < queue.size -> idx + 1
+                        player.repeatMode == Player.REPEAT_MODE_ALL -> 0
+                        else -> -1
+                    }
+                    if (nextIdx >= 0) {
+                        ServerProgress.find(cur.uri)?.let { p -> reportPlex(cur.uri, "stopped", p.durationMs, p.durationMs) }
+                        play(queue, nextIdx)
+                    }
+                }
             }
         }
     }
@@ -533,7 +613,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun recoverLive(error: PlaybackException): Boolean {
         val entry = _state.value.current?.takeIf { it.isLive } ?: return false
-        if (usingVlc) return false
+        if (usingExternalKernel) return false
         val behind = error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW
         if (!behind && entry.uri !in liveWorked) return false
         val now = android.os.SystemClock.elapsedRealtime()
@@ -592,6 +672,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun mpv(): MpvPlayer = mpvPlayer ?: MpvPlayer(getApplication(), mediaProxy()).also {
+        it.addListener(listener)
+        mpvPlayer = it
+    }
+
     private fun vlc(): VlcPlayer = vlcPlayer ?: VlcPlayer(getApplication(), mediaProxy()).also {
         it.addListener(listener)
         vlcPlayer = it
@@ -630,7 +715,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 直播打不开且是解析错误：换一种类型（HLS ↔ 普通流）重试一次。返回是否已重试。 */
     private fun retryLiveAsOtherType(error: PlaybackException): Boolean {
         val entry = _state.value.current?.takeIf { it.isLive } ?: return false
-        if (usingVlc || entry.uri in liveRetried) return false
+        if (usingExternalKernel || entry.uri in liveRetried) return false
         val parsing = error.errorCode in setOf(
             PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
             PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
@@ -648,55 +733,144 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
-    // ---- 直播：默认内核打不开的频道自动换兼容模式（VLC 内核），并按频道记住 ----
+    // ---- 内核分流、记住频道内核与播放页无缝切换（ExoPlayer ↔ MPV ↔ VLC） ----
 
     private val playbackPrefs = getApplication<Application>().getSharedPreferences("playback", Context.MODE_PRIVATE)
 
-    /** 要用兼容模式播放的直播频道地址 */
+    /** 要用 VLC 兼容模式播放的直播频道地址 */
     private val vlcChannels: MutableSet<String> = HashSet(playbackPrefs.getStringSet("vlcChannels", emptySet()).orEmpty())
+
+    /** 要用 MPV 内核播放的直播频道地址 */
+    private val mpvChannels: MutableSet<String> = HashSet(playbackPrefs.getStringSet("mpvChannels", emptySet()).orEmpty())
 
     /** 这次打开后已经自动换过兼容模式的频道，兼容模式也不行时不再来回换 */
     private val vlcAutoTried = HashSet<String>()
 
-    /** 用户在直播播放页手动指定的内核（true = VLC 内核，false = 默认内核），避免自动回退覆盖手动选择 */
-    private val manualLiveKernel = HashMap<String, Boolean>()
-
     private fun rememberVlcChannel(uri: String) {
-        if (vlcChannels.add(uri)) playbackPrefs.edit().putStringSet("vlcChannels", HashSet(vlcChannels)).apply()
+        mpvChannels.remove(uri)
+        if (vlcChannels.add(uri)) {
+            playbackPrefs.edit()
+                .putStringSet("vlcChannels", HashSet(vlcChannels))
+                .putStringSet("mpvChannels", HashSet(mpvChannels))
+                .apply()
+        }
     }
 
     private fun forgetVlcChannel(uri: String) {
         if (vlcChannels.remove(uri)) playbackPrefs.edit().putStringSet("vlcChannels", HashSet(vlcChannels)).apply()
     }
 
+    private fun rememberMpvChannel(uri: String) {
+        vlcChannels.remove(uri)
+        if (mpvChannels.add(uri)) {
+            playbackPrefs.edit()
+                .putStringSet("mpvChannels", HashSet(mpvChannels))
+                .putStringSet("vlcChannels", HashSet(vlcChannels))
+                .apply()
+        }
+    }
+
+    private fun forgetMpvChannel(uri: String) {
+        if (mpvChannels.remove(uri)) playbackPrefs.edit().putStringSet("mpvChannels", HashSet(mpvChannels)).apply()
+    }
+
     /**
-     * 直播用默认内核打不开：自动改用兼容模式。网络不通、源失效（HTTP 4xx/5xx）换内核也没用，照常报错。
-     * 返回是否已切换。
+     * 普通视频在默认 ExoPlayer 硬解报错（如杜比视界 Profile 5 被拦截、Hi10P/AV1/旧封装硬解不支持）时，
+     * 自动无损切入 MPV 内核软硬解与色调映射，不打断用户观影。
+     */
+    private fun autoSwitchVideoToMpv(error: PlaybackException): Boolean {
+        val entry = _state.value.current?.takeIf { it.isVideo && !it.isLive } ?: return false
+        if (usingExternalKernel || manualEntryKernel[entry.uri] == PlayerKernel.EXO) return false
+        val decodeOrContainer = error.errorCode in setOf(
+            PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+            PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+            PlaybackException.ERROR_CODE_DECODING_FAILED,
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+            PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+        )
+        if (!decodeOrContainer || !mpvAutoTried.add(entry.uri)) return false
+        val looksDv = DolbyVisionHelper.looksLikeDolbyVisionTitle(entry.title) ||
+            (error.cause?.message?.contains("dolby", ignoreCase = true) == true)
+        val banner = if (looksDv) {
+            "检测到杜比视界流，已自动切换 MPV 内核还原标准色彩"
+        } else {
+            "系统硬解不支持该格式，已自动切换 MPV 内核播放"
+        }
+        android.util.Log.i("Voxtitle", "$banner：${entry.uri}")
+        switchKernel(target = PlayerKernel.MPV, manual = false, dolbyP5Hint = looksDv, reasonBanner = banner)
+        return true
+    }
+
+    /**
+     * 直播用默认内核打不开：自动改用 VLC 兼容内核。网络不通、源失效（HTTP 4xx/5xx）换内核也没用，照常报错。
      */
     private fun autoSwitchLiveToVlc(error: PlaybackException): Boolean {
         val entry = _state.value.current?.takeIf { it.isLive } ?: return false
-        if (usingVlc || manualLiveKernel[entry.uri] == false || !vlcAutoTried.add(entry.uri)) return false
+        if (usingExternalKernel || manualEntryKernel[entry.uri] == PlayerKernel.EXO || !vlcAutoTried.add(entry.uri)) return false
         if (error.errorCode in setOf(
                 PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
                 PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
                 PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
             )
         ) return false
-        android.util.Log.i("Voxtitle", "直播默认内核打不开，自动换兼容模式：${entry.uri}")
-        switchLiveKernelInternal(entry, useVlc = true, manual = false)
+        android.util.Log.i("Voxtitle", "直播默认内核打不开，自动换 VLC 内核：${entry.uri}")
+        switchKernel(target = PlayerKernel.VLC, manual = false)
         return true
     }
 
-    /** 用 VLC 内核播放一个文件。直播保留频道列表，换台时每个频道再按记住的内核打开。 */
-    private fun playWithVlc(entry: MediaEntry, positionMs: Long, channels: List<MediaEntry>? = null) {
+    /** 用 MPV 内核播放一个条目，完整保留剧集或直播队列以便上一集/下一集切集。 */
+    private fun playWithMpv(
+        entry: MediaEntry,
+        positionMs: Long,
+        entries: List<MediaEntry>? = null,
+        dolbyP5Hint: Boolean = false,
+        playWhenReady: Boolean = true,
+        speed: Float = 1f,
+        repeatMode: Int = Player.REPEAT_MODE_OFF,
+    ) {
+        vlcLiveWatch?.cancel()
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
+        vlcPlayer?.setAsrAudioConsumer(null, null)
+        vlcPlayer?.stop()
+        queue = entries ?: listOf(entry)
+        isCurrentDolbyShunted = dolbyP5Hint
+        val m = mpv()
+        m.dolbyProfile5Hint = dolbyP5Hint || DolbyVisionHelper.looksLikeDolbyVisionTitle(entry.title)
+        m.repeatMode = repeatMode
+        m.setPlaybackSpeed(speed)
+        m.setMediaItem(itemOf(entry), positionMs)
+        _state.update { it.copy(playbackError = null, videoProblem = null) }
+        m.playWhenReady = playWhenReady
+        m.prepare()
+        startPlaybackService()
+        _player.value = m
+        onEntryChanged(entry)
+    }
+
+    /** 用 VLC 内核播放一个文件。保留播放列表/频道列表。 */
+    private fun playWithVlc(
+        entry: MediaEntry,
+        positionMs: Long,
+        channels: List<MediaEntry>? = null,
+        playWhenReady: Boolean = true,
+        speed: Float = 1f,
+    ) {
+        exoPlayer.stop()
+        exoPlayer.clearMediaItems()
+        mpvPlayer?.stop()
+        mpvPlayer?.clearMediaItems()
         queue = channels ?: listOf(entry)
+        isCurrentDolbyShunted = false
         val v = vlc()
+        v.setPlaybackSpeed(speed)
         v.setMediaItem(itemOf(entry), positionMs)
         _state.update { it.copy(playbackError = null, videoProblem = null) }
+        v.playWhenReady = playWhenReady
         v.prepare()
-        v.play()
+        if (playWhenReady) v.play()
         startPlaybackService()
         _player.value = v
         onEntryChanged(entry)
@@ -711,12 +885,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun watchVlcLive(entry: MediaEntry) {
         vlcLiveWatch?.cancel()
-        if (manualLiveKernel[entry.uri] == true) return
+        if (manualEntryKernel[entry.uri] == PlayerKernel.VLC) return
         vlcLiveWatch = viewModelScope.launch {
             delay(VLC_LIVE_START_MS)
             val v = vlcPlayer ?: return@launch
             if (!usingVlc || _state.value.current?.uri != entry.uri || v.playbackState == Player.STATE_READY) return@launch
-            if (manualLiveKernel[entry.uri] == true || !vlcFallbackTried.add(entry.uri)) return@launch
+            if (manualEntryKernel[entry.uri] == PlayerKernel.VLC || !vlcFallbackTried.add(entry.uri)) return@launch
             android.util.Log.w("Voxtitle", "兼容模式 ${VLC_LIVE_START_MS / 1000} 秒还没放出直播，改回默认内核：${entry.uri}")
             forgetVlcChannel(entry.uri)
             vlcAutoTried += entry.uri
@@ -728,75 +902,157 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 这次打开后已经从兼容模式退回过默认内核的频道 */
     private val vlcFallbackTried = HashSet<String>()
 
-    /** 直播播放页手动切换「默认内核 / VLC 内核」，切换后若原本开着 AI 字幕则自动在新内核上无缝续跑。 */
-    fun setLiveKernel(useVlc: Boolean) {
+    /**
+     * 播放页一键无缝切换播放内核（默认 ExoPlayer / MPV 内核 / VLC 内核）：
+     * - 点播视频：精确继承当前毫秒进度、播放/暂停状态、倍速、循环模式，且**不中断已生成的 AI 字幕与后台识别/翻译任务**；
+     * - 直播频道：按频道记忆所选内核，若正在实时语音识别字幕则在新内核音频源上自动无缝续跑。
+     */
+    fun switchKernel(
+        target: PlayerKernel,
+        manual: Boolean = true,
+        dolbyP5Hint: Boolean = false,
+        reasonBanner: String? = null,
+    ) {
         val entry = _state.value.current ?: return
-        if (!entry.isLive) {
-            if (useVlc && !usingVlc) switchToVlc()
+        if (VlcPlayer.needsVlc(entry.title) && target != PlayerKernel.VLC) {
+            extras.emit("光盘镜像（ISO）仅支持 VLC 内核播放")
             return
         }
-        if (useVlc == usingVlc) return
-        switchLiveKernelInternal(entry, useVlc = useVlc, manual = true)
-    }
-
-    fun toggleLiveKernel() = setLiveKernel(!usingVlc)
-
-    private fun switchLiveKernelInternal(entry: MediaEntry, useVlc: Boolean, manual: Boolean) {
+        if (target == activeKernel && _state.value.playbackError == null && _state.value.videoProblem == null) {
+            reasonBanner?.let(extras::emit)
+            return
+        }
         if (manual) {
-            manualLiveKernel[entry.uri] = useVlc
+            manualEntryKernel[entry.uri] = target
         }
-        if (useVlc) rememberVlcChannel(entry.uri) else forgetVlcChannel(entry.uri)
 
-        val resumeAsr = transcribeJob?.isActive == true
-        val resumeTranslate = lastAlsoTranslate || (translateJob?.isActive == true)
-        if (resumeAsr || translateJob?.isActive == true || captionJob?.isActive == true || embeddedJob?.isActive == true) {
-            cancelAll()
-        }
+        val savedQueue = queue.takeIf { it.isNotEmpty() } ?: listOf(entry)
+        val wasPlaying = player.playWhenReady || _state.value.playbackError != null
+        val curSpeed = player.playbackParameters.speed
+        val curRepeat = player.repeatMode
+        val resumePos = if (entry.isLive) 0L else player.currentPosition.coerceAtLeast(0L)
+
         vlcLiveWatch?.cancel()
-        vlcPlayer?.setAsrAudioConsumer(null, null)
-        _state.update {
-            it.copy(
-                cues = emptyList(),
-                liveClock = null,
-                liveHint = null,
-                liveCaptions = false,
-                playbackError = null,
-                videoProblem = null,
-                error = null,
-                failedTask = null,
-                status = "",
-            )
-        }
+        frameWatch?.cancel()
+        sawFirstFrame = false
 
-        if (useVlc) {
-            playWithVlc(entry, 0, queue.takeIf { it.isNotEmpty() })
-        } else {
-            vlcPlayer?.stop()
-            _player.value = exoPlayer
-            val channels = queue.takeIf { it.isNotEmpty() } ?: listOf(entry)
-            val cleanQueue = channels.filter { it == entry || !VlcPlayer.needsVlc(it.title) }
-            queue = cleanQueue
-            val targetIdx = cleanQueue.indexOfFirst { it.uri == entry.uri }.coerceAtLeast(0)
-            exoPlayer.setMediaItems(cleanQueue.map(::itemOf), targetIdx, 0L)
-            exoPlayer.prepare()
-            exoPlayer.play()
-            startPlaybackService()
-        }
-
-        if (resumeAsr) {
-            generateSubtitles(alsoTranslate = resumeTranslate)
-        }
-    }
-
-    /** ExoPlayer 播放失败时，从当前位置改用 VLC 内核重试。 */
-    fun switchToVlc() {
-        val entry = _state.value.current ?: return
         if (entry.isLive) {
-            switchLiveKernelInternal(entry, useVlc = true, manual = true)
-        } else {
-            playWithVlc(entry, exoPlayer.currentPosition.coerceAtLeast(0))
+            when (target) {
+                PlayerKernel.VLC -> rememberVlcChannel(entry.uri)
+                PlayerKernel.MPV -> rememberMpvChannel(entry.uri)
+                PlayerKernel.EXO -> {
+                    forgetVlcChannel(entry.uri)
+                    forgetMpvChannel(entry.uri)
+                }
+            }
+            val resumeAsr = transcribeJob?.isActive == true
+            val resumeTranslate = lastAlsoTranslate || (translateJob?.isActive == true)
+            if (resumeAsr || translateJob?.isActive == true || captionJob?.isActive == true || embeddedJob?.isActive == true) {
+                cancelAll()
+            }
+            vlcPlayer?.setAsrAudioConsumer(null, null)
+            _state.update {
+                it.copy(
+                    cues = emptyList(),
+                    liveClock = null,
+                    liveHint = null,
+                    liveCaptions = false,
+                    playbackError = null,
+                    videoProblem = null,
+                    error = null,
+                    failedTask = null,
+                    status = "",
+                )
+            }
+            when (target) {
+                PlayerKernel.MPV -> playWithMpv(entry, 0L, savedQueue, dolbyP5Hint = false, playWhenReady = true, speed = curSpeed, repeatMode = curRepeat)
+                PlayerKernel.VLC -> playWithVlc(entry, 0L, savedQueue, playWhenReady = true, speed = curSpeed)
+                PlayerKernel.EXO -> {
+                    mpvPlayer?.stop()
+                    mpvPlayer?.clearMediaItems()
+                    vlcPlayer?.stop()
+                    isCurrentDolbyShunted = false
+                    val cleanQueue = savedQueue.filter { it == entry || !VlcPlayer.needsVlc(it.title) }
+                    queue = cleanQueue
+                    val targetIdx = cleanQueue.indexOfFirst { it.uri == entry.uri }.coerceAtLeast(0)
+                    exoPlayer.repeatMode = curRepeat
+                    exoPlayer.setPlaybackSpeed(curSpeed)
+                    exoPlayer.setMediaItems(cleanQueue.map(::itemOf), targetIdx, 0L)
+                    exoPlayer.prepare()
+                    exoPlayer.play()
+                    _player.value = exoPlayer
+                    startPlaybackService()
+                }
+            }
+            if (resumeAsr) {
+                generateSubtitles(alsoTranslate = resumeTranslate)
+            }
+            reasonBanner?.let(extras::emit)
+            return
         }
+
+        // 点播视频 / 音频切换内核：完整保留当前字幕 cues 与正在进行的识别/翻译任务
+        if (captionJob?.isActive == true) captionJob?.cancel()
+        _state.update { it.copy(playbackError = null, videoProblem = null) }
+
+        when (target) {
+            PlayerKernel.MPV -> {
+                playWithMpv(
+                    entry = entry,
+                    positionMs = resumePos,
+                    entries = savedQueue,
+                    dolbyP5Hint = dolbyP5Hint,
+                    playWhenReady = wasPlaying,
+                    speed = curSpeed,
+                    repeatMode = curRepeat,
+                )
+            }
+            PlayerKernel.VLC -> {
+                playWithVlc(
+                    entry = entry,
+                    positionMs = resumePos,
+                    channels = savedQueue,
+                    playWhenReady = wasPlaying,
+                    speed = curSpeed,
+                )
+            }
+            PlayerKernel.EXO -> {
+                mpvPlayer?.stop()
+                mpvPlayer?.clearMediaItems()
+                vlcPlayer?.setAsrAudioConsumer(null, null)
+                vlcPlayer?.stop()
+                isCurrentDolbyShunted = false
+                val cleanQueue = savedQueue.filter { it == entry || !VlcPlayer.needsVlc(it.title) }
+                queue = cleanQueue
+                val targetIdx = cleanQueue.indexOfFirst { it.uri == entry.uri }.coerceAtLeast(0)
+                exoPlayer.repeatMode = curRepeat
+                exoPlayer.setPlaybackSpeed(curSpeed)
+                exoPlayer.setMediaItems(cleanQueue.map(::itemOf), targetIdx, resumePos)
+                exoPlayer.playWhenReady = wasPlaying
+                exoPlayer.prepare()
+                _player.value = exoPlayer
+                startPlaybackService()
+            }
+        }
+        extras.applyTrackDefaults()
+        reasonBanner?.let(extras::emit)
     }
+
+    /** 兼容旧调用入口 */
+    fun setLiveKernel(useVlc: Boolean) = switchKernel(if (useVlc) PlayerKernel.VLC else PlayerKernel.EXO, manual = true)
+
+    fun toggleLiveKernel() {
+        val next = when (activeKernel) {
+            PlayerKernel.EXO -> PlayerKernel.MPV
+            PlayerKernel.MPV -> PlayerKernel.VLC
+            PlayerKernel.VLC -> PlayerKernel.EXO
+        }
+        switchKernel(next, manual = true)
+    }
+
+    fun switchToMpv() = switchKernel(PlayerKernel.MPV, manual = true)
+
+    fun switchToVlc() = switchKernel(PlayerKernel.VLC, manual = true)
 
     /**
      * 播放/暂停。出错后（播放器处于空闲状态）重新加载并从当前位置继续；播完后从头播放。
@@ -825,22 +1081,53 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val resume = resumePosition(start)
         // 光盘镜像只能用 VLC 内核播放
         if (VlcPlayer.needsVlc(start.title)) {
-            playWithVlc(start, resume)
+            playWithVlc(start, resume, entries)
             return
         }
-        // 上次默认内核打不开、换了兼容模式的直播频道：直接用兼容模式，不用再先报错一次
-        if (start.isLive && start.uri in vlcChannels) {
-            playWithVlc(start, 0, entries)
-            return
+        val manualKernel = manualEntryKernel[start.uri]
+        if (start.isLive) {
+            val targetLiveKernel = manualKernel ?: when {
+                start.uri in vlcChannels -> PlayerKernel.VLC
+                start.uri in mpvChannels -> PlayerKernel.MPV
+                else -> _state.value.settings.preferredKernel
+            }
+            when (targetLiveKernel) {
+                PlayerKernel.VLC -> {
+                    playWithVlc(start, 0L, entries)
+                    return
+                }
+                PlayerKernel.MPV -> {
+                    playWithMpv(start, 0L, entries)
+                    return
+                }
+                PlayerKernel.EXO -> {}
+            }
+        } else if (start.isVideo) {
+            val targetVideoKernel = manualKernel ?: _state.value.settings.preferredKernel
+            when (targetVideoKernel) {
+                PlayerKernel.MPV -> {
+                    playWithMpv(start, resume, entries, dolbyP5Hint = DolbyVisionHelper.looksLikeDolbyVisionTitle(start.title))
+                    return
+                }
+                PlayerKernel.VLC -> {
+                    playWithVlc(start, resume, entries)
+                    return
+                }
+                PlayerKernel.EXO -> {}
+            }
         }
+
         vlcLiveWatch?.cancel()
+        mpvPlayer?.stop()
+        mpvPlayer?.clearMediaItems()
         vlcPlayer?.setAsrAudioConsumer(null, null)
         vlcPlayer?.stop()
+        isCurrentDolbyShunted = false
         _player.value = exoPlayer
         // 连播队列里跳过光盘镜像，ExoPlayer 打不开
         queue = entries.filter { it == start || !VlcPlayer.needsVlc(it.title) }
         exoPlayer.setMediaItems(queue.map(::itemOf), queue.indexOf(start), resume)
-        _state.update { it.copy(playbackError = null) }
+        _state.update { it.copy(playbackError = null, videoProblem = null) }
         exoPlayer.prepare()
         exoPlayer.play()
         startPlaybackService()
@@ -1378,6 +1665,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun runLive(settings: AppSettings) {
         val entry = _state.value.current ?: return
         val vlcMode = usingVlc
+        val arrivalMode = usingExternalKernel
         val item = itemOf(entry)
         val anchors = LiveAnchors()
         liveDelayAdded = 0
@@ -1386,7 +1674,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 cues = emptyList(), progress = null,
                 status = if (vlcMode) "正在从 VLC 内核获取实时音频…" else "正在连接直播的声音…",
-                liveClock = if (vlcMode) LiveClock.Arrival(android.os.SystemClock.elapsedRealtime()) else LiveClock.Stream,
+                liveClock = if (arrivalMode) LiveClock.Arrival(android.os.SystemClock.elapsedRealtime()) else LiveClock.Stream,
             )
         }
         val incoming = java.util.concurrent.ConcurrentLinkedQueue<Pair<Cue, Long>>()
@@ -1684,7 +1972,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun delayLive(lateMs: Long): Boolean {
         val wall = android.os.SystemClock.elapsedRealtime()
-        if (usingVlc || liveDelayAdded >= LIVE_MAX_DELAY_MS) return false
+        if (usingExternalKernel || liveDelayAdded >= LIVE_MAX_DELAY_MS) return false
         if (liveDelayChangedAt > 0 && wall - liveDelayChangedAt < 15_000) return false
         val p = exoPlayer
         if (!p.isCurrentMediaItemLive) return false
@@ -1710,7 +1998,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 实时字幕停了：恢复正常的直播延迟，回到直播最新位置。 */
     private fun restoreLivePlayback(entry: MediaEntry) {
         liveDelayAdded = 0
-        if (usingVlc) return
+        if (usingExternalKernel) return
         val p = exoPlayer
         if (p.currentMediaItem?.mediaId != entry.uri) return
         p.replaceMediaItem(p.currentMediaItemIndex, itemOf(entry))
@@ -1721,7 +2009,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun seekToSubtitleTime(ms: Long) {
         when (_state.value.liveClock) {
             null -> player.seekTo(ms)
-            LiveClock.Stream -> if (!usingVlc) exoPlayer.seekTo(ms - LiveTimeline.periodPosition(exoPlayer, 0))
+            LiveClock.Stream -> if (!usingExternalKernel) exoPlayer.seekTo(ms - LiveTimeline.periodPosition(exoPlayer, 0))
             is LiveClock.Arrival -> {}
         }
     }
@@ -1729,7 +2017,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 字幕时间轴上的"现在"：普通视频就是播放位置；直播实时字幕见 [LiveClock]。 */
     fun subtitleTime(positionMs: Long = player.currentPosition): Long = when (val c = _state.value.liveClock) {
         null -> positionMs
-        LiveClock.Stream -> if (usingVlc) positionMs else LiveTimeline.periodPosition(exoPlayer, positionMs)
+        LiveClock.Stream -> if (usingExternalKernel) positionMs else LiveTimeline.periodPosition(exoPlayer, positionMs)
         is LiveClock.Arrival -> android.os.SystemClock.elapsedRealtime() - c.baseMs
     }
 
@@ -2132,9 +2420,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 点 AI 字幕面板的「翻译字幕」时，是否应该读取并翻译视频自带字幕。 */
     fun shouldExtractEmbeddedOnTranslate(): Boolean {
         val s = _state.value
-        if (s.current?.isLive == true && usingVlc) return false
+        if (s.current?.isLive == true && usingExternalKernel) return false
         if (s.cues.isEmpty()) return true
-        val hasTextSubtitles = !usingVlc && exoPlayer.currentTracks.groups.any { g ->
+        val hasTextSubtitles = !usingVlc && player.currentTracks.groups.any { g ->
             g.type == C.TRACK_TYPE_TEXT && (0 until g.length).any { i ->
                 val f = g.getTrackFormat(i)
                 (f.codecs ?: f.sampleMimeType) !in listOf("application/pgs", "application/vobsub", "application/dvbsubs")
@@ -2151,7 +2439,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (usable.isEmpty()) return null
         streamingEmbeddedTrackId?.let { id -> usable.firstOrNull { it.id == id }?.let { return it } }
         if (!usingVlc) {
-            val selected = exoPlayer.currentTracks.groups
+            val selected = player.currentTracks.groups
                 .firstOrNull { it.type == C.TRACK_TYPE_TEXT && it.isSelected }
                 ?.takeIf { it.length > 0 }
                 ?.getTrackFormat(0)
@@ -2242,7 +2530,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             store.deleteCues(uri)
             _state.update { it.copy(cues = emptyList(), embeddedTracks = null) }
         }
-        if (!usingVlc) {
+        if (!usingExternalKernel) {
             val texts = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
             if (texts.isNotEmpty() && (C.TRACK_TYPE_TEXT in exoPlayer.trackSelectionParameters.disabledTrackTypes || texts.none { it.isSelected })) {
                 extras.selectTrack(C.TRACK_TYPE_TEXT, texts[0], 0)
@@ -2298,7 +2586,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 android.util.Log.e("Voxtitle", "读取内嵌字幕失败", e)
                 val demuxed = EmbeddedSubtitles.demuxedTracks()
                 preferredEmbeddedTrack(demuxed)?.let { applyProgressiveEmbeddedTrack(it, streamingEmbeddedTranslate) }
-                val hasPlayerTextTrack = !usingVlc && exoPlayer.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
+                val hasPlayerTextTrack = !usingExternalKernel && exoPlayer.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
                 if (_state.value.cues.isNotEmpty() || hasPlayerTextTrack) {
                     _state.update {
                         it.copy(
@@ -2330,8 +2618,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun startLiveCaptions() {
         val entry = _state.value.current?.takeIf { it.isLive } ?: return
-        if (usingVlc) {
-            _state.update { it.copy(error = "VLC 内核下自带字幕直接在画面上显示，暂不支持提取文字翻译；请点「AI 字幕 → 语音识别生成字幕」，或切回「默认内核」翻译自带字幕") }
+        if (usingExternalKernel) {
+            _state.update { it.copy(error = "${activeKernel.shortLabel} 内核下直播自带字幕直接在画面上显示，暂不支持提取文字翻译；请点「AI 字幕 → 语音识别生成字幕」，或切回「默认内核」翻译自带字幕") }
             return
         }
         val p = exoPlayer
@@ -2529,7 +2817,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         when {
             usable.size == 1 -> useEmbeddedTrack(usable[0])
             usable.isEmpty() -> {
-                val hasPlayerTextTrack = !usingVlc &&
+                val hasPlayerTextTrack = !usingExternalKernel &&
                     exoPlayer.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.isSupported } &&
                     tracks.none { it.imageBased }
                 if (_state.value.cues.isNotEmpty() || hasPlayerTextTrack) {
@@ -2761,9 +3049,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun playQueueIndex(index: Int) {
         if (index !in queue.indices) return
         val e = queue[index]
-        // 兼容模式下没有播放队列，或目标直播频道记住了要用 VLC 内核：重新按该频道记住的内核打开
-        if (usingVlc || (e.isLive && e.uri in vlcChannels)) {
-            if (e.isLive) play(queue, index)
+        if (usingExternalKernel || (e.isLive && (e.uri in vlcChannels || e.uri in mpvChannels)) || manualEntryKernel[e.uri] != null) {
+            play(queue, index)
             return
         }
         savePosition()
@@ -2773,9 +3060,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 从播放队列里去掉第 index 个；去掉的是正在放的就接着放下一个。 */
     fun removeQueueIndex(index: Int) {
-        if (usingVlc || index !in queue.indices || queue.size <= 1) return
-        queue = queue.toMutableList().also { it.removeAt(index) }
-        exoPlayer.removeMediaItem(index)
+        if (index !in queue.indices || queue.size <= 1) return
+        val removingCurrent = queue[index].uri == _state.value.current?.uri
+        val updated = queue.toMutableList().also { it.removeAt(index) }
+        queue = updated
+        if (usingExternalKernel) {
+            if (removingCurrent) {
+                play(updated, index.coerceAtMost(updated.lastIndex))
+            }
+        } else {
+            exoPlayer.removeMediaItem(index)
+        }
     }
 
     // ---- 「我喜欢」：存成一个普通的播放列表，在首页的播放列表里也能看到 ----
@@ -2805,10 +3100,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * restartFirst 时「上一个」在播放超过 3 秒时先回到开头，和常见音乐播放器的按钮一样。
      */
     fun skipInQueue(next: Boolean, restartFirst: Boolean = false) {
-        if (usingVlc) {
-            if (_state.value.current?.isLive == true && queue.size > 1) {
+        if (usingExternalKernel) {
+            if (!next && restartFirst && player.currentPosition > 3000 && _state.value.current?.isLive != true) {
+                player.seekTo(0)
+                return
+            }
+            if (queue.size > 1) {
                 val cur = queue.indexOfFirst { it.uri == _state.value.current?.uri }.coerceAtLeast(0)
-                val target = (cur + if (next) 1 else -1).mod(queue.size)
+                val rawTarget = cur + if (next) 1 else -1
+                val target = if (player.repeatMode == Player.REPEAT_MODE_ALL || _state.value.current?.isLive == true) {
+                    rawTarget.mod(queue.size)
+                } else {
+                    rawTarget.takeIf { it in queue.indices } ?: return
+                }
                 playQueueIndex(target)
             }
             return
@@ -2904,6 +3208,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (current) getApplication<Application>().let { it.stopService(Intent(it, PlaybackService::class.java)) }
         exoPlayer.release()
         assHandler.release()
+        mpvPlayer?.release()
         vlcPlayer?.release()
         proxyInstance?.close()
         proxyInstance = null
@@ -3046,9 +3351,10 @@ private fun resolvingFactory(app: Application, http: DataSource.Factory): DataSo
  * 否则这类视频（常见于 MKV 电影）会只有画面没有声音。
  */
 @UnstableApi
-internal fun renderersFactory(app: Application) = DefaultRenderersFactory(app)
-    .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
-    .setEnableDecoderFallback(true)
+internal fun renderersFactory(
+    app: Application,
+    allowBlockedProfile5DirectRender: () -> Boolean = { false },
+): DefaultRenderersFactory = DolbyAwareRenderersFactory(app, allowBlockedProfile5DirectRender)
 
 /** 出错提示里「人话」和技术细节的分隔，播放页只默认显示前半部分 */
 internal const val PLAYBACK_ERROR_DETAIL = "\n\u0001"
@@ -3069,15 +3375,15 @@ internal fun describePlaybackError(e: PlaybackException): String {
         PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE -> "文件不完整或已损坏，可能没下载完"
         PlaybackException.ERROR_CODE_IO_NO_PERMISSION -> "没有读取这个文件的权限。到系统设置里给译幕「音乐和视频」权限"
         PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
-        PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED -> "这种文件格式默认内核打不开，或者文件已损坏。点「兼容模式播放」试试"
+        PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED -> "这种文件格式当前内核打不开，或者文件已损坏。点「MPV 内核播放」或「VLC 内核」试试"
         PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
         PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
         PlaybackException.ERROR_CODE_DECODING_FAILED,
         PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
-        PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES -> "这台手机解不了这个视频的画面或声音格式。点「兼容模式播放」试试"
+        PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES -> "硬件解码不支持这个视频的画面或色彩格式。点「MPV 内核播放」可软硬解并准确还原杜比色彩"
         PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
         PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED -> "声音输出失败，可能被别的应用占用了。点「重试」"
-        else -> "播放出错了。点「重试」，不行的话用兼容模式播放"
+        else -> "播放出错了。点「重试」，或切换「MPV / VLC 内核」试试"
     }
     val detail = generateSequence(e.cause) { it.cause }.mapNotNull { it.message }.firstOrNull()?.take(200)
     return buildString {

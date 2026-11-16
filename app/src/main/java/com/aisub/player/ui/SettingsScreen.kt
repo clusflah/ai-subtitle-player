@@ -661,11 +661,37 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             CollapsibleCard(
                 "播放",
                 listOfNotNull(
+                    "内核 " + s.preferredKernel.shortLabel,
+                    if (s.autoDolbyMpv) "杜比映射" else null,
                     s.preferredAudioLanguages.takeIf { it.isNotEmpty() }?.let { "音轨 " + (LANGUAGE_CHOICES.firstOrNull { c -> c.first == it }?.second ?: it) },
                     s.preferredSubtitleLanguages.takeIf { it.isNotEmpty() }?.let { "字幕 " + (LANGUAGE_CHOICES.firstOrNull { c -> c.first == it }?.second ?: it) },
                     if (s.autoSkip) "自动跳过片头片尾" else null,
-                ).joinToString(" · ").ifEmpty { "音轨、字幕选择与片头片尾" },
+                ).joinToString(" · ").ifEmpty { "内核、杜比色彩映射、音轨与片头片尾" },
             ) {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                    Text("默认播放内核", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        s.preferredKernel.description + "（播放界面顶部或「更多」菜单可随时切换内核）",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        com.aisub.player.PlayerKernel.entries.forEach { k ->
+                            FilterChip(
+                                selected = s.preferredKernel == k,
+                                onClick = { s = s.copy(preferredKernel = k) },
+                                label = { Text(k.shortLabel) },
+                            )
+                        }
+                    }
+                }
+                CardDivider()
+                ListRow(
+                    title = "杜比视界自动切换 MPV 色彩映射",
+                    subtitle = "在非杜比视界屏幕上播放 Dolby Vision（尤其 Profile 5）视频时，自动切至 MPV 内核通过 libplacebo 映射为标准色彩，解决紫绿偏色",
+                    trailing = { Switch(checked = s.autoDolbyMpv, onCheckedChange = { s = s.copy(autoDolbyMpv = it) }) },
+                    onClick = { s = s.copy(autoDolbyMpv = !s.autoDolbyMpv) },
+                )
+                CardDivider()
                 LanguageRow("首选音轨语言", s.preferredAudioLanguages) { s = s.copy(preferredAudioLanguages = it) }
                 CardDivider()
                 LanguageRow("首选视频自带字幕语言", s.preferredSubtitleLanguages) { s = s.copy(preferredSubtitleLanguages = it) }

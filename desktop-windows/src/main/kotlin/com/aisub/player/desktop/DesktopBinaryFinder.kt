@@ -26,6 +26,27 @@ object DesktopBinaryFinder {
     @Volatile
     private var cachedYtDlp: String? = null
 
+    @Volatile
+    private var cachedMpv: String? = null
+
+    fun findMpv(): String? {
+        cachedMpv?.let { if (File(it).exists()) return it }
+        findExecutable("mpv.exe")?.let {
+            cachedMpv = it
+            return it
+        }
+        val programDirs = listOf(
+            File("C:/Program Files/mpv/mpv.exe"),
+            File("C:/mpv/mpv.exe"),
+            File(binDir, "mpv/mpv.exe"),
+        )
+        programDirs.firstOrNull { it.isFile }?.let {
+            cachedMpv = it.absolutePath
+            return it.absolutePath
+        }
+        return null
+    }
+
     fun findFfmpeg(): String? {
         cachedFfmpeg?.let { if (File(it).exists()) return it }
         findExecutable("ffmpeg.exe")?.let {

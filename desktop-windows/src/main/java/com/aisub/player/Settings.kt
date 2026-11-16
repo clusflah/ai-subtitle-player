@@ -63,6 +63,13 @@ enum class Provider(
 
 data class ProviderConfig(val apiKey: String = "", val model: String = "", val baseUrl: String = "")
 
+/** 视频与直播播放内核选择 */
+enum class PlayerKernel(val label: String, val shortLabel: String, val description: String) {
+    EXO("默认内核（智能混合）", "默认", "常规视频硬件加速优先；遇到杜比视界 Profile 5 自动切 MPV/libplacebo 防紫绿偏色"),
+    MPV("MPV 内核（杜比映射）", "MPV", "启用 libplacebo 着色器动态色调映射管线，准确还原杜比视界与 HDR 至标准色彩"),
+    VLC("VLC 内核（兼容/光盘）", "VLC", "强制使用 LibVLC 引擎，适合蓝光/DVD ISO 光盘镜像与特定直播流"),
+}
+
 /** 播放视频时切到别的应用、回桌面或锁屏怎么办 */
 enum class VideoLeaveAction(val label: String) {
     PAUSE("暂停"),
@@ -199,6 +206,8 @@ data class AppSettings(
     val appBackground: AppBackground = AppBackground.AURORA_GRAY_WHITE_GRADIENT,
     val appDarkMode: AppDarkMode = AppDarkMode.SYSTEM,
     val liquidGlass: Boolean = false,
+    val preferredKernel: PlayerKernel = PlayerKernel.EXO,
+    val autoDolbyMpv: Boolean = true,
 ) {
     /** 某个服务商的配置，未填的字段用默认值补齐。 */
     fun configOf(p: Provider): ProviderConfig {
@@ -401,6 +410,9 @@ class SettingsRepository(context: Context) {
                 }
             },
             liquidGlass = prefs.getBoolean("liquidGlass", d.liquidGlass),
+            preferredKernel = runCatching { PlayerKernel.valueOf(prefs.getString("preferredKernel", d.preferredKernel.name)!!) }
+                .getOrDefault(d.preferredKernel),
+            autoDolbyMpv = prefs.getBoolean("autoDolbyMpv", d.autoDolbyMpv),
         )
     }
 
@@ -464,6 +476,8 @@ class SettingsRepository(context: Context) {
             .putString("appBackground", s.appBackground.name)
             .putString("appDarkMode", s.appDarkMode.name)
             .putBoolean("liquidGlass", s.liquidGlass)
+            .putString("preferredKernel", s.preferredKernel.name)
+            .putBoolean("autoDolbyMpv", s.autoDolbyMpv)
         for (e in TtsEngineType.entries) editor.putString("ttsVoice.${e.name}", s.ttsVoices[e].orEmpty())
         for ((p, c) in s.providerConfigs) {
             editor.putString("${p.name}.apiKey", c.apiKey)

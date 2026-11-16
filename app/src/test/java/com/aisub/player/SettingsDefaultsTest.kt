@@ -9,6 +9,8 @@ class SettingsDefaultsTest {
     fun defaultsDisableLiquidGlassAndAutoAsr() {
         val defaults = AppSettings()
         assertFalse(defaults.liquidGlass)
+        org.junit.Assert.assertEquals(PlayerKernel.EXO, defaults.preferredKernel)
+        org.junit.Assert.assertTrue(defaults.autoDolbyMpv)
         assertFalse(defaults.dlAutoAsr)
     }
 }

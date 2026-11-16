@@ -84,6 +84,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -200,7 +201,7 @@ private val RESIZE_MODES = listOf(
 )
 
 /** 播放页里弹出的对话框。 */
-private enum class PlayerDialog { SPEED, SLEEP, GOTO, DELAY, INFO, EXPORT, SAVE_PLAYLIST, ERROR, ASR_LANGUAGE, TRANSLATE_MODEL, EQUALIZER }
+private enum class PlayerDialog { SPEED, SLEEP, GOTO, DELAY, INFO, EXPORT, SAVE_PLAYLIST, ERROR, ASR_LANGUAGE, TRANSLATE_MODEL, EQUALIZER, KERNEL }
 
 /** 画中画状态，由 MainActivity 更新。 */
 object PipState {
@@ -225,9 +226,12 @@ fun PlayerScreen(vm: MainViewModel, onBack: () -> Unit, onOpenSettings: () -> Un
 @Composable
 private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings: () -> Unit) {
     val state by vm.state.collectAsStateWithLifecycle()
-    // 播放内核可能在 ExoPlayer 和 VLC 之间切换
+    // 播放内核可在 ExoPlayer、MPV 与 VLC 之间实时无缝切换
     val player by vm.playerFlow.collectAsStateWithLifecycle()
-    val usingVlc = player !== vm.exoPlayer
+    val activeKernel = remember(player) { vm.activeKernel }
+    val usingMpv = activeKernel == com.aisub.player.PlayerKernel.MPV
+    val usingVlc = activeKernel == com.aisub.player.PlayerKernel.VLC
+    val usingExternalKernel = player !== vm.exoPlayer
     val context = LocalContext.current
     val activity = context as? Activity
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -249,6 +253,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             buffering = isBuf
             if (isBuf) {
                 (player as? com.aisub.player.media.VlcPlayer)?.pollDirectNetworkBytes()
+                (player as? com.aisub.player.media.MpvPlayer)?.pollDirectNetworkBytes()
                 val now = System.currentTimeMillis()
                 if (bufferSpeedText.isEmpty() || now - lastSpeedSampleMs >= 250L) {
                     lastSpeedSampleMs = now
@@ -557,43 +562,44 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 else Modifier,
             ),
     ) {
-        // ---- 画面 ----
-        AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    this.player = player
-                    useController = false
-                    // 遮罩透明：画面背景本来就是黑色；VLC 内核不一定按 ExoPlayer 的方式通知首帧
-                    setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                    findViewById<android.view.View>(androidx.media3.ui.R.id.exo_content_frame)
-                        ?.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, _ ->
-                            videoBottomPx = bottom
-                            viewHeightPx = height
-                        }
-                }.also { playerView = it }
-            },
-            update = {
-                // ASS / SSA 字幕由 libass 画在字幕视图里的这一层上。只给视频挂：
-                // 音乐在后台放着时回到播放页，libass 的字幕视图还没准备好就被要求绘制，会让播放出错
-                if (state.current?.isVideo != false && it.tag != "ass") {
-                    it.subtitleView?.withAssSupport(vm.assHandler)
-                    it.tag = "ass"
-                }
-                if (it.player !== player) it.player = player
-                it.resizeMode = RESIZE_MODES[resizeIndex].first
-                // 视频自带字幕和 AI 字幕同时显示时，把自带字幕抬高，避免叠在一起
-                val aiVisible = state.settings.showAiSubtitles && state.cues.isNotEmpty()
-                it.subtitleView?.setBottomPaddingFraction(if (aiVisible) 0.32f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
-                // 正在翻译直播自带字幕，或自带字幕已载入 AI 字幕：自带字幕不再原样显示，免得同一句出现两遍
-                val embeddedInAi = aiVisible && (state.embeddedTracks != null || state.extractingEmbedded)
-                it.subtitleView?.visibility = if (state.liveCaptions || embeddedInAi) android.view.View.GONE else android.view.View.VISIBLE
-                vm.extras.attachVideoView(it.videoSurfaceView)
-            },
-            modifier = Modifier.fillMaxSize(),
-        )
-        DisposableEffect(playerView) {
-            vm.extras.attachVideoView(playerView?.videoSurfaceView)
-            onDispose { vm.extras.attachVideoView(null) }
+        // ---- 画面（按内核隔离 SurfaceView 实例，避免 MediaCodec / MPV EGL / VLC IVLCVout 跨内核争用同一 BufferQueue） ----
+        androidx.compose.runtime.key(activeKernel) {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        this.player = player
+                        useController = false
+                        // 遮罩透明：画面背景本来就是黑色；MPV / VLC 内核直接向 Surface 渲染帧
+                        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        findViewById<android.view.View>(androidx.media3.ui.R.id.exo_content_frame)
+                            ?.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, _ ->
+                                videoBottomPx = bottom
+                                viewHeightPx = height
+                            }
+                    }.also { playerView = it }
+                },
+                update = {
+                    // ASS / SSA 字幕：默认内核由 ass-media 绘制在 SubtitleView 上；MPV 内核自身已内建原版 libass 硬渲染
+                    if (!usingExternalKernel && state.current?.isVideo != false && it.tag != "ass") {
+                        it.subtitleView?.withAssSupport(vm.assHandler)
+                        it.tag = "ass"
+                    }
+                    if (it.player !== player) it.player = player
+                    it.resizeMode = RESIZE_MODES[resizeIndex].first
+                    // 视频自带字幕和 AI 字幕同时显示时，把自带字幕抬高，避免叠在一起
+                    val aiVisible = state.settings.showAiSubtitles && state.cues.isNotEmpty()
+                    it.subtitleView?.setBottomPaddingFraction(if (aiVisible) 0.32f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
+                    // 正在翻译直播自带字幕，或自带字幕已载入 AI 字幕：自带字幕不再原样显示，免得同一句出现两遍
+                    val embeddedInAi = aiVisible && (state.embeddedTracks != null || state.extractingEmbedded)
+                    it.subtitleView?.visibility = if (state.liveCaptions || embeddedInAi) android.view.View.GONE else android.view.View.VISIBLE
+                    vm.extras.attachVideoView(it.videoSurfaceView)
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+            DisposableEffect(playerView) {
+                vm.extras.attachVideoView(playerView?.videoSurfaceView)
+                onDispose { vm.extras.attachVideoView(null) }
+            }
         }
         if (audioOnly) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -691,18 +697,26 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 }
                 Row(Modifier.focusRequester(errorFocus)) {
                     TextButton(onClick = { vm.togglePlay() }) { Text("重试", color = Orange) }
-                    if (!usingVlc) {
-                        TextButton(onClick = { vm.switchToVlc() }) {
-                            Text(if (isLive) "切换 VLC 内核" else "兼容模式播放", color = Orange)
+                    if (!usingMpv) {
+                        TextButton(onClick = { vm.switchKernel(com.aisub.player.PlayerKernel.MPV) }) {
+                            Text("MPV 内核播放", color = Orange)
                         }
-                    } else if (isLive) {
-                        TextButton(onClick = { vm.setLiveKernel(false) }) { Text("切换默认内核", color = Orange) }
+                    }
+                    if (!usingVlc) {
+                        TextButton(onClick = { vm.switchKernel(com.aisub.player.PlayerKernel.VLC) }) {
+                            Text("VLC 内核", color = Orange)
+                        }
+                    }
+                    if (usingExternalKernel) {
+                        TextButton(onClick = { vm.switchKernel(com.aisub.player.PlayerKernel.EXO) }) {
+                            Text("默认内核", color = Color(0xFFCCCCCC))
+                        }
                     }
                 }
             }
         }
 
-        // ---- 画面出不来（手机解不了这种格式）：说明原因，给出办法 ----
+        // ---- 画面出不来（手机硬解不支持该格式）：推荐 MPV 内核（全格式解码 + 杜比色彩还原） ----
         state.videoProblem?.let { msg ->
             val probShape = RoundedCornerShape(24.dp)
             Column(
@@ -715,13 +729,15 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 Text(msg, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    if (vm.canTranscode) "可以请服务器转成手机能放的 1080p 格式，或者用兼容模式（VLC 内核）播放" else "可以用兼容模式（VLC 内核）播放，杜比视界的颜色可能偏紫偏绿",
+                    if (vm.canTranscode) "可切换至 MPV 内核直接播放（支持杜比视界色彩映射与全格式解码），或请服务器转码"
+                    else "推荐切换至 MPV 内核播放，内置 libplacebo 动态色调映射，杜比视界不偏紫偏绿",
                     color = Color(0xFFCCCCCC), fontSize = 13.sp,
                 )
                 Spacer(Modifier.height(10.dp))
                 Row(Modifier.focusRequester(errorFocus)) {
-                    if (vm.canTranscode) TextButton(onClick = vm::playTranscoded) { Text("服务器转码播放", color = Orange) }
-                    if (!usingVlc) TextButton(onClick = vm::switchToVlc) { Text("兼容模式播放", color = Orange) }
+                    if (!usingMpv) TextButton(onClick = vm::switchToMpv) { Text("MPV 内核播放", color = Orange) }
+                    if (vm.canTranscode) TextButton(onClick = vm::playTranscoded) { Text("服务器转码", color = Orange) }
+                    if (!usingVlc) TextButton(onClick = vm::switchToVlc) { Text("VLC 内核", color = Color(0xFFCCCCCC)) }
                     TextButton(onClick = vm::dismissVideoProblem) { Text("只听声音", color = Color(0xFFCCCCCC)) }
                 }
             }
@@ -770,8 +786,18 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         music.tags?.title?.takeIf { isMusic } ?: state.current?.displayTitle ?: "", color = Color.White, fontSize = 20.sp,
                         maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 8.dp),
                     )
+                    // 顶栏播放内核快捷胶囊：支持触屏点按与电视遥控器焦点直接切换「默认 / MPV / VLC」内核
+                    if (state.current?.isVideo == true || isLive) {
+                        val dolbyActive = usingMpv && (vm.isCurrentDolbyShunted || (player as? com.aisub.player.media.MpvPlayer)?.detectedDolbyProfile != null)
+                        KernelBadgeButton(
+                            kernel = activeKernel,
+                            dolbyActive = dolbyActive,
+                            tv = tv,
+                            onClick = { dialog = PlayerDialog.KERNEL; interactions++ },
+                            modifier = Modifier.padding(end = 4.dp),
+                        )
+                    }
                     // 播放队列（直播时提供频道与节目单入口）
-                    // 兼容模式下直播也保留频道列表（换台时按各频道记住的内核打开）
                     if (isLive) {
                         if (vm.queueSize > 1) {
                             TextButton(
@@ -791,7 +817,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         ) {
                             Text("节目单", color = Color.White)
                         }
-                    } else if (vm.queueSize > 1 && !usingVlc) {
+                    } else if (vm.queueSize > 1) {
                         TextButton(
                             onClick = { showChannels = true },
                             modifier = Modifier.tvFocusRing(RoundedCornerShape(50), color = Color.White, scale = true, fillBackground = true),
@@ -827,10 +853,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     )
                 }
                 // 没有目标语言字幕的视频：一键翻译外语字幕，或识别 + 翻译，不用去面板里找
-                val quick = remember(state.cues, embeddedTracks, state.settings.targetLanguage, state.asrSettings.asrLanguage, isLive, usingVlc) {
+                val quick = remember(state.cues, embeddedTracks, state.settings.targetLanguage, state.asrSettings.asrLanguage, isLive, usingExternalKernel) {
                     val target = state.settings.ttsLocale
-                    // 默认内核直播优先边播边翻自带字幕；VLC 内核下通过原生音频回调分流实时语音识别生成字幕
-                    val tracks = if (isLive && usingVlc) embeddedTracks.filter { QuickSubtitles.isTargetTrack(it, target) } else embeddedTracks
+                    // 默认内核直播优先边播边翻自带字幕；MPV / VLC 内核直播直接走实时语音识别生成字幕
+                    val tracks = if (isLive && usingExternalKernel) embeddedTracks.filter { QuickSubtitles.isTargetTrack(it, target) } else embeddedTracks
                     QuickSubtitles.decide(state.cues, tracks, target) {
                         LanguageCheck.alreadyTarget(it, target, state.asrSettings.asrLanguage, ChineseScript::variant)
                     }
@@ -987,12 +1013,12 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                                 Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium)
                                 Spacer(Modifier.weight(1f))
                                 LiveKernelSwitch(
-                                    usingVlc = usingVlc,
+                                    activeKernel = activeKernel,
                                     tv = tv,
-                                    onSelect = { targetVlc ->
-                                        if (targetVlc != usingVlc) {
-                                            vm.setLiveKernel(targetVlc)
-                                            indicator = null to if (targetVlc) "已切换至 VLC 内核" else "已切换至默认内核"
+                                    onSelect = { target ->
+                                        if (target != activeKernel) {
+                                            vm.switchKernel(target)
+                                            indicator = null to "已切换至${target.shortLabel}内核"
                                         }
                                         interactions++
                                     },
@@ -1007,12 +1033,12 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium)
                             Spacer(Modifier.width(10.dp))
                             LiveKernelSwitch(
-                                usingVlc = usingVlc,
+                                activeKernel = activeKernel,
                                 tv = tv,
-                                onSelect = { targetVlc ->
-                                    if (targetVlc != usingVlc) {
-                                        vm.setLiveKernel(targetVlc)
-                                        indicator = null to if (targetVlc) "已切换至 VLC 内核" else "已切换至默认内核"
+                                onSelect = { target ->
+                                    if (target != activeKernel) {
+                                        vm.switchKernel(target)
+                                        indicator = null to "已切换至${target.shortLabel}内核"
                                     }
                                     interactions++
                                 },
@@ -1084,7 +1110,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 } else Spacer(Modifier.height(4.dp))
                 // 播放键居中，左右各一个上一集/下一集；外侧两组对称：
                 // 手机左=字幕、AI 字幕，右=旋转、更多；电视左=字幕、AI 字幕，右=倍速、更多（电视不能转屏）
-                val canSkip = vm.queueSize > 1 && (!usingVlc || isLive)
+                val canSkip = vm.queueSize > 1
                 LiquidDock(
                     count = 7,
                     activeSlot = targetSlot,
@@ -1298,7 +1324,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             modifier = Modifier.align(Alignment.CenterEnd).focusRequester(moreFocus),
         ) {
             MorePanel(
-                state = state, audioOnly = audioOnly, repeatMode = player.repeatMode, usingVlc = usingVlc,
+                state = state, audioOnly = audioOnly, repeatMode = player.repeatMode, activeKernel = activeKernel,
                 onAction = { action ->
                     showMore = false
                     when (action) {
@@ -1327,11 +1353,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             }
                             indicator = AppIcons.Repeat to repeatLabel(player.repeatMode)
                         }
-                        MoreAction.SWITCH_KERNEL -> {
-                            val nextVlc = !usingVlc
-                            vm.setLiveKernel(nextVlc)
-                            indicator = null to if (nextVlc) "已切换至 VLC 内核" else "已切换至默认内核"
-                        }
+                        MoreAction.SWITCH_KERNEL -> dialog = PlayerDialog.KERNEL
                         MoreAction.INFO -> dialog = PlayerDialog.INFO
                         MoreAction.AB_LOOP -> indicator = AppIcons.Repeat to vm.toggleAbLoop()
                         MoreAction.SAVE_PLAYLIST -> dialog = PlayerDialog.SAVE_PLAYLIST
@@ -1634,6 +1656,18 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         PlayerDialog.DELAY -> DelayDialog(state.subtitleDelayMs, onChange = vm::setSubtitleDelay, onDismiss = { dialog = null })
         PlayerDialog.INFO -> InfoDialog(vm, onDismiss = { dialog = null })
         PlayerDialog.EQUALIZER -> EqualizerDialog(vm, onDismiss = { dialog = null })
+        PlayerDialog.KERNEL -> KernelSwitchDialog(
+            vm = vm,
+            state = state,
+            activeKernel = activeKernel,
+            onSelectKernel = { target ->
+                val changed = target != activeKernel
+                vm.switchKernel(target, manual = true)
+                if (changed) indicator = null to "已切换至${target.shortLabel}内核"
+                dialog = null
+            },
+            onDismiss = { dialog = null },
+        )
         PlayerDialog.EXPORT -> ChoiceDialog(
             "导出字幕（SRT）", listOf("双语", "仅译文", "仅原文"), -1, onDismiss = { dialog = null },
         ) { i ->
@@ -1959,7 +1993,7 @@ private fun GestureLayer(
 private enum class MoreAction { ASPECT, SLEEP, SPEED, GOTO, NAVIGATE, BOOKMARKS, SKIP, SWITCH_KERNEL, EQUALIZER, AUDIO_ONLY, PIP, REPEAT, INFO, AB_LOOP, SAVE_PLAYLIST, SETTINGS }
 
 @Composable
-private fun MorePanel(usingVlc: Boolean, state: UiState, audioOnly: Boolean, repeatMode: Int, onAction: (MoreAction) -> Unit) {
+private fun MorePanel(activeKernel: com.aisub.player.PlayerKernel, state: UiState, audioOnly: Boolean, repeatMode: Int, onAction: (MoreAction) -> Unit) {
     // 最常用的四个放在最上面一排，其余按用途分组
     val quick = listOf(
         Triple(MoreAction.SPEED, AppIcons.Speed, "倍速"),
@@ -1969,9 +2003,7 @@ private fun MorePanel(usingVlc: Boolean, state: UiState, audioOnly: Boolean, rep
     )
     val groups = listOf(
         "播放" to buildList {
-            if (state.current?.isLive == true) {
-                add(Triple(MoreAction.SWITCH_KERNEL, AppIcons.PlayArrow, if (usingVlc) "内核：VLC 内核（点此切回默认）" else "内核：默认内核（点此切换 VLC）"))
-            }
+            add(Triple(MoreAction.SWITCH_KERNEL, AppIcons.PlayArrow, "播放内核：${activeKernel.shortLabel}（点此切换）"))
             add(Triple(MoreAction.REPEAT, AppIcons.Repeat, "循环：${repeatLabel(repeatMode)}"))
             add(Triple(MoreAction.AB_LOOP, AppIcons.Repeat, if (state.loopA == null) "A-B 循环" else if (state.loopB == null) "A-B 循环：设置 B 点" else "关闭 A-B 循环"))
             add(Triple(MoreAction.GOTO, AppIcons.AccessTime, "转到时间"))
@@ -2055,9 +2087,9 @@ private fun openSystemEqualizer(context: Context, sessionId: Int) {
 private fun EqualizerDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val player by vm.playerFlow.collectAsStateWithLifecycle()
-    val usingVlc = player !== vm.exoPlayer
+    val usingExternal = player !== vm.exoPlayer
     val ctrl = vm.equalizer
-    val eq = remember(usingVlc) { if (usingVlc) null else ctrl.attach() }
+    val eq = remember(usingExternal) { if (usingExternal) null else ctrl.attach() }
     var enabled by remember { mutableStateOf(ctrl.enabled) }
     var preset by remember { mutableStateOf(ctrl.preset) }
     val range = remember(eq) { eq?.let { runCatching { it.bandLevelRange }.getOrNull() } }
@@ -2086,7 +2118,7 @@ private fun EqualizerDialog(vm: MainViewModel, onDismiss: () -> Unit) {
         },
         text = {
             if (eq == null || range == null || bands == 0) {
-                Text(if (usingVlc) "兼容模式（VLC 内核）下不能用均衡器" else "这台设备不支持应用内均衡器，可以试试系统均衡器")
+                Text(if (usingExternal) "${vm.activeKernel.shortLabel} 内核下暂不支持应用内均衡器，可尝试系统均衡器或切回默认内核" else "这台设备不支持应用内均衡器，可以试试系统均衡器")
             } else Column(Modifier.verticalScroll(rememberScrollState())) {
                 if (presets.isNotEmpty()) {
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2120,7 +2152,7 @@ private fun EqualizerDialog(vm: MainViewModel, onDismiss: () -> Unit) {
         dismissButton = {
             TextButton(onClick = {
                 onDismiss()
-                openSystemEqualizer(context, if (usingVlc) 0 else vm.exoPlayer.audioSessionId)
+                openSystemEqualizer(context, if (usingExternal) 0 else vm.exoPlayer.audioSessionId)
             }) { Text("系统均衡器") }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
@@ -2142,7 +2174,8 @@ private enum class SubtitleAction { GENERATE, TRANSLATE, LIST, DELAY, IMPORT, ON
 @Composable
 private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitleAction: (SubtitleAction) -> Unit) {
     val player by vm.playerFlow.collectAsStateWithLifecycle()
-    val usingVlc = player !== vm.exoPlayer
+    val usingVlc = vm.usingVlc
+    val usingExternal = player !== vm.exoPlayer
     // 字幕、音频两项默认收起，点哪项展开哪项
     var audioOpen by remember(state.current?.uri) { mutableStateOf(false) }
     var embeddedOpen by remember { mutableStateOf(false) }
@@ -2158,8 +2191,8 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
         }
     }
     val live = state.current?.isLive == true
-    // VLC 内核下直播通过「语音识别生成字幕」走原生音频分流，不走内嵌字幕文字提取
-    val canRead = if (live) !usingVlc && hasTextSubtitles else hasTextSubtitles || usingVlc
+    // MPV / VLC 内核下直播通过「语音识别生成字幕」识别语音，不走内嵌隐藏式字幕提取；点播视频三内核均可读取内嵌字幕翻译
+    val canRead = if (live) !usingExternal && hasTextSubtitles else hasTextSubtitles || usingVlc
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(vertical = 6.dp)) {
         // ---------------- AI 字幕：识别、外挂文件或提取出的字幕，由本应用显示 ----------------
@@ -2701,10 +2734,165 @@ private fun DelayDialog(delayMs: Long, onChange: (Long) -> Unit, onDismiss: () -
 }
 
 @Composable
-private fun LiveKernelSwitch(
-    usingVlc: Boolean,
+private fun KernelBadgeButton(
+    kernel: com.aisub.player.PlayerKernel,
+    dolbyActive: Boolean,
     tv: Boolean,
-    onSelect: (Boolean) -> Unit,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var focused by remember { mutableStateOf(false) }
+    val highlight = tv && focused
+    val pillShape = RoundedCornerShape(50)
+    val badgeText = when {
+        kernel == com.aisub.player.PlayerKernel.MPV && dolbyActive -> "MPV · 杜比"
+        else -> "内核: ${kernel.shortLabel}"
+    }
+    val pillTint = when {
+        highlight -> Color(0xFFFFB74D)
+        dolbyActive -> Color(0xCCF28C00)
+        kernel != com.aisub.player.PlayerKernel.EXO -> Color(0x883949AB)
+        else -> GlassTokens.DarkControlTint
+    }
+    Row(
+        modifier = modifier
+            .onFocusChanged { focused = it.isFocused }
+            .tvFocusRing(pillShape, color = Color.White, scale = true)
+            .liquidGlass(
+                shape = pillShape,
+                style = GlassStyle.Pill,
+                tint = pillTint,
+                borderColor = if (highlight || dolbyActive) Color.White.copy(alpha = 0.7f) else Color.Unspecified,
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = badgeText,
+            color = if (highlight) Color(0xFF1F1100) else Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun KernelSwitchDialog(
+    vm: MainViewModel,
+    state: UiState,
+    activeKernel: com.aisub.player.PlayerKernel,
+    onSelectKernel: (com.aisub.player.PlayerKernel) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var hwdecPref by remember(vm.mpvHwdecPref) { mutableStateOf(vm.mpvHwdecPref) }
+    AppDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("切换播放内核") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    "切换时自动保留当前播放进度与已生成的 AI 字幕",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                com.aisub.player.PlayerKernel.entries.forEach { k ->
+                    val selected = activeKernel == k
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (selected) Orange.copy(alpha = 0.14f) else Color.Transparent)
+                            .tvFocusRing(RoundedCornerShape(14.dp), color = Orange, fillBackground = true)
+                            .clickable { onSelectKernel(k) }
+                            .padding(horizontal = 10.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = selected, onClick = { onSelectKernel(k) })
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                k.label,
+                                fontSize = 15.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            )
+                            Text(
+                                k.description,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                Text(
+                    "MPV 解码与杜比色彩策略",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    listOf<Pair<Boolean?, String>>(
+                        null to "智能自动（推荐）",
+                        true to "硬解优先",
+                        false to "纯软解",
+                    ).forEach { (pref, label) ->
+                        FilterChip(
+                            selected = hwdecPref == pref,
+                            onClick = {
+                                hwdecPref = pref
+                                vm.setMpvHwdecPreference(pref)
+                            },
+                            label = { Text(label, fontSize = 12.sp) },
+                        )
+                    }
+                }
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable {
+                            vm.updateSettings(state.settings.copy(autoDolbyMpv = !state.settings.autoDolbyMpv))
+                        }
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("杜比视界自动切 MPV 防偏色", fontSize = 14.sp)
+                        Text(
+                            "识别到 Profile 5 等流时自动启用 libplacebo 色彩映射，告别紫绿画面",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = state.settings.autoDolbyMpv,
+                        onCheckedChange = { vm.updateSettings(state.settings.copy(autoDolbyMpv = it)) },
+                    )
+                }
+            }
+        },
+        dismissButton = {
+            if (state.settings.preferredKernel != activeKernel) {
+                TextButton(onClick = {
+                    vm.updateSettings(state.settings.copy(preferredKernel = activeKernel))
+                }) {
+                    Text("设为默认(${activeKernel.shortLabel})")
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
+}
+
+@Composable
+private fun LiveKernelSwitch(
+    activeKernel: com.aisub.player.PlayerKernel,
+    tv: Boolean,
+    onSelect: (com.aisub.player.PlayerKernel) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val outerShape = RoundedCornerShape(50)
@@ -2714,8 +2902,8 @@ private fun LiveKernelSwitch(
             .padding(2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        listOf(false to "默认内核", true to "VLC 内核").forEach { (isVlcOption, label) ->
-            val selected = usingVlc == isVlcOption
+        com.aisub.player.PlayerKernel.entries.forEach { option ->
+            val selected = activeKernel == option
             var focused by remember { mutableStateOf(false) }
             val highlight = tv && focused
             val pillShape = RoundedCornerShape(50)
@@ -2731,12 +2919,12 @@ private fun LiveKernelSwitch(
                             else -> Color.Transparent
                         },
                     )
-                    .clickable { onSelect(isVlcOption) }
+                    .clickable { onSelect(option) }
                     .padding(horizontal = 10.dp, vertical = 4.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = label,
+                    text = option.shortLabel,
                     color = when {
                         highlight || selected -> Color(0xFF1F1100)
                         else -> Color(0xFFD5DCE6)
@@ -2757,16 +2945,20 @@ private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     val exo = p as? androidx.media3.exoplayer.ExoPlayer
     val v = exo?.videoFormat
     val a = exo?.audioFormat
+    val kernel = vm.activeKernel
     val entry = vm.state.value.current
     val rows = listOfNotNull(
         "文件" to (entry?.title ?: ""),
         "时长" to formatClock(p.duration.coerceAtLeast(0)),
-        "播放内核" to if (exo != null) "默认内核（ExoPlayer）" else "VLC 内核",
-        if (exo == null) vm.vlcAudioBackendLabel?.let { "音频输出" to it } else null,
+        "播放内核" to kernel.label,
+        if (kernel == com.aisub.player.PlayerKernel.MPV) vm.mpvPipelineLabel?.let { "渲染与色彩管线" to it } else null,
+        if (kernel == com.aisub.player.PlayerKernel.VLC) vm.vlcAudioBackendLabel?.let { "音频输出" to it } else null,
         if (exo == null && p.videoSize.width > 0) "画面" to "${p.videoSize.width}×${p.videoSize.height}" else null,
         v?.let { "画面" to "${it.width}×${it.height}" + (it.frameRate.takeIf { f -> f > 0 }?.let { f -> " · %.0f fps".format(f) } ?: "") },
-        v?.let { "视频编码" to (it.sampleMimeType ?: "") + (it.codecs?.let { c -> " ($c)" } ?: "") },
-        a?.let { "音频编码" to (it.sampleMimeType ?: "") },
+        v?.let { "视频编码" to (it.sampleMimeType ?: "") + (it.codecs?.let { c -> " ($c)" } ?: "") }
+            ?: vm.mpvVideoCodecLabel?.let { "视频编码" to it },
+        a?.let { "音频编码" to (it.sampleMimeType ?: "") }
+            ?: vm.mpvAudioCodecLabel?.let { "音频编码" to it },
         a?.let { "音频" to "${it.sampleRate} Hz · ${it.channelCount} 声道" },
         "地址" to (entry?.uri ?: ""),
     )

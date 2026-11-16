@@ -2,6 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- 允许在 Android 6.0 (API 23) 标准版上合并声明更高 minSdk 的可选原生库（运行时已由 bionic_compat23 与安全探测兜底） -->
+    <uses-sdk tools:overrideLibrary="dev.jdtech.mpv" />
+
     <!-- 手机和电视共用一个 APK：电视没有触屏，也不要求 Leanback 界面库 -->
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.software.leanback" android:required="false" />

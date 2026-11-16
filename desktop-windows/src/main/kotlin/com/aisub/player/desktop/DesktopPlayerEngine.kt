@@ -597,9 +597,19 @@ object DesktopPlayerEngine {
     }
 }
 
+enum class DesktopBackendMode {
+    /** 默认智能模式：常规流走 VLCJ 低延迟渲染，检测到杜比视界流自动切 libplacebo 色彩映射管线消除紫绿偏色 */
+    AUTO,
+    /** MPV / libplacebo 模式：走 FFmpeg + Vulkan libplacebo（无 Vulkan 时自动回退 zscale 色调映射）渲染管线 */
+    MPV_LIBPLACEBO,
+    /** 纯 VLC 模式：强制优先使用 LibVLC（如蓝光/DVD ISO 光盘镜像） */
+    VLC_ONLY,
+}
+
 class DesktopExoPlayer(
     private val context: Context,
     private val dataSourceFactory: DataSource.Factory?,
+    var backendMode: DesktopBackendMode = DesktopBackendMode.AUTO,
 ) : ExoPlayer {
     init {
         DesktopPlayerEngine.initPrefsIfNeeded(context)
@@ -881,6 +891,18 @@ class DesktopExoPlayer(
     private var currentChapters: List<Chapter> = emptyList()
 
     fun chapters(): List<Chapter> = currentChapters
+
+    /** 非杜比认证管线下自动拦截杜比视界流改走 libplacebo 色调映射 */
+    @Volatile
+    var autoDolbyProtection: Boolean = true
+
+    @Volatile
+    var detectedDolbyProfile: Int? = null
+        private set
+
+    @Volatile
+    var activePipelineDescription: String = ""
+        private set
 
     @Volatile
     private var vlcBufferingSinceMs: Long = 0L
@@ -1380,13 +1402,34 @@ class DesktopExoPlayer(
                 releaseLiveRelay()
             }
 
-            // 2. 优先使用 VLCJ (共享全局 Factory)
-            if (DesktopPlayerEngine.vlcAvailable && startWithVlcjOnExecutor(gen, playableUrl, headers, startPosMs)) {
+            // 2. 若指定了 MPV / libplacebo 内核，或开启了杜比防偏色且探测到杜比视界流（如 Profile 5 dvh1/dvhe），
+            //    主动绕过不支持 IPTPQc2 的 VLC 3.x（否则必出紫绿画面），直接走 libplacebo 色调映射管线
+            val forceMpvPipeline = backendMode == DesktopBackendMode.MPV_LIBPLACEBO
+            val probeDvProfile = if (!forceMpvPipeline && backendMode == DesktopBackendMode.AUTO && autoDolbyProtection && !isCurrentItemAudioOnly) {
+                probeDolbyVisionProfileQuick(playableUrl, headers, item.mediaMetadata.title?.toString())
+            } else {
+                null
+            }
+            if (probeDvProfile != null) {
+                detectedDolbyProfile = probeDvProfile
+                Log.i(TAG, "检测到杜比视界 Profile $probeDvProfile，绕过 VLC 3.x 改用 libplacebo 色调映射管线: $playableUrl")
+            }
+
+            if (!forceMpvPipeline && probeDvProfile == null &&
+                DesktopPlayerEngine.vlcAvailable && startWithVlcjOnExecutor(gen, playableUrl, headers, startPosMs)
+            ) {
+                activePipelineDescription = "LibVLC 硬件混合管线"
                 return@execute
             }
 
-            // 3. 使用内置 FFmpeg + Java Sound 引擎
-            startWithFfmpeg(gen, playableUrl, headers, startPosMs)
+            // 3. 使用内置 MPV/libplacebo + FFmpeg 色彩映射渲染引擎
+            startWithFfmpeg(
+                gen = gen,
+                url = playableUrl,
+                headers = headers,
+                startPosMs = startPosMs,
+                preferLibplacebo = forceMpvPipeline || probeDvProfile != null,
+            )
         }
     }
 
@@ -1921,13 +1964,80 @@ class DesktopExoPlayer(
         return if (v in 1.0..120.0) v else null
     }
 
+    /**
+     * 快速探测媒体流是否为杜比视界（Dolby Vision）：
+     * 本地文件直接调 ffprobe 毫秒级读取流头；远程流仅在文件名含 DV / DoVi / Dolby Vision 或 MP4/MKV 容器时轻量探测，不拖慢常规起播。
+     */
+    private fun probeDolbyVisionProfileQuick(url: String, headers: Map<String, String>, titleHint: String?): Int? {
+        val isLocal = !url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)
+        val titleLooksDv = com.aisub.player.media.DolbyVisionHelper.looksLikeDolbyVisionTitle(titleHint ?: url)
+        if (!isLocal && !titleLooksDv) return null
+        val ffprobe = DesktopBinaryFinder.findFfprobe() ?: run {
+            if (titleLooksDv) DesktopBinaryFinder.ensureFfmpeg()
+            DesktopBinaryFinder.findFfprobe()
+        } ?: return if (titleLooksDv) 5 else null
+
+        return runCatching {
+            val cmd = mutableListOf(
+                ffprobe, "-v", "error",
+                "-select_streams", "v:0",
+                "-probesize", "1M",
+                "-analyzeduration", "1000000",
+                "-show_entries", "stream=codec_tag_string,color_space,side_data_list",
+                "-of", "json",
+            )
+            if (headers.isNotEmpty() && url.startsWith("http")) {
+                val hdr = headers.entries.joinToString("\r\n") { "${it.key}: ${it.value}" } + "\r\n"
+                cmd.addAll(listOf("-headers", hdr))
+            }
+            cmd.add(url)
+            val proc = ProcessBuilder(cmd).redirectError(ProcessBuilder.Redirect.DISCARD).start()
+            var out = ""
+            val reader = Thread({ runCatching { out = proc.inputStream.bufferedReader().readText() } }, "Voxtitle-DvProbe").apply {
+                isDaemon = true
+                start()
+            }
+            if (!proc.waitFor(4, TimeUnit.SECONDS)) proc.destroyForcibly()
+            reader.join(300)
+            parseDvProfileFromFfprobeJson(out) ?: if (titleLooksDv) 5 else null
+        }.getOrNull()
+    }
+
+    private fun parseDvProfileFromFfprobeJson(jsonText: String): Int? {
+        if (jsonText.isBlank()) return null
+        val root = runCatching { JSONObject(jsonText) }.getOrNull() ?: return null
+        val streams = root.optJSONArray("streams") ?: return null
+        for (i in 0 until streams.length()) {
+            val s = streams.getJSONObject(i)
+            val sideList = s.optJSONArray("side_data_list")
+            if (sideList != null) {
+                for (j in 0 until sideList.length()) {
+                    val sd = sideList.getJSONObject(j)
+                    if (sd.has("dv_profile")) {
+                        val p = sd.optInt("dv_profile", -1)
+                        if (p > 0) return p
+                    }
+                }
+            }
+            val tag = s.optString("codec_tag_string").lowercase()
+            if (tag in setOf("dvh1", "dvhe", "dav1", "dvav", "dva1")) return 5
+            val cs = s.optString("color_space").lowercase()
+            if ("ipt" in cs || "dolby" in cs) return 5
+        }
+        return null
+    }
+
     private fun buildFfmpegInputArgs(
         ffmpeg: String,
         url: String,
         headers: Map<String, String>,
         startPosMs: Long,
+        useVulkanDevice: Boolean = false,
     ): MutableList<String> {
         val cmd = mutableListOf(ffmpeg, "-v", "error")
+        if (useVulkanDevice) {
+            cmd.addAll(listOf("-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk"))
+        }
         if (url.startsWith("http")) {
             cmd.addAll(listOf("-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"))
         }
@@ -1942,10 +2052,30 @@ class DesktopExoPlayer(
         return cmd
     }
 
-    private fun startWithFfmpeg(gen: Int, url: String, headers: Map<String, String>, startPosMs: Long) {
+    private fun buildColorMappedVfFilter(
+        fpsStr: String,
+        width: Int,
+        height: Int,
+        mode: Int,
+    ): String = when (mode) {
+        // Mode 1: Vulkan GPU libplacebo 动态色调映射（完整支持杜比视界 Profile 5 IPTPQc2 + RPU 及 HDR10 -> BT.709）
+        1 -> "fps=fps=$fpsStr:round=near,libplacebo=w=$width:h=$height:colorspace=bt709:color_primaries=bt709:color_trc=iec61966-2-1:tonemapping=bt.2390:apply_dolbyvision=true:format=bgra"
+        // Mode 2: 无 Vulkan 驱动时的 CPU zscale HDR 色调映射兜底（针对 HDR10 / Profile 7 / Profile 8）
+        2 -> "fps=fps=$fpsStr:round=near,zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,scale=$width:$height:flags=fast_bilinear"
+        // Mode 0: 标准 SDR 快速缩放管线
+        else -> "fps=fps=$fpsStr:round=near,scale=$width:$height:flags=fast_bilinear"
+    }
+
+    private fun startWithFfmpeg(
+        gen: Int,
+        url: String,
+        headers: Map<String, String>,
+        startPosMs: Long,
+        preferLibplacebo: Boolean = false,
+    ) {
         if (gen != mediaGeneration.get()) return
         ffmpegRunning.set(true)
-        Log.i(TAG, "启动 FFmpeg 播放引擎: url=$url, startPosMs=$startPosMs")
+        Log.i(TAG, "启动 FFmpeg/libplacebo 播放引擎: url=$url, startPosMs=$startPosMs, preferLibplacebo=$preferLibplacebo")
         ioPool.submit {
             if (gen != mediaGeneration.get() || !ffmpegRunning.get()) return@submit
             val ffmpeg = DesktopBinaryFinder.ensureFfmpeg()
@@ -1960,7 +2090,7 @@ class DesktopExoPlayer(
                 return@submit
             }
 
-            // 探测时长、帧率与视频分辨率
+            // 探测时长、帧率、分辨率与杜比视界/HDR色彩元数据
             var srcWidth = 1280
             var srcHeight = 720
             var width = 1280
@@ -1968,6 +2098,8 @@ class DesktopExoPlayer(
             var hasVideo = true
             var hasAudio = true
             var fps = 24.0
+            var isHdrOrDv = preferLibplacebo
+            var dvProfile: Int? = detectedDolbyProfile
             val probedGroups = ArrayList<Tracks.Group>()
             DesktopBinaryFinder.findFfprobe()?.let { ffprobe ->
                 runCatching {
@@ -1975,7 +2107,7 @@ class DesktopExoPlayer(
                         ffprobe, "-v", "error",
                         "-probesize", "2M",
                         "-analyzeduration", "2000000",
-                        "-show_entries", "format=duration:stream=index,codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,tags",
+                        "-show_entries", "format=duration:stream=index,codec_type,codec_name,codec_tag_string,color_space,color_transfer,color_primaries,width,height,avg_frame_rate,r_frame_rate,tags,side_data_list",
                         "-of", "json",
                     )
                     if (headers.isNotEmpty() && url.startsWith("http")) {
@@ -1996,6 +2128,11 @@ class DesktopExoPlayer(
                     }
                     readerThread.join(500)
                     if (jsonText.isNotBlank()) {
+                        parseDvProfileFromFfprobeJson(jsonText)?.let {
+                            dvProfile = it
+                            detectedDolbyProfile = it
+                            isHdrOrDv = true
+                        }
                         val root = JSONObject(jsonText)
                         val durSec = root.optJSONObject("format")?.optString("duration")?.toDoubleOrNull()
                         if (durSec != null && durSec > 0) {
@@ -2015,11 +2152,15 @@ class DesktopExoPlayer(
                                 if (stype == "video" && !foundVideo) {
                                     val w = s.optInt("width", 0)
                                     val h = s.optInt("height", 0)
+                                    val trc = s.optString("color_transfer").lowercase()
+                                    if (trc == "smpte2084" || trc == "arib-std-b67") {
+                                        isHdrOrDv = true
+                                    }
                                     if (w > 0 && h > 0) {
                                         srcWidth = w
                                         srcHeight = h
-                                        val maxW = DesktopPlayerEngine.displayWidthPx.coerceIn(854, 1280)
-                                        val maxH = DesktopPlayerEngine.displayHeightPx.coerceIn(480, 720)
+                                        val maxW = DesktopPlayerEngine.displayWidthPx.coerceIn(1280, 1920)
+                                        val maxH = DesktopPlayerEngine.displayHeightPx.coerceIn(720, 1080)
                                         val scale = minOf(1.0, maxW.toDouble() / w.toDouble(), maxH.toDouble() / h.toDouble())
                                         width = (((w * scale).roundToInt() / 2) * 2).coerceAtLeast(2)
                                         height = (((h * scale).roundToInt() / 2) * 2).coerceAtLeast(2)
@@ -2027,9 +2168,12 @@ class DesktopExoPlayer(
                                         fps = parseFfmpegFrameRate(s.optString("avg_frame_rate"))
                                             ?: parseFfmpegFrameRate(s.optString("r_frame_rate"))
                                             ?: fps
+                                        val mime = if (dvProfile != null) MimeTypes.VIDEO_DOLBY_VISION else "video/${s.optString("codec_name", "avc")}"
+                                        val codecsStr = if (dvProfile != null) "dvhe.%02d".format(java.util.Locale.US, dvProfile) else null
                                         val vf = Format.Builder()
                                             .setId("v$idx")
-                                            .setSampleMimeType("video/${s.optString("codec_name", "avc")}")
+                                            .setSampleMimeType(mime)
+                                            .setCodecs(codecsStr)
                                             .setWidth(w)
                                             .setHeight(h)
                                             .setFrameRate(fps.toFloat())
@@ -2073,6 +2217,13 @@ class DesktopExoPlayer(
                 notifyMain { listeners.forEach { it.onTracksChanged(currentTracks) } }
             }
 
+            val usePlacebo = preferLibplacebo || isHdrOrDv
+            activePipelineDescription = when {
+                dvProfile != null -> "libplacebo Vulkan · 杜比视界 P$dvProfile → BT.709 (bt.2390)"
+                usePlacebo -> "libplacebo Vulkan · HDR/广色域动态映射管线"
+                else -> "FFmpeg 软解渲染管线"
+            }
+
             if (hasVideo) {
                 val sz = VideoSize(srcWidth, srcHeight)
                 videoSize = sz
@@ -2080,9 +2231,20 @@ class DesktopExoPlayer(
                     listeners.forEach { it.onVideoSizeChanged(sz) }
                 }
                 if (hasAudio) {
-                    startFfmpegMuxedPlayback(gen, ffmpeg, url, headers, startPosMs, width, height, fps)
+                    startFfmpegMuxedPlayback(
+                        gen = gen,
+                        ffmpeg = ffmpeg,
+                        url = url,
+                        headers = headers,
+                        startPosMs = startPosMs,
+                        width = width,
+                        height = height,
+                        fps = fps,
+                        filterMode = if (usePlacebo) 1 else 0,
+                        isHdrFallbackCandidate = isHdrOrDv && dvProfile != 5,
+                    )
                 } else {
-                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps)
+                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = if (usePlacebo) 1 else 0)
                 }
             } else {
                 startFfmpegAudioThread(gen, ffmpeg, url, headers, startPosMs, markReadyWithoutVideo = true, endWhenDone = true)
@@ -2091,8 +2253,8 @@ class DesktopExoPlayer(
     }
 
     /**
-     * 单进程音画同步解码：video 走 stdout rawvideo（带 CFR fps 滤镜），audio 走本机回环 TCP PCM。
-     * 避免起两个 FFmpeg 进程争抢 115 等单连接网盘，彻底消除 403 重连风暴与帧率漂移。
+     * 单进程音画同步解码：video 走 stdout rawvideo（支持 Vulkan libplacebo 杜比视界动态色调映射，若机器无 Vulkan 驱动则自动无缝降级），
+     * audio 走本机回环 TCP PCM。避免起两个进程争抢 115 等单连接网盘。
      */
     private fun startFfmpegMuxedPlayback(
         gen: Int,
@@ -2103,6 +2265,8 @@ class DesktopExoPlayer(
         width: Int,
         height: Int,
         fps: Double,
+        filterMode: Int = 0,
+        isHdrFallbackCandidate: Boolean = false,
     ) {
         ioPool.submit {
             val safeFps = fps.coerceIn(12.0, 60.0)
@@ -2111,19 +2275,20 @@ class DesktopExoPlayer(
                 ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).apply { soTimeout = 20_000 }
             }.getOrElse { e ->
                 Log.e(TAG, "FFmpeg 本地音频套接字创建失败，改用纯视频模式", e)
-                startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps)
+                startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode)
                 return@submit
             }
             ffmpegAudioServer = audioServer
 
             val hasLiveAudio = AtomicBoolean(true)
             val audioDoneLatch = CountDownLatch(1)
-            val cmd = buildFfmpegInputArgs(ffmpeg, url, headers, startPosMs).apply {
+            val vfStr = buildColorMappedVfFilter(fpsStr, width, height, filterMode)
+            val cmd = buildFfmpegInputArgs(ffmpeg, url, headers, startPosMs, useVulkanDevice = filterMode == 1).apply {
                 addAll(
                     listOf(
                         "-threads", "0",
                         "-map", "0:v:0", "-sn",
-                        "-vf", "fps=fps=$fpsStr:round=near,scale=$width:$height:flags=fast_bilinear",
+                        "-vf", vfStr,
                         "-pix_fmt", "bgra",
                         "-f", "rawvideo", "pipe:1",
                         "-map", "0:a:0?", "-vn", "-sn",
@@ -2175,6 +2340,14 @@ class DesktopExoPlayer(
                 )
                 proc.destroy()
                 audioDoneLatch.await(3, TimeUnit.SECONDS)
+                // 若当前电脑缺少 Vulkan ICD 导致 filterMode=1 (libplacebo) 未输出任何帧，自动降级至 CPU zscale / 标准滤镜续播
+                if (framesRead == 0L && filterMode == 1 && ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                    val nextMode = if (isHdrFallbackCandidate) 2 else 0
+                    Log.w(TAG, "当前显卡未启用 Vulkan libplacebo，自动切换至 CPU 色调映射管线 (mode=$nextMode)")
+                    activePipelineDescription = if (nextMode == 2) "FFmpeg zscale CPU HDR 色调映射" else "FFmpeg 软解渲染管线"
+                    startFfmpegMuxedPlayback(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = nextMode, isHdrFallbackCandidate = false)
+                    return@runCatching
+                }
                 if (ffmpegRunning.get() && gen == mediaGeneration.get() && framesRead > 0L) {
                     onItemEnded()
                 }
@@ -2334,17 +2507,19 @@ class DesktopExoPlayer(
         width: Int,
         height: Int,
         fps: Double,
+        filterMode: Int = 0,
     ) {
         ioPool.submit {
             runCatching {
                 val safeFps = fps.coerceIn(12.0, 60.0)
                 val fpsStr = "%.6f".format(java.util.Locale.US, safeFps)
-                val cmd = buildFfmpegInputArgs(ffmpeg, url, headers, startPosMs).apply {
+                val vfStr = buildColorMappedVfFilter(fpsStr, width, height, filterMode)
+                val cmd = buildFfmpegInputArgs(ffmpeg, url, headers, startPosMs, useVulkanDevice = filterMode == 1).apply {
                     addAll(
                         listOf(
                             "-threads", "0",
                             "-an", "-sn",
-                            "-vf", "fps=fps=$fpsStr:round=near,scale=$width:$height:flags=fast_bilinear",
+                            "-vf", vfStr,
                             "-pix_fmt", "bgra",
                             "-f", "rawvideo", "-",
                         ),
@@ -2364,6 +2539,10 @@ class DesktopExoPlayer(
                     useAudioClock = { false },
                 )
                 proc.destroy()
+                if (framesRead == 0L && filterMode == 1 && ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = 0)
+                    return@runCatching
+                }
                 if (ffmpegRunning.get() && gen == mediaGeneration.get() && framesRead > 0L) {
                     onItemEnded()
                 }

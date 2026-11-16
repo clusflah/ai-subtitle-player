@@ -431,7 +431,7 @@ private fun rememberPlayMode(player: Player): Pair<PlayMode, () -> PlayMode> {
 @Composable
 private fun PlayControls(vm: MainViewModel, player: Player, wantsPlay: Boolean, onMessage: (String) -> Unit, onQueue: () -> Unit) {
     val (mode, next) = rememberPlayMode(player)
-    val canSkip = vm.queueSize > 1 && !vm.usingVlc
+    val canSkip = vm.queueSize > 1
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically,
@@ -453,7 +453,7 @@ private fun PlayControls(vm: MainViewModel, player: Player, wantsPlay: Boolean, 
         IconButton(onClick = { vm.skipInQueue(true) }, enabled = canSkip) {
             Icon(AppIcons.SkipNext, "下一首", tint = if (canSkip) Color.White else Faint, modifier = Modifier.size(34.dp))
         }
-        IconButton(onClick = onQueue, enabled = !vm.usingVlc) {
+        IconButton(onClick = onQueue, enabled = vm.queueSize > 0) {
             Icon(AppIcons.QueueMusic, "播放列表", tint = Color.White, modifier = Modifier.size(28.dp))
         }
     }

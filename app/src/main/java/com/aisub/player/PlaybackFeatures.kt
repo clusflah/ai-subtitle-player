@@ -35,6 +35,7 @@ import com.aisub.player.media.SkipRange
 import com.aisub.player.media.SkipSource
 import com.aisub.player.media.TrackChoice
 import com.aisub.player.media.TrackMemory
+import com.aisub.player.media.MpvPlayer
 import com.aisub.player.media.VlcPlayer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -166,8 +167,11 @@ class PlaybackFeatures(
         // 时长这时一般已经知道了，按离结尾的距离记的片尾才能换算
         refreshSkipRanges()
         val p = player()
-        if (p is VlcPlayer && _state.value.chapters.isEmpty()) {
-            p.chapters().takeIf { it.isNotEmpty() }?.let(::setChapters)
+        if (_state.value.chapters.isEmpty()) {
+            when (p) {
+                is VlcPlayer -> p.chapters().takeIf { it.isNotEmpty() }?.let(::setChapters)
+                is MpvPlayer -> p.chapters().takeIf { it.isNotEmpty() }?.let(::setChapters)
+            }
         }
         if (tracks.groups.isNotEmpty()) pendingTrackMemory?.let { m ->
             pendingTrackMemory = null
@@ -492,13 +496,16 @@ class PlaybackFeatures(
         val audioLangs = s.preferredAudioLanguages.toLanguageList()
         val textLangs = s.preferredSubtitleLanguages.toLanguageList()
         val textOff = textLangs.isEmpty() || (s.preferLoadedSubtitles && hasLoadedSubtitles())
-        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters.buildUpon()
-            .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
-            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-            .setPreferredAudioLanguages(*audioLangs.toTypedArray())
-            .setPreferredTextLanguages(*textLangs.toTypedArray())
-            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, textOff)
-            .build()
+        val active = player()
+        for (target in listOf(exoPlayer, active).distinct()) {
+            target.trackSelectionParameters = target.trackSelectionParameters.buildUpon()
+                .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                .setPreferredAudioLanguages(*audioLangs.toTypedArray())
+                .setPreferredTextLanguages(*textLangs.toTypedArray())
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, textOff)
+                .build()
+        }
     }
 
     private fun applyTrackMemory(m: TrackMemory, tracks: Tracks) {
@@ -553,6 +560,9 @@ class PlaybackFeatures(
     /** 暂停并前进/后退一帧。 */
     fun stepFrame(forward: Boolean): Long {
         val p = player()
+        if (p is MpvPlayer) {
+            return p.stepFrame(forward)
+        }
         p.pause()
         val fps = (p as? ExoPlayer)?.videoFormat?.frameRate?.takeIf { it > 1f } ?: 30f
         val frameMs = (1000f / fps).toLong().coerceAtLeast(1)

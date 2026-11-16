@@ -63,6 +63,13 @@ enum class Provider(
 
 data class ProviderConfig(val apiKey: String = "", val model: String = "", val baseUrl: String = "")
 
+/** 视频与直播播放内核选择 */
+enum class PlayerKernel(val label: String, val shortLabel: String, val description: String) {
+    EXO("默认内核（ExoPlayer）", "默认", "系统硬件解码优先，省电流畅；遇到杜比视界 Profile 5 自动切 MPV 防偏色"),
+    MPV("MPV 内核（杜比映射）", "MPV", "内置 libmpv + libplacebo 着色器，动态映射杜比视界与 HDR 至标准色彩，支持全格式软硬解"),
+    VLC("VLC 内核（兼容/光盘）", "VLC", "支持蓝光/DVD ISO 光盘镜像，直播源支持单连接原生音频分流实时生成 AI 字幕"),
+}
+
 /** 播放视频时切到别的应用、回桌面或锁屏怎么办 */
 enum class VideoLeaveAction(val label: String) {
     PAUSE("暂停"),
@@ -199,6 +206,10 @@ data class AppSettings(
     val appBackground: AppBackground = AppBackground.AURORA_GRAY_WHITE_GRADIENT,
     val appDarkMode: AppDarkMode = AppDarkMode.SYSTEM,
     val liquidGlass: Boolean = false,
+    /** 默认视频播放内核（播放界面可随时一键切换） */
+    val preferredKernel: PlayerKernel = PlayerKernel.EXO,
+    /** 非杜比视界屏幕播放杜比视界（尤其 Profile 5）时自动切换至 MPV 内核进行色调映射，解决紫绿偏色 */
+    val autoDolbyMpv: Boolean = true,
 ) {
     /** 某个服务商的配置，未填的字段用默认值补齐。 */
     fun configOf(p: Provider): ProviderConfig {
@@ -399,6 +410,9 @@ class SettingsRepository(context: Context) {
                 }
             },
             liquidGlass = prefs.getBoolean("liquidGlass", d.liquidGlass),
+            preferredKernel = runCatching { PlayerKernel.valueOf(prefs.getString("preferredKernel", d.preferredKernel.name)!!) }
+                .getOrDefault(d.preferredKernel),
+            autoDolbyMpv = prefs.getBoolean("autoDolbyMpv", d.autoDolbyMpv),
         )
     }
 
@@ -462,6 +476,8 @@ class SettingsRepository(context: Context) {
             .putString("appBackground", s.appBackground.name)
             .putString("appDarkMode", s.appDarkMode.name)
             .putBoolean("liquidGlass", s.liquidGlass)
+            .putString("preferredKernel", s.preferredKernel.name)
+            .putBoolean("autoDolbyMpv", s.autoDolbyMpv)
         for (e in TtsEngineType.entries) editor.putString("ttsVoice.${e.name}", s.ttsVoices[e].orEmpty())
         for ((p, c) in s.providerConfigs) {
             editor.putString("${p.name}.apiKey", c.apiKey)

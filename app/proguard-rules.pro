@@ -6,3 +6,7 @@
 # VLC 原生音频分流桥与 libVLC JNI 指针字段防混淆
 -keep class com.aisub.player.media.VlcAudioBridge { *; }
 -keep class org.videolan.libvlc.** { *; }
+
+# MPV 原生播放桥与 libmpv JNI 回调防混淆
+-keep class com.aisub.player.media.MpvNativeBridge { *; }
+-keep class dev.jdtech.mpv.** { *; }
