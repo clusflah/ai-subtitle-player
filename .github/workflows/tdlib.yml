@@ -95,38 +95,45 @@ jobs:
           $gperfExe = "$vcpkg\installed\x64-windows\tools\gperf\gperf.exe"
           $env:PATH = "$vcpkg\installed\x64-windows\tools\gperf;$vcpkg\installed\x64-windows\bin;$env:PATH"
 
+          $env:JAVA_HOME = $env:JAVA_HOME.Replace('\', '/')
+          $javaHome = $env:JAVA_HOME
+          $vcpkgToolchain = "$vcpkg/scripts/buildsystems/vcpkg.cmake".Replace('\', '/')
+          $gperfPath = $gperfExe.Replace('\', '/')
+
           New-Item -ItemType Directory -Force -Path "td\build" | Out-Null
           Push-Location "td\build"
           cmake -A x64 `
             -DCMAKE_INSTALL_PREFIX:PATH="../example/java/td" `
             -DTD_ENABLE_JNI=ON `
-            -DGPERF_EXECUTABLE="$gperfExe" `
-            -DJAVA_HOME="$env:JAVA_HOME" `
-            -DCMAKE_TOOLCHAIN_FILE:FILEPATH="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DGPERF_EXECUTABLE:FILEPATH="$gperfPath" `
+            -DJAVA_HOME:PATH="$javaHome" `
+            -DCMAKE_TOOLCHAIN_FILE:FILEPATH="$vcpkgToolchain" `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DCMAKE_POLICY_DEFAULT_CMP0219=NEW `
             ..
           if ($LASTEXITCODE -ne 0) { throw "CMake configure td failed" }
-          cmake --build . --target install --config Release -- /m:4
+          cmake --build . --target install --config Release -- /m:2
           if ($LASTEXITCODE -ne 0) { throw "CMake build td failed" }
           Pop-Location
 
           New-Item -ItemType Directory -Force -Path "td\example\java\build" | Out-Null
           Push-Location "td\example\java\build"
-          $tdDir = (Resolve-Path "../td/lib/cmake/Td").Path
+          $tdDir = (Resolve-Path "../td/lib/cmake/Td").Path.Replace('\', '/')
           cmake -A x64 `
             -DCMAKE_INSTALL_PREFIX:PATH="../../../tdlib-win" `
-            -DJAVA_HOME="$env:JAVA_HOME" `
-            -DCMAKE_TOOLCHAIN_FILE:FILEPATH="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DJAVA_HOME:PATH="$javaHome" `
+            -DCMAKE_TOOLCHAIN_FILE:FILEPATH="$vcpkgToolchain" `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DTd_DIR:PATH="$tdDir" `
+            -DCMAKE_POLICY_DEFAULT_CMP0219=NEW `
             ..
           if ($LASTEXITCODE -ne 0) { throw "CMake configure tdjni failed" }
-          cmake --build . --target tdjni --config Release -- /m:4
+          cmake --build . --target tdjni --config Release -- /m:2
           if ($LASTEXITCODE -ne 0) { throw "CMake build tdjni failed" }
           Pop-Location
 
           New-Item -ItemType Directory -Force -Path "win-out" | Out-Null
-          $tdjniDll = Get-ChildItem -Path "td\example\java" -Recurse -Filter "tdjni.dll" | Select-Object -First 1
+          $tdjniDll = Get-ChildItem -Path "td" -Recurse -Filter "tdjni.dll" | Select-Object -First 1
           if (-not $tdjniDll) { throw "tdjni.dll not found after build" }
           Copy-Item $tdjniDll.FullName "win-out\tdjni.dll" -Force
           Get-ChildItem "$vcpkg\installed\x64-windows\bin\*.dll" -ErrorAction SilentlyContinue | ForEach-Object {

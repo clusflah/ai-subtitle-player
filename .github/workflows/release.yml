@@ -125,82 +125,94 @@ jobs:
             exit 0
           }
 
-          Write-Host "Release 中尚未存在 tdjni-windows-x64.zip，开始自动编译 Windows x64 tdjni.dll ($tdCommit)..."
-          if (-not (Get-Command php -ErrorAction SilentlyContinue)) {
-            if (Test-Path "C:\tools\php") {
-              $env:PATH = "C:\tools\php;$env:PATH"
-            } else {
-              choco install php -y --no-progress
-              $phpDir = Get-ChildItem "C:\tools\php*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-              if ($phpDir) { $env:PATH = "$($phpDir.FullName);$env:PATH" }
+          try {
+            Write-Host "Release 中尚未存在 tdjni-windows-x64.zip，开始自动编译 Windows x64 tdjni.dll ($tdCommit)..."
+            if (-not (Get-Command php -ErrorAction SilentlyContinue)) {
+              if (Test-Path "C:\tools\php") {
+                $env:PATH = "C:\tools\php;$env:PATH"
+              } else {
+                choco install php -y --no-progress
+                $phpDir = Get-ChildItem "C:\tools\php*" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($phpDir) { $env:PATH = "$($phpDir.FullName);$env:PATH" }
+              }
             }
-          }
-          $vcpkg = $env:VCPKG_INSTALLATION_ROOT
-          if ([string]::IsNullOrWhiteSpace($vcpkg) -or -not (Test-Path "$vcpkg\vcpkg.exe")) {
-            git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
-            & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat"
-            $vcpkg = "$env:RUNNER_TEMP\vcpkg"
-          }
-          & "$vcpkg\vcpkg.exe" install gperf:x64-windows openssl:x64-windows zlib:x64-windows
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
-          $gperfExe = "$vcpkg\installed\x64-windows\tools\gperf\gperf.exe"
-          $env:PATH = "$vcpkg\installed\x64-windows\tools\gperf;$vcpkg\installed\x64-windows\bin;$env:PATH"
+            $vcpkg = $env:VCPKG_INSTALLATION_ROOT
+            if ([string]::IsNullOrWhiteSpace($vcpkg) -or -not (Test-Path "$vcpkg\vcpkg.exe")) {
+              git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+              & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat"
+              $vcpkg = "$env:RUNNER_TEMP\vcpkg"
+            }
+            & "$vcpkg\vcpkg.exe" install gperf:x64-windows openssl:x64-windows zlib:x64-windows
+            if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+            $gperfExe = "$vcpkg\installed\x64-windows\tools\gperf\gperf.exe"
+            $env:PATH = "$vcpkg\installed\x64-windows\tools\gperf;$vcpkg\installed\x64-windows\bin;$env:PATH"
 
-          $tdSrc = "$env:RUNNER_TEMP\td-src"
-          git clone https://github.com/tdlib/td.git $tdSrc
-          Push-Location $tdSrc
-          git checkout $tdCommit
-          Pop-Location
+            $tdSrc = "$env:RUNNER_TEMP\td-src"
+            git clone https://github.com/tdlib/td.git $tdSrc
+            Push-Location $tdSrc
+            git checkout $tdCommit
+            Pop-Location
 
-          New-Item -ItemType Directory -Force -Path "$tdSrc\build" | Out-Null
-          Push-Location "$tdSrc\build"
-          cmake -A x64 `
-            -DCMAKE_INSTALL_PREFIX:PATH="../example/java/td" `
-            -DTD_ENABLE_JNI=ON `
-            -DGPERF_EXECUTABLE="$gperfExe" `
-            -DJAVA_HOME="$env:JAVA_HOME" `
-            -DCMAKE_TOOLCHAIN_FILE:FILEPATH="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
-            ..
-          if ($LASTEXITCODE -ne 0) { throw "CMake configure td failed" }
-          cmake --build . --target install --config Release -- /m:4
-          if ($LASTEXITCODE -ne 0) { throw "CMake build td failed" }
-          Pop-Location
+            $env:JAVA_HOME = $env:JAVA_HOME.Replace('\', '/')
+            $javaHome = $env:JAVA_HOME
+            $vcpkgToolchain = "$vcpkg/scripts/buildsystems/vcpkg.cmake".Replace('\', '/')
+            $gperfPath = $gperfExe.Replace('\', '/')
 
-          New-Item -ItemType Directory -Force -Path "$tdSrc\example\java\build" | Out-Null
-          Push-Location "$tdSrc\example\java\build"
-          $tdCmakeDir = (Resolve-Path "../td/lib/cmake/Td").Path
-          cmake -A x64 `
-            -DCMAKE_INSTALL_PREFIX:PATH="../../../tdlib-win" `
-            -DJAVA_HOME="$env:JAVA_HOME" `
-            -DCMAKE_TOOLCHAIN_FILE:FILEPATH="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
-            -DTd_DIR:PATH="$tdCmakeDir" `
-            ..
-          if ($LASTEXITCODE -ne 0) { throw "CMake configure tdjni failed" }
-          cmake --build . --target tdjni --config Release -- /m:4
-          if ($LASTEXITCODE -ne 0) { throw "CMake build tdjni failed" }
-          Pop-Location
+            New-Item -ItemType Directory -Force -Path "$tdSrc\build" | Out-Null
+            Push-Location "$tdSrc\build"
+            cmake -A x64 `
+              -DCMAKE_INSTALL_PREFIX:PATH="../example/java/td" `
+              -DTD_ENABLE_JNI=ON `
+              -DGPERF_EXECUTABLE:FILEPATH="$gperfPath" `
+              -DJAVA_HOME:PATH="$javaHome" `
+              -DCMAKE_TOOLCHAIN_FILE:FILEPATH="$vcpkgToolchain" `
+              -DVCPKG_TARGET_TRIPLET=x64-windows `
+              -DCMAKE_POLICY_DEFAULT_CMP0219=NEW `
+              ..
+            if ($LASTEXITCODE -ne 0) { throw "CMake configure td failed" }
+            cmake --build . --target install --config Release -- /m:2
+            if ($LASTEXITCODE -ne 0) { throw "CMake build td failed" }
+            Pop-Location
 
-          $tdjniDll = Get-ChildItem -Path "$tdSrc\example\java" -Recurse -Filter "tdjni.dll" | Select-Object -First 1
-          if (-not $tdjniDll) { throw "tdjni.dll not found after build" }
-          Copy-Item $tdjniDll.FullName "$resDir/tdjni.dll" -Force
-          Get-ChildItem "$vcpkg\installed\x64-windows\bin\*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item $_.FullName "$resDir/$($_.Name)" -Force
-          }
-          if ($env:VCToolsRedistDir) {
-            Get-ChildItem "$env:VCToolsRedistDir\x64\Microsoft.VC*.CRT\*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
+            New-Item -ItemType Directory -Force -Path "$tdSrc\example\java\build" | Out-Null
+            Push-Location "$tdSrc\example\java\build"
+            $tdCmakeDir = (Resolve-Path "../td/lib/cmake/Td").Path.Replace('\', '/')
+            cmake -A x64 `
+              -DCMAKE_INSTALL_PREFIX:PATH="../../../tdlib-win" `
+              -DJAVA_HOME:PATH="$javaHome" `
+              -DCMAKE_TOOLCHAIN_FILE:FILEPATH="$vcpkgToolchain" `
+              -DVCPKG_TARGET_TRIPLET=x64-windows `
+              -DTd_DIR:PATH="$tdCmakeDir" `
+              -DCMAKE_POLICY_DEFAULT_CMP0219=NEW `
+              ..
+            if ($LASTEXITCODE -ne 0) { throw "CMake configure tdjni failed" }
+            cmake --build . --target tdjni --config Release -- /m:2
+            if ($LASTEXITCODE -ne 0) { throw "CMake build tdjni failed" }
+            Pop-Location
+
+            $tdjniDll = Get-ChildItem -Path $tdSrc -Recurse -Filter "tdjni.dll" | Select-Object -First 1
+            if (-not $tdjniDll) { throw "tdjni.dll not found after build" }
+            Copy-Item $tdjniDll.FullName "$resDir/tdjni.dll" -Force
+            Get-ChildItem "$vcpkg\installed\x64-windows\bin\*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
               Copy-Item $_.FullName "$resDir/$($_.Name)" -Force
             }
-          }
-          $dllNames = Get-ChildItem "$resDir/*.dll" | Select-Object -ExpandProperty Name | Sort-Object
-          Set-Content -Path "$resDir/manifest.txt" -Value ($dllNames -join "`n") -Encoding UTF8
-          Get-ChildItem $resDir
+            if ($env:VCToolsRedistDir) {
+              Get-ChildItem "$env:VCToolsRedistDir\x64\Microsoft.VC*.CRT\*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
+                Copy-Item $_.FullName "$resDir/$($_.Name)" -Force
+              }
+            }
+            $dllNames = Get-ChildItem "$resDir/*.dll" | Select-Object -ExpandProperty Name | Sort-Object
+            Set-Content -Path "$resDir/manifest.txt" -Value ($dllNames -join "`n") -Encoding UTF8
+            Get-ChildItem $resDir
 
-          # 同步回传到对应 TDLib Release，后续所有构建直接秒级复用
-          $zipOut = "$env:RUNNER_TEMP\tdjni-windows-x64.zip"
-          Compress-Archive -Path "$resDir\*" -DestinationPath $zipOut -Force
-          gh release upload "$tdTag" $zipOut --repo "${{ github.repository }}" --clobber 2>$null
+            # 同步回传到对应 TDLib Release，后续所有构建直接秒级复用
+            $zipOut = "$env:RUNNER_TEMP\tdjni-windows-x64.zip"
+            Compress-Archive -Path "$resDir\*" -DestinationPath $zipOut -Force
+            gh release upload "$tdTag" $zipOut --repo "${{ github.repository }}" --clobber 2>$null
+          } catch {
+            Write-Warning "自动编译 Windows TDLib native 遇到异常: $_"
+            Write-Warning "主程序将继续打包发布；TDLib 原生库后续可通过在线拉取或手动导入启用。"
+          }
           $global:LASTEXITCODE = 0
 
       - name: Build Windows Packages
