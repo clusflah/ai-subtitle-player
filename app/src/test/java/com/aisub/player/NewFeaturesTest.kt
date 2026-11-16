@@ -225,4 +225,79 @@ class NewFeaturesTest {
         assertTrue(com.aisub.player.media.DolbyVisionHelper.looksLikeProfile5Title("Movie.2026.dvh1.05.06.mp4"))
         assertTrue(com.aisub.player.media.DolbyVisionHelper.looksLikeProfile5Title("Series.S01E01.2160p.DVP5.mp4"))
     }
+
+    @Test
+    fun legacyDolbyExoMatrixAndRpuRbspParserRestoreColorsAccurately() {
+        val snap = com.aisub.player.media.RpuShaderSnapshot.DEFAULT_PROFILE_5
+        assertEquals(9, snap.iptToLmsColMajor.size)
+        assertEquals(9, snap.lmsToRgb709ColMajor.size)
+        assertEquals(0.0f, snap.iptOffset[0], 1e-5f)
+        assertEquals(0.5f, snap.iptOffset[1], 1e-5f)
+        assertEquals(0.5f, snap.iptOffset[2], 1e-5f)
+
+        // Verify matrix inversion round-trip (M * M^-1 == Identity)
+        val forward = floatArrayOf(
+            0.3048015f, 0.6310284f, 0.0641775f,
+            0.1522829f, 0.7332429f, 0.1144062f,
+            0.0263598f, 0.1328402f, 0.8407810f,
+        )
+        val inv = com.aisub.player.media.RpuShaderSnapshot.invert3x3Row(forward)!!
+        val prod = com.aisub.player.media.RpuShaderSnapshot.mul3x3Row(forward, inv)
+        assertEquals(1.0f, prod[0], 1e-4f)
+        assertEquals(1.0f, prod[4], 1e-4f)
+        assertEquals(1.0f, prod[8], 1e-4f)
+        assertEquals(0.0f, prod[1], 1e-4f)
+
+        // Construct a minimal valid Dolby Vision Profile 5 UNSPEC62 NALU (with 0x00 0x00 0x03 RBSP emulation prevention)
+        // Header: 0x7C 0x01 (NAL type 62), RBSP prefix 0x19 (25), rpu_type=2 (6b), rpu_format=18 (11b),
+        // profile=5 (4b), level=0 (4b), seq_info=0 (1b), dm_present=0 (1b), use_prev=0 (1b), rpu_id=0 (ue=1b)...
+        val bits = StringBuilder()
+        fun putBits(v: Int, n: Int) {
+            for (i in n - 1 downTo 0) bits.append(if (((v ushr i) and 1) != 0) '1' else '0')
+        }
+        fun putUe(v: Int) {
+            val code = v + 1
+            val len = 32 - Integer.numberOfLeadingZeros(code)
+            repeat(len - 1) { bits.append('0') }
+            putBits(code, len)
+        }
+        putBits(25, 8) // rpu_nal_prefix = 25
+        putBits(2, 6)  // rpu_type = 2
+        putBits(18, 11) // rpu_format
+        putBits(5, 4)  // vdr_rpu_profile = 5
+        putBits(0, 4)  // vdr_rpu_level = 0
+        putBits(0, 1)  // vdr_seq_info_present_flag = 0 (defaults: 10-bit, fixed denom 23)
+        putBits(0, 1)  // vdr_dm_metadata_present_flag = 0
+        putBits(0, 1)  // use_prev_vdr_rpu_flag = 0
+        putUe(0)       // vdr_rpu_id = 0
+        putUe(0)       // mapping_color_space
+        putUe(0)       // mapping_chroma_format_idc
+        repeat(3) {
+            putUe(0)           // num_pivots_minus2 = 0 -> 2 pivots
+            putBits(0, 10)     // pivot[0] = 0
+            putBits(1023, 10)  // pivot[1] = 1023
+        }
+        putUe(0) // num_x_partitions_minus1
+        putUe(0) // num_y_partitions_minus1
+        repeat(3) {
+            putUe(0)          // mapping_idc = 0 (polynomial)
+            putBits(0, 1)     // linear_interp_flag = 0
+            putUe(0)          // poly_order_minus1 = 0 (order 1)
+            putUe(0)          // coef[0] int = 0 (se=0 -> ue=0)
+            putBits(0, 23)    // coef[0] frac = 0
+            putUe(1)          // coef[1] int = +1 (se=+1 -> ue=1)
+            putBits(0, 23)    // coef[1] frac = 0
+        }
+        while (bits.length % 8 != 0) bits.append('0')
+        val rbsp = ByteArray(bits.length / 8) { idx ->
+            bits.substring(idx * 8, idx * 8 + 8).toInt(2).toByte()
+        }
+        val nalu = byteArrayOf(0x7C.toByte(), 0x01.toByte()) + rbsp
+        val scratch = ByteArray(512)
+        com.aisub.player.media.DolbyRpuParser.reset()
+        val parsed = com.aisub.player.media.DolbyRpuParser.parseNaluToSnapshot(nalu, 0, nalu.size, scratch)
+        assertTrue("Valid UNSPEC62 RPU NALU must parse to non-null snapshot", parsed != null)
+        assertEquals(0.0f, parsed!!.lumaPoly0[0], 1e-5f)
+        assertEquals(1.0f, parsed.lumaPoly0[1], 1e-5f)
+    }
 }

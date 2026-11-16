@@ -37,6 +37,9 @@ import com.aisub.player.media.AppStore
 import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.DolbyAwareRenderersFactory
 import com.aisub.player.media.DolbyVisionHelper
+import com.aisub.player.media.LegacyDolbyExoBridge
+import com.aisub.player.media.LegacyExoShaderMode
+import com.aisub.player.media.withLegacyDolbyExoSupport
 import com.aisub.player.media.MediaProxy
 import com.aisub.player.media.MpvPlayer
 import com.aisub.player.media.VlcPlayer
@@ -186,15 +189,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var isCurrentDolbyShunted: Boolean = false
         private set
 
+    @Volatile
+    private var pendingExoUri: String? = null
+
     private fun isManualExoLockedForCurrent(): Boolean {
-        val uri = _state.value.current?.uri
+        val uri = pendingExoUri ?: _state.value.current?.uri
         return (uri != null && manualEntryKernel[uri] == PlayerKernel.EXO) || !_state.value.settings.autoDolbyMpv
     }
 
     /** 默认播放内核 */
     val exoPlayer: ExoPlayer = run {
         val assParsers = AssSubtitleParserFactory(assHandler)
-        val sources = DefaultMediaSourceFactory(authDataSourceFactory(app), DefaultExtractorsFactory().withAssMkvSupport(assParsers, assHandler).withAiff())
+        val extractors = DefaultExtractorsFactory()
+            .withAssMkvSupport(assParsers, assHandler)
+            .withAiff()
+            .withLegacyDolbyExoSupport(app) { isManualExoLockedForCurrent() }
+        val sources = DefaultMediaSourceFactory(authDataSourceFactory(app), extractors)
         sources.setSubtitleParserFactory(assParsers)
         ExoPlayer.Builder(app)
             .setRenderersFactory(
@@ -242,6 +252,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val usingVlc: Boolean get() = activeKernel == PlayerKernel.VLC
     val usingExternalKernel: Boolean get() = player !== exoPlayer
     val mpvPipelineLabel: String? get() = mpvPlayer?.takeIf { usingMpv }?.pipelineSummary
+    val exoDolbyPipelineLabel: String?
+        get() = LegacyDolbyExoBridge.shaderModeFlow.value
+            .takeIf { !usingExternalKernel && it != LegacyExoShaderMode.OFF }
+            ?.summaryLabel
     val mpvVideoCodecLabel: String? get() = mpvPlayer?.takeIf { usingMpv }?.activeVideoCodec
     val mpvAudioCodecLabel: String? get() = mpvPlayer?.takeIf { usingMpv }?.activeAudioCodec
     val decodeMode: DecodeMode get() = _state.value.settings.decodeMode
@@ -539,6 +553,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     return
                 }
+            }
+            if (!usingExternalKernel) {
+                val selectedVideoFormats = tracks.groups
+                    .asSequence()
+                    .filter { it.type == C.TRACK_TYPE_VIDEO && it.isSelected }
+                    .flatMap { g ->
+                        (0 until g.length).asSequence()
+                            .filter { g.isTrackSelected(it) }
+                            .map { g.getTrackFormat(it) }
+                    }
+                LegacyDolbyExoBridge.syncFromSelectedTracks(
+                    context = getApplication(),
+                    formats = selectedVideoFormats,
+                    manualExoLocked = isManualExoLockedForCurrent(),
+                )
             }
             if (usingMpv && mpvPlayer?.detectedDolbyProfile != null) {
                 isCurrentDolbyShunted = true
@@ -854,6 +883,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         repeatMode: Int = Player.REPEAT_MODE_OFF,
     ) {
         vlcLiveWatch?.cancel()
+        LegacyDolbyExoBridge.reset()
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
         vlcPlayer?.setAsrAudioConsumer(null, null)
@@ -882,6 +912,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         playWhenReady: Boolean = true,
         speed: Float = 1f,
     ) {
+        LegacyDolbyExoBridge.reset()
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
         mpvPlayer?.stop()
@@ -889,6 +920,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         queue = channels ?: listOf(entry)
         isCurrentDolbyShunted = false
         val v = vlc()
+        v.setHwdecPreference(_state.value.settings.decodeMode.forceHwdecFlag)
         v.setPlaybackSpeed(speed)
         v.setMediaItem(itemOf(entry), positionMs)
         _state.update { it.copy(playbackError = null, videoProblem = null) }
@@ -996,6 +1028,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     mpvPlayer?.clearMediaItems()
                     vlcPlayer?.stop()
                     isCurrentDolbyShunted = false
+                    pendingExoUri = entry.uri
+                    LegacyDolbyExoBridge.reset()
                     val cleanQueue = savedQueue.filter { it == entry || !VlcPlayer.needsVlc(it.title) }
                     queue = cleanQueue
                     val targetIdx = cleanQueue.indexOfFirst { it.uri == entry.uri }.coerceAtLeast(0)
@@ -1046,6 +1080,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 vlcPlayer?.setAsrAudioConsumer(null, null)
                 vlcPlayer?.stop()
                 isCurrentDolbyShunted = false
+                pendingExoUri = entry.uri
+                LegacyDolbyExoBridge.reset()
                 val cleanQueue = savedQueue.filter { it == entry || !VlcPlayer.needsVlc(it.title) }
                 queue = cleanQueue
                 val targetIdx = cleanQueue.indexOfFirst { it.uri == entry.uri }.coerceAtLeast(0)
@@ -1147,6 +1183,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         vlcPlayer?.setAsrAudioConsumer(null, null)
         vlcPlayer?.stop()
         isCurrentDolbyShunted = false
+        pendingExoUri = start.uri
+        LegacyDolbyExoBridge.reset()
         _player.value = exoPlayer
         // 连播队列里跳过光盘镜像，ExoPlayer 打不开
         queue = entries.filter { it == start || !VlcPlayer.needsVlc(it.title) }

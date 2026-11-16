@@ -1,6 +1,10 @@
 package com.aisub.player.media
 
+import android.app.ActivityManager
+import android.app.UiModeManager
 import android.content.Context
+import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.hardware.display.DisplayManager
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
@@ -158,14 +162,45 @@ object DolbyVisionHelper {
      * - Profile 5 且当前屏幕不支持杜比视界（或无认证硬解）时必转 MPV，彻底杜绝 `IPTPQc2` 紫绿画面；
      * - 老旧 SDR 设备（如 Android 6.0 电视，无任何 HDR 屏幕能力）遇到杜比视界流时也优先交由 MPV 映射为鲜亮的 BT.709 SDR。
      */
+    /** 当前设备 GPU 是否原生支持 OpenGL ES 3.0+（MPV `gpu-next` / `libplacebo` 的最低硬件要求）。 */
+    fun supportsOpenGlEs3(context: Context): Boolean {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        return (am?.deviceConfigurationInfo?.reqGlEsVersion ?: 0) >= 0x00030000
+    }
+
+    /** 当前是否为 Android TV 电视/机顶盒设备。 */
+    fun isTelevisionDevice(context: Context): Boolean {
+        val uiMode = context.getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager
+        return uiMode?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION ||
+            context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+    }
+
+    /**
+     * 严格判定是否为需要由 ExoPlayer 原生硬解 + GLES 2.0 着色器直接修复杜比色彩的「老设备」：
+     * - 凡具备原生杜比视界显示与硬解的设备恒为 false；
+     * - 仅命中：GLES 2.0 老 GPU（如 Mali-450）、32 位架构（如小米电视 4A）、低内存设备，或无任何 HDR 能力且系统低于 Android 12 的老设备；
+     * - 现代 64 位 GLES 3.0+ 手机/平板与现代 HDR 电视恒为 false，确保绝不改变新设备的任何原生播放效果。
+     */
+    fun isLegacyDolbyDevice(context: Context): Boolean {
+        if (displaySupportsDolbyVision(context) && hasHardwareDolbyVisionDecoder(requireProfile5 = true)) {
+            return false
+        }
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val is32Bit = Build.SUPPORTED_64_BIT_ABIS.isEmpty()
+        val isLowRam = am?.isLowRamDevice == true
+        val isOldSdr = !displaySupportsAnyHdr(context) && Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+        return !supportsOpenGlEs3(context) || is32Bit || isLowRam || isOldSdr
+    }
+
     fun requiresMpvForColorAccuracy(context: Context, format: Format?): Boolean {
         if (!isDolbyVision(format)) return false
         val dvDisplay = displaySupportsDolbyVision(context)
         if (isProfile5(format)) {
+            // 老设备不再强行转 MPV CPU 软解（4K 会卡且 GLES 2.0 仍偏色），留在 Exo 走零拷贝硬解 + GLES 2.0 杜比着色器；
+            // 现代非杜比新手机维持自动切 MPV (gpu-next + libplacebo) 的 16-bit 高精度管线不变
+            if (isLegacyDolbyDevice(context)) return false
             return !dvDisplay || !hasHardwareDolbyVisionDecoder(requireProfile5 = true)
         }
-        // Profile 7 / 8 带有标准 HEVC HDR10 / HLG 兼容底流，由 DolbyAwareRenderersFactory
-        // 自动回退至系统原生 HEVC Surface 零拷贝硬解，既无紫绿偏色又避免老电视与 Android 12 以下设备内存拷贝掉帧
         return false
     }
 

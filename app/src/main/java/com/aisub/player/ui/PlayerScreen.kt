@@ -232,6 +232,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     val usingMpv = activeKernel == com.aisub.player.PlayerKernel.MPV
     val usingVlc = activeKernel == com.aisub.player.PlayerKernel.VLC
     val usingExternalKernel = player !== vm.exoPlayer
+    val legacyExoShaderMode by com.aisub.player.media.LegacyDolbyExoBridge.shaderModeFlow.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val activity = context as? Activity
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -575,8 +576,12 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 else Modifier,
             ),
     ) {
-        // ---- 画面（按内核隔离 SurfaceView 实例，避免 MediaCodec / MPV EGL / VLC IVLCVout 跨内核争用同一 BufferQueue） ----
+        // ---- 画面（按内核隔离 SurfaceView 实例；新设备与普通视频 100% 走系统原生 PlayerView，仅老设备 Exo 杜比/HDR 时挂载零拷贝 GLES 2.0 着色器视图） ----
+        val useLegacyExoGlSurface = !usingExternalKernel &&
+            legacyExoShaderMode != com.aisub.player.media.LegacyExoShaderMode.OFF &&
+            !audioOnly
         androidx.compose.runtime.key(activeKernel) {
+            var legacyGlView by remember { mutableStateOf<LegacyDolbyGlSurfaceView?>(null) }
             AndroidView(
                 factory = { ctx ->
                     PlayerView(ctx).apply {
@@ -599,19 +604,65 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                     if (it.player !== player) it.player = player
                     it.resizeMode = RESIZE_MODES[resizeIndex].first
+
+                    val contentFrame = it.findViewById<android.widget.FrameLayout>(androidx.media3.ui.R.id.exo_content_frame)
+                    if (useLegacyExoGlSurface && contentFrame != null) {
+                        var glView = legacyGlView
+                        if (glView == null || glView.parent !== contentFrame) {
+                            glView?.let { old -> (old.parent as? android.view.ViewGroup)?.removeView(old) }
+                            glView = LegacyDolbyGlSurfaceView(it.context) { surface ->
+                                if (!vm.usingExternalKernel && com.aisub.player.media.LegacyDolbyExoBridge.shaderModeFlow.value != com.aisub.player.media.LegacyExoShaderMode.OFF) {
+                                    if (surface != null && surface.isValid) {
+                                        vm.exoPlayer.setVideoSurface(surface)
+                                    }
+                                }
+                            }.apply {
+                                layoutParams = android.widget.FrameLayout.LayoutParams(
+                                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                )
+                            }
+                            it.videoSurfaceView?.visibility = android.view.View.GONE
+                            contentFrame.addView(glView, 0)
+                            legacyGlView = glView
+                        }
+                        glView.setShaderMode(legacyExoShaderMode)
+                        glView.currentDecoderSurface()?.takeIf { s -> s.isValid }?.let { s ->
+                            vm.exoPlayer.setVideoSurface(s)
+                        }
+                    } else if (legacyGlView != null) {
+                        val old = legacyGlView
+                        legacyGlView = null
+                        old?.onPause()
+                        old?.releaseSurfaceResources()
+                        (old?.parent as? android.view.ViewGroup)?.removeView(old)
+                        it.videoSurfaceView?.visibility = android.view.View.VISIBLE
+                        if (!usingExternalKernel) {
+                            (it.videoSurfaceView as? android.view.SurfaceView)?.let(vm.exoPlayer::setVideoSurfaceView)
+                        }
+                    }
+
                     // 视频自带字幕和 AI 字幕同时显示时，把自带字幕抬高，避免叠在一起
                     val aiVisible = state.settings.showAiSubtitles && state.cues.isNotEmpty()
                     it.subtitleView?.setBottomPaddingFraction(if (aiVisible) 0.32f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
                     // 正在翻译直播自带字幕，或自带字幕已载入 AI 字幕：自带字幕不再原样显示，免得同一句出现两遍
                     val embeddedInAi = aiVisible && (state.embeddedTracks != null || state.extractingEmbedded)
                     it.subtitleView?.visibility = if (state.liveCaptions || embeddedInAi) android.view.View.GONE else android.view.View.VISIBLE
-                    vm.extras.attachVideoView(it.videoSurfaceView)
+                    vm.extras.attachVideoView(legacyGlView ?: it.videoSurfaceView)
                 },
                 modifier = Modifier.fillMaxSize(),
             )
             DisposableEffect(playerView) {
-                vm.extras.attachVideoView(playerView?.videoSurfaceView)
-                onDispose { vm.extras.attachVideoView(null) }
+                vm.extras.attachVideoView(legacyGlView ?: playerView?.videoSurfaceView)
+                onDispose {
+                    legacyGlView?.let { old ->
+                        old.onPause()
+                        old.releaseSurfaceResources()
+                        (old.parent as? android.view.ViewGroup)?.removeView(old)
+                    }
+                    legacyGlView = null
+                    vm.extras.attachVideoView(null)
+                }
             }
         }
         if (audioOnly) {
@@ -820,11 +871,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     )
                     // 顶栏播放内核快捷胶囊：支持触屏点按与电视遥控器焦点直接切换「默认 / MPV / VLC」内核
                     if (state.current?.isVideo == true || isLive) {
-                        val dolbyActive = usingMpv && (vm.isCurrentDolbyShunted || (player as? com.aisub.player.media.MpvPlayer)?.detectedDolbyProfile != null)
+                        val exoDolbyActive = !usingExternalKernel && legacyExoShaderMode != com.aisub.player.media.LegacyExoShaderMode.OFF
+                        val dolbyActive = exoDolbyActive ||
+                            (usingMpv && (vm.isCurrentDolbyShunted || (player as? com.aisub.player.media.MpvPlayer)?.detectedDolbyProfile != null))
                         KernelBadgeButton(
                             kernel = activeKernel,
                             decodeMode = state.settings.decodeMode,
                             dolbyActive = dolbyActive,
+                            exoDolbyBadge = legacyExoShaderMode.badgeSuffix.takeIf { exoDolbyActive },
                             tv = tv,
                             onClick = { dialog = PlayerDialog.KERNEL; interactions++ },
                             modifier = Modifier.padding(end = 4.dp),
@@ -2837,6 +2891,7 @@ private fun KernelBadgeButton(
     kernel: com.aisub.player.PlayerKernel,
     decodeMode: com.aisub.player.DecodeMode,
     dolbyActive: Boolean,
+    exoDolbyBadge: String? = null,
     tv: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -2846,8 +2901,12 @@ private fun KernelBadgeButton(
     val pillShape = RoundedCornerShape(50)
     val decodeSuffix = if (decodeMode != com.aisub.player.DecodeMode.AUTO) " · ${decodeMode.shortLabel}" else ""
     val badgeText = when {
-        kernel == com.aisub.player.PlayerKernel.MPV && dolbyActive -> "MPV · 杜比$decodeSuffix"
-        else -> "内核: ${kernel.shortLabel}$decodeSuffix"
+        kernel == com.aisub.player.PlayerKernel.EXO && !exoDolbyBadge.isNullOrBlank() ->
+            "默认 · $exoDolbyBadge$decodeSuffix"
+        kernel == com.aisub.player.PlayerKernel.MPV && dolbyActive ->
+            "MPV · 杜比$decodeSuffix"
+        else ->
+            "内核: ${kernel.shortLabel}$decodeSuffix"
     }
     val pillTint = when {
         highlight -> Color(0xFFFFB74D)
@@ -3123,6 +3182,7 @@ private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
         "时长" to formatClock(p.duration.coerceAtLeast(0)),
         "播放内核" to kernel.label,
         "解码方式" to vm.state.value.settings.decodeMode.label,
+        if (kernel == com.aisub.player.PlayerKernel.EXO) vm.exoDolbyPipelineLabel?.let { "色彩与渲染管线" to it } else null,
         if (kernel == com.aisub.player.PlayerKernel.MPV) vm.mpvPipelineLabel?.let { "渲染与色彩管线" to it } else null,
         if (kernel == com.aisub.player.PlayerKernel.VLC) vm.vlcDecodeLabel?.let { "VLC 解码管线" to it } else null,
         if (kernel == com.aisub.player.PlayerKernel.VLC) vm.vlcAudioBackendLabel?.let { "音频输出" to it } else null,

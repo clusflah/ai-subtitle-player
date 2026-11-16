@@ -1,4 +1,8 @@
-## 本版更新（2.10.1）
+## 本版更新（2.10.2）
+
+- **老设备默认 ExoPlayer 内核零拷贝硬解修复杜比视界偏色与发灰（不卡顿、不影响新设备）**：新增 `LegacyDolbyExoBridge`、`DolbyRpuParser` 与 `LegacyDolbyGlSurfaceView`（OpenGL ES 2.0 `GL_TEXTURE_EXTERNAL_OES` 按需渲染管线，兼容 Mali-450 等 32 位老电视 FP16 着色器）。在老设备（GLES 2.0、32 位架构、低内存或 Android 12 以下无 HDR 屏幕设备）及手动指定 Exo 内核时，直接由系统芯片硬件解码 HEVC 并实时解析 `UNSPEC62` RPU 元数据，在 GPU 显存内单趟完成杜比 Profile 5（`IPTPQc2`）紫绿偏色还原与 Profile 7/8（HDR10 / HLG）→ BT.709 SDR 防发灰映射；现代 64 位新手机与 HDR 电视完全走原有原生 `SurfaceView` 管线，零画质与性能干扰
+
+## 2.10.1 更新
 
 - **内核选择界面统一新增「自动 / 硬解 / 软解」手动切换（Android / TV / Windows）**：播放页「切换播放内核与软硬解」弹窗、直播底栏遥控器快捷胶囊与「设置 → 播放」统一支持 `智能自动`、`硬解`、`软解` 三档全局实时切换，同时打通默认内核（ExoPlayer / VLCJ）、MPV 内核与 VLC 内核的底层硬解/软解实时重载并保留播放进度与字幕
 - **安卓手机与 Android TV 杜比视界与 MPV 流畅度优化**：修复片名含 `DV` / `DoVi` 时把带兼容层的 Profile 7 / 8 误锁死在纯软解（`hwdec=no`）导致 4K 严重卡顿发热的问题（解封装确认非 Profile 5 时自动恢复 `mediacodec-copy` 硬解）；取消 Android 12 以下电视将 Profile 7 / 8 强行分流至 MPV 的内存拷贝损耗（保留默认 ExoPlayer 原生 HEVC Surface 零拷贝硬解）；并为安卓 MPV `gpu-next` 启用轻量双线性采样与去抖动着色器配置
