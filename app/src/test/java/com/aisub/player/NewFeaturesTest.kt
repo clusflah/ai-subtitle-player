@@ -3,11 +3,14 @@ package com.aisub.player
 import com.aisub.player.media.CustomMediaLibrary
 import com.aisub.player.media.CustomMediaLibraryStore
 import com.aisub.player.media.LibraryFolderBinding
+import com.aisub.player.media.LocalMediaFilter
+import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.MediaLibraryType
 import com.aisub.player.media.ScrapedEpisode
 import com.aisub.player.media.ScrapedMediaItem
 import com.aisub.player.meta.RecommendationEngine
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -93,5 +96,47 @@ class NewFeaturesTest {
         assertEquals("movie", parsed[0].kind)
         assertTrue(parsed[0].reason.contains("科幻"))
         assertEquals("tv", parsed[1].kind)
+    }
+
+    @Test
+    fun localMediaFilterMatchesAndSerializes() {
+        val filter = LocalMediaFilter(
+            minVideoDurationSec = 60,
+            minVideoSizeKb = 10 * 1024L,
+            videoExtensions = setOf("mkv", "mp4"),
+            excludeVideoJunk = true,
+            minAudioDurationSec = 30,
+            excludeAudioRingtones = true,
+            minImageSizeKb = 100L,
+            excludeScreenshots = true,
+            excludeCacheImages = true,
+        )
+        val roundTrip = LocalMediaFilter.fromJson(filter.toJson())
+        assertEquals(filter, roundTrip)
+        assertEquals(4, roundTrip.videoActiveCount)
+        assertEquals(2, roundTrip.audioActiveCount)
+        assertEquals(3, roundTrip.imageActiveCount)
+
+        // Video checks
+        val goodMovie = MediaEntry("content://v/1", "Movie.mkv", isVideo = true, durationMs = 120_000L, folder = "Movies", sizeBytes = 50L * 1024 * 1024)
+        val shortClip = MediaEntry("content://v/2", "Clip.mp4", isVideo = true, durationMs = 12_000L, folder = "Movies", sizeBytes = 20L * 1024 * 1024)
+        val screenRec = MediaEntry("content://v/3", "Screenrecord_1.mp4", isVideo = true, durationMs = 180_000L, folder = "DCIM/ScreenRecorder", sizeBytes = 30L * 1024 * 1024)
+        assertTrue(roundTrip.matchesVideo(goodMovie))
+        assertFalse(roundTrip.matchesVideo(shortClip))
+        assertFalse(roundTrip.matchesVideo(screenRec))
+
+        // Audio checks
+        val flacSong = MediaEntry("content://a/1", "Track.flac", isVideo = false, durationMs = 210_000L, folder = "Music", sizeBytes = 25L * 1024 * 1024)
+        val ringtone = MediaEntry("content://a/2", "Ding.mp3", isVideo = false, durationMs = 45_000L, folder = "Ringtones", sizeBytes = 2L * 1024 * 1024)
+        assertTrue(roundTrip.matchesAudio(flacSong))
+        assertFalse(roundTrip.matchesAudio(ringtone))
+
+        // Image checks
+        val cameraPhoto = MediaEntry("content://i/1", "IMG_2026.JPG", isVideo = false, folder = "DCIM/Camera", sizeBytes = 2L * 1024 * 1024)
+        val screenshot = MediaEntry("content://i/2", "Screenshot_2026.png", isVideo = false, folder = "Pictures/Screenshots", sizeBytes = 800L * 1024)
+        val tinyIcon = MediaEntry("content://i/3", "icon.png", isVideo = false, folder = "Pictures", sizeBytes = 12L * 1024)
+        assertTrue(roundTrip.matchesImage(cameraPhoto))
+        assertFalse(roundTrip.matchesImage(screenshot))
+        assertFalse(roundTrip.matchesImage(tinyIcon))
     }
 }

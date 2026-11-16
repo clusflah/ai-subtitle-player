@@ -188,11 +188,39 @@ object Telegram {
         }
         _auth.value = TgAuth.Starting
         client = runCatching {
+            com.aisub.player.desktop.DesktopTdlibLoader.ensureLoaded().getOrThrow()
             Client.execute(TdApi.SetLogVerbosityLevel(1))
-            Client.create({ onUpdate(it) }, null, null)
+            Client.create({ onUpdate(it) }, null, null).also { created ->
+                syncProxyToTdlib(created)
+            }
         }.onFailure { e ->
-            _auth.value = TgAuth.Unsupported("Windows 桌面版暂未安装 TDLib (tdjni.dll) 组件（${e.message}）")
+            val detail = com.aisub.player.desktop.DesktopTdlibLoader.lastError() ?: e.message ?: e.javaClass.simpleName
+            _auth.value = TgAuth.Unsupported("Windows 桌面版暂未安装 TDLib (tdjni.dll) 组件（$detail）")
         }.getOrNull()
+    }
+
+    /** 将应用内代理或 Windows 系统代理（如 Clash / v2rayN 127.0.0.1:7890）自动同步给 TDLib */
+    private fun syncProxyToTdlib(cl: Client) {
+        runCatching {
+            val s = com.aisub.player.SettingsRepository(app).load()
+            val resolved: Triple<com.aisub.player.net.ProxyType, String, Int>? =
+                if (s.proxyType != com.aisub.player.net.ProxyType.OFF && s.proxyHost.isNotBlank() && s.proxyPort in 1..65535) {
+                    Triple(s.proxyType, s.proxyHost.trim(), s.proxyPort)
+                } else {
+                    com.aisub.player.desktop.DesktopTdlibLoader.detectWindowsSystemProxy()
+                }
+            if (resolved == null) {
+                cl.send(TdApi.DisableProxy()) {}
+            } else {
+                val (type, host, port) = resolved
+                val tdType: TdApi.ProxyType = when (type) {
+                    com.aisub.player.net.ProxyType.SOCKS -> TdApi.ProxyTypeSocks5("", "")
+                    else -> TdApi.ProxyTypeHttp("", "", false)
+                }
+                val proxy = TdApi.Proxy(host, port, tdType)
+                cl.send(TdApi.AddProxy(proxy, true, "")) {}
+            }
+        }
     }
 
     private fun onUpdate(obj: TdApi.Object) {

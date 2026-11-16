@@ -1,6 +1,11 @@
 package com.aisub.player.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -52,11 +57,13 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -126,20 +133,63 @@ fun HomeMediaLibrariesSection(
     var editingLibrary by remember { mutableStateOf<CustomMediaLibrary?>(null) }
     var createDialogOpen by remember { mutableStateOf(false) }
     var unifiedSearchOpen by remember { mutableStateOf(false) }
+    // 首页媒体库默认折叠，点开可显示完整卡片与海报墙；若后台正在执行刮削则自动展开方便看进度
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val anyScraping = progressMap.values.any { it.running }
+    LaunchedEffect(anyScraping) {
+        if (anyScraping) expanded = true
+    }
+    val arrowAngle by animateFloatAsState(if (expanded) 180f else 0f, label = "home_lib_arrow")
+    val totalScrapedCount = remember(libraries, itemsMap) {
+        libraries.sumOf { libItem -> (itemsMap[libItem.id]?.size ?: libItem.itemCount).coerceAtLeast(0) }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(start = PageGutter, end = PageGutter - 6.dp, top = 8.dp, bottom = 2.dp),
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = "媒体库",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.weight(1f),
-            )
+            Row(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .tvFocusRing(RoundedCornerShape(10.dp))
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "媒体库",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                val summaryBadge = when {
+                    libraries.isEmpty() -> if (expanded) "" else " · 点击展开"
+                    totalScrapedCount > 0 -> " ${libraries.size} · 共 $totalScrapedCount 部"
+                    else -> " ${libraries.size}"
+                }
+                if (summaryBadge.isNotEmpty()) {
+                    Text(
+                        text = summaryBadge,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = 4.dp),
+                    )
+                }
+                Icon(
+                    imageVector = AppIcons.ExpandMore,
+                    contentDescription = if (expanded) "收起媒体库" else "展开媒体库",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .padding(start = 4.dp)
+                        .size(20.dp)
+                        .rotate(arrowAngle),
+                )
+            }
             if (libraries.isNotEmpty() || libState.servers.any { it.type.isMediaServer }) {
                 TextButton(
                     onClick = { unifiedSearchOpen = true },
@@ -165,80 +215,88 @@ fun HomeMediaLibrariesSection(
             }
         }
 
-        if (libraries.isEmpty()) {
-            SurfaceCard {
-                ListRow(
-                    title = "添加自定义电影 / 电视剧媒体库",
-                    subtitle = "选择云存储（115、阿里云盘、百度网盘、PikPak、WebDAV、OpenList 等）或本机特定文件夹刮削海报墙，并与 Emby / Plex 联动索引播放",
-                    icon = AppIcons.Movie,
-                    trailing = {
-                        Button(
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut(),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (libraries.isEmpty()) {
+                    SurfaceCard {
+                        ListRow(
+                            title = "添加自定义电影 / 电视剧媒体库",
+                            subtitle = "选择云存储（115、阿里云盘、百度网盘、PikPak、WebDAV、OpenList 等）或本机特定文件夹刮削海报墙，并与 Emby / Plex 联动索引播放",
+                            icon = AppIcons.Movie,
+                            trailing = {
+                                Button(
+                                    onClick = {
+                                        editingLibrary = null
+                                        createDialogOpen = true
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                ) {
+                                    Text("新建", fontSize = 12.sp)
+                                }
+                            },
                             onClick = {
                                 editingLibrary = null
                                 createDialogOpen = true
                             },
-                            colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        ) {
-                            Text("新建", fontSize = 12.sp)
-                        }
-                    },
-                    onClick = {
-                        editingLibrary = null
-                        createDialogOpen = true
-                    },
-                )
-            }
-        } else {
-            LazyRow(
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                items(libraries, key = { it.id }) { library ->
-                    val libItems = itemsMap[library.id].orEmpty()
-                    val prog = progressMap[library.id]
-                    LibrarySummaryCard(
-                        library = library,
-                        scrapedItems = libItems,
-                        progress = prog,
-                        width = if (tv) 236.dp else if (wide) 220.dp else 196.dp,
-                        onClick = { onOpenLibrary(library.id) },
-                        onScrapeNow = {
-                            CustomMediaLibraryStore.startScrape(context, library.id, settings, lib)
-                        },
-                        onCancelScrape = {
-                            CustomMediaLibraryStore.cancelScrape(library.id)
-                        },
-                        onEdit = {
-                            editingLibrary = library
-                            createDialogOpen = true
-                        },
-                        onDelete = {
-                            CustomMediaLibraryStore.deleteLibrary(context, library.id)
-                        },
-                    )
-                }
-            }
-
-            // 每个已刮削出条目的媒体库直接在首页展示精简海报预览行，点海报直达影片详情/选集播放
-            libraries.forEach { library ->
-                val libItems = itemsMap[library.id].orEmpty()
-                if (libItems.isNotEmpty()) {
-                    SectionHeader(
-                        title = "${library.name} · ${library.type.label}",
-                        actionLabel = "全部 ${libItems.size} 部",
-                        onAction = { onOpenLibrary(library.id) },
-                    )
+                        )
+                    }
+                } else {
                     LazyRow(
-                        contentPadding = PaddingValues(horizontal = 12.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        items(libItems.take(12), key = { it.id }) { mediaItem ->
-                            ScrapedPosterCard(
-                                item = mediaItem,
-                                width = if (tv) 142.dp else if (wide) 130.dp else 108.dp,
-                                onClick = { onOpenItem(library.id, mediaItem.id) },
+                        items(libraries, key = { it.id }) { library ->
+                            val libItems = itemsMap[library.id].orEmpty()
+                            val prog = progressMap[library.id]
+                            LibrarySummaryCard(
+                                library = library,
+                                scrapedItems = libItems,
+                                progress = prog,
+                                width = if (tv) 236.dp else if (wide) 220.dp else 196.dp,
+                                onClick = { onOpenLibrary(library.id) },
+                                onScrapeNow = {
+                                    CustomMediaLibraryStore.startScrape(context, library.id, settings, lib)
+                                },
+                                onCancelScrape = {
+                                    CustomMediaLibraryStore.cancelScrape(library.id)
+                                },
+                                onEdit = {
+                                    editingLibrary = library
+                                    createDialogOpen = true
+                                },
+                                onDelete = {
+                                    CustomMediaLibraryStore.deleteLibrary(context, library.id)
+                                },
                             )
+                        }
+                    }
+
+                    // 每个已刮削出条目的媒体库直接在首页展示精简海报预览行，点海报直达影片详情/选集播放
+                    libraries.forEach { library ->
+                        val libItems = itemsMap[library.id].orEmpty()
+                        if (libItems.isNotEmpty()) {
+                            SectionHeader(
+                                title = "${library.name} · ${library.type.label}",
+                                actionLabel = "全部 ${libItems.size} 部",
+                                onAction = { onOpenLibrary(library.id) },
+                            )
+                            LazyRow(
+                                contentPadding = PaddingValues(horizontal = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                items(libItems.take(12), key = { it.id }) { mediaItem ->
+                                    ScrapedPosterCard(
+                                        item = mediaItem,
+                                        width = if (tv) 142.dp else if (wide) 130.dp else 108.dp,
+                                        onClick = { onOpenItem(library.id, mediaItem.id) },
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -257,6 +315,7 @@ fun HomeMediaLibrariesSection(
             onDismiss = { createDialogOpen = false },
             onSaved = { saved, scrapeImmediately ->
                 createDialogOpen = false
+                expanded = true
                 if (scrapeImmediately) {
                     CustomMediaLibraryStore.startScrape(context, saved.id, settings, lib)
                 }

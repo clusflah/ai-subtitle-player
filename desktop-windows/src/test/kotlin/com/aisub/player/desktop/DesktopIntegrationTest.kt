@@ -433,8 +433,12 @@ class DesktopIntegrationTest {
         Telegram.init(GlobalDesktopApp)
         Telegram.setCredentials(12345, "0123456789abcdef0123456789abcdef")
         val state = Telegram.auth.value
-        println("Telegram auth state on Windows without tdjni.dll: $state")
-        assertTrue(state is TgAuth.Unsupported)
+        println("Telegram auth state on Windows (tdlibLoaded=${DesktopTdlibLoader.isLoaded()}): $state")
+        if (DesktopTdlibLoader.isLoaded()) {
+            assertTrue(state is TgAuth.Starting || state is TgAuth.WaitPhone || state is TgAuth.Unsupported)
+        } else {
+            assertTrue(state is TgAuth.Unsupported)
+        }
     }
 
     @Test

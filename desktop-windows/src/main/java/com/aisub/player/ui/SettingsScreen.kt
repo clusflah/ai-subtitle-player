@@ -746,6 +746,8 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                     trailing = { Switch(checked = s.musicOnlineLookup, onCheckedChange = { s = s.copy(musicOnlineLookup = it) }) },
                     onClick = { s = s.copy(musicOnlineLookup = !s.musicOnlineLookup) },
                 )
+                CardDivider()
+                LocalMediaFilterSettingsRow()
             }
 
             // ---------------- 视频下载（下载版） ----------------

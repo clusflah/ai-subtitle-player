@@ -206,6 +206,10 @@ object LibLd {
     @Synchronized
     fun loadLibrary(name: String) {
         if (!loaded.add(name)) return
+        if (name == "tdjni") {
+            com.aisub.player.desktop.DesktopTdlibLoader.ensureLoaded().getOrThrow()
+            return
+        }
         if (name == "sherpa-onnx-jni") {
             val dir = File(android.content.Context.appDataRoot(), "bin/sherpa-1.13.8").apply { mkdirs() }
             val onnxDll = extractResource("sherpa-onnx/native/win-x64/onnxruntime.dll", File(dir, "onnxruntime.dll"))

@@ -13,17 +13,41 @@ plugins {
 }
 
 group = "com.aisub.player"
-version = "2.9.97"
+version = "2.9.98"
 
 // 复用或准备 TDLib Java 源码与 sherpa-onnx Java 接口
 val tdlibTag = "tdlib-1.8.69-4c6377aa73"
 val tdlibSha256 = "147377ef259c3615e578c894c8c3f74f9519f2ff473c030c41dba602dea1238c"
 
+fun patchTdlibClientJava(rootDir: File) {
+    val clientJava = File(rootDir, "tdlib/java/org/drinkless/tdlib/Client.java")
+    if (clientJava.isFile) {
+        val src = clientJava.readText(Charsets.UTF_8)
+        if ("System.loadLibrary(\"tdjni\")" in src) {
+            clientJava.writeText(
+                src.replace("System.loadLibrary(\"tdjni\")", "android.os.LibLd.loadLibrary(\"tdjni\")"),
+                Charsets.UTF_8,
+            )
+        }
+    }
+}
+
 fun prepareTdlib(dir: File): File {
-    val done = File(dir, ".ok")
-    if (done.exists()) return dir
+    val done = File(dir, ".ok-v2")
+    if (done.exists()) {
+        patchTdlibClientJava(dir)
+        return dir
+    }
     val parentCache = file("../.gradle/tdlib/$tdlibTag")
-    if (File(parentCache, ".ok").exists()) return parentCache
+    if (File(parentCache, ".ok").exists() || File(parentCache, ".ok-v2").exists()) {
+        // 复制一份到 desktop-windows 自己的构建目录再打补丁，避免污染 Android 模块共用的原始目录
+        if (!File(dir, "tdlib/java/org/drinkless/tdlib/Client.java").isFile) {
+            parentCache.copyRecursively(dir, overwrite = true)
+        }
+        patchTdlibClientJava(dir)
+        done.writeText(tdlibSha256)
+        return dir
+    }
     dir.mkdirs()
     val zip = File(dir, "$tdlibTag.zip")
     if (!zip.exists()) {
@@ -57,8 +81,41 @@ fun prepareTdlib(dir: File): File {
         }
     }
     zip.delete()
+    patchTdlibClientJava(dir)
     done.writeText(tdlibSha256)
     return dir
+}
+
+fun prepareTdlibWinNative(resRoot: File): File {
+    val targetDir = File(resRoot, "tdlib/native/win-x64")
+    if (File(targetDir, "tdjni.dll").isFile || File("src/main/resources/tdlib/native/win-x64/tdjni.dll").isFile) {
+        return resRoot
+    }
+    runCatching {
+        val url = "https://github.com/clusflah/ai-subtitle-player/releases/download/$tdlibTag/tdjni-windows-x64.zip"
+        targetDir.mkdirs()
+        val tmpZip = File(targetDir, "tdjni-windows-x64.zip")
+        logger.lifecycle("尝试获取预编译 Windows TDLib 原生库：$url")
+        URI(url).toURL().openStream().use { input -> tmpZip.outputStream().use { input.copyTo(it) } }
+        val dllNames = ArrayList<String>()
+        ZipFile(tmpZip).use { z ->
+            for (e in z.entries()) {
+                if (e.isDirectory) continue
+                val baseName = e.name.replace('\\', '/').substringAfterLast('/')
+                if (!baseName.endsWith(".dll", ignoreCase = true)) continue
+                val out = File(targetDir, baseName)
+                z.getInputStream(e).use { input -> out.outputStream().use { input.copyTo(it) } }
+                dllNames += baseName
+            }
+        }
+        tmpZip.delete()
+        if (dllNames.isNotEmpty()) {
+            File(targetDir, "manifest.txt").writeText(dllNames.sorted().joinToString("\n"), Charsets.UTF_8)
+        }
+    }.onFailure {
+        logger.lifecycle("提示：尚未在 Release 找到预编译 tdjni-windows-x64.zip（CI 构建时会自动编译并打包）")
+    }
+    return resRoot
 }
 
 fun extractSherpaJar(aarFile: File, outJar: File): File {
@@ -138,6 +195,7 @@ fun prepareSherpaWinNative(outFile: File): File {
 }
 
 val tdlibDir: File = prepareTdlib(layout.buildDirectory.dir("tdlib/$tdlibTag").get().asFile)
+val tdlibWinNativeResDir: File = prepareTdlibWinNative(layout.buildDirectory.dir("tdlib-win-native").get().asFile)
 val sherpaJar: File = extractSherpaJar(
     file("../app/libs/sherpa-onnx-1.13.8.aar"),
     layout.buildDirectory.file("extracted-libs/sherpa-onnx-classes-patched.jar").get().asFile,
@@ -149,7 +207,7 @@ val sherpaWinNativeJar: File = prepareSherpaWinNative(
 sourceSets {
     main {
         java.srcDirs("src/main/java", "src/main/kotlin", File(tdlibDir, "tdlib/java"))
-        resources.srcDirs("src/main/resources", "../app/src/main/assets")
+        resources.srcDirs("src/main/resources", "../app/src/main/assets", tdlibWinNativeResDir)
     }
     test {
         java.srcDirs("src/test/java", "src/test/kotlin")

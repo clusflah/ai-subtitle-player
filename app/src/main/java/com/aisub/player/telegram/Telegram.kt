@@ -188,7 +188,21 @@ object Telegram {
         }
         _auth.value = TgAuth.Starting
         runCatching { Client.execute(TdApi.SetLogVerbosityLevel(1)) }
-        client = Client.create({ onUpdate(it) }, null, null)
+        client = Client.create({ onUpdate(it) }, null, null).also { created ->
+            runCatching {
+                val s = com.aisub.player.SettingsRepository(app).load()
+                if (s.proxyType != com.aisub.player.net.ProxyType.OFF && s.proxyHost.isNotBlank() && s.proxyPort in 1..65535) {
+                    val tdType: TdApi.ProxyType = when (s.proxyType) {
+                        com.aisub.player.net.ProxyType.SOCKS -> TdApi.ProxyTypeSocks5("", "")
+                        else -> TdApi.ProxyTypeHttp("", "", false)
+                    }
+                    val proxy = TdApi.Proxy(s.proxyHost.trim(), s.proxyPort, tdType)
+                    created.send(TdApi.AddProxy(proxy, true, "")) {}
+                } else {
+                    created.send(TdApi.DisableProxy()) {}
+                }
+            }
+        }
     }
 
     private fun onUpdate(obj: TdApi.Object) {

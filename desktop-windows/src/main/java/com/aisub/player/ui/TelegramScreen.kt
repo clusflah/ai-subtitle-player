@@ -110,7 +110,90 @@ fun TelegramScreen(onBack: () -> Unit, openSaved: () -> Unit, openChat: (TgChat)
                 "输入两步验证密码", "密码", KeyboardType.Password, password = true,
                 note = if (a.hint.isNotBlank()) "密码提示：${a.hint}" else "这个账号开了两步验证",
             ) { Telegram.submitPassword(it) }
-            is TgAuth.Unsupported -> EmptyState(a.reason, icon = AppIcons.Live, buttonText = "修改 api_id / api_hash") { editCredentials = true }
+            is TgAuth.Unsupported -> {
+                if (a.reason.contains("tdjni", ignoreCase = true)) {
+                    var installingTdlib by remember { mutableStateOf(false) }
+                    var installStatus by remember { mutableStateOf<String?>(null) }
+                    Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            IconBadge(AppIcons.Telegram, size = 64.dp)
+                            Text(
+                                text = "需要桌面端 Telegram (TDLib) 原生组件",
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            Text(
+                                text = installStatus ?: (a.reason + "\n\n提示：通过 GitHub Actions 发布构建的安装包会自动内置该组件；若是本地开发运行，可点击下方按钮自动下载或导入本地 tdjni.dll。"),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            if (installingTdlib) {
+                                CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                            } else {
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Button(
+                                        onClick = {
+                                            installingTdlib = true
+                                            installStatus = "正在连接 GitHub 下载 tdjni-windows-x64.zip…"
+                                            scope.launch {
+                                                val res = withContext(Dispatchers.IO) {
+                                                    com.aisub.player.desktop.DesktopTdlibLoader.downloadAndInstall { msg ->
+                                                        installStatus = msg
+                                                    }
+                                                }
+                                                installingTdlib = false
+                                                res.onSuccess {
+                                                    installStatus = null
+                                                    Telegram.start()
+                                                }.onFailure { err ->
+                                                    installStatus = err.message ?: "在线安装失败"
+                                                }
+                                            }
+                                        },
+                                    ) {
+                                        Text("在线下载安装组件")
+                                    }
+                                    androidx.compose.material3.OutlinedButton(
+                                        onClick = {
+                                            javax.swing.SwingUtilities.invokeLater {
+                                                val chooser = javax.swing.JFileChooser().apply {
+                                                    dialogTitle = "选择 tdjni.dll 或 tdjni-windows-x64.zip"
+                                                    fileFilter = javax.swing.filechooser.FileNameExtensionFilter(
+                                                        "TDLib 组件 (tdjni.dll / *.zip)", "dll", "zip",
+                                                    )
+                                                }
+                                                if (chooser.showOpenDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION) {
+                                                    val chosen = chooser.selectedFile ?: return@invokeLater
+                                                    scope.launch {
+                                                        val res = withContext(Dispatchers.IO) {
+                                                            com.aisub.player.desktop.DesktopTdlibLoader.importFromLocalFile(chosen)
+                                                        }
+                                                        res.onSuccess {
+                                                            installStatus = null
+                                                            Telegram.start()
+                                                        }.onFailure { err ->
+                                                            installStatus = "导入失败：${err.message}"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                    ) {
+                                        Text("导入本地 tdjni.dll / ZIP…")
+                                    }
+                                    TextButton(onClick = { editCredentials = true }) {
+                                        Text("修改 api_id / api_hash")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    EmptyState(a.reason, icon = AppIcons.Live, buttonText = "修改 api_id / api_hash") { editCredentials = true }
+                }
+            }
             TgAuth.Ready -> ChatList(openChat)
         }
     }

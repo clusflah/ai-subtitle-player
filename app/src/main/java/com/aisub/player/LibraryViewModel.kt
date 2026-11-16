@@ -8,6 +8,8 @@ import androidx.lifecycle.viewModelScope
 import com.aisub.player.media.AppStore
 import com.aisub.player.media.FavoriteFolder
 import com.aisub.player.media.HistoryItem
+import com.aisub.player.media.LocalMediaFilter
+import com.aisub.player.media.LocalMediaFilterStore
 import com.aisub.player.media.MediaEntry
 import com.aisub.player.media.MediaLibrary
 import com.aisub.player.media.Playlist
@@ -42,7 +44,15 @@ data class LibraryState(
     val servers: List<Server> = emptyList(),
     val videoSort: SortOrder = SortOrder.RECENT,
     val audioSort: SortOrder = SortOrder.RECENT,
+    val imageSort: SortOrder = SortOrder.RECENT,
     val videoGrid: Boolean = true,
+    val localFilter: LocalMediaFilter = LocalMediaFilter(),
+    val hiddenByVideoFilter: Int = 0,
+    val hiddenByAudioFilter: Int = 0,
+    val hiddenByImageFilter: Int = 0,
+    val availableVideoFolders: List<String> = emptyList(),
+    val availableAudioFolders: List<String> = emptyList(),
+    val availableImageFolders: List<String> = emptyList(),
     /** 字幕内容匹配搜索词的视频地址 */
     val subtitleMatches: Set<String> = emptySet(),
     /** 隐藏的文件夹（全部，不管现在是否暂时显示） */
@@ -93,15 +103,34 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     val serverContinue = androidx.compose.runtime.mutableStateMapOf<String, List<com.aisub.player.remote.cloud.ServerItem>>()
 
     init {
+        LocalMediaFilterStore.ensureInit(app)
         reloadStored()
         _state.update {
-            it.copy(videoSort = viewPrefs.sort("video"), audioSort = viewPrefs.sort("audio"), videoGrid = viewPrefs.grid("video"))
+            it.copy(
+                videoSort = viewPrefs.sort("video"),
+                audioSort = viewPrefs.sort("audio"),
+                imageSort = viewPrefs.sort("image"),
+                videoGrid = viewPrefs.grid("video"),
+                localFilter = LocalMediaFilterStore.filter.value,
+            )
+        }
+        viewModelScope.launch {
+            LocalMediaFilterStore.filter.collect { f ->
+                _state.update { it.copy(localFilter = f) }
+                applyHidden()
+            }
         }
     }
 
     fun setSort(page: String, order: SortOrder) {
         viewPrefs.setSort(page, order)
-        _state.update { if (page == "video") it.copy(videoSort = order) else it.copy(audioSort = order) }
+        _state.update {
+            when (page) {
+                "video" -> it.copy(videoSort = order)
+                "image" -> it.copy(imageSort = order)
+                else -> it.copy(audioSort = order)
+            }
+        }
     }
 
     fun setVideoGrid(grid: Boolean) {
@@ -179,15 +208,29 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private fun applyHidden() = _state.update { s ->
         val hidden = if (s.showHidden) emptyList() else s.hiddenFolders
         val local = hidden.filter { it.serverId == null }
+        val f = LocalMediaFilterStore.ensureInit(getApplication())
         // 直播频道的 folder 是分组名，不是本机目录
         fun hiddenEntry(e: MediaEntry) = !e.isLive && e.folder.isNotEmpty() && local.any { under(e.folder, it) }
+        val unhiddenVideos = allVideos.filterNot(::hiddenEntry)
+        val unhiddenAudios = allAudios.filterNot(::hiddenEntry)
+        val unhiddenImages = allImages.filterNot { image -> image.folder.isNotEmpty() && local.any { under(image.folder, it) } }
+        val filteredVideos = unhiddenVideos.filter { f.matchesVideo(it) }
+        val filteredAudios = unhiddenAudios.filter { f.matchesAudio(it) }
+        val filteredImages = unhiddenImages.filter { f.matchesImage(it) }
         s.copy(
-            videos = allVideos.filterNot(::hiddenEntry),
-            audios = allAudios.filterNot(::hiddenEntry),
-            images = allImages.filterNot { image -> image.folder.isNotEmpty() && local.any { under(image.folder, it) } },
+            localFilter = f,
+            videos = filteredVideos,
+            audios = filteredAudios,
+            images = filteredImages,
+            hiddenByVideoFilter = (unhiddenVideos.size - filteredVideos.size).coerceAtLeast(0),
+            hiddenByAudioFilter = (unhiddenAudios.size - filteredAudios.size).coerceAtLeast(0),
+            hiddenByImageFilter = (unhiddenImages.size - filteredImages.size).coerceAtLeast(0),
+            availableVideoFolders = unhiddenVideos.map { it.folder }.distinct().sorted(),
+            availableAudioFolders = unhiddenAudios.map { it.folder }.distinct().sorted(),
+            availableImageFolders = unhiddenImages.map { it.folder }.distinct().sorted(),
             history = allHistory.filterNot { hiddenEntry(it.entry) },
             playlists = allPlaylists.map { p -> p.copy(items = p.items.filterNot(::hiddenEntry)) },
-            favoriteFolders = allFavorites.filterNot { f -> hidden.any { it.serverId == f.serverId && under(f.path, it) } },
+            favoriteFolders = allFavorites.filterNot { fav -> hidden.any { it.serverId == fav.serverId && under(fav.path, it) } },
         )
     }
 
