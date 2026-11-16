@@ -276,28 +276,29 @@ fun HomeMediaLibrariesSection(
                         }
                     }
 
-                    // 每个已刮削出条目的媒体库直接在首页展示精简海报预览行，点海报直达影片详情/选集播放
-                    libraries.forEach { library ->
-                        val libItems = itemsMap[library.id].orEmpty()
-                        if (libItems.isNotEmpty()) {
-                            SectionHeader(
-                                title = "${library.name} · ${library.type.label}",
-                                actionLabel = "全部 ${libItems.size} 部",
-                                onAction = { onOpenLibrary(library.id) },
-                            )
-                            LazyRow(
-                                contentPadding = PaddingValues(horizontal = 12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                items(libItems.take(12), key = { it.id }) { mediaItem ->
-                                    ScrapedPosterCard(
-                                        item = mediaItem,
-                                        width = if (tv) 142.dp else if (wide) 130.dp else 108.dp,
-                                        onClick = { onOpenItem(library.id, mediaItem.id) },
-                                    )
-                                }
-                            }
-                        }
+                }
+            }
+        }
+
+        // 各媒体库的电影和电视剧内容始终在首页展开展示，仅折叠上方的「媒体库」管理区本身；标题只显示媒体库名称
+        libraries.forEach { library ->
+            val libItems = itemsMap[library.id].orEmpty()
+            if (libItems.isNotEmpty()) {
+                SectionHeader(
+                    title = library.name,
+                    actionLabel = "全部 ${libItems.size} 部",
+                    onAction = { onOpenLibrary(library.id) },
+                )
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    items(libItems.take(20), key = { it.id }) { mediaItem ->
+                        ScrapedPosterCard(
+                            item = mediaItem,
+                            width = if (tv) 142.dp else if (wide) 130.dp else 108.dp,
+                            onClick = { onOpenItem(library.id, mediaItem.id) },
+                        )
                     }
                 }
             }
@@ -1046,7 +1047,7 @@ fun CustomLibraryScreen(
     }
 
     DetailScaffold(
-        title = "${library.name} · ${library.type.label} (${rawItems.size})",
+        title = "${library.name} (${rawItems.size})",
         onBack = onBack,
         actions = {
             IconButton(onClick = { searchOpen = !searchOpen; if (!searchOpen) filterQuery = "" }) {
@@ -1560,12 +1561,22 @@ fun CustomLibraryItemDetailScreen(
                                     }
                                 }
                             }
+                            val serverNamesById = remember(libState.servers) {
+                                libState.servers.associate { it.id to it.name }
+                            }
+                            val hasMultipleSources = remember(item.episodes) {
+                                item.episodes.map { it.serverId }.distinct().size > 1
+                            }
                             seasonEpisodes.forEach { ep ->
                                 val globalIndex = item.episodes.indexOfFirst { it.id == ep.id }.coerceAtLeast(0)
                                 val hist = historyByUri[ep.playUrl]
+                                val sourceLabel = if (hasMultipleSources) {
+                                    if (ep.serverId == null) "本机" else serverNamesById[ep.serverId]
+                                } else null
                                 ScrapedEpisodeRow(
                                     ep = ep,
                                     isTv = item.kind == "tv",
+                                    sourceLabel = sourceLabel,
                                     watchedPosMs = hist?.positionMs ?: 0L,
                                     durationMs = hist?.entry?.durationMs ?: 0L,
                                     onClick = { play(fullPlayQueue, globalIndex) },
@@ -1627,6 +1638,7 @@ fun CustomLibraryItemDetailScreen(
 private fun ScrapedEpisodeRow(
     ep: ScrapedEpisode,
     isTv: Boolean,
+    sourceLabel: String? = null,
     watchedPosMs: Long,
     durationMs: Long,
     onClick: () -> Unit,
@@ -1658,6 +1670,7 @@ private fun ScrapedEpisodeRow(
                 overflow = TextOverflow.Ellipsis,
             )
             val sub = buildList {
+                if (!sourceLabel.isNullOrBlank()) add(sourceLabel)
                 if (ep.sizeBytes > 0) add(formatSize(ep.sizeBytes))
                 if (watchedPosMs > 5_000L) add("上次看到 ${formatDuration(watchedPosMs)}")
             }.joinToString(" · ")

@@ -139,4 +139,70 @@ class NewFeaturesTest {
         assertFalse(roundTrip.matchesImage(screenshot))
         assertFalse(roundTrip.matchesImage(tinyIcon))
     }
+
+    @Test
+    fun multiSourceNasAnd115TvGroupingHandlesLargeNasAndChineseFolders() {
+        val discovered = ArrayList<CustomMediaLibraryStore.DiscoveredVideo>()
+        // 模拟 NAS 目录包含超过 1600 集电视剧（验证不再挤占后续 115 目录扫描与分组）
+        for (showIdx in 1..40) {
+            for (ep in 1..42) {
+                discovered += CustomMediaLibraryStore.DiscoveredVideo(
+                    serverId = "srv-nas",
+                    bindingIndex = 0,
+                    fileName = "NAS剧集$showIdx.S01E%02d.1080p.mkv".format(ep),
+                    path = "/downloads/影视/电视剧/NAS剧集$showIdx/S01E%02d.mkv".format(ep),
+                    playUrl = "http://nas.local/tv/$showIdx/$ep.mkv",
+                    sizeBytes = 1024L,
+                    parentFolder = "NAS剧集$showIdx",
+                    grandParentFolder = "电视剧",
+                    posterSidecar = null,
+                )
+            }
+        }
+        // 模拟 115 网盘电视剧目录：1) 剧名文件夹 + S01E01 集名开头；2) 国产剧分类目录 + 两字剧名（如「繁花」「狂飙」）
+        discovered += CustomMediaLibraryStore.DiscoveredVideo(
+            serverId = "srv-115",
+            bindingIndex = 1,
+            fileName = "S01E01 初入京都.2160p.WEB-DL.mkv",
+            path = "cid_ep1",
+            playUrl = "cloud://srv-115/pc1?n=S01E01.mkv",
+            sizeBytes = 2048L,
+            parentFolder = "庆余年 (2019)",
+            grandParentFolder = "电视剧",
+            posterSidecar = null,
+        )
+        discovered += CustomMediaLibraryStore.DiscoveredVideo(
+            serverId = "srv-115",
+            bindingIndex = 1,
+            fileName = "S01E02 再起波澜.2160p.WEB-DL.mkv",
+            path = "cid_ep2",
+            playUrl = "cloud://srv-115/pc2?n=S01E02.mkv",
+            sizeBytes = 2048L,
+            parentFolder = "庆余年 (2019)",
+            grandParentFolder = "电视剧",
+            posterSidecar = null,
+        )
+        discovered += CustomMediaLibraryStore.DiscoveredVideo(
+            serverId = "srv-115",
+            bindingIndex = 1,
+            fileName = "繁花.S01E01.4K.mkv",
+            path = "cid_fh1",
+            playUrl = "cloud://srv-115/pc3?n=fh01.mkv",
+            sizeBytes = 4096L,
+            parentFolder = "国产剧",
+            grandParentFolder = "电视剧",
+            posterSidecar = null,
+        )
+
+        val candidates = CustomMediaLibraryStore.groupTvCandidates(discovered)
+        assertEquals(42, candidates.size)
+        val qyn = candidates.firstOrNull { it.titles.contains("庆余年") }
+        assertTrue("115 庆余年 must be grouped under show folder title", qyn != null)
+        assertEquals(2, qyn!!.hits.size)
+        assertEquals(2019, qyn.year)
+
+        val fanhua = candidates.firstOrNull { it.titles.contains("繁花") }
+        assertTrue("115 2-char show 繁花 under 国产剧 must not be merged into 国产剧", fanhua != null)
+        assertEquals(1, fanhua!!.hits.size)
+    }
 }

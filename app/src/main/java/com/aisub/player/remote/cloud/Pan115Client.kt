@@ -24,36 +24,64 @@ class Pan115Client(server: Server) : CloudClient(server) {
         .header("User-Agent", UA)
         .header("Cookie", cookie)
 
+    private fun fetchFilesPage(cid: String, offset: Int, mode: Int): JSONObject {
+        val endpoint = if (mode == 1) "https://aps.115.com/natsort/files.php" else "https://webapi.115.com/files"
+        val url = endpoint.toHttpUrl().newBuilder()
+            .addQueryParameter("aid", "1")
+            .addQueryParameter("cid", cid)
+            .addQueryParameter("o", if (mode == 2) "user_ptime" else "file_name")
+            .addQueryParameter("asc", if (mode == 2) "0" else "1")
+            .addQueryParameter("offset", offset.toString())
+            .addQueryParameter("show_dir", "1")
+            .addQueryParameter("limit", PAGE.toString())
+            .addQueryParameter("snap", "0")
+            .apply {
+                if (mode != 2) addQueryParameter("natsort", "1")
+            }
+            .addQueryParameter("record_open_time", "1")
+            .addQueryParameter("format", "json")
+            .addQueryParameter("fc_mix", "0")
+            .build()
+        val req = request(url.toString())
+            .header("Referer", "https://115.com/")
+            .build()
+        return cloudHttp.newCall(req).execute().use { it.json() }
+    }
+
     override suspend fun list(path: String): List<RemoteItem> = withContext(Dispatchers.IO) {
-        val cid = path.ifEmpty { "0" }
+        val cid = path.trim().let { if (it.isEmpty() || it == "/") "0" else it }
         val items = ArrayList<RemoteItem>()
         var offset = 0
+        var mode = 0
         while (true) {
-            val url = "https://webapi.115.com/files".toHttpUrl().newBuilder()
-                .addQueryParameter("aid", "1").addQueryParameter("cid", cid)
-                .addQueryParameter("o", "file_name").addQueryParameter("asc", "1")
-                .addQueryParameter("offset", offset.toString()).addQueryParameter("show_dir", "1")
-                .addQueryParameter("limit", PAGE.toString()).addQueryParameter("snap", "0")
-                .addQueryParameter("natsort", "1").addQueryParameter("record_open_time", "1")
-                .addQueryParameter("format", "json").addQueryParameter("fc_mix", "0")
-                .build()
-            val json = cloudHttp.newCall(request(url.toString()).build()).execute().use { it.json() }
+            var json = fetchFilesPage(cid, offset, mode)
+            while (!json.optBoolean("state", true) && mode < 2) {
+                val errNo = json.optInt("errNo", json.optInt("errno"))
+                val msg = json.optString("error").ifEmpty { json.optString("msg") }
+                if (errNo == 99 || msg.contains("登录")) break
+                mode++
+                json = fetchFilesPage(cid, offset, mode)
+            }
             check(json)
             val data = json.optJSONArray("data") ?: break
-            for (i in 0 until data.length()) {
+            val len = data.length()
+            if (len == 0) break
+            for (i in 0 until len) {
                 val f = data.getJSONObject(i)
                 val name = f.optString("n")
                 val fid = f.optString("fid")
                 if (fid.isEmpty()) {
                     // 没有 fid 的是目录，目录 ID 在 cid
-                    items.add(RemoteItem(name, f.optString("cid"), isDir = true))
+                    val subCid = f.optString("cid")
+                    if (subCid.isNotEmpty()) items.add(RemoteItem(name, subCid, isDir = true))
                 } else {
                     val pickCode = f.optString("pc")
                     items.add(RemoteItem(name, fid, isDir = false, size = f.optLong("s"), playUrl = playUri(pickCode, name)))
                 }
             }
-            offset += PAGE
-            if (offset >= json.optInt("count") || data.length() == 0) break
+            offset += len
+            val totalCount = json.optInt("count", 0)
+            if (totalCount in 1..offset) break
         }
         items.sortedWith(compareBy({ !it.isDir }, { it.name.lowercase() }))
     }

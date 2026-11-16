@@ -292,8 +292,8 @@ sealed interface IndexedPlayHit {
 object CustomMediaLibraryStore {
     const val PREFS_NAME = "custom_libraries"
     private const val KEY_LIBRARIES = "libraries"
-    private const val MAX_SCAN_DEPTH = 4
-    private const val MAX_SCAN_FILES = 1500
+    private const val MAX_SCAN_DEPTH = 6
+    internal const val MAX_SCAN_FILES_PER_FOLDER = 10_000
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val scrapeJobs = ConcurrentHashMap<String, Job>()
@@ -546,10 +546,12 @@ object CustomMediaLibraryStore {
             }
             try {
                 val discovered = ArrayList<DiscoveredVideo>()
-                val servers = libVm.state.value.servers.associateBy { it.id }
+                val allServers = (libVm.state.value.servers + AppStore(app).servers()).distinctBy { it.id }
+                val servers = allServers.associateBy { it.id }
                 val localVideos = libVm.state.value.videos
 
-                for (binding in library.folders) {
+                library.folders.forEachIndexed { bindingIndex, binding ->
+                    val folderDiscovered = ArrayList<DiscoveredVideo>()
                     if (binding.serverId == null) {
                         val prefix = binding.path.trim('/')
                         val matched = if (prefix.isEmpty()) {
@@ -561,10 +563,11 @@ object CustomMediaLibraryStore {
                             }
                         }
                         for (v in matched) {
-                            if (discovered.size >= MAX_SCAN_FILES) break
+                            if (folderDiscovered.size >= MAX_SCAN_FILES_PER_FOLDER) break
                             val folderSegs = v.folder.trim('/').split('/').filter { it.isNotBlank() }
-                            discovered += DiscoveredVideo(
+                            folderDiscovered += DiscoveredVideo(
                                 serverId = null,
+                                bindingIndex = bindingIndex,
                                 fileName = v.title,
                                 path = v.uri,
                                 playUrl = v.uri,
@@ -575,27 +578,47 @@ object CustomMediaLibraryStore {
                             )
                         }
                     } else {
-                        val srv = servers[binding.serverId] ?: continue
-                        val client = runCatching { libVm.client(srv) }.getOrNull() ?: continue
-                        scanRemoteFolderRecursive(
-                            serverId = srv.id,
-                            client = client,
-                            path = binding.path.ifEmpty { srv.rootPath },
-                            folderName = binding.displayPath.substringAfterLast('/').trim(),
-                            parentFolderName = "",
-                            depth = 0,
-                            out = discovered,
-                        ) { count ->
+                        val srv = servers[binding.serverId]
+                            ?: allServers.firstOrNull { !it.type.isMediaServer && it.name.equals(binding.serverName, ignoreCase = true) }
+                        val client = srv?.let { runCatching { libVm.client(it) }.getOrNull() }
+                        if (srv != null && client != null) {
                             _scrapeProgress.update { map ->
                                 map + (libraryId to ScrapeProgress(
                                     libraryId = libraryId,
                                     running = true,
-                                    stage = "正在扫描目录（已发现 $count 个视频）…",
-                                    scannedFiles = count,
+                                    stage = "正在扫描 ${srv.name}（累计已发现 ${discovered.size} 个视频）…",
+                                    scannedFiles = discovered.size,
                                 ))
+                            }
+                            try {
+                                scanRemoteFolderRecursive(
+                                    serverId = srv.id,
+                                    bindingIndex = bindingIndex,
+                                    client = client,
+                                    path = binding.path.ifEmpty { srv.rootPath },
+                                    folderName = binding.displayPath.substringAfterLast('/').trim(),
+                                    parentFolderName = "",
+                                    depth = 0,
+                                    out = folderDiscovered,
+                                ) { folderCount ->
+                                    val totalSoFar = discovered.size + folderCount
+                                    _scrapeProgress.update { map ->
+                                        map + (libraryId to ScrapeProgress(
+                                            libraryId = libraryId,
+                                            running = true,
+                                            stage = "正在扫描 ${srv.name}（当前源 $folderCount 个，累计 $totalSoFar 个视频）…",
+                                            scannedFiles = totalSoFar,
+                                        ))
+                                    }
+                                }
+                            } catch (ce: CancellationException) {
+                                throw ce
+                            } catch (e: Exception) {
+                                android.util.Log.w("Voxtitle", "扫描存储源 ${srv.name} 异常: ${e.message}")
                             }
                         }
                     }
+                    discovered.addAll(folderDiscovered)
                 }
 
                 if (discovered.isEmpty()) {
@@ -611,9 +634,17 @@ object CustomMediaLibraryStore {
                     return@launch
                 }
 
-                val existingItems = _itemsByLibrary.value[libraryId].orEmpty()
+                val existingItems = (_itemsByLibrary.value[libraryId].orEmpty() +
+                    _itemsByLibrary.value.values.flatten()).distinctBy { it.id }
                 val scrapedItems = if (library.type == MediaLibraryType.MOVIE) {
-                    scrapeMovieGroups(libraryId, discovered, existingItems, settings) { done, total, curTitle ->
+                    scrapeMovieGroups(
+                        libraryId = libraryId,
+                        files = discovered,
+                        existing = existingItems,
+                        settings = settings,
+                        folderCount = library.folders.size,
+                        onPartialSave = { partial -> saveLibraryCatalog(app, libraryId, partial) },
+                    ) { done, total, curTitle ->
                         _scrapeProgress.update {
                             it + (libraryId to ScrapeProgress(
                                 libraryId = libraryId,
@@ -626,7 +657,14 @@ object CustomMediaLibraryStore {
                         }
                     }
                 } else {
-                    scrapeTvGroups(libraryId, discovered, existingItems, settings) { done, total, curTitle ->
+                    scrapeTvGroups(
+                        libraryId = libraryId,
+                        files = discovered,
+                        existing = existingItems,
+                        settings = settings,
+                        folderCount = library.folders.size,
+                        onPartialSave = { partial -> saveLibraryCatalog(app, libraryId, partial) },
+                    ) { done, total, curTitle ->
                         _scrapeProgress.update {
                             it + (libraryId to ScrapeProgress(
                                 libraryId = libraryId,
@@ -675,8 +713,9 @@ object CustomMediaLibraryStore {
         }
     }
 
-    private data class DiscoveredVideo(
+    internal data class DiscoveredVideo(
         val serverId: String?,
+        val bindingIndex: Int = 0,
         val fileName: String,
         val path: String,
         val playUrl: String,
@@ -686,8 +725,25 @@ object CustomMediaLibraryStore {
         val posterSidecar: String?,
     )
 
+    private suspend fun listRemoteWithRetry(client: RemoteClient, path: String): List<RemoteItem>? {
+        var lastErr: Throwable? = null
+        for (attempt in 0..2) {
+            try {
+                return client.list(path)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Throwable) {
+                lastErr = e
+                if (attempt < 2) delay(350L * (attempt + 1))
+            }
+        }
+        android.util.Log.w("Voxtitle", "列举远端目录失败 ($path): ${lastErr?.message}")
+        return null
+    }
+
     private suspend fun scanRemoteFolderRecursive(
         serverId: String,
+        bindingIndex: Int,
         client: RemoteClient,
         path: String,
         folderName: String,
@@ -696,25 +752,27 @@ object CustomMediaLibraryStore {
         out: MutableList<DiscoveredVideo>,
         onCount: (Int) -> Unit,
     ) {
-        if (depth > MAX_SCAN_DEPTH || out.size >= MAX_SCAN_FILES) return
-        val children = runCatching { client.list(path) }.getOrNull() ?: return
+        if (depth > MAX_SCAN_DEPTH || out.size >= MAX_SCAN_FILES_PER_FOLDER) return
+        val children = listRemoteWithRetry(client, path) ?: return
         val posterFile = children.firstOrNull {
             !it.isDir && it.playUrl != null && it.name.lowercase() in setOf(
                 "poster.jpg", "poster.png", "poster.webp", "folder.jpg", "folder.png", "cover.jpg", "cover.png",
             )
         }?.playUrl
+        val isCloudSource = client is com.aisub.player.remote.cloud.CloudClient
 
         for (item in children) {
-            if (out.size >= MAX_SCAN_FILES) break
+            if (out.size >= MAX_SCAN_FILES_PER_FOLDER) break
             if (item.name.startsWith(".")) continue
             if (item.isDir) {
                 val low = item.name.lowercase()
                 if (low in setOf("extras", "sample", "samples", "subs", "subtitles", "featurettes", "@eadir", "bdmv")) continue
                 if (depth < MAX_SCAN_DEPTH) {
-                    // 对网盘接口保持温和请求节奏，防止触发网盘风控
-                    if (depth >= 1) delay(60L)
+                    // 对 115 等直连网盘在所有层级保持温和请求间隔，避免并发或快速扫子目录触发风控限流
+                    if (isCloudSource) delay(80L) else if (depth >= 1) delay(20L)
                     scanRemoteFolderRecursive(
                         serverId = serverId,
+                        bindingIndex = bindingIndex,
                         client = client,
                         path = item.path,
                         folderName = item.name,
@@ -727,6 +785,7 @@ object CustomMediaLibraryStore {
             } else if (item.playUrl != null && MediaEntry.isVideoName(item.name)) {
                 out += DiscoveredVideo(
                     serverId = serverId,
+                    bindingIndex = bindingIndex,
                     fileName = item.name,
                     path = item.path,
                     playUrl = item.playUrl,
@@ -746,6 +805,15 @@ object CustomMediaLibraryStore {
         """^(?:season\s*(\d+)|s(\d{1,2})|第\s*([一二三四五六七八九十\d]+)\s*[季部]|specials)$""",
         RegexOption.IGNORE_CASE,
     )
+    private val LEADING_SUBGROUP_REGEX = Regex("""^\s*[\[【][^\]】]*[\]】]\s*""")
+    private val LEADING_EP_MARKER_REGEX = Regex(
+        """^(?:s\d{1,2}[\s._\-]*e[p]?\d{1,4}|ep?\s*\d{1,4}|episode[\s._\-]*\d{1,4}|第\s*[0-9零〇一二两三四五六七八九十百]+\s*[集话話期幕]|\d{1,4}(?=[\s._\-]|$))""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val BARE_EP_TITLE_REGEX = Regex(
+        """^(?:s\d{1,2}[\s._\-]*e[p]?\d{1,4}|ep?\s*\d{1,4}|episode\s*\d{1,4}|第?\s*[0-9零〇一二两三四五六七八九十百]+\s*[集话話期幕]|\d{1,4}(?:-\d{1,4})?|part\s*\d+|ova\s*\d*|sp\s*\d*)$""",
+        RegexOption.IGNORE_CASE,
+    )
 
     private fun extractTmdbTag(vararg texts: String): String? {
         for (t in texts) {
@@ -763,9 +831,9 @@ object CustomMediaLibraryStore {
         return null
     }
 
-    private fun parseSeasonFromFolder(folder: String): Int? {
+    internal fun parseSeasonFromFolder(folder: String): Int? {
         val trimmed = folder.trim()
-        if (trimmed.equals("specials", ignoreCase = true) || trimmed == "SP") return 0
+        if (trimmed.equals("specials", ignoreCase = true) || trimmed.equals("sp", ignoreCase = true)) return 0
         val m = SEASON_DIR_REGEX.matchEntire(trimmed) ?: return null
         m.groupValues[1].toIntOrNull()?.let { return it }
         m.groupValues[2].toIntOrNull()?.let { return it }
@@ -776,14 +844,59 @@ object CustomMediaLibraryStore {
         return null
     }
 
-    private fun isGenericContainerFolder(name: String): Boolean {
+    internal fun isGenericContainerFolder(name: String): Boolean {
         if (name.isBlank()) return true
         val low = name.trim().lowercase()
+        if (low.matches(Regex("""^(?:19\d{2}|20\d{2})年?$"""))) return true
         return low in setOf(
-            "movie", "movies", "film", "films", "tv", "tvshows", "series", "video", "videos",
-            "电影", "电视剧", "剧集", "动漫", "动画", "纪录片", "影视", "网盘", "root", "download", "downloads",
-            "4k", "1080p", "remux", "bluray", "原盘",
+            "movie", "movies", "film", "films", "tv", "tvs", "tvshows", "tv shows", "series", "show", "shows",
+            "video", "videos", "media", "电影", "电视剧", "剧集", "连续剧", "动漫", "动画", "番剧", "新番",
+            "纪录片", "综艺", "真人秀", "影视", "影视剧", "网盘", "云盘", "根目录", "内部存储根目录",
+            "root", "download", "downloads", "nas", "115", "115网盘", "115 网盘", "aliyun", "阿里云盘",
+            "baidu", "百度网盘", "pikpak", "onedrive", "webdav", "openlist", "alist",
+            "国产剧", "大陆剧", "内地剧", "华语剧", "美剧", "英剧", "欧美剧", "日剧", "韩剧", "日韩剧",
+            "港剧", "台剧", "港台剧", "泰剧", "海外剧", "短剧", "合集", "完结", "连载", "追剧", "在看", "未看", "已看",
+            "4k", "2160p", "1080p", "720p", "remux", "bluray", "blu-ray", "bdmv", "stream", "原盘", "杜比", "杜比视界", "hdr",
         )
+    }
+
+    internal fun startsWithEpisodeMarker(fileName: String): Boolean {
+        val stem = fileName.substringBeforeLast('.').trim()
+        val stripped = LEADING_SUBGROUP_REGEX.find(stem)?.let {
+            if (it.range.last < stem.lastIndex) stem.substring(it.range.last + 1).trim() else stem
+        } ?: stem
+        return LEADING_EP_MARKER_REGEX.containsMatchIn(stripped)
+    }
+
+    internal fun isBareEpisodeTitle(parsedTitle: String, rawFileName: String): Boolean {
+        val t = parsedTitle.trim()
+        if (t.isEmpty() || t.length <= 1) return true
+        if (t.equals(rawFileName.trim(), ignoreCase = true) || t.equals(rawFileName.substringBeforeLast('.').trim(), ignoreCase = true)) {
+            if (startsWithEpisodeMarker(rawFileName)) return true
+        }
+        return BARE_EP_TITLE_REGEX.matches(t)
+    }
+
+    /** 多目录绑定时按目录轮询交错排列，保证首页预览与默认排序同时均衡呈现 NAS 与 115 等各来源内容 */
+    private fun <T> interleaveByBinding(items: List<Pair<Int, T>>, folderCount: Int): List<T> {
+        if (folderCount <= 1 || items.size <= 1) return items.map { it.second }
+        val buckets = LinkedHashMap<Int, ArrayDeque<T>>()
+        for ((bIdx, item) in items) {
+            buckets.getOrPut(bIdx) { ArrayDeque() }.addLast(item)
+        }
+        if (buckets.size <= 1) return items.map { it.second }
+        val out = ArrayList<T>(items.size)
+        while (out.size < items.size) {
+            var progressed = false
+            for (q in buckets.values) {
+                if (q.isNotEmpty()) {
+                    out += q.removeFirst()
+                    progressed = true
+                }
+            }
+            if (!progressed) break
+        }
+        return out
     }
 
     private suspend fun scrapeMovieGroups(
@@ -791,10 +904,13 @@ object CustomMediaLibraryStore {
         files: List<DiscoveredVideo>,
         existing: List<ScrapedMediaItem>,
         settings: AppSettings,
+        folderCount: Int = 1,
+        onPartialSave: (List<ScrapedMediaItem>) -> Unit = {},
         onProgress: (Int, Int, String) -> Unit,
     ): List<ScrapedMediaItem> {
         data class MovieCandidate(
             val key: String,
+            val bindingIndex: Int,
             val titles: List<String>,
             val year: Int?,
             val tmdbTag: String?,
@@ -818,13 +934,15 @@ object CustomMediaLibraryStore {
             val normKey = (tmdbTag?.let { "tmdb:$it" } ?: "${normalizeMatchText(primaryTitle)}:${year ?: 0}")
             val titles = (listOfNotNull(primaryTitle, folderParsed?.title) + fileParsed.candidates()).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
             val g = groups.getOrPut(normKey) {
-                MovieCandidate(normKey, titles, year, tmdbTag, imdbTag, mutableListOf())
+                MovieCandidate(normKey, v.bindingIndex, titles, year, tmdbTag, imdbTag, mutableListOf())
             }
             g.files += v
         }
 
         val existingByPlayUrl = existing.flatMap { item -> item.episodes.map { ep -> ep.playUrl to item } }.toMap()
-        val results = ArrayList<ScrapedMediaItem>(groups.size)
+        val existingByNormTitle = existing.filter { it.kind == "movie" && !it.posterUrl.isNullOrBlank() }
+            .associateBy { "${normalizeMatchText(it.title)}:${it.year ?: 0}" }
+        val taggedResults = ArrayList<Pair<Int, ScrapedMediaItem>>(groups.size)
         var index = 0
         for ((_, group) in groups) {
             index++
@@ -832,6 +950,7 @@ object CustomMediaLibraryStore {
             onProgress(index, groups.size, label)
 
             val cachedItem = group.files.firstNotNullOfOrNull { existingByPlayUrl[it.playUrl] }
+                ?: group.titles.firstNotNullOfOrNull { t -> existingByNormTitle["${normalizeMatchText(t)}:${group.year ?: 0}"] }
             val episodes = group.files.mapIndexed { idx, f ->
                 ScrapedEpisode(
                     season = 1,
@@ -846,7 +965,8 @@ object CustomMediaLibraryStore {
             }
 
             if (cachedItem != null && (!cachedItem.posterUrl.isNullOrBlank() || !settings.metaOnline)) {
-                results += cachedItem.copy(libraryId = libraryId, episodes = episodes)
+                val reusedId = if (cachedItem.libraryId == libraryId) cachedItem.id else UUID.randomUUID().toString()
+                taggedResults += group.bindingIndex to cachedItem.copy(id = reusedId, libraryId = libraryId, episodes = episodes)
                 continue
             }
 
@@ -859,8 +979,9 @@ object CustomMediaLibraryStore {
             )
             val info = if (settings.metaOnline) lookupOnlineMeta(settings, q, tv = false) else null
             val fallbackPoster = group.files.firstNotNullOfOrNull { it.posterSidecar }
-            results += ScrapedMediaItem(
-                id = cachedItem?.id ?: UUID.randomUUID().toString(),
+            val reusedId = if (cachedItem != null && cachedItem.libraryId == libraryId) cachedItem.id else UUID.randomUUID().toString()
+            taggedResults += group.bindingIndex to ScrapedMediaItem(
+                id = reusedId,
                 libraryId = libraryId,
                 kind = "movie",
                 title = info?.title?.ifBlank { null } ?: label,
@@ -884,54 +1005,72 @@ object CustomMediaLibraryStore {
                 imdbId = info?.imdbId ?: group.imdbTag,
                 episodes = episodes,
             )
+            if (taggedResults.size % 10 == 0 && taggedResults.size < groups.size) {
+                onPartialSave(interleaveByBinding(taggedResults, folderCount))
+            }
         }
-        return results
+        val ordered = interleaveByBinding(taggedResults, folderCount)
+        val baseTime = System.currentTimeMillis()
+        return ordered.mapIndexed { idx, item ->
+            item.copy(addedAt = baseTime - idx)
+        }
     }
 
-    private suspend fun scrapeTvGroups(
-        libraryId: String,
-        files: List<DiscoveredVideo>,
-        existing: List<ScrapedMediaItem>,
-        settings: AppSettings,
-        onProgress: (Int, Int, String) -> Unit,
-    ): List<ScrapedMediaItem> {
-        data class TvFileHit(
-            val video: DiscoveredVideo,
-            val season: Int,
-            val episode: Int,
-            val epTitle: String,
-        )
-        data class TvCandidate(
-            val key: String,
-            val titles: List<String>,
-            val year: Int?,
-            val tmdbTag: String?,
-            val imdbTag: String?,
-            val hits: MutableList<TvFileHit>,
-        )
+    internal data class TvFileHit(
+        val video: DiscoveredVideo,
+        val season: Int,
+        val episode: Int,
+        val epTitle: String,
+    )
+
+    internal data class TvCandidate(
+        val key: String,
+        val bindingIndex: Int,
+        val titles: List<String>,
+        val year: Int?,
+        val tmdbTag: String?,
+        val imdbTag: String?,
+        val hits: MutableList<TvFileHit>,
+    )
+
+    internal fun groupTvCandidates(files: List<DiscoveredVideo>): List<TvCandidate> {
+        // 检测是否存在把多部不同剧集平铺在同一个非通用目录（如「待看合集」）里的情况
+        val prefixesByParent = HashMap<String, MutableSet<String>>()
+        for (v in files) {
+            if (parseSeasonFromFolder(v.parentFolder) != null || isGenericContainerFolder(v.parentFolder)) continue
+            val fp = NameParser.parse(v.fileName)
+            if (!startsWithEpisodeMarker(v.fileName) && !isBareEpisodeTitle(fp.title, v.fileName) && fp.isEpisode) {
+                val norm = normalizeMatchText(fp.title)
+                if (norm.length >= 2) {
+                    prefixesByParent.getOrPut("${v.serverId}|${v.parentFolder}") { HashSet() } += norm
+                }
+            }
+        }
 
         val groups = LinkedHashMap<String, TvCandidate>()
         for (v in files) {
             val fileParsed = NameParser.parse(v.fileName)
             val folderSeason = parseSeasonFromFolder(v.parentFolder)
+            val multiShowContainer = (prefixesByParent["${v.serverId}|${v.parentFolder}"]?.size ?: 0) >= 2
             val showFolderRaw = when {
                 folderSeason != null && !isGenericContainerFolder(v.grandParentFolder) -> v.grandParentFolder
-                folderSeason == null && !isGenericContainerFolder(v.parentFolder) -> v.parentFolder
+                folderSeason == null && !isGenericContainerFolder(v.parentFolder) && !multiShowContainer -> v.parentFolder
                 else -> ""
             }
             val folderParsed = showFolderRaw.takeIf { it.isNotBlank() }?.let { NameParser.parse(it) }
 
-            val fileTitleLooksBareEp = fileParsed.title.length <= 2 ||
-                fileParsed.title.matches(Regex("""^(?:ep?|episode|第?\d+[集话話]|\d{1,3})$""", RegexOption.IGNORE_CASE))
+            val fileStartsWithEp = startsWithEpisodeMarker(v.fileName)
+            val fileTitleLooksBareEp = isBareEpisodeTitle(fileParsed.title, v.fileName) || fileStartsWithEp
             val showTitle = when {
                 folderParsed != null && folderParsed.title.isNotBlank() && (fileTitleLooksBareEp || folderSeason != null) -> folderParsed.title
+                folderParsed != null && folderParsed.title.isNotBlank() && !isBareEpisodeTitle(folderParsed.title, showFolderRaw) -> folderParsed.title
                 fileParsed.title.isNotBlank() && !fileTitleLooksBareEp -> fileParsed.title
                 folderParsed != null && folderParsed.title.isNotBlank() -> folderParsed.title
                 else -> fileParsed.title.ifBlank { v.fileName.substringBeforeLast('.') }
             }
 
             val season = (fileParsed.season ?: folderSeason ?: 1).coerceAtLeast(0)
-            val fallbackEpNum = Regex("""(?:^|[\s._\-\[E第])(\d{1,3})(?:[集话話\]\s._\-]|$)""", RegexOption.IGNORE_CASE)
+            val fallbackEpNum = Regex("""(?:^|[\s._\-\[E第])(\d{1,4})(?:[集话話期\]\s._\-]|$)""", RegexOption.IGNORE_CASE)
                 .find(v.fileName.substringBeforeLast('.'))?.groupValues?.get(1)?.toIntOrNull()
             val episode = (fileParsed.episode ?: fallbackEpNum ?: 1).coerceAtLeast(1)
             val year = folderParsed?.year ?: fileParsed.year
@@ -939,10 +1078,15 @@ object CustomMediaLibraryStore {
             val imdbTag = extractImdbTag(showFolderRaw, v.parentFolder, v.fileName)
 
             val normKey = tmdbTag?.let { "tmdb:$it" } ?: normalizeMatchText(showTitle).ifEmpty { showTitle.lowercase() }
-            val candidates = listOfNotNull(showTitle, folderParsed?.title, fileParsed.title.takeUnless { fileTitleLooksBareEp })
-                .map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            val candidates = (
+                listOfNotNull(
+                    showTitle,
+                    folderParsed?.title,
+                    fileParsed.title.takeUnless { fileTitleLooksBareEp },
+                ) + (folderParsed?.candidates().orEmpty()) + (if (!fileTitleLooksBareEp) fileParsed.candidates() else emptyList())
+                ).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
             val group = groups.getOrPut(normKey) {
-                TvCandidate(normKey, candidates, year, tmdbTag, imdbTag, mutableListOf())
+                TvCandidate(normKey, v.bindingIndex, candidates, year, tmdbTag, imdbTag, mutableListOf())
             }
             group.hits += TvFileHit(
                 video = v,
@@ -951,17 +1095,31 @@ object CustomMediaLibraryStore {
                 epTitle = v.fileName.substringBeforeLast('.'),
             )
         }
+        return groups.values.toList()
+    }
 
+    private suspend fun scrapeTvGroups(
+        libraryId: String,
+        files: List<DiscoveredVideo>,
+        existing: List<ScrapedMediaItem>,
+        settings: AppSettings,
+        folderCount: Int = 1,
+        onPartialSave: (List<ScrapedMediaItem>) -> Unit = {},
+        onProgress: (Int, Int, String) -> Unit,
+    ): List<ScrapedMediaItem> {
+        val groups = groupTvCandidates(files)
         val existingByPlayUrl = existing.flatMap { item -> item.episodes.map { ep -> ep.playUrl to item } }.toMap()
-        val results = ArrayList<ScrapedMediaItem>(groups.size)
+        val existingByNormTitle = existing.filter { it.kind == "tv" && !it.posterUrl.isNullOrBlank() }
+            .associateBy { normalizeMatchText(it.title) }
+        val taggedResults = ArrayList<Pair<Int, ScrapedMediaItem>>(groups.size)
         var index = 0
-        for ((_, group) in groups) {
+        for (group in groups) {
             index++
             val label = group.titles.firstOrNull() ?: "剧集"
             onProgress(index, groups.size, label)
 
             val sortedEpisodes = group.hits
-                .sortedWith(compareBy({ it.season }, { it.episode }, { it.video.fileName.lowercase() }))
+                .sortedWith(compareBy({ it.season }, { it.episode }, { it.video.bindingIndex }, { it.video.fileName.lowercase() }))
                 .map { h ->
                     ScrapedEpisode(
                         season = h.season,
@@ -975,9 +1133,15 @@ object CustomMediaLibraryStore {
                     )
                 }
 
+            // 取该剧集包含最多分集（或最早出现）的绑定源下标用于多源交错排序
+            val dominantBinding = group.hits.groupingBy { it.video.bindingIndex }.eachCount()
+                .maxByOrNull { it.value }?.key ?: group.bindingIndex
+
             val cachedItem = group.hits.firstNotNullOfOrNull { existingByPlayUrl[it.video.playUrl] }
+                ?: group.titles.firstNotNullOfOrNull { t -> existingByNormTitle[normalizeMatchText(t)] }
             if (cachedItem != null && (!cachedItem.posterUrl.isNullOrBlank() || !settings.metaOnline)) {
-                results += cachedItem.copy(libraryId = libraryId, episodes = sortedEpisodes)
+                val reusedId = if (cachedItem.libraryId == libraryId) cachedItem.id else UUID.randomUUID().toString()
+                taggedResults += dominantBinding to cachedItem.copy(id = reusedId, libraryId = libraryId, episodes = sortedEpisodes)
                 continue
             }
 
@@ -990,8 +1154,9 @@ object CustomMediaLibraryStore {
             )
             val info = if (settings.metaOnline) lookupOnlineMeta(settings, q, tv = true) else null
             val fallbackPoster = group.hits.firstNotNullOfOrNull { it.video.posterSidecar }
-            results += ScrapedMediaItem(
-                id = cachedItem?.id ?: UUID.randomUUID().toString(),
+            val reusedId = if (cachedItem != null && cachedItem.libraryId == libraryId) cachedItem.id else UUID.randomUUID().toString()
+            taggedResults += dominantBinding to ScrapedMediaItem(
+                id = reusedId,
                 libraryId = libraryId,
                 kind = "tv",
                 title = info?.title?.ifBlank { null } ?: label,
@@ -1015,8 +1180,15 @@ object CustomMediaLibraryStore {
                 imdbId = info?.imdbId ?: group.imdbTag,
                 episodes = sortedEpisodes,
             )
+            if (taggedResults.size % 10 == 0 && taggedResults.size < groups.size) {
+                onPartialSave(interleaveByBinding(taggedResults, folderCount))
+            }
         }
-        return results
+        val ordered = interleaveByBinding(taggedResults, folderCount)
+        val baseTime = System.currentTimeMillis()
+        return ordered.mapIndexed { idx, item ->
+            item.copy(addedAt = baseTime - idx)
+        }
     }
 
     private suspend fun lookupOnlineMeta(settings: AppSettings, q: MetaQuery, tv: Boolean): MediaInfo? {
@@ -1025,16 +1197,7 @@ object CustomMediaLibraryStore {
             info = runCatching { MetaRepository.tmdb(settings, q) }.getOrNull()
         }
         if (settings.doubanEnabled && (info == null || info.doubanRating == null || info.posterUrl == null || info.overview.isBlank())) {
-            val db = runCatching {
-                Douban.lookup(
-                    titles = (listOfNotNull(info?.title, info?.originalTitle) + q.titles).filter { it.isNotBlank() }.distinct(),
-                    year = q.year ?: info?.year?.take(4)?.toIntOrNull(),
-                    season = null,
-                    imdbId = info?.imdbId ?: q.imdbId,
-                    tv = tv,
-                    doubanId = info?.doubanId ?: q.doubanId,
-                )
-            }.getOrNull()
+            val db = runCatching { MetaRepository.douban(q, info) }.getOrNull()
             if (db != null) {
                 val dbInfo = db.info?.copy(doubanRating = db.rating, doubanVotes = db.votes, doubanId = db.id)
                 info = when {
@@ -1043,6 +1206,7 @@ object CustomMediaLibraryStore {
                     else -> dbInfo
                 }
             }
+            delay(80L)
         }
         return info
     }
