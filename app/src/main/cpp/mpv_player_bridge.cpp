@@ -317,7 +317,11 @@ Java_com_aisub_player_media_MpvNativeBridge_nativeCreate(JNIEnv* env, jobject th
         return 0;
     }
 
-    MpvInstance* inst = new MpvInstance();
+    MpvInstance* inst = static_cast<MpvInstance*>(malloc(sizeof(MpvInstance)));
+    if (!inst) {
+        g_api.terminate_destroy(mpv);
+        return 0;
+    }
     memset(inst, 0, sizeof(MpvInstance));
     inst->mpv = mpv;
     inst->callback_global = env->NewGlobalRef(thiz);
@@ -606,5 +610,5 @@ Java_com_aisub_player_media_MpvNativeBridge_nativeDestroy(
         inst->callback_global = nullptr;
     }
     pthread_mutex_destroy(&inst->surface_lock);
-    delete inst;
+    free(inst);
 }
