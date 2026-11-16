@@ -30,6 +30,9 @@ sealed interface Screen {
     data class ServerHome(val serverId: String, val title: String) : Screen
     data class ServerLibrary(val serverId: String, val sectionKey: String, val title: String) : Screen
     data class ServerDetail(val serverId: String, val ratingKey: String) : Screen
+    /** 首页自定义刮削媒体库（电影 / 电视剧海报墙与单部详情页） */
+    data class CustomLibrary(val libraryId: String) : Screen
+    data class CustomLibraryItem(val libraryId: String, val itemId: String) : Screen
     /**
      * 文件详情：文件信息 + TMDB 简介 + 豆瓣评分。serverId 为 null 表示本地文件；
      * queue / index 是点「播放」时的播放队列（同一文件夹里的媒体，方便连播下一集）。

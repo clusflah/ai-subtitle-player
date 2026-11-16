@@ -291,6 +291,10 @@ fun ServerDetailScreen(
     onBack: () -> Unit,
     openItem: (ServerItem) -> Unit,
     play: (List<MediaEntry>, Int) -> Unit,
+    settings: com.aisub.player.AppSettings = com.aisub.player.AppSettings(),
+    onUpdateSettings: ((com.aisub.player.AppSettings) -> Unit)? = null,
+    onOpenSettings: (() -> Unit)? = null,
+    onOpenDiscoverDetail: (com.aisub.player.meta.DiscoverItem) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -381,6 +385,24 @@ fun ServerDetailScreen(
                 }
                 if (it.roles.isNotEmpty()) item { Cast(it) }
                 it.videoInfo?.let { info -> item { Text(info, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(16.dp)) } }
+                if (it.type in setOf("movie", "show") && it.title.isNotBlank()) {
+                    item(key = "server_recommendations") {
+                        Spacer(Modifier.height(14.dp))
+                        MediaRecommendationsSection(
+                            kind = if (it.type == "show") "tv" else "movie",
+                            title = it.title,
+                            year = it.year,
+                            genres = it.genres,
+                            directors = it.directors,
+                            cast = it.roles.map { r -> r.name }.take(10),
+                            overview = it.summary,
+                            settings = settings,
+                            onUpdateSettings = onUpdateSettings,
+                            onOpenSettings = onOpenSettings,
+                            onSelectWork = onOpenDiscoverDetail,
+                        )
+                    }
+                }
             }
         }
     }

@@ -173,6 +173,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
     val testResults = remember { mutableStateMapOf<String, String>() }
     val testing = remember { mutableStateMapOf<String, Boolean>() }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     fun runTest(key: String, block: suspend () -> String) {
         testing[key] = true
         scope.launch {
@@ -777,6 +778,13 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 ProxySettings(s) { s = it }
             }
 
+            // ---------------- 多端同步 ----------------
+            val existingServers = remember { com.aisub.player.media.AppStore(context).servers() }
+            MultiDeviceSyncCard(
+                existingServers = existingServers,
+                flush = { if (s != vm.state.value.settings) vm.updateSettings(s) },
+            )
+
             // ---------------- 备份与迁移 ----------------
             BackupCard(flush = { if (s != vm.state.value.settings) vm.updateSettings(s) })
         }
@@ -789,6 +797,7 @@ private fun ProxySettings(s: AppSettings, onChange: (AppSettings) -> Unit) {
     var testing by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     Column {
         ProxyType.entries.forEachIndexed { i, type ->
             if (i > 0) CardDivider(inset = 64.dp)
@@ -834,6 +843,7 @@ private fun TtsSettings(s: AppSettings, vm: MainViewModel, onChange: (AppSetting
     var testing by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     Column {
         ListRow(
             title = "播放时朗读译文",
@@ -954,6 +964,7 @@ private fun ModelField(
     var error by remember(listKey) { mutableStateOf<String?>(null) }
     var expanded by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     fun load() {
         loading = true
         error = null

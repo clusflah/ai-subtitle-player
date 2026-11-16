@@ -194,6 +194,7 @@ fun CollapsibleCard(
         "朗读" in title || "配音" in title -> AppIcons.Volume
         "播放" in title -> AppIcons.PlayArrow
         "代理" in title || "网络" in title -> AppIcons.Web
+        "同步" in title -> AppIcons.Refresh
         "备份" in title -> AppIcons.Cloud
         else -> AppIcons.Settings
     }

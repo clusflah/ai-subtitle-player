@@ -129,6 +129,8 @@ private sealed interface HomeDialog {
     data class EditServer(val server: Server, val hint: String? = null) : HomeDialog
     data class CloudLogin(val type: ServerType, val existing: Server?) : HomeDialog
     data class RenameServer(val server: Server) : HomeDialog
+    data object NewCustomLibrary : HomeDialog
+    data object Sync : HomeDialog
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -336,6 +338,7 @@ fun HomeScreen(
                                     AddSourceDropdownMenu(
                                         expanded = addMenu,
                                         onDismiss = { addMenu = false },
+                                        onNewMediaLibrary = { addMenu = false; dialog = HomeDialog.NewCustomLibrary },
                                         onPick = { type ->
                                             addMenu = false
                                             dialog = when (type) {
@@ -538,6 +541,13 @@ fun HomeScreen(
                     addSource = { dialog = HomeDialog.AddSource(setOf(AddKind.STORAGE, AddKind.MEDIA_SERVER)) },
                     openReading = { nav.push(Screen.MangaRead(it)) },
                     openWebManga = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
+                    openCustomLibrary = { libId -> nav.push(Screen.CustomLibrary(libId)) },
+                    openCustomItem = { libId, itemId -> nav.push(Screen.CustomLibraryItem(libId, itemId)) },
+                    openServerDetailById = { sid, rk -> nav.push(Screen.ServerDetail(sid, rk)) },
+                    openRemotePath = { srv, path, title ->
+                        if (srv.type.isMediaServer && path.isEmpty()) nav.push(Screen.ServerHome(srv.id, srv.name))
+                        else nav.push(Screen.Remote(srv.id, path, title))
+                    },
                 )
                 Tab.LOCAL -> Column {
                     val mediaOptions = listOf(
@@ -669,6 +679,7 @@ fun HomeScreen(
                     openLiveFavorites = { nav.push(Screen.Live) },
                     openManga = { nav.push(Screen.Manga) },
                     openBooks = { nav.push(Screen.Books) },
+                    onSync = { dialog = HomeDialog.Sync },
                 )
             }
         }
@@ -737,6 +748,22 @@ fun HomeScreen(
             initial = d.server, hint = d.hint,
             onDismiss = { dialog = null },
             onSave = { lib.saveServer(it); dialog = null },
+        )
+        HomeDialog.NewCustomLibrary -> EditCustomLibraryDialog(
+            initial = null,
+            lib = lib,
+            onAddCloudSource = { dialog = HomeDialog.AddSource(setOf(AddKind.STORAGE)) },
+            onDismiss = { dialog = null },
+            onSaved = { saved, scrapeNow ->
+                dialog = null
+                if (scrapeNow) {
+                    com.aisub.player.media.CustomMediaLibraryStore.startScrape(context, saved.id, mainUi.settings, lib)
+                }
+            },
+        )
+        HomeDialog.Sync -> MultiDeviceSyncQuickDialog(
+            onOpenSettings = { dialog = null; openSettings() },
+            onDismiss = { dialog = null },
         )
     }
 }
@@ -1009,12 +1036,21 @@ internal enum class AddKind(val title: String) { STORAGE("网络存储"), MEDIA_
 private fun AddSourceDropdownMenu(
     expanded: Boolean,
     onDismiss: () -> Unit,
+    onNewMediaLibrary: (() -> Unit)? = null,
     onPick: (ServerType) -> Unit,
     onLive: () -> Unit,
     onStream: () -> Unit,
     onTelegram: () -> Unit,
 ) {
     AppMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        if (onNewMediaLibrary != null) {
+            DropdownMenuItem(
+                leadingIcon = { Icon(AppIcons.Movie, null, tint = Orange, modifier = Modifier.size(26.dp)) },
+                text = { Text("新建电影 / 剧集媒体库", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium) },
+                onClick = onNewMediaLibrary,
+            )
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+        }
         @Composable
         fun ServerMenuItem(type: ServerType) {
             DropdownMenuItem(
@@ -1136,6 +1172,10 @@ private fun HomeTab(
     openReading: (MangaOpen) -> Unit,
     /** 继续阅读：网页漫画回到那一话的网页 */
     openWebManga: (String) -> Unit,
+    openCustomLibrary: (String) -> Unit = {},
+    openCustomItem: (String, String) -> Unit = { _, _ -> },
+    openServerDetailById: (String, String) -> Unit = { _, _ -> },
+    openRemotePath: (Server, String, String) -> Unit = { _, _, _ -> },
 ) {
     val mediaServers = state.servers.filter { it.type.isMediaServer }
     val resume = remember(state.history, mediaServers) {
@@ -1187,7 +1227,20 @@ private fun HomeTab(
     val favorites = remember(state.favoriteFolders, state.servers) {
         state.favoriteFolders.filter { f -> f.serverId == null || state.servers.any { it.id == f.serverId } }
     }
+    val customLibraries by com.aisub.player.media.CustomMediaLibraryStore.libraries.collectAsStateWithLifecycle()
     LazyColumn(state = lib.listState("home"), contentPadding = PaddingValues(bottom = 104.dp)) {
+        item(key = "home_custom_libraries") {
+            HomeMediaLibrariesSection(
+                lib = lib,
+                settings = settings,
+                onOpenLibrary = openCustomLibrary,
+                onOpenItem = openCustomItem,
+                onOpenServerDetail = openServerDetailById,
+                onOpenRemote = openRemotePath,
+                onAddCloudSource = addSource,
+                play = play,
+            )
+        }
         if (resume.isNotEmpty()) {
             item { SectionHeader("继续观看") }
             item {
@@ -1282,7 +1335,7 @@ private fun HomeTab(
                 }
             }
         }
-        if (resume.isEmpty() && recentSongs.isEmpty() && reading.isEmpty() && favorites.isEmpty() && mediaServers.isEmpty() && recentVideos.isEmpty() && recentWeb.isEmpty() && recentLive.isEmpty() && recentTelegram.isEmpty()) item {
+        if (customLibraries.isEmpty() && resume.isEmpty() && recentSongs.isEmpty() && reading.isEmpty() && favorites.isEmpty() && mediaServers.isEmpty() && recentVideos.isEmpty() && recentWeb.isEmpty() && recentLive.isEmpty() && recentTelegram.isEmpty()) item {
             Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 IconBadge(AppIcons.Movie, size = 72.dp)
                 Spacer(Modifier.height(16.dp))
@@ -1514,6 +1567,7 @@ private fun MeTab(
     openLiveFavorites: () -> Unit,
     openManga: () -> Unit,
     openBooks: () -> Unit,
+    onSync: () -> Unit = {},
 ) {
     val context = LocalContext.current
     LaunchedEffect(Unit) {
@@ -1693,7 +1747,9 @@ private fun MeTab(
 
         SectionHeader("设置与帮助")
         SurfaceCard {
-            ListRow("设置", "语音识别、字幕翻译、播放、朗读", AppIcons.Settings, onClick = onSettings)
+            ListRow("多端同步", "跨手机、电视、Windows 双向同步进度、自定义媒体库与服务器", AppIcons.Refresh, onClick = onSync)
+            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            ListRow("设置", "语音识别、字幕翻译、播放、朗读、同步", AppIcons.Settings, onClick = onSettings)
             HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
             val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
             ListRow("检查更新", "当前版本 ${com.aisub.player.BuildConfig.VERSION_NAME}", AppIcons.SystemUpdate,

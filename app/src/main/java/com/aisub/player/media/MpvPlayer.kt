@@ -957,6 +957,15 @@ class MpvPlayer(
         return Futures.immediateVoidFuture()
     }
 
+    /** 供直播录屏在 RTSP / RTMP / UDP 等协议下调用 libmpv 原生 stream-record 无损落盘 */
+    fun setStreamRecordPath(path: String): Boolean {
+        if (!MpvNativeBridge.isAvailable()) return false
+        return runCatching {
+            bridge.setPropertyString("stream-record", path)
+            true
+        }.getOrDefault(false)
+    }
+
     companion object {
         private val DIRECT_STREAM_SCHEMES = setOf("rtsp", "rtsps", "rtmp", "rtmps", "rtp", "udp", "mms", "mmsh")
 

@@ -108,6 +108,14 @@ class MainActivity : ComponentActivity() {
         com.aisub.player.update.appUpdater.autoCheck(this)
         // 续播、播放列表里可能有 Telegram 的视频：先记下 Context，用到时再启动
         com.aisub.player.telegram.Telegram.init(this)
+        // 初始化首页自定义刮削媒体库与多端自动同步
+        com.aisub.player.media.CustomMediaLibraryStore.ensureInit(this)
+        com.aisub.player.sync.MultiDeviceSync.onSyncedReload = {
+            lib.reloadStored()
+            com.aisub.player.media.CustomMediaLibraryStore.reload(this)
+            main.reloadSettings()
+        }
+        com.aisub.player.sync.MultiDeviceSync.triggerStartupSyncIfEnabled(this)
         // 小组件在后台放着歌：界面接着放（先于 handleIntent，点通知栏进来时能直接打开播放页）
         main.resumeWidgetPlayback()
         if (savedInstanceState == null) handleIntent(intent)
@@ -258,6 +266,39 @@ class MainActivity : ComponentActivity() {
                             lib, screen.serverId, screen.ratingKey, back,
                             openItem = { nav.push(Screen.ServerDetail(screen.serverId, it.ratingKey)) },
                             play = play,
+                            settings = ui.settings,
+                            onUpdateSettings = main::updateSettings,
+                            onOpenSettings = { nav.push(Screen.Settings) },
+                            onOpenDiscoverDetail = { w -> nav.push(Screen.DiscoverDetail(w)) },
+                        )
+                        is Screen.CustomLibrary -> com.aisub.player.ui.CustomLibraryScreen(
+                            libraryId = screen.libraryId,
+                            lib = lib,
+                            settings = ui.settings,
+                            onBack = back,
+                            onOpenItem = { itemId -> nav.push(Screen.CustomLibraryItem(screen.libraryId, itemId)) },
+                            onOpenServerDetail = { sid, rk -> nav.push(Screen.ServerDetail(sid, rk)) },
+                            onOpenRemote = { srv, path, title ->
+                                if (srv.type.isMediaServer && path.isEmpty()) nav.push(Screen.ServerHome(srv.id, srv.name))
+                                else nav.push(Screen.Remote(srv.id, path, title))
+                            },
+                            play = play,
+                        )
+                        is Screen.CustomLibraryItem -> com.aisub.player.ui.CustomLibraryItemDetailScreen(
+                            libraryId = screen.libraryId,
+                            itemId = screen.itemId,
+                            lib = lib,
+                            settings = ui.settings,
+                            onUpdateSettings = main::updateSettings,
+                            onOpenSettings = { nav.push(Screen.Settings) },
+                            onBack = back,
+                            play = play,
+                            onOpenDiscoverDetail = { w -> nav.push(Screen.DiscoverDetail(w)) },
+                            onOpenServerDetail = { sid, rk -> nav.push(Screen.ServerDetail(sid, rk)) },
+                            onOpenRemote = { srv, path, title ->
+                                if (srv.type.isMediaServer && path.isEmpty()) nav.push(Screen.ServerHome(srv.id, srv.name))
+                                else nav.push(Screen.Remote(srv.id, path, title))
+                            },
                         )
                         is Screen.FileDetail -> FileDetailScreen(
                             main, lib, screen.serverId, screen.item, screen.queue, screen.index, screen.folder, back,
@@ -265,6 +306,7 @@ class MainActivity : ComponentActivity() {
                             openImages = { images, i -> nav.push(Screen.ImageViewer(screen.serverId, images, i)) },
                             openFolder = { dir -> screen.serverId?.let { nav.push(Screen.Remote(it, dir.path, dir.name)) } },
                             openSettings = { nav.push(Screen.Settings) },
+                            openDiscoverDetail = { w -> nav.push(Screen.DiscoverDetail(w)) },
                         )
                         is Screen.ImageViewer -> ImageViewerScreen(
                             screen.serverId, screen.images, screen.index, back,
@@ -303,6 +345,11 @@ class MainActivity : ComponentActivity() {
                                 lib.localShowsVideo = true
                                 while (nav.stack.size > 1) nav.pop()
                             },
+                            onOpenCustomItem = { libId, itemId ->
+                                nav.push(Screen.CustomLibraryItem(libId, itemId))
+                            },
+                            onUpdateSettings = main::updateSettings,
+                            onSelectWork = { w -> nav.push(Screen.DiscoverDetail(w)) },
                         )
                         is Screen.DiscoverChart -> com.aisub.player.ui.DiscoverChartScreen(
                             initialChartId = screen.chartId,
@@ -373,6 +420,7 @@ class MainActivity : ComponentActivity() {
 
     /** 离开播放页：视频暂停；音乐（开了后台播放时）继续放，底部显示「正在播放」小条。 */
     private fun leavePlayer() {
+        main.stopLiveRecordingIfActive()
         if (!main.keepMusicPlayingOutsidePlayer()) main.player.pause()
         main.savePosition()
         lib.reloadStored()

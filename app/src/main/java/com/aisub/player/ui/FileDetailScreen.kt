@@ -113,6 +113,7 @@ fun FileDetailScreen(
     openImages: (List<RemoteItem>, Int) -> Unit,
     openFolder: (RemoteItem) -> Unit,
     openSettings: () -> Unit,
+    openDiscoverDetail: (com.aisub.player.meta.DiscoverItem) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -418,6 +419,35 @@ fun FileDetailScreen(
                     LabeledText("来源", server?.let { "${it.name}（${it.type.label}）" } ?: if (isTelegram) "Telegram" else "本机")
                     if ((server == null || !server.type.isCloud) && !isTelegram) LabeledText("位置", Uri.decode(item.path))
                 }
+            }
+
+            // ---------- 相似作品推荐与 AI 智能推荐 ----------
+            if (online && !item.isDir && title.isNotBlank()) {
+                val libState by lib.state.collectAsStateWithLifecycle()
+                val recentWatched = remember(libState.history) {
+                    libState.history.filter { it.entry.isVideo && !it.entry.isLive }
+                        .map { it.entry.displayTitle }
+                        .distinct()
+                        .take(8)
+                }
+                Spacer(Modifier.height(14.dp))
+                MediaRecommendationsSection(
+                    kind = if (info?.kind == "tv" || meta?.kind in setOf("tv", "season", "episode") || parsed.episode != null) "tv" else "movie",
+                    title = title,
+                    originalTitle = info?.originalTitle.orEmpty(),
+                    year = (info?.year ?: meta?.year?.toString() ?: parsed.year?.toString())?.take(4)?.toIntOrNull(),
+                    tmdbId = info?.tmdbId?.takeIf { it > 0 },
+                    doubanId = info?.doubanId,
+                    genres = (info?.genres ?: meta?.genres).orEmpty(),
+                    directors = info?.directors.orEmpty(),
+                    cast = info?.cast.orEmpty(),
+                    overview = overview,
+                    recentWatchedTitles = recentWatched,
+                    settings = settings,
+                    onUpdateSettings = main::updateSettings,
+                    onOpenSettings = openSettings,
+                    onSelectWork = openDiscoverDetail,
+                )
             }
 
             // ---------- 文本预览 ----------

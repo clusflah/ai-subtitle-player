@@ -1149,6 +1149,9 @@ fun DiscoverDetailScreen(
     onOpenServerDetail: (serverId: String, ratingKey: String) -> Unit = { _, _ -> },
     onOpenRemote: (server: Server, path: String, title: String) -> Unit = { _, _, _ -> },
     onOpenLocalLibrary: () -> Unit = {},
+    onOpenCustomItem: (libraryId: String, itemId: String) -> Unit = { _, _ -> },
+    onUpdateSettings: ((AppSettings) -> Unit)? = null,
+    onSelectWork: (DiscoverItem) -> Unit = {},
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -1220,6 +1223,27 @@ fun DiscoverDetailScreen(
             doubanId = displayDoubanId,
             platforms = detectedPlatforms,
         )
+    }
+
+    val customLibraries by com.aisub.player.media.CustomMediaLibraryStore.libraries.collectAsStateWithLifecycle()
+    val customCatalogs by com.aisub.player.media.CustomMediaLibraryStore.itemsByLibrary.collectAsStateWithLifecycle()
+    val customLibraryMatches = remember(customLibraries, customCatalogs, displayTitle, displayOrigTitle, displayTmdbId, displayDoubanId, displayImdbId) {
+        com.aisub.player.media.CustomMediaLibraryStore.matchInScrapedLibraries(
+            context = context,
+            title = displayTitle,
+            origTitle = displayOrigTitle,
+            tmdbId = displayTmdbId,
+            doubanId = displayDoubanId,
+            imdbId = displayImdbId,
+            kind = enrichedItem.kind,
+        )
+    }
+
+    val recentWatchedTitles = remember(libState.history) {
+        libState.history.filter { it.entry.isVideo && !it.entry.isLive }
+            .map { it.entry.displayTitle }
+            .distinct()
+            .take(8)
     }
 
     // 匹配本地媒体库与本机观看记录
@@ -1553,15 +1577,35 @@ fun DiscoverDetailScreen(
                     }
                 }
             }
+
+            // AI 智能推荐 + 相似作品推荐
+            MediaRecommendationsSection(
+                kind = enrichedItem.kind,
+                title = displayTitle,
+                originalTitle = displayOrigTitle,
+                year = displayYear?.take(4)?.toIntOrNull(),
+                tmdbId = displayTmdbId,
+                doubanId = displayDoubanId,
+                genres = displayGenres,
+                directors = info?.directors.orEmpty(),
+                cast = info?.cast.orEmpty(),
+                overview = displayOverview,
+                recentWatchedTitles = recentWatchedTitles,
+                settings = settings,
+                onUpdateSettings = onUpdateSettings,
+                onOpenSettings = onOpenSettings,
+                onSelectWork = onSelectWork,
+            )
         }
     }
 
-    // 播放来源选择面板：本地资源 / 远程资源 / 原平台播放
+    // 播放来源选择面板：自定义媒体库 / 本地资源 / Emby & Plex 远程资源 / 原平台播放
     if (playDialogOpen) {
         DiscoverPlaySourceDialog(
             title = displayTitle,
             origTitle = displayOrigTitle,
             detectedPlatforms = detectedPlatforms,
+            customLibraryMatches = customLibraryMatches,
             localMatches = localMatches,
             remoteHistoryMatches = remoteHistoryMatches,
             lib = lib,
@@ -1570,6 +1614,10 @@ fun DiscoverDetailScreen(
             onPlayEntries = { list, idx ->
                 playDialogOpen = false
                 play(list, idx)
+            },
+            onOpenCustomItem = { libId, itemId ->
+                playDialogOpen = false
+                onOpenCustomItem(libId, itemId)
             },
             onOpenLocalLibrary = {
                 playDialogOpen = false
@@ -1713,12 +1761,14 @@ private fun DiscoverPlaySourceDialog(
     title: String,
     origTitle: String,
     detectedPlatforms: List<PlatformSource>,
+    customLibraryMatches: List<com.aisub.player.media.IndexedPlayHit.CustomLibraryHit> = emptyList(),
     localMatches: List<MediaEntry>,
     remoteHistoryMatches: List<MediaEntry>,
     lib: LibraryViewModel,
     servers: List<Server>,
     onDismiss: () -> Unit,
     onPlayEntries: (List<MediaEntry>, Int) -> Unit,
+    onOpenCustomItem: (libraryId: String, itemId: String) -> Unit = { _, _ -> },
     onOpenLocalLibrary: () -> Unit,
     onOpenServerDetail: (serverId: String, ratingKey: String) -> Unit,
     onOpenRemote: (server: Server, path: String, title: String) -> Unit,
@@ -1787,6 +1837,36 @@ private fun DiscoverPlaySourceDialog(
                 Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                // 0. 首页已刮削自定义媒体库命中片源（直接索引播放）
+                if (customLibraryMatches.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Icon(AppIcons.Movie, null, tint = Orange, modifier = Modifier.size(18.dp))
+                            Text("已索引媒体库", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        }
+                        customLibraryMatches.forEach { hit ->
+                            val m = hit.item
+                            val singleDirect = m.kind == "movie" && m.episodes.size == 1
+                            PlayOptionRow(
+                                title = m.title,
+                                subtitle = buildString {
+                                    append("自定义媒体库「${hit.library.name}」")
+                                    m.badgeText?.let { append(" · $it") }
+                                },
+                                actionText = if (singleDirect) "直接播放" else "选集播放",
+                                onClick = {
+                                    if (singleDirect) {
+                                        onPlayEntries(listOf(m.episodes.first().toMediaEntry(null)), 0)
+                                    } else {
+                                        onOpenCustomItem(hit.library.id, m.id)
+                                    }
+                                },
+                            )
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                }
+
                 // 1. 本地资源
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {

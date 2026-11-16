@@ -173,6 +173,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
     val testResults = remember { mutableStateMapOf<String, String>() }
     val testing = remember { mutableStateMapOf<String, Boolean>() }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     fun runTest(key: String, block: suspend () -> String) {
         testing[key] = true
         scope.launch {
@@ -778,6 +779,13 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             ) {
                 ProxySettings(s) { s = it }
             }
+
+            // ---------------- 多端同步 ----------------
+            val existingServers = remember { com.aisub.player.media.AppStore(context).servers() }
+            MultiDeviceSyncCard(
+                existingServers = existingServers,
+                flush = { if (s != vm.state.value.settings) vm.updateSettings(s) },
+            )
 
             // ---------------- 备份与迁移 ----------------
             BackupCard(flush = { if (s != vm.state.value.settings) vm.updateSettings(s) })

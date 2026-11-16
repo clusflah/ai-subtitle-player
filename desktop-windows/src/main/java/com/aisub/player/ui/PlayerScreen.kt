@@ -355,6 +355,19 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     /** 直播面板当前标签：0 = 分类，1 = 频道，2 = 节目 */
     var channelSheetTab by remember { mutableIntStateOf(2) }
     val isLive = state.current?.isLive == true
+    val recordState by com.aisub.player.live.LiveRecorder.state.collectAsStateWithLifecycle()
+    LaunchedEffect(recordState.lastSavedMessage, recordState.error) {
+        recordState.lastSavedMessage?.let { msg ->
+            indicator = AppIcons.Download to msg
+            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+            com.aisub.player.live.LiveRecorder.clearMessage()
+        }
+        recordState.error?.let { err ->
+            indicator = AppIcons.Info to err
+            Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+            com.aisub.player.live.LiveRecorder.clearMessage()
+        }
+    }
     val epgVer = EpgRepository.version
     var epgNowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(isLive) {
@@ -724,14 +737,33 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             )
         }
-        // 流式识别进行中：控制栏收起时在角上留一个小标记
-        if (state.transcribing && state.streamingAsr && !controls && !musicMode && !PipState.inPip) {
-            Text(
-                "● 流式识别", color = Color(0xCCFFFFFF), fontSize = 11.sp,
-                modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(12.dp)
-                    .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Color(0x66F28C00))
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
-            )
+        // 流式识别 / 直播录屏进行中：控制栏收起时在左上角留一个小标记
+        if ((recordState.recording || (state.transcribing && state.streamingAsr)) && !controls && !musicMode && !PipState.inPip) {
+            Row(
+                Modifier.align(Alignment.TopStart).statusBarsPadding().padding(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (recordState.recording) {
+                    Text(
+                        "● 录屏 ${formatClock(recordState.elapsedMs)}",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Color(0xCCD32F2F))
+                            .padding(horizontal = 9.dp, vertical = 2.dp),
+                    )
+                }
+                if (state.transcribing && state.streamingAsr) {
+                    Text(
+                        "● 流式识别", color = Color(0xCCFFFFFF), fontSize = 11.sp,
+                        modifier = Modifier
+                            .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Color(0x66F28C00))
+                            .padding(horizontal = 8.dp, vertical = 2.dp),
+                    )
+                }
+            }
         }
         // 同步诊断浮层（Stage 0：可通过「更多 → 同步诊断」随时开关）
         if (showSyncDiag && !musicMode && !PipState.inPip) {
@@ -1121,6 +1153,42 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 if (isLive) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Spacer(Modifier.width(10.dp))
+                        val rec = recordState.recording
+                        val saving = recordState.saving
+                        Row(
+                            Modifier
+                                .tvFocusRing(RoundedCornerShape(50), color = Color.White, scale = true)
+                                .liquidGlass(
+                                    shape = RoundedCornerShape(50),
+                                    style = GlassStyle.Pill,
+                                    tint = if (rec) Color(0xDDD32F2F) else GlassTokens.DarkControlTint,
+                                )
+                                .clickable(enabled = !saving) {
+                                    vm.toggleLiveRecording()
+                                    interactions++
+                                }
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            Icon(
+                                if (rec) AppIcons.StopSquare else AppIcons.RecordDot,
+                                contentDescription = if (rec) "停止录屏" else "直播录屏",
+                                tint = if (rec) Color.White else Color(0xFFFF5252),
+                                modifier = Modifier.size(13.dp),
+                            )
+                            Text(
+                                text = when {
+                                    saving -> "保存中…"
+                                    rec -> "停止 ${formatClock(recordState.elapsedMs)}"
+                                    else -> "录屏"
+                                },
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
                         Spacer(Modifier.weight(1f))
                         // 实时字幕和画面对不上时手动对齐：字幕早了点「推后」，晚了点「提前」；点中间的数字细调
                         if (state.transcribing || state.cues.isNotEmpty()) {
@@ -1556,6 +1624,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         showMore = false
                         when (action) {
                             MoreAction.SWITCH_KERNEL -> dialog = PlayerDialog.KERNEL
+                            MoreAction.RECORD_LIVE -> vm.toggleLiveRecording()
                             MoreAction.ASPECT -> {
                                 resizeIndex = (resizeIndex + 1) % RESIZE_MODES.size
                                 indicator = AppIcons.AspectRatio to RESIZE_MODES[resizeIndex].second
@@ -2231,7 +2300,7 @@ private fun GestureLayer(
 
 // ---------------- 更多菜单 ----------------
 
-private enum class MoreAction { ASPECT, SLEEP, SPEED, GOTO, NAVIGATE, BOOKMARKS, SKIP, SWITCH_KERNEL, EQUALIZER, AUDIO_ONLY, PIP, REPEAT, INFO, SYNC_DIAG, AB_LOOP, SAVE_PLAYLIST, SETTINGS }
+private enum class MoreAction { ASPECT, SLEEP, SPEED, GOTO, NAVIGATE, BOOKMARKS, SKIP, SWITCH_KERNEL, RECORD_LIVE, EQUALIZER, AUDIO_ONLY, PIP, REPEAT, INFO, SYNC_DIAG, AB_LOOP, SAVE_PLAYLIST, SETTINGS }
 
 @Composable
 private fun MorePanel(
@@ -2251,13 +2320,17 @@ private fun MorePanel(
         Triple(MoreAction.SLEEP, AppIcons.Timer, if (state.sleepAt != null) "定时中" else "定时关闭"),
     )
     val groups = listOf(
-        "播放" to listOf(
-            Triple(MoreAction.SWITCH_KERNEL, AppIcons.PlayArrow, "播放内核：${activeKernel.shortLabel}（点此切换）"),
-            Triple(MoreAction.REPEAT, AppIcons.Repeat, "循环：${repeatLabel(repeatMode)}"),
-            Triple(MoreAction.AB_LOOP, AppIcons.Repeat, if (state.loopA == null) "A-B 循环" else if (state.loopB == null) "A-B 循环：设置 B 点" else "关闭 A-B 循环"),
-            Triple(MoreAction.GOTO, AppIcons.AccessTime, "转到时间"),
-            Triple(MoreAction.AUDIO_ONLY, AppIcons.MusicNote, if (audioOnly) "恢复视频画面" else "只播放声音"),
-        ),
+        "播放" to buildList {
+            add(Triple(MoreAction.SWITCH_KERNEL, AppIcons.PlayArrow, "播放内核：${activeKernel.shortLabel}（点此切换）"))
+            if (state.current?.isLive == true) {
+                val recording = com.aisub.player.live.LiveRecorder.state.value.recording
+                add(Triple(MoreAction.RECORD_LIVE, if (recording) AppIcons.StopSquare else AppIcons.RecordDot, if (recording) "停止直播录屏并保存" else "开始直播录屏"))
+            }
+            add(Triple(MoreAction.REPEAT, AppIcons.Repeat, "循环：${repeatLabel(repeatMode)}"))
+            add(Triple(MoreAction.AB_LOOP, AppIcons.Repeat, if (state.loopA == null) "A-B 循环" else if (state.loopB == null) "A-B 循环：设置 B 点" else "关闭 A-B 循环"))
+            add(Triple(MoreAction.GOTO, AppIcons.AccessTime, "转到时间"))
+            add(Triple(MoreAction.AUDIO_ONLY, AppIcons.MusicNote, if (audioOnly) "恢复视频画面" else "只播放声音"))
+        },
         "跳转" to listOf(
             Triple(MoreAction.NAVIGATE, AppIcons.GridView, "章节与片段"),
             Triple(MoreAction.BOOKMARKS, AppIcons.Star, "书签与关键帧"),

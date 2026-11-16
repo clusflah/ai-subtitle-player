@@ -1169,6 +1169,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun onEntryChanged(entry: MediaEntry) {
         if (_state.value.current?.uri == entry.uri) return
+        stopLiveRecordingIfActive()
         cancelAll()
         com.aisub.player.net.NetworkSpeedTracker.resetNetworkSpeed()
         EmbeddedSubtitles.resetDemuxCache()
@@ -1242,6 +1243,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         library.recordHistory(entry.copy(durationMs = if (entry.isLive) 0 else duration), if (entry.isLive) 0 else player.currentPosition)
         extras.saveHistoryThumbnail()
         reportPlexNow(if (player.isPlaying) "playing" else "stopped")
+        com.aisub.player.sync.MultiDeviceSync.scheduleDebouncedAutoSync(getApplication())
+    }
+
+    /** 开启或停止当前直播频道的录屏（支持同步导出实时 AI 字幕 .srt） */
+    fun toggleLiveRecording() {
+        val app = getApplication<Application>()
+        val recState = com.aisub.player.live.LiveRecorder.state.value
+        if (recState.recording) {
+            com.aisub.player.live.LiveRecorder.stop(app, _state.value.cues)
+            return
+        }
+        val cur = _state.value.current ?: return
+        if (!cur.isLive) return
+        val mpvHook: ((java.io.File) -> (() -> Unit)?)? = mpvPlayer?.takeIf { usingMpv }?.let { m ->
+            { outFile ->
+                if (m.setStreamRecordPath(outFile.absolutePath)) {
+                    { m.setStreamRecordPath("") }
+                } else null
+            }
+        }
+        com.aisub.player.live.LiveRecorder.start(
+            context = app,
+            streamUrl = cur.uri,
+            channelTitle = cur.displayTitle,
+            mpvStreamRecordStarter = mpvHook,
+        )
+    }
+
+    fun stopLiveRecordingIfActive() {
+        if (com.aisub.player.live.LiveRecorder.state.value.recording) {
+            com.aisub.player.live.LiveRecorder.stop(getApplication(), _state.value.cues)
+        }
+    }
+
+    /** 多端同步落盘后热刷新内存中的设置 */
+    fun reloadSettings() {
+        val loaded = settingsRepo.load()
+        val old = _state.value.settings
+        _state.update { it.copy(settings = loaded) }
+        if (old.proxyType != loaded.proxyType || old.proxyHost != loaded.proxyHost || old.proxyPort != loaded.proxyPort) {
+            com.aisub.player.net.AppProxy.apply(getApplication(), loaded.proxyType, loaded.proxyHost, loaded.proxyPort)
+        }
     }
 
     /** 只给当前视频选语音语言，不改设置里的默认语言 */
@@ -3194,6 +3237,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             playbackStatsJob?.cancel()
             playbackStatsJob = null
         }
+        stopLiveRecordingIfActive()
         equalizer.release()
         ttsReader.stop()
         previewPlayer?.release()
