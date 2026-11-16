@@ -16,7 +16,14 @@ class LibVLC(val context: Context, val options: List<String> = emptyList()) {
 
 class Media(libVLC: LibVLC, val uri: Uri) {
     internal val options = mutableListOf<String>()
-    fun setHWDecoderEnabled(enabled: Boolean, force: Boolean) {}
+    internal var hwdecPref: Boolean? = null
+    fun setHWDecoderEnabled(enabled: Boolean, force: Boolean) {
+        hwdecPref = when {
+            !enabled -> false
+            force -> true
+            else -> null
+        }
+    }
     fun addOption(option: String) {
         options.add(option)
     }
@@ -131,6 +138,13 @@ class MediaPlayer(libVLC: LibVLC) {
         this.eventListener = listener
     }
 
+    val activePipelineDescription: String
+        get() = engine.activePipelineDescription
+
+    fun setHwdecPreference(forceHwdec: Boolean?) {
+        engine.updateHwdecPreference(forceHwdec)
+    }
+
     fun play() {
         val m = media ?: return
         if (engine.playbackState == Player.STATE_IDLE || engine.playbackState == Player.STATE_ENDED) {
@@ -141,6 +155,7 @@ class MediaPlayer(libVLC: LibVLC) {
                     startMs = (sec * 1000.0).toLong()
                 }
             }
+            engine.hwdecPreference = m.hwdecPref
             engine.setMediaItem(MediaItem.fromUri(m.uri), startMs)
             engine.playWhenReady = true
             engine.prepare()

@@ -224,10 +224,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val mpvPipelineLabel: String?
         get() = when {
             usingMpv -> mpvPlayer?.pipelineSummary
+            usingVlc -> vlcPlayer?.decodeSummaryLabel
             else -> (exoPlayer as? com.aisub.player.desktop.DesktopExoPlayer)?.activePipelineDescription?.takeIf { it.isNotBlank() }
         }
-    val mpvHwdecPref: Boolean? get() = mpvPlayer?.userForceHwdec
-    fun setMpvHwdecPreference(forceHwdec: Boolean?) { mpv().setHwdecPreference(forceHwdec) }
+    val decodeMode: DecodeMode get() = _state.value.settings.decodeMode
+    val mpvHwdecPref: Boolean? get() = _state.value.settings.decodeMode.forceHwdecFlag
+
+    fun setDecodeMode(mode: DecodeMode) {
+        if (_state.value.settings.decodeMode == mode &&
+            (exoPlayer as? com.aisub.player.desktop.DesktopExoPlayer)?.hwdecPreference == mode.forceHwdecFlag &&
+            mpvPlayer?.userForceHwdec == mode.forceHwdecFlag &&
+            vlcPlayer?.userForceHwdec == mode.forceHwdecFlag
+        ) return
+        updateSettings(_state.value.settings.copy(decodeMode = mode))
+    }
+
+    fun setMpvHwdecPreference(forceHwdec: Boolean?) {
+        setDecodeMode(DecodeMode.fromForceHwdecFlag(forceHwdec))
+    }
 
     /** 应用没开着时从桌面小组件开始的后台播放：先停掉它，界面打开后接着放（见 [resumeWidgetPlayback]） */
     private var widgetHandover = WidgetPlayback.takeOver()
@@ -597,6 +611,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     if (PlaybackService.session === session) NowPlayingWidget.attach(getApplication(), session.player)
                 }
         }
+        (exoPlayer as? com.aisub.player.desktop.DesktopExoPlayer)?.hwdecPreference = _state.value.settings.decodeMode.forceHwdecFlag
         // 桌面小组件显示正在唱的那句歌词
         viewModelScope.launch {
             music.state.map { it.lyrics }.distinctUntilChanged().collect { l ->
@@ -606,11 +621,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun mpv(): MpvPlayer = mpvPlayer ?: MpvPlayer(getApplication(), authDataSourceFactory(getApplication())).also {
+        it.setHwdecPreference(_state.value.settings.decodeMode.forceHwdecFlag)
         it.addListener(listener)
         mpvPlayer = it
     }
 
     private fun vlc(): VlcPlayer = vlcPlayer ?: VlcPlayer(getApplication(), proxy).also {
+        it.setHwdecPreference(_state.value.settings.decodeMode.forceHwdecFlag)
         it.addListener(listener)
         vlcPlayer = it
     }
@@ -715,7 +732,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         vlcPlayer?.stop()
         queue = entries ?: listOf(entry)
         val m = mpv()
-        m.dolbyProfile5Hint = DolbyVisionHelper.looksLikeDolbyVisionTitle(entry.title)
+        m.setHwdecPreference(_state.value.settings.decodeMode.forceHwdecFlag)
+        m.dolbyProfile5Hint = DolbyVisionHelper.looksLikeProfile5Title(entry.title)
         m.repeatMode = repeatMode
         m.setPlaybackSpeed(speed)
         m.setMediaItem(itemOf(entry), positionMs)
@@ -741,6 +759,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         mpvPlayer?.clearMediaItems()
         queue = channels ?: listOf(entry)
         val v = vlc()
+        v.setHwdecPreference(_state.value.settings.decodeMode.forceHwdecFlag)
         v.setPlaybackSpeed(speed)
         v.setMediaItem(itemOf(entry), positionMs)
         _state.update { it.copy(playbackError = null, videoProblem = null) }
@@ -803,7 +822,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 mpvPlayer?.stop()
                 mpvPlayer?.clearMediaItems()
                 vlcPlayer?.stop()
-                (exoPlayer as? com.aisub.player.desktop.DesktopExoPlayer)?.autoDolbyProtection = _state.value.settings.autoDolbyMpv
+                (exoPlayer as? com.aisub.player.desktop.DesktopExoPlayer)?.let { d ->
+                    d.autoDolbyProtection = _state.value.settings.autoDolbyMpv
+                    d.hwdecPreference = _state.value.settings.decodeMode.forceHwdecFlag
+                }
                 val cleanQueue = savedQueue.filter { it == entry || !VlcPlayer.needsVlc(it.title) }
                 queue = cleanQueue
                 val idx = cleanQueue.indexOfFirst { it.uri == entry.uri }.coerceAtLeast(0)
@@ -1023,6 +1045,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val loaded = settingsRepo.load()
         val old = _state.value.settings
         _state.update { it.copy(settings = loaded) }
+        if (old.decodeMode != loaded.decodeMode) {
+            applyDecodeModeLive(loaded.decodeMode)
+        }
         if (old.proxyType != loaded.proxyType || old.proxyHost != loaded.proxyHost || old.proxyPort != loaded.proxyPort) {
             com.aisub.player.net.AppProxy.apply(getApplication(), loaded.proxyType, loaded.proxyHost, loaded.proxyPort)
         }
@@ -1049,6 +1074,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (old.preferredAudioLanguages != s.preferredAudioLanguages || old.preferredSubtitleLanguages != s.preferredSubtitleLanguages) {
             extras.applyTrackDefaults()
         }
+        if (old.decodeMode != s.decodeMode) {
+            applyDecodeModeLive(s.decodeMode)
+        }
+    }
+
+    private fun applyDecodeModeLive(mode: DecodeMode) {
+        val flag = mode.forceHwdecFlag
+        (exoPlayer as? com.aisub.player.desktop.DesktopExoPlayer)?.updateHwdecPreference(flag)
+        mpvPlayer?.setHwdecPreference(flag)
+        vlcPlayer?.setHwdecPreference(flag)
     }
 
     // ---------------- 朗读与角色 ----------------

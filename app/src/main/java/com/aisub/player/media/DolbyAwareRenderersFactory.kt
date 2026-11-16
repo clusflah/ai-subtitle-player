@@ -19,6 +19,7 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 @UnstableApi
 class DolbyAwareRenderersFactory(
     private val appContext: Context,
+    private val decodeModeProvider: () -> com.aisub.player.DecodeMode = { com.aisub.player.DecodeMode.AUTO },
     private val allowBlockedProfile5DirectRender: () -> Boolean = { false },
 ) : DefaultRenderersFactory(appContext) {
 
@@ -35,25 +36,43 @@ class DolbyAwareRenderersFactory(
                 requiresSecureDecoder,
                 requiresTunnelingDecoder,
             )
-            if (!mimeType.equals(MimeTypes.VIDEO_DOLBY_VISION, ignoreCase = true)) {
+            if (!mimeType.startsWith("video/", ignoreCase = true)) {
                 return@MediaCodecSelector defaultList
             }
 
-            val dvDisplay = DolbyVisionHelper.displaySupportsDolbyVision(appContext)
-            val hwDv = DolbyVisionHelper.hasHardwareDolbyVisionDecoder(requireProfile5 = false)
-
-            // 屏幕与硬件解码器均原生支持杜比视界时，保留系统杜比解码管线
-            if (dvDisplay && hwDv) {
-                return@MediaCodecSelector defaultList
+            val filteredForDolby = if (mimeType.equals(MimeTypes.VIDEO_DOLBY_VISION, ignoreCase = true)) {
+                val dvDisplay = DolbyVisionHelper.displaySupportsDolbyVision(appContext)
+                val hwDv = DolbyVisionHelper.hasHardwareDolbyVisionDecoder(requireProfile5 = false)
+                // 屏幕与硬解均原生支持杜比视界或用户手动锁死默认内核时放行，否则拦截 Profile 5 转交 MPV，Profile 7/8 回退 HEVC/AV1 底流
+                if ((dvDisplay && hwDv) || allowBlockedProfile5DirectRender()) defaultList else emptyList()
+            } else {
+                defaultList
+            }
+            if (filteredForDolby.isEmpty()) {
+                return@MediaCodecSelector emptyList<MediaCodecInfo>()
             }
 
-            // 用户若强制手动锁死默认内核则放行，否则在非杜比屏幕上拒绝未认证的 dolby-vision 解码器，
-            // 使 Profile 5 立即进入 MainViewModel 的 MPV 自动分流（不闪出一帧紫绿画面），
-            // 而 Profile 7/8 由 Media3 MediaCodecUtil 自动回退至基础 HEVC/AV1 解码器。
-            if (allowBlockedProfile5DirectRender()) {
-                return@MediaCodecSelector defaultList
+            when (decodeModeProvider()) {
+                com.aisub.player.DecodeMode.SW -> filteredForDolby.filter { isSoftwareCodec(it) }
+                com.aisub.player.DecodeMode.HW -> {
+                    val hw = filteredForDolby.filterNot { isSoftwareCodec(it) }
+                    hw.ifEmpty { filteredForDolby }
+                }
+                com.aisub.player.DecodeMode.AUTO -> filteredForDolby
             }
-            emptyList<MediaCodecInfo>()
+        }
+    }
+
+    companion object {
+        internal fun isSoftwareCodec(info: MediaCodecInfo): Boolean {
+            val name = info.name.lowercase()
+            return name.startsWith("omx.google.") ||
+                name.startsWith("c2.android.") ||
+                name.startsWith("c2.goldfish.") ||
+                name.contains(".sw.") ||
+                name.contains("sw.decoder") ||
+                name.endsWith(".sw") ||
+                "ffmpeg" in name
         }
     }
 }

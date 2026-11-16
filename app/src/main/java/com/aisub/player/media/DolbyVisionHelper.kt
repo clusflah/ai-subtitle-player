@@ -164,17 +164,22 @@ object DolbyVisionHelper {
         if (isProfile5(format)) {
             return !dvDisplay || !hasHardwareDolbyVisionDecoder(requireProfile5 = true)
         }
-        // Profile 7 / 8 在完全不支持 HDR 的老电视（如 Android 6.0 SDR 电视）上，用 MPV 色调映射也能避免发灰发暗
-        if (!displaySupportsAnyHdr(context) && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            return true
-        }
+        // Profile 7 / 8 带有标准 HEVC HDR10 / HLG 兼容底流，由 DolbyAwareRenderersFactory
+        // 自动回退至系统原生 HEVC Surface 零拷贝硬解，既无紫绿偏色又避免老电视与 Android 12 以下设备内存拷贝掉帧
         return false
     }
 
-    /** 根据文件名初步猜测是否为杜比视界片源（用于在起播前或提示文案中辅助识别）。 */
+    /** 根据文件名初步猜测是否为杜比视界片源（仅用于提示文案展示，不锁死软解）。 */
     fun looksLikeDolbyVisionTitle(title: String?): Boolean {
         if (title.isNullOrBlank()) return false
-        return Regex("""(?i)(?<![a-z0-9])(dv|dovi|dolby[\s._-]*vision)(?![a-z0-9])""").containsMatchIn(title)
+        return Regex("""(?i)(?:(?<![a-z0-9])(?:dv|dovi|dolby[\s._-]*vision)(?![a-z0-9])|杜比视界)""").containsMatchIn(title)
+    }
+
+    /** 根据文件名判断是否明确标注为无兼容底流的杜比视界 Profile 5（避免将 Profile 7/8 误判锁死软解）。 */
+    fun looksLikeProfile5Title(title: String?): Boolean {
+        if (title.isNullOrBlank()) return false
+        return Regex("""(?i)(?:(?:dvhe|dvh1|dvav|dva1|dav1)[\s._-]*0*5\b|\bdvp5\b|\b(?:dolby[\s._-]*vision|dovi|dv)[\s._-]*(?:profile[\s._-]*)?5\b)""")
+            .containsMatchIn(title)
     }
 
     /** 可读的杜比视界规格说明（供播放提示与视频信息面板展示）。 */

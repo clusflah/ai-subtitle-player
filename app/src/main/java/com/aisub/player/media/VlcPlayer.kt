@@ -131,6 +131,33 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         audioBridge.setAsrConsumer(onChunk, onDiscontinuity)
     }
 
+    /** 用户手动覆盖的硬解偏好：null=智能自动，true=强制硬解，false=强制软解 */
+    var userForceHwdec: Boolean? = null
+        private set
+
+    /** 当前实际生效的解码策略描述 */
+    val decodeSummaryLabel: String
+        get() = when (userForceHwdec) {
+            true -> "硬解优先 (MediaCodec)"
+            false -> "纯软解 (FFmpeg CPU)"
+            null -> "智能自动 (MediaCodec 硬解)"
+        }
+
+    /** 切换 VLC 软硬解策略；若当前正在播放点播视频则保持原进度即时重载解码器。 */
+    fun setHwdecPreference(forceHwdec: Boolean?) {
+        if (userForceHwdec == forceHwdec) return
+        userForceHwdec = forceHwdec
+        if (items.isNotEmpty() && playbackState != Player.STATE_IDLE && playbackState != Player.STATE_ENDED) {
+            val isLive = items.firstOrNull()?.localConfiguration?.tag == "live"
+            if (!isLive) {
+                startPositionMs = mp.time.coerceAtLeast(0L)
+            }
+            mp.stop()
+            handlePrepare()
+        }
+        invalidateState()
+    }
+
     /** 当前实际生效的音频输出路径描述（AAudio 低延迟直出 / AudioTrack + -160ms 同步补偿）。 */
     val audioBackendLabel: String
         get() = audioBridge.activeBackendLabel()
@@ -290,7 +317,14 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         directRemoteStream = openDirectly
         lastDirectReadBytes = -1L
 
-        media.setHWDecoderEnabled(true, false)
+        when (userForceHwdec) {
+            true -> media.setHWDecoderEnabled(true, true)
+            false -> {
+                media.setHWDecoderEnabled(false, false)
+                media.addOption(":avcodec-hw=none")
+            }
+            null -> media.setHWDecoderEnabled(true, false)
+        }
         // 光盘镜像不进菜单，直接播放正片（应用里没有光盘菜单的操作界面）
         media.addOption(":no-dvdnav-menu")
         media.addOption(":no-bluray-menu")

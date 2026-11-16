@@ -663,6 +663,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 "播放",
                 listOfNotNull(
                     "内核 " + s.preferredKernel.shortLabel,
+                    if (s.decodeMode != com.aisub.player.DecodeMode.AUTO) "解码 " + s.decodeMode.shortLabel else null,
                     if (s.autoDolbyMpv) "杜比映射" else null,
                     s.preferredAudioLanguages.takeIf { it.isNotEmpty() }?.let { "音轨 " + (LANGUAGE_CHOICES.firstOrNull { c -> c.first == it }?.second ?: it) },
                     s.preferredSubtitleLanguages.takeIf { it.isNotEmpty() }?.let { "字幕 " + (LANGUAGE_CHOICES.firstOrNull { c -> c.first == it }?.second ?: it) },
@@ -681,6 +682,21 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                                 selected = s.preferredKernel == k,
                                 onClick = { s = s.copy(preferredKernel = k) },
                                 label = { Text(k.shortLabel) },
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text("解码方式（全局统一）", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        s.decodeMode.description,
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        com.aisub.player.DecodeMode.entries.forEach { m ->
+                            FilterChip(
+                                selected = s.decodeMode == m,
+                                onClick = { s = s.copy(decodeMode = m) },
+                                label = { Text(m.label) },
                             )
                         }
                     }

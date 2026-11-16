@@ -275,12 +275,24 @@ class MpvPlayer(
         bridge.setOptionString("gpu-context", "android")
         bridge.setOptionString("gpu-api", "opengl")
 
-        // 默认 mediacodec-copy（硬解帧拷回内存供着色器色调映射，不支持的编码自动软解）
-        bridge.setOptionString("hwdec", "mediacodec-copy")
+        // 精简移动端与电视端 GPU 着色器负载：采用单趟双线性采样并关闭高开销蓝噪点抖动与非线性缩放，4K 杜比映射更流畅省电
+        bridge.setOptionString("scale", "bilinear")
+        bridge.setOptionString("cscale", "bilinear")
+        bridge.setOptionString("dscale", "bilinear")
+        bridge.setOptionString("dither", "no")
+        bridge.setOptionString("correct-downscaling", "no")
+        bridge.setOptionString("linear-downscaling", "no")
+        bridge.setOptionString("sigmoid-upscaling", "no")
+
+        // 默认 mediacodec-copy（硬解帧拷回内存供着色器色调映射，不支持的编码或手动指定软解时走 FFmpeg 多核软解）
+        val initHwdec = if (userForceHwdec == false) "no" else "mediacodec-copy"
+        bridge.setOptionString("hwdec", initHwdec)
         bridge.setOptionString("hwdec-codecs", "all")
         bridge.setOptionString("vd-lavc-threads", "0")
-        if (lowRam) {
+        if (lowRam || initHwdec == "no") {
             bridge.setOptionString("vd-lavc-fast", "yes")
+        }
+        if (lowRam) {
             bridge.setOptionString("vd-lavc-skiploopfilter", "nonref")
         }
 
@@ -353,19 +365,40 @@ class MpvPlayer(
 
     /** 切换 MPV 解码策略：null=智能自动（常规硬解、杜比 P5 软解保留 RPU），true=硬解优先，false=纯软解 */
     fun setHwdecPreference(forceHwdec: Boolean?) {
+        if (userForceHwdec == forceHwdec) return
         userForceHwdec = forceHwdec
-        applyEffectiveHwdec(isDolbyP5 = dolbyProfile5Hint || detectedDolbyProfile == 5)
+        applyEffectiveHwdec(
+            isDolbyP5 = dolbyProfile5Hint || detectedDolbyProfile == 5,
+            reloadVideoIfChanged = true,
+        )
+        invalidateState()
     }
 
-    private fun applyEffectiveHwdec(isDolbyP5: Boolean) {
+    private fun applyEffectiveHwdec(isDolbyP5: Boolean, reloadVideoIfChanged: Boolean = false) {
+        if (!bridge.isCreated) return
         val target = when (userForceHwdec) {
             true -> "mediacodec-copy"
             false -> "no"
             // 智能模式：Android MediaCodec 解码器会丢弃 HEVC UNSPEC62 杜比 RPU 动态元数据与 IPTPQc2 标记，
-            // 因此检测到 Profile 5 时自动切为 FFmpeg 原生解码（hevcdec），让 libplacebo 100% 拿到 RPU 消除紫绿偏色
+            // 因此仅在确认 Profile 5 时切为 FFmpeg 原生解码（hevcdec），Profile 7/8 与常规视频均保持硬解
             null -> if (isDolbyP5) "no" else "mediacodec-copy"
         }
+        val wantSw = target == "no"
+        bridge.setPropertyString("vd-lavc-fast", if (wantSw || isLowRamOr32BitDevice()) "yes" else "no")
         bridge.setPropertyString("hwdec", target)
+        if (reloadVideoIfChanged &&
+            playbackState != Player.STATE_IDLE &&
+            items.isNotEmpty() &&
+            surfaceAttached &&
+            C.TRACK_TYPE_VIDEO !in trackParams.disabledTrackTypes
+        ) {
+            val curSw = activeHwdec.isNullOrBlank() || activeHwdec == "no"
+            if (curSw != wantSw) {
+                val targetVid = if (activeVideoTrackId > 0) activeVideoTrackId.toString() else "auto"
+                bridge.setPropertyString("vid", "no")
+                bridge.setPropertyString("vid", targetVid)
+            }
+        }
     }
 
     /** 供「视频信息」面板展示当前色彩与解码链路详情。 */
@@ -466,9 +499,18 @@ class MpvPlayer(
                 val dur = bridge.getPropertyDouble("duration", -1.0)
                 if (dur > 0.0) durationMs = (dur * 1000.0).toLong()
                 refreshTracksAndChapters()
-                // 若容器解封装出杜比视界 Profile 5，确保切换至 FFmpeg 原生解码保留 RPU 元数据
-                if (detectedDolbyProfile == 5 || activeColorMatrix.equals("dolbyvision", ignoreCase = true)) {
-                    applyEffectiveHwdec(isDolbyP5 = true)
+                // 根据容器真实解封装结果精确匹配软硬解：仅真 Profile 5 启用 FFmpeg 软解保留 RPU，
+                // 若实际为带兼容层的 Profile 7 / 8 或普通 HDR10，则立即解除软解锁死恢复 mediacodec-copy 硬解
+                val isConfirmedP5 = detectedDolbyProfile == 5 ||
+                    (detectedDolbyProfile == null && activeColorMatrix.equals("dolbyvision", ignoreCase = true))
+                if (isConfirmedP5) {
+                    dolbyProfile5Hint = true
+                    applyEffectiveHwdec(isDolbyP5 = true, reloadVideoIfChanged = true)
+                } else if (dolbyProfile5Hint) {
+                    dolbyProfile5Hint = false
+                    applyEffectiveHwdec(isDolbyP5 = false, reloadVideoIfChanged = true)
+                } else {
+                    applyEffectiveHwdec(isDolbyP5 = false, reloadVideoIfChanged = false)
                 }
                 applyTrackSelectionInternal()
                 bridge.setPropertyBoolean("pause", !playWhenReady)

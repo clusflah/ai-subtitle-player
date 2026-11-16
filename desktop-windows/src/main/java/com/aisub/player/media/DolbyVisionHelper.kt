@@ -44,7 +44,13 @@ object DolbyVisionHelper {
 
     fun looksLikeDolbyVisionTitle(title: String?): Boolean {
         if (title.isNullOrBlank()) return false
-        return Regex("""(?i)(?<![a-z0-9])(dv|dovi|dolby[\s._-]*vision)(?![a-z0-9])""").containsMatchIn(title)
+        return Regex("""(?i)(?:(?<![a-z0-9])(?:dv|dovi|dolby[\s._-]*vision)(?![a-z0-9])|杜比视界)""").containsMatchIn(title)
+    }
+
+    fun looksLikeProfile5Title(title: String?): Boolean {
+        if (title.isNullOrBlank()) return false
+        return Regex("""(?i)(?:(?:dvhe|dvh1|dvav|dva1|dav1)[\s._-]*0*5\b|\bdvp5\b|\b(?:dolby[\s._-]*vision|dovi|dv)[\s._-]*(?:profile[\s._-]*)?5\b)""")
+            .containsMatchIn(title)
     }
 
     fun describeProfile(profile: Int?): String = when (profile) {

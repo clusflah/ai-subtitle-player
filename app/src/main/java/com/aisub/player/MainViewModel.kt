@@ -197,7 +197,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val sources = DefaultMediaSourceFactory(authDataSourceFactory(app), DefaultExtractorsFactory().withAssMkvSupport(assParsers, assHandler).withAiff())
         sources.setSubtitleParserFactory(assParsers)
         ExoPlayer.Builder(app)
-            .setRenderersFactory(renderersFactory(app) { isManualExoLockedForCurrent() }.withAssSupport(assHandler))
+            .setRenderersFactory(
+                renderersFactory(
+                    app = app,
+                    decodeModeProvider = { _state.value.settings.decodeMode },
+                    allowBlockedProfile5DirectRender = { isManualExoLockedForCurrent() },
+                ).withAssSupport(assHandler),
+            )
             .setMediaSourceFactory(sources)
             // 后台播放需要：来电、别的应用放声音时暂停，拔耳机暂停，锁屏后播放网络文件不断
             .setAudioAttributes(
@@ -238,11 +244,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val mpvPipelineLabel: String? get() = mpvPlayer?.takeIf { usingMpv }?.pipelineSummary
     val mpvVideoCodecLabel: String? get() = mpvPlayer?.takeIf { usingMpv }?.activeVideoCodec
     val mpvAudioCodecLabel: String? get() = mpvPlayer?.takeIf { usingMpv }?.activeAudioCodec
-    val mpvHwdecPref: Boolean? get() = mpvPlayer?.userForceHwdec
+    val decodeMode: DecodeMode get() = _state.value.settings.decodeMode
+    val mpvHwdecPref: Boolean? get() = _state.value.settings.decodeMode.forceHwdecFlag
+    val vlcDecodeLabel: String? get() = vlcPlayer?.takeIf { usingVlc }?.decodeSummaryLabel
     val vlcAudioBackendLabel: String? get() = vlcPlayer?.takeIf { usingVlc }?.audioBackendLabel
 
+    /** 全局切换视频软硬解策略（自动 / 硬解 / 软解），立即同步至默认 ExoPlayer、MPV 与 VLC 三大内核并持久化。 */
+    fun setDecodeMode(mode: DecodeMode) {
+        if (_state.value.settings.decodeMode == mode &&
+            mpvPlayer?.userForceHwdec == mode.forceHwdecFlag &&
+            vlcPlayer?.userForceHwdec == mode.forceHwdecFlag
+        ) return
+        updateSettings(_state.value.settings.copy(decodeMode = mode))
+    }
+
     fun setMpvHwdecPreference(forceHwdec: Boolean?) {
-        mpv().setHwdecPreference(forceHwdec)
+        setDecodeMode(DecodeMode.fromForceHwdecFlag(forceHwdec))
     }
 
     /** 应用没开着时从桌面小组件开始的后台播放：先停掉它，界面打开后接着放（见 [resumeWidgetPlayback]） */
@@ -673,11 +690,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun mpv(): MpvPlayer = mpvPlayer ?: MpvPlayer(getApplication(), mediaProxy()).also {
+        it.setHwdecPreference(_state.value.settings.decodeMode.forceHwdecFlag)
         it.addListener(listener)
         mpvPlayer = it
     }
 
     private fun vlc(): VlcPlayer = vlcPlayer ?: VlcPlayer(getApplication(), mediaProxy()).also {
+        it.setHwdecPreference(_state.value.settings.decodeMode.forceHwdecFlag)
         it.addListener(listener)
         vlcPlayer = it
     }
@@ -780,7 +799,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun autoSwitchVideoToMpv(error: PlaybackException): Boolean {
         val entry = _state.value.current?.takeIf { it.isVideo && !it.isLive } ?: return false
-        if (usingExternalKernel || manualEntryKernel[entry.uri] == PlayerKernel.EXO) return false
+        val forcedSw = _state.value.settings.decodeMode == DecodeMode.SW
+        if (usingExternalKernel || (manualEntryKernel[entry.uri] == PlayerKernel.EXO && !forcedSw)) return false
         val decodeOrContainer = error.errorCode in setOf(
             PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
             PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
@@ -790,16 +810,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
             PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
         )
-        if (!decodeOrContainer || !mpvAutoTried.add(entry.uri)) return false
+        if (!decodeOrContainer || (!forcedSw && !mpvAutoTried.add(entry.uri))) return false
         val looksDv = DolbyVisionHelper.looksLikeDolbyVisionTitle(entry.title) ||
             (error.cause?.message?.contains("dolby", ignoreCase = true) == true)
-        val banner = if (looksDv) {
-            "检测到杜比视界流，已自动切换 MPV 内核还原标准色彩"
-        } else {
-            "系统硬解不支持该格式，已自动切换 MPV 内核播放"
+        val isExplicitP5 = DolbyVisionHelper.looksLikeProfile5Title(entry.title) ||
+            (error.cause?.message?.contains("dvhe.05", ignoreCase = true) == true) ||
+            (error.cause?.message?.contains("dvh1.05", ignoreCase = true) == true)
+        val banner = when {
+            forcedSw -> "系统默认内核缺少该格式的软解器，已自动切至 MPV 纯软解"
+            looksDv -> "检测到杜比视界流，已自动切换 MPV 内核还原标准色彩"
+            else -> "系统硬解不支持该格式，已自动切换 MPV 内核播放"
         }
         android.util.Log.i("Voxtitle", "$banner：${entry.uri}")
-        switchKernel(target = PlayerKernel.MPV, manual = false, dolbyP5Hint = looksDv, reasonBanner = banner)
+        switchKernel(target = PlayerKernel.MPV, manual = false, dolbyP5Hint = isExplicitP5, reasonBanner = banner)
         return true
     }
 
@@ -838,7 +861,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         queue = entries ?: listOf(entry)
         isCurrentDolbyShunted = dolbyP5Hint
         val m = mpv()
-        m.dolbyProfile5Hint = dolbyP5Hint || DolbyVisionHelper.looksLikeDolbyVisionTitle(entry.title)
+        m.setHwdecPreference(_state.value.settings.decodeMode.forceHwdecFlag)
+        m.dolbyProfile5Hint = dolbyP5Hint
         m.repeatMode = repeatMode
         m.setPlaybackSpeed(speed)
         m.setMediaItem(itemOf(entry), positionMs)
@@ -1106,7 +1130,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val targetVideoKernel = manualKernel ?: _state.value.settings.preferredKernel
             when (targetVideoKernel) {
                 PlayerKernel.MPV -> {
-                    playWithMpv(start, resume, entries, dolbyP5Hint = DolbyVisionHelper.looksLikeDolbyVisionTitle(start.title))
+                    playWithMpv(start, resume, entries, dolbyP5Hint = DolbyVisionHelper.looksLikeProfile5Title(start.title))
                     return
                 }
                 PlayerKernel.VLC -> {
@@ -1307,6 +1331,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (old.preferredAudioLanguages != s.preferredAudioLanguages || old.preferredSubtitleLanguages != s.preferredSubtitleLanguages) {
             extras.applyTrackDefaults()
+        }
+        if (old.decodeMode != s.decodeMode) {
+            applyDecodeModeLive(s.decodeMode)
+        }
+    }
+
+    private fun applyDecodeModeLive(mode: DecodeMode) {
+        val flag = mode.forceHwdecFlag
+        mpvPlayer?.setHwdecPreference(flag)
+        vlcPlayer?.setHwdecPreference(flag)
+        val cur = _state.value.current
+        if (!usingExternalKernel && cur != null && (cur.isVideo || cur.isLive) && exoPlayer.playbackState != Player.STATE_IDLE) {
+            val resumePos = if (cur.isLive) C.TIME_UNSET else exoPlayer.currentPosition.coerceAtLeast(0L)
+            val idx = exoPlayer.currentMediaItemIndex.coerceAtLeast(0)
+            val wasPlaying = exoPlayer.playWhenReady
+            _state.update { it.copy(playbackError = null, videoProblem = null) }
+            exoPlayer.stop()
+            if (resumePos != C.TIME_UNSET) {
+                exoPlayer.seekTo(idx, resumePos)
+            }
+            exoPlayer.playWhenReady = wasPlaying
+            exoPlayer.prepare()
         }
     }
 
@@ -3397,8 +3443,9 @@ private fun resolvingFactory(app: Application, http: DataSource.Factory): DataSo
 @UnstableApi
 internal fun renderersFactory(
     app: Application,
+    decodeModeProvider: () -> DecodeMode = { DecodeMode.AUTO },
     allowBlockedProfile5DirectRender: () -> Boolean = { false },
-): DefaultRenderersFactory = DolbyAwareRenderersFactory(app, allowBlockedProfile5DirectRender)
+): DefaultRenderersFactory = DolbyAwareRenderersFactory(app, decodeModeProvider, allowBlockedProfile5DirectRender)
 
 /** 出错提示里「人话」和技术细节的分隔，播放页只默认显示前半部分 */
 internal const val PLAYBACK_ERROR_DETAIL = "\n\u0001"

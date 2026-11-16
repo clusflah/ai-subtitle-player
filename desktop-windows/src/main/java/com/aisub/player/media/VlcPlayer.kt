@@ -104,6 +104,25 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         invalidateState()
     }
 
+    var userForceHwdec: Boolean? = null
+        private set
+
+    val decodeSummaryLabel: String
+        get() = mp.activePipelineDescription.ifBlank {
+            when (userForceHwdec) {
+                true -> "LibVLC 硬件加速管线"
+                false -> "LibVLC 纯软解管线"
+                null -> "LibVLC 智能混合管线"
+            }
+        }
+
+    fun setHwdecPreference(forceHwdec: Boolean?) {
+        if (userForceHwdec == forceHwdec) return
+        userForceHwdec = forceHwdec
+        mp.setHwdecPreference(forceHwdec)
+        invalidateState()
+    }
+
     /** 当前标题的章节（DVD / 蓝光、MKV 等）；VLC 开始播放后才有。 */
     fun chapters(): List<Chapter> = runCatching {
         mp.getChapters(-1).orEmpty().map { Chapter(it.timeOffset, (it.timeOffset + it.duration).takeIf { _ -> it.duration > 0 }, it.name.orEmpty()) }
@@ -185,7 +204,14 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         val name = item.mediaMetadata.title?.toString() ?: uri.lastPathSegment.orEmpty()
         error = null
         val media = Media(libVlc, Uri.parse(proxy.register(uri, name)))
-        media.setHWDecoderEnabled(true, false)
+        when (userForceHwdec) {
+            true -> media.setHWDecoderEnabled(true, true)
+            false -> {
+                media.setHWDecoderEnabled(false, false)
+                media.addOption(":avcodec-hw=none")
+            }
+            null -> media.setHWDecoderEnabled(true, false)
+        }
         // 光盘镜像不进菜单，直接播放正片（应用里没有光盘菜单的操作界面）
         media.addOption(":no-dvdnav-menu")
         media.addOption(":no-bluray-menu")

@@ -920,8 +920,8 @@ class DesktopExoPlayer(
     fun updateHwdecPreference(forceHwdec: Boolean?) {
         if (hwdecPreference == forceHwdec) return
         hwdecPreference = forceHwdec
-        if (ffmpegRunning.get() && playbackState != Player.STATE_IDLE) {
-            val resumePos = currentPosition
+        if ((ffmpegRunning.get() || vlcHasActiveMedia) && playbackState != Player.STATE_IDLE && playbackState != Player.STATE_ENDED) {
+            val resumePos = if (isCurrentMediaItemLive) 0L else currentPosition.coerceAtLeast(0L)
             val nextGen = mediaGeneration.incrementAndGet()
             playbackState = Player.STATE_BUFFERING
             currentMediaItem?.let { startCurrentItemAsync(nextGen, it, resumePos) }
@@ -1483,7 +1483,11 @@ class DesktopExoPlayer(
             if (!forceMpvPipeline && probeDvProfile == null &&
                 DesktopPlayerEngine.vlcAvailable && startWithVlcjOnExecutor(gen, playableUrl, headers, startPosMs)
             ) {
-                activePipelineDescription = "LibVLC 硬件混合管线"
+                activePipelineDescription = when (hwdecPreference) {
+                    true -> "LibVLC 硬件加速管线"
+                    false -> "LibVLC 纯软解管线"
+                    null -> "LibVLC 智能混合管线"
+                }
                 return@execute
             }
 
@@ -1584,6 +1588,11 @@ class DesktopExoPlayer(
             }
 
             val options = mutableListOf(":no-dvdnav-menu", ":no-bluray-menu")
+            when (hwdecPreference) {
+                true -> options.add(":avcodec-hw=any")
+                false -> options.add(":avcodec-hw=none")
+                null -> {}
+            }
             val lowerUrl = url.lowercase()
             if (lowerUrl.startsWith("http://127.0.0.1:") || lowerUrl.startsWith("http://localhost:")) {
                 options.add(":http-proxy=")

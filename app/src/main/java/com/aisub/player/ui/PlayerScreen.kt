@@ -823,6 +823,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         val dolbyActive = usingMpv && (vm.isCurrentDolbyShunted || (player as? com.aisub.player.media.MpvPlayer)?.detectedDolbyProfile != null)
                         KernelBadgeButton(
                             kernel = activeKernel,
+                            decodeMode = state.settings.decodeMode,
                             dolbyActive = dolbyActive,
                             tv = tv,
                             onClick = { dialog = PlayerDialog.KERNEL; interactions++ },
@@ -1086,12 +1087,18 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                                 Spacer(Modifier.weight(1f))
                                 LiveKernelSwitch(
                                     activeKernel = activeKernel,
+                                    decodeMode = state.settings.decodeMode,
                                     tv = tv,
                                     onSelect = { target ->
                                         if (target != activeKernel) {
                                             vm.switchKernel(target)
                                             indicator = null to "已切换至${target.shortLabel}内核"
                                         }
+                                        interactions++
+                                    },
+                                    onCycleDecodeMode = { nextMode ->
+                                        vm.setDecodeMode(nextMode)
+                                        indicator = null to "解码方式：${nextMode.label}"
                                         interactions++
                                     },
                                 )
@@ -1106,12 +1113,18 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             Spacer(Modifier.width(10.dp))
                             LiveKernelSwitch(
                                 activeKernel = activeKernel,
+                                decodeMode = state.settings.decodeMode,
                                 tv = tv,
                                 onSelect = { target ->
                                     if (target != activeKernel) {
                                         vm.switchKernel(target)
                                         indicator = null to "已切换至${target.shortLabel}内核"
                                     }
+                                    interactions++
+                                },
+                                onCycleDecodeMode = { nextMode ->
+                                    vm.setDecodeMode(nextMode)
+                                    indicator = null to "解码方式：${nextMode.label}"
                                     interactions++
                                 },
                             )
@@ -1735,11 +1748,18 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             vm = vm,
             state = state,
             activeKernel = activeKernel,
+            tv = tv,
             onSelectKernel = { target ->
                 val changed = target != activeKernel
                 vm.switchKernel(target, manual = true)
                 if (changed) indicator = null to "已切换至${target.shortLabel}内核"
                 dialog = null
+            },
+            onSelectDecodeMode = { mode ->
+                if (mode != state.settings.decodeMode) {
+                    vm.setDecodeMode(mode)
+                    indicator = null to "已切换为${mode.label}"
+                }
             },
             onDismiss = { dialog = null },
         )
@@ -2078,7 +2098,7 @@ private fun MorePanel(activeKernel: com.aisub.player.PlayerKernel, state: UiStat
     )
     val groups = listOf(
         "播放" to buildList {
-            add(Triple(MoreAction.SWITCH_KERNEL, AppIcons.PlayArrow, "播放内核：${activeKernel.shortLabel}（点此切换）"))
+            add(Triple(MoreAction.SWITCH_KERNEL, AppIcons.PlayArrow, "播放内核：${activeKernel.shortLabel} · ${state.settings.decodeMode.shortLabel}（点此切换）"))
             if (state.current?.isLive == true) {
                 val recording = com.aisub.player.live.LiveRecorder.state.value.recording
                 add(Triple(MoreAction.RECORD_LIVE, if (recording) AppIcons.StopSquare else AppIcons.RecordDot, if (recording) "停止直播录屏并保存" else "开始直播录屏"))
@@ -2815,6 +2835,7 @@ private fun DelayDialog(delayMs: Long, onChange: (Long) -> Unit, onDismiss: () -
 @Composable
 private fun KernelBadgeButton(
     kernel: com.aisub.player.PlayerKernel,
+    decodeMode: com.aisub.player.DecodeMode,
     dolbyActive: Boolean,
     tv: Boolean,
     onClick: () -> Unit,
@@ -2823,9 +2844,10 @@ private fun KernelBadgeButton(
     var focused by remember { mutableStateOf(false) }
     val highlight = tv && focused
     val pillShape = RoundedCornerShape(50)
+    val decodeSuffix = if (decodeMode != com.aisub.player.DecodeMode.AUTO) " · ${decodeMode.shortLabel}" else ""
     val badgeText = when {
-        kernel == com.aisub.player.PlayerKernel.MPV && dolbyActive -> "MPV · 杜比"
-        else -> "内核: ${kernel.shortLabel}"
+        kernel == com.aisub.player.PlayerKernel.MPV && dolbyActive -> "MPV · 杜比$decodeSuffix"
+        else -> "内核: ${kernel.shortLabel}$decodeSuffix"
     }
     val pillTint = when {
         highlight -> Color(0xFFFFB74D)
@@ -2862,17 +2884,19 @@ private fun KernelSwitchDialog(
     vm: MainViewModel,
     state: UiState,
     activeKernel: com.aisub.player.PlayerKernel,
+    tv: Boolean,
     onSelectKernel: (com.aisub.player.PlayerKernel) -> Unit,
+    onSelectDecodeMode: (com.aisub.player.DecodeMode) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var hwdecPref by remember(vm.mpvHwdecPref) { mutableStateOf(vm.mpvHwdecPref) }
+    val curDecodeMode = state.settings.decodeMode
     AppDialog(
         onDismissRequest = onDismiss,
-        title = { Text("切换播放内核") },
+        title = { Text("切换播放内核与软硬解") },
         text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "切换时自动保留当前播放进度与已生成的 AI 字幕",
+                    "切换内核或软硬解均自动保留当前播放进度与 AI 字幕",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -2885,7 +2909,7 @@ private fun KernelSwitchDialog(
                             .background(if (selected) Orange.copy(alpha = 0.14f) else Color.Transparent)
                             .tvFocusRing(RoundedCornerShape(14.dp), color = Orange, fillBackground = true)
                             .clickable { onSelectKernel(k) }
-                            .padding(horizontal = 10.dp, vertical = 10.dp),
+                            .padding(horizontal = 10.dp, vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         RadioButton(selected = selected, onClick = { onSelectKernel(k) })
@@ -2904,45 +2928,76 @@ private fun KernelSwitchDialog(
                         }
                     }
                 }
-                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
                 Text(
-                    "MPV 解码与杜比色彩策略",
+                    "解码方式（对全部内核统一生效）",
                     fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontWeight = FontWeight.SemiBold,
                 )
                 Row(
-                    Modifier.horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                        .padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    listOf<Pair<Boolean?, String>>(
-                        null to "智能自动（推荐）",
-                        true to "硬解优先",
-                        false to "纯软解",
-                    ).forEach { (pref, label) ->
-                        FilterChip(
-                            selected = hwdecPref == pref,
-                            onClick = {
-                                hwdecPref = pref
-                                vm.setMpvHwdecPreference(pref)
-                            },
-                            label = { Text(label, fontSize = 12.sp) },
-                        )
+                    com.aisub.player.DecodeMode.entries.forEach { mode ->
+                        val selected = curDecodeMode == mode
+                        var focused by remember { mutableStateOf(false) }
+                        val highlight = tv && focused
+                        val segShape = RoundedCornerShape(9.dp)
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .onFocusChanged { focused = it.isFocused }
+                                .tvFocusRing(segShape, color = Orange, scale = true)
+                                .clip(segShape)
+                                .background(
+                                    when {
+                                        highlight -> Color(0xFFFFB74D)
+                                        selected -> Orange
+                                        else -> Color.Transparent
+                                    },
+                                )
+                                .clickable { onSelectDecodeMode(mode) }
+                                .padding(vertical = 8.dp, horizontal = 6.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = mode.label,
+                                fontSize = 13.sp,
+                                fontWeight = if (selected || highlight) FontWeight.SemiBold else FontWeight.Medium,
+                                color = when {
+                                    highlight -> Color(0xFF1F1100)
+                                    selected -> Color.White
+                                    else -> MaterialTheme.colorScheme.onSurface
+                                },
+                                maxLines = 1,
+                            )
+                        }
                     }
                 }
+                Text(
+                    curDecodeMode.description,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Row(
                     Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
+                        .tvFocusRing(RoundedCornerShape(10.dp), color = Orange, fillBackground = true)
                         .clickable {
                             vm.updateSettings(state.settings.copy(autoDolbyMpv = !state.settings.autoDolbyMpv))
                         }
-                        .padding(vertical = 4.dp),
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text("杜比视界自动切 MPV 防偏色", fontSize = 14.sp)
                         Text(
-                            "识别到 Profile 5 等流时自动启用 libplacebo 色彩映射，告别紫绿画面",
+                            "仅对无兼容底流的 Profile 5 自动启用 libplacebo 色彩映射，Profile 7/8 保持零拷贝硬解",
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -2970,11 +3025,14 @@ private fun KernelSwitchDialog(
 @Composable
 private fun LiveKernelSwitch(
     activeKernel: com.aisub.player.PlayerKernel,
+    decodeMode: com.aisub.player.DecodeMode,
     tv: Boolean,
     onSelect: (com.aisub.player.PlayerKernel) -> Unit,
+    onCycleDecodeMode: (com.aisub.player.DecodeMode) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val outerShape = RoundedCornerShape(50)
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
     Row(
         modifier = modifier
             .liquidGlass(shape = outerShape, style = GlassStyle.Pill, tint = GlassTokens.DarkControlTint)
@@ -3015,6 +3073,40 @@ private fun LiveKernelSwitch(
             }
         }
     }
+    var decodeFocused by remember { mutableStateOf(false) }
+    val decodeHighlight = tv && decodeFocused
+    val decodeShape = RoundedCornerShape(50)
+    val nextMode = when (decodeMode) {
+        com.aisub.player.DecodeMode.AUTO -> com.aisub.player.DecodeMode.HW
+        com.aisub.player.DecodeMode.HW -> com.aisub.player.DecodeMode.SW
+        com.aisub.player.DecodeMode.SW -> com.aisub.player.DecodeMode.AUTO
+    }
+    Box(
+        modifier = Modifier
+            .onFocusChanged { decodeFocused = it.isFocused }
+            .tvFocusRing(decodeShape, color = Color.White, scale = true)
+            .liquidGlass(
+                shape = decodeShape,
+                style = GlassStyle.Pill,
+                tint = when {
+                    decodeHighlight -> Color(0xFFFFB74D)
+                    decodeMode != com.aisub.player.DecodeMode.AUTO -> Orange.copy(alpha = 0.85f)
+                    else -> GlassTokens.DarkControlTint
+                },
+            )
+            .clickable { onCycleDecodeMode(nextMode) }
+            .padding(horizontal = 9.dp, vertical = 4.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "解码:${decodeMode.shortLabel}",
+            color = if (decodeHighlight || decodeMode != com.aisub.player.DecodeMode.AUTO) Color(0xFF1F1100) else Color(0xFFD5DCE6),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
+    }
+    }
 }
 
 @androidx.annotation.OptIn(UnstableApi::class)
@@ -3030,7 +3122,9 @@ private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
         "文件" to (entry?.title ?: ""),
         "时长" to formatClock(p.duration.coerceAtLeast(0)),
         "播放内核" to kernel.label,
+        "解码方式" to vm.state.value.settings.decodeMode.label,
         if (kernel == com.aisub.player.PlayerKernel.MPV) vm.mpvPipelineLabel?.let { "渲染与色彩管线" to it } else null,
+        if (kernel == com.aisub.player.PlayerKernel.VLC) vm.vlcDecodeLabel?.let { "VLC 解码管线" to it } else null,
         if (kernel == com.aisub.player.PlayerKernel.VLC) vm.vlcAudioBackendLabel?.let { "音频输出" to it } else null,
         if (exo == null && p.videoSize.width > 0) "画面" to "${p.videoSize.width}×${p.videoSize.height}" else null,
         v?.let { "画面" to "${it.width}×${it.height}" + (it.frameRate.takeIf { f -> f > 0 }?.let { f -> " · %.0f fps".format(f) } ?: "") },

@@ -81,6 +81,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -941,6 +942,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(end = 8.dp),
                     )
                     if (state.current?.isVideo == true || isLive) {
+                        val decodeSuffix = if (state.settings.decodeMode != com.aisub.player.DecodeMode.AUTO) {
+                            " · ${state.settings.decodeMode.shortLabel}"
+                        } else {
+                            ""
+                        }
                         TextButton(
                             onClick = { dialog = PlayerDialog.KERNEL; interactions++ },
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
@@ -948,7 +954,13 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                                 .padding(end = 4.dp)
                                 .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = GlassTokens.DarkControlTint),
                         ) {
-                            Text("内核: ${activeKernel.shortLabel}", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "内核: ${activeKernel.shortLabel}$decodeSuffix",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                            )
                         }
                     }
                     // 播放队列（直播时提供频道与节目单入口）
@@ -1956,19 +1968,24 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         PlayerDialog.DELAY -> DelayDialog(state.subtitleDelayMs, onChange = vm::setSubtitleDelay, onDismiss = { dialog = null })
         PlayerDialog.INFO -> InfoDialog(vm, onDismiss = { dialog = null })
         PlayerDialog.EQUALIZER -> EqualizerDialog(vm, onDismiss = { dialog = null })
-        PlayerDialog.KERNEL -> ChoiceDialog(
-            "切换播放内核",
-            com.aisub.player.PlayerKernel.entries.map { "${it.label} — ${it.description}" },
-            com.aisub.player.PlayerKernel.entries.indexOf(activeKernel),
-            onDismiss = { dialog = null },
-        ) { idx ->
-            val target = com.aisub.player.PlayerKernel.entries[idx]
-            if (target != activeKernel) {
+        PlayerDialog.KERNEL -> DesktopKernelSwitchDialog(
+            vm = vm,
+            state = state,
+            activeKernel = activeKernel,
+            onSelectKernel = { target ->
+                val changed = target != activeKernel
                 vm.switchKernel(target, manual = true)
-                indicator = null to "已切换至${target.shortLabel}内核"
-            }
-            dialog = null
-        }
+                if (changed) indicator = null to "已切换至${target.shortLabel}内核"
+                dialog = null
+            },
+            onSelectDecodeMode = { mode ->
+                if (mode != state.settings.decodeMode) {
+                    vm.setDecodeMode(mode)
+                    indicator = null to "已切换为${mode.label}"
+                }
+            },
+            onDismiss = { dialog = null },
+        )
         PlayerDialog.EXPORT -> ChoiceDialog(
             "导出字幕（SRT）", listOf("双语", "仅译文", "仅原文"), -1, onDismiss = { dialog = null },
         ) { i ->
@@ -2321,7 +2338,7 @@ private fun MorePanel(
     )
     val groups = listOf(
         "播放" to buildList {
-            add(Triple(MoreAction.SWITCH_KERNEL, AppIcons.PlayArrow, "播放内核：${activeKernel.shortLabel}（点此切换）"))
+            add(Triple(MoreAction.SWITCH_KERNEL, AppIcons.PlayArrow, "播放内核：${activeKernel.shortLabel} · ${state.settings.decodeMode.shortLabel}（点此切换）"))
             if (state.current?.isLive == true) {
                 val recording = com.aisub.player.live.LiveRecorder.state.value.recording
                 add(Triple(MoreAction.RECORD_LIVE, if (recording) AppIcons.StopSquare else AppIcons.RecordDot, if (recording) "停止直播录屏并保存" else "开始直播录屏"))
@@ -3129,6 +3146,134 @@ private fun DelayDialog(delayMs: Long, onChange: (Long) -> Unit, onDismiss: () -
     )
 }
 
+@Composable
+private fun DesktopKernelSwitchDialog(
+    vm: MainViewModel,
+    state: UiState,
+    activeKernel: com.aisub.player.PlayerKernel,
+    onSelectKernel: (com.aisub.player.PlayerKernel) -> Unit,
+    onSelectDecodeMode: (com.aisub.player.DecodeMode) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val curDecodeMode = state.settings.decodeMode
+    AppDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("切换播放内核与软硬解") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "切换内核或软硬解均自动保留当前播放进度与 AI 字幕",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                com.aisub.player.PlayerKernel.entries.forEach { k ->
+                    val selected = activeKernel == k
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (selected) Orange.copy(alpha = 0.14f) else Color.Transparent)
+                            .tvFocusRing(RoundedCornerShape(14.dp), color = Orange, fillBackground = true)
+                            .clickable { onSelectKernel(k) }
+                            .padding(horizontal = 10.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = selected, onClick = { onSelectKernel(k) })
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                k.label,
+                                fontSize = 15.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            )
+                            Text(
+                                k.description,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                HorizontalDivider(modifier = Modifier.padding(vertical = 2.dp))
+                Text(
+                    "解码方式（对全部内核统一生效）",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                        .padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    com.aisub.player.DecodeMode.entries.forEach { mode ->
+                        val selected = curDecodeMode == mode
+                        val segShape = RoundedCornerShape(9.dp)
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .tvFocusRing(segShape, color = Orange, scale = true)
+                                .clip(segShape)
+                                .background(if (selected) Orange else Color.Transparent)
+                                .clickable { onSelectDecodeMode(mode) }
+                                .padding(vertical = 8.dp, horizontal = 6.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = mode.label,
+                                fontSize = 13.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                color = if (selected) Color.White else MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
+                Text(
+                    curDecodeMode.description,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable {
+                            vm.updateSettings(state.settings.copy(autoDolbyMpv = !state.settings.autoDolbyMpv))
+                        }
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("杜比视界自动切 MPV 防偏色", fontSize = 14.sp)
+                        Text(
+                            "检测到杜比视界（尤其 Profile 5）时自动启用 D3D11VA 硬解 + libplacebo 色彩映射，告别紫绿偏色与卡顿",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = state.settings.autoDolbyMpv,
+                        onCheckedChange = { vm.updateSettings(state.settings.copy(autoDolbyMpv = it)) },
+                    )
+                }
+            }
+        },
+        dismissButton = {
+            if (state.settings.preferredKernel != activeKernel) {
+                TextButton(onClick = {
+                    vm.updateSettings(state.settings.copy(preferredKernel = activeKernel))
+                }) {
+                    Text("设为默认(${activeKernel.shortLabel})")
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
+}
+
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
@@ -3141,6 +3286,7 @@ private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
         "文件" to (entry?.title ?: ""),
         "时长" to formatClock(p.duration.coerceAtLeast(0)),
         "播放内核" to vm.activeKernel.label,
+        "解码方式" to vm.state.value.settings.decodeMode.label,
         vm.mpvPipelineLabel?.let { "色彩与渲染管线" to it },
         if (exo == null && p.videoSize.width > 0) "画面" to "${p.videoSize.width}×${p.videoSize.height}" else null,
         v?.let { "画面" to "${it.width}×${it.height}" + (it.frameRate.takeIf { f -> f > 0 }?.let { f -> " · %.0f fps".format(f) } ?: "") },

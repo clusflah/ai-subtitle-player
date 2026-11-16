@@ -70,6 +70,30 @@ enum class PlayerKernel(val label: String, val shortLabel: String, val descripti
     VLC("VLC 内核（兼容/光盘）", "VLC", "强制使用 LibVLC 引擎，适合蓝光/DVD ISO 光盘镜像与特定直播流"),
 }
 
+/** 统一视频软硬解策略（默认内核、MPV 内核、VLC 内核全局生效） */
+enum class DecodeMode(val label: String, val shortLabel: String, val description: String) {
+    AUTO("智能自动", "自动", "常规视频硬件加速优先；杜比视界 Profile 5 等特殊流自动匹配最佳色彩与解码路径"),
+    HW("硬解", "硬解", "强制优先调用芯片/显卡硬件解码器，4K 高码率更流畅省电"),
+    SW("软解", "软解", "强制使用 CPU 多线程软件解码，适合排查硬解花屏、绿屏或驱动兼容异常"),
+    ;
+
+    /** 底层引擎硬解覆盖标记：null=智能自动，true=硬解优先，false=纯软解 */
+    val forceHwdecFlag: Boolean?
+        get() = when (this) {
+            AUTO -> null
+            HW -> true
+            SW -> false
+        }
+
+    companion object {
+        fun fromForceHwdecFlag(flag: Boolean?): DecodeMode = when (flag) {
+            true -> HW
+            false -> SW
+            null -> AUTO
+        }
+    }
+}
+
 /** 播放视频时切到别的应用、回桌面或锁屏怎么办 */
 enum class VideoLeaveAction(val label: String) {
     PAUSE("暂停"),
@@ -207,6 +231,7 @@ data class AppSettings(
     val appDarkMode: AppDarkMode = AppDarkMode.SYSTEM,
     val liquidGlass: Boolean = false,
     val preferredKernel: PlayerKernel = PlayerKernel.EXO,
+    val decodeMode: DecodeMode = DecodeMode.AUTO,
     val autoDolbyMpv: Boolean = true,
 ) {
     /** 某个服务商的配置，未填的字段用默认值补齐。 */
@@ -412,6 +437,8 @@ class SettingsRepository(context: Context) {
             liquidGlass = prefs.getBoolean("liquidGlass", d.liquidGlass),
             preferredKernel = runCatching { PlayerKernel.valueOf(prefs.getString("preferredKernel", d.preferredKernel.name)!!) }
                 .getOrDefault(d.preferredKernel),
+            decodeMode = runCatching { DecodeMode.valueOf(prefs.getString("decodeMode", d.decodeMode.name)!!) }
+                .getOrDefault(d.decodeMode),
             autoDolbyMpv = prefs.getBoolean("autoDolbyMpv", d.autoDolbyMpv),
         )
     }
@@ -477,6 +504,7 @@ class SettingsRepository(context: Context) {
             .putString("appDarkMode", s.appDarkMode.name)
             .putBoolean("liquidGlass", s.liquidGlass)
             .putString("preferredKernel", s.preferredKernel.name)
+            .putString("decodeMode", s.decodeMode.name)
             .putBoolean("autoDolbyMpv", s.autoDolbyMpv)
         for (e in TtsEngineType.entries) editor.putString("ttsVoice.${e.name}", s.ttsVoices[e].orEmpty())
         for ((p, c) in s.providerConfigs) {

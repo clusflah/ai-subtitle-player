@@ -205,4 +205,24 @@ class NewFeaturesTest {
         assertTrue("115 2-char show 繁花 under 国产剧 must not be merged into 国产剧", fanhua != null)
         assertEquals(1, fanhua!!.hits.size)
     }
+
+    @Test
+    fun decodeModeAndDolbyProfile5TitleHeuristicsAreAccurate() {
+        assertEquals(DecodeMode.AUTO, AppSettings().decodeMode)
+        assertEquals(null, DecodeMode.AUTO.forceHwdecFlag)
+        assertEquals(true, DecodeMode.HW.forceHwdecFlag)
+        assertEquals(false, DecodeMode.SW.forceHwdecFlag)
+        assertEquals(DecodeMode.HW, DecodeMode.fromForceHwdecFlag(true))
+        assertEquals(DecodeMode.SW, DecodeMode.fromForceHwdecFlag(false))
+        assertEquals(DecodeMode.AUTO, DecodeMode.fromForceHwdecFlag(null))
+
+        // Generic DV / DoVi filenames (mostly Profile 7/8 hybrids) must NOT lock pure software decode
+        assertTrue(com.aisub.player.media.DolbyVisionHelper.looksLikeDolbyVisionTitle("Dune.Part.Two.2024.2160p.WEB-DL.DV.HDR.HEVC.mkv"))
+        assertFalse(com.aisub.player.media.DolbyVisionHelper.looksLikeProfile5Title("Dune.Part.Two.2024.2160p.WEB-DL.DV.HDR.HEVC.mkv"))
+
+        // Explicit Profile 5 markers should be recognized accurately
+        assertTrue(com.aisub.player.media.DolbyVisionHelper.looksLikeProfile5Title("The.Secret.Agent.2160p.DV.Profile.5.HEVC.mp4"))
+        assertTrue(com.aisub.player.media.DolbyVisionHelper.looksLikeProfile5Title("Movie.2026.dvh1.05.06.mp4"))
+        assertTrue(com.aisub.player.media.DolbyVisionHelper.looksLikeProfile5Title("Series.S01E01.2160p.DVP5.mp4"))
+    }
 }
