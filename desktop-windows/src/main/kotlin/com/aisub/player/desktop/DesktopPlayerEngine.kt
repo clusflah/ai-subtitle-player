@@ -59,6 +59,7 @@ import uk.co.caprica.vlcj.player.embedded.videosurface.callback.RenderCallback
 import uk.co.caprica.vlcj.player.embedded.videosurface.callback.format.RV32BufferFormat
 import java.awt.image.BufferedImage
 import java.awt.image.DataBufferInt
+import java.io.BufferedInputStream
 import java.io.File
 import java.io.InputStream
 import java.net.InetAddress
@@ -428,6 +429,13 @@ object DesktopPlayerEngine {
         publishWrittenSlot(slot)
     }
 
+    internal fun submitFrameBgraBytes(width: Int, height: Int, src: ByteArray) {
+        val slot = acquireWriteSlot(width, height)
+        val count = minOf(slot.bytes.size, src.size)
+        System.arraycopy(src, 0, slot.bytes, 0, count)
+        publishWrittenSlot(slot)
+    }
+
     internal fun readFrameBgraStream(
         width: Int,
         height: Int,
@@ -485,7 +493,6 @@ object DesktopPlayerEngine {
                     slotToPublish!!.uploadToSkia()
                     val bmpToPublish = slotToPublish!!.composeBitmap
                     currentDrawBitmap = bmpToPublish
-                    _currentFrameFlow.value = bmpToPublish
                     val tick = frameCounter.incrementAndGet()
                     frameTick.longValue = tick
                     drawnFramesWindow.incrementAndGet()
@@ -724,7 +731,17 @@ class DesktopExoPlayer(
     private fun computeLiveWindowStartMs(session: DesktopLiveRelay.RelaySession): Long =
         (session.oldestTimelineMs - 1_500L).coerceAtLeast(0L)
 
+    private fun currentFfmpegAudioClockMs(): Long {
+        val base = positionMsInternal
+        if (!playWhenReady || !ffmpegAudioClockReady) return base.coerceAtLeast(0L)
+        val elapsedMs = ((System.nanoTime() - positionAnchorNano) / 1_000_000L).coerceIn(0L, 45L)
+        return (base + (elapsedMs * playbackParameters.speed).toLong() - FFMPEG_SPEAKER_LATENCY_MS).coerceAtLeast(0L)
+    }
+
     private fun rawExtrapolatedPlayheadMs(compensateSpeakerLatency: Boolean): Long {
+        if (ffmpegRunning.get() && ffmpegAudioClockReady) {
+            return currentFfmpegAudioClockMs()
+        }
         val base = positionMsInternal
         if (isPlaying && vlcActivelyPlaying && !ffmpegRunning.get()) {
             val elapsedMs = ((System.nanoTime() - positionAnchorNano) / 1_000_000L).coerceIn(0L, 1_200L)
@@ -769,7 +786,7 @@ class DesktopExoPlayer(
             }
             val raw = rawExtrapolatedPlayheadMs(compensateSpeakerLatency = !isCurrentMediaItemLive)
             val bounded = if (duration != C.TIME_UNSET && duration > 0) raw.coerceAtMost(duration) else raw
-            if (isPlaying && vlcActivelyPlaying && !ffmpegRunning.get()) {
+            if (isPlaying && (vlcActivelyPlaying || (ffmpegRunning.get() && ffmpegAudioClockReady))) {
                 val prev = lastReportedMonotonicMs
                 if (prev >= 0L && bounded < prev && (prev - bounded) < 220L) {
                     return prev
@@ -896,6 +913,21 @@ class DesktopExoPlayer(
     @Volatile
     var autoDolbyProtection: Boolean = true
 
+    /** MPV/FFmpeg 硬解策略：null = 智能自动（Windows 默认启用 D3D11VA 硬解），true = 硬解优先，false = 纯软解 */
+    @Volatile
+    var hwdecPreference: Boolean? = null
+
+    fun updateHwdecPreference(forceHwdec: Boolean?) {
+        if (hwdecPreference == forceHwdec) return
+        hwdecPreference = forceHwdec
+        if (ffmpegRunning.get() && playbackState != Player.STATE_IDLE) {
+            val resumePos = currentPosition
+            val nextGen = mediaGeneration.incrementAndGet()
+            playbackState = Player.STATE_BUFFERING
+            currentMediaItem?.let { startCurrentItemAsync(nextGen, it, resumePos) }
+        }
+    }
+
     @Volatile
     var detectedDolbyProfile: Int? = null
         private set
@@ -924,8 +956,9 @@ class DesktopExoPlayer(
     @Volatile
     private var wavClip: Clip? = null
 
-    // 后端 3: FFmpeg 软解流 (无 VLC 时的全格式兜底)
+    // 后端 3: FFmpeg + D3D11VA 硬解 + Vulkan libplacebo 高速渲染引擎
     private val ffmpegRunning = AtomicBoolean(false)
+    private val ffmpegSeekScheduled = AtomicBoolean(false)
     @Volatile
     private var ffmpegAudioClockReady: Boolean = false
     @Volatile
@@ -936,6 +969,10 @@ class DesktopExoPlayer(
     private var ffmpegAudioLine: SourceDataLine? = null
     @Volatile
     private var ffmpegAudioServer: ServerSocket? = null
+    @Volatile
+    private var ffmpegVideoServer: ServerSocket? = null
+    @Volatile
+    private var selectedFfmpegAudioStreamSpec: String = "0:a:0?" 
 
     override fun addListener(listener: Player.Listener) {
         listeners.add(listener)
@@ -985,6 +1022,7 @@ class DesktopExoPlayer(
         duration = C.TIME_UNSET
         currentTracks = Tracks.EMPTY
         currentChapters = emptyList()
+        selectedFfmpegAudioStreamSpec = "0:a:0?"
         playerError = null
         notifyMain {
             listeners.forEach { it.onMediaItemTransition(currentMediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) }
@@ -1127,8 +1165,17 @@ class DesktopExoPlayer(
             return
         }
         if (ffmpegRunning.get()) {
-            val nextGen = mediaGeneration.incrementAndGet()
-            currentMediaItem?.let { startCurrentItemAsync(nextGen, it, targetPos) }
+            pendingSeekTargetMs = targetPos
+            if (ffmpegSeekScheduled.compareAndSet(false, true)) {
+                watchdogPool.schedule({
+                    ffmpegSeekScheduled.set(false)
+                    val finalTarget = pendingSeekTargetMs
+                    if (finalTarget != C.TIME_UNSET && playbackState != Player.STATE_IDLE) {
+                        val nextGen = mediaGeneration.incrementAndGet()
+                        currentMediaItem?.let { startCurrentItemAsync(nextGen, it, finalTarget) }
+                    }
+                }, 60L, TimeUnit.MILLISECONDS)
+            }
             return
         }
         // 合并连续拖动进度条时的多次跳转请求，不在 UI 线程调 JNI
@@ -1237,6 +1284,24 @@ class DesktopExoPlayer(
 
     private fun applyTrackSelection(params: TrackSelectionParameters) {
         val gen = mediaGeneration.get()
+        if (ffmpegRunning.get()) {
+            val audioOverride = params.overrides.values.firstOrNull { it.type == C.TRACK_TYPE_AUDIO }
+            val nextSpec = when {
+                C.TRACK_TYPE_AUDIO in params.disabledTrackTypes -> ""
+                audioOverride != null -> {
+                    val streamIdx = audioOverride.mediaTrackGroup.id.removePrefix("a").toIntOrNull()
+                    if (streamIdx != null) "0:$streamIdx?" else "0:a:0?"
+                }
+                else -> "0:a:0?"
+            }
+            if (nextSpec != selectedFfmpegAudioStreamSpec) {
+                selectedFfmpegAudioStreamSpec = nextSpec
+                val resumePos = currentPosition
+                val nextGen = mediaGeneration.incrementAndGet()
+                currentMediaItem?.let { startCurrentItemAsync(nextGen, it, resumePos) }
+            }
+            return
+        }
         vlcExecutor.execute {
             if (gen != mediaGeneration.get()) return@execute
             val mp = vlcMp ?: return@execute
@@ -1968,39 +2033,161 @@ class DesktopExoPlayer(
      * 快速探测媒体流是否为杜比视界（Dolby Vision）：
      * 本地文件直接调 ffprobe 毫秒级读取流头；远程流仅在文件名含 DV / DoVi / Dolby Vision 或 MP4/MKV 容器时轻量探测，不拖慢常规起播。
      */
-    private fun probeDolbyVisionProfileQuick(url: String, headers: Map<String, String>, titleHint: String?): Int? {
-        val isLocal = !url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)
-        val titleLooksDv = com.aisub.player.media.DolbyVisionHelper.looksLikeDolbyVisionTitle(titleHint ?: url)
-        if (!isLocal && !titleLooksDv) return null
-        val ffprobe = DesktopBinaryFinder.findFfprobe() ?: run {
-            if (titleLooksDv) DesktopBinaryFinder.ensureFfmpeg()
-            DesktopBinaryFinder.findFfprobe()
-        } ?: return if (titleLooksDv) 5 else null
+    private data class ProbedStreamMeta(
+        val srcWidth: Int,
+        val srcHeight: Int,
+        val hasVideo: Boolean,
+        val hasAudio: Boolean,
+        val fps: Double,
+        val durationMs: Long,
+        val isHdrOrDv: Boolean,
+        val dvProfile: Int?,
+        val videoFormat: Format?,
+        val audioFormat: Format?,
+        val trackGroups: List<Tracks.Group>,
+    )
 
+    private fun probeMediaStreamsCached(
+        url: String,
+        headers: Map<String, String>,
+        timeoutSec: Long = 8L,
+    ): ProbedStreamMeta? {
+        val cacheKey = currentMediaItem?.localConfiguration?.uri?.toString()?.ifBlank { url } ?: url
+        probeMetaCache[cacheKey]?.let { return it }
+        probeMetaCache[url]?.let { return it }
+
+        val ffprobe = DesktopBinaryFinder.findFfprobe() ?: return null
         return runCatching {
             val cmd = mutableListOf(
                 ffprobe, "-v", "error",
-                "-select_streams", "v:0",
-                "-probesize", "1M",
-                "-analyzeduration", "1000000",
-                "-show_entries", "stream=codec_tag_string,color_space,side_data_list",
+                "-probesize", "1500000",
+                "-analyzeduration", "1500000",
+                "-show_entries", "format=duration:stream=index,codec_type,codec_name,codec_tag_string,color_space,color_transfer,color_primaries,width,height,avg_frame_rate,r_frame_rate,tags,side_data_list",
                 "-of", "json",
             )
+            if (url.startsWith("http://127.0.0.1:", ignoreCase = true) || url.startsWith("http://localhost:", ignoreCase = true)) {
+                cmd.addAll(listOf("-http_proxy", ""))
+            }
             if (headers.isNotEmpty() && url.startsWith("http")) {
                 val hdr = headers.entries.joinToString("\r\n") { "${it.key}: ${it.value}" } + "\r\n"
                 cmd.addAll(listOf("-headers", hdr))
             }
             cmd.add(url)
-            val proc = ProcessBuilder(cmd).redirectError(ProcessBuilder.Redirect.DISCARD).start()
-            var out = ""
-            val reader = Thread({ runCatching { out = proc.inputStream.bufferedReader().readText() } }, "Voxtitle-DvProbe").apply {
-                isDaemon = true
-                start()
+            val proc = ProcessBuilder(cmd)
+                .redirectError(ProcessBuilder.Redirect.DISCARD)
+                .start()
+            var jsonText = ""
+            val readerThread = Thread(
+                { runCatching { jsonText = proc.inputStream.bufferedReader().readText() } },
+                "Voxtitle-FfprobeRead",
+            ).apply { isDaemon = true; start() }
+            if (!proc.waitFor(timeoutSec, TimeUnit.SECONDS)) {
+                proc.destroyForcibly()
             }
-            if (!proc.waitFor(4, TimeUnit.SECONDS)) proc.destroyForcibly()
-            reader.join(300)
-            parseDvProfileFromFfprobeJson(out) ?: if (titleLooksDv) 5 else null
+            readerThread.join(400)
+            if (jsonText.isBlank()) return null
+
+            val dvProf = parseDvProfileFromFfprobeJson(jsonText)
+            val root = JSONObject(jsonText)
+            val durSec = root.optJSONObject("format")?.optString("duration")?.toDoubleOrNull()
+            val durMs = if (durSec != null && durSec > 0.0) (durSec * 1000.0).toLong() else C.TIME_UNSET
+            val streams = root.optJSONArray("streams")
+
+            var srcW = 1280
+            var srcH = 720
+            var foundVideo = false
+            var foundAudio = false
+            var fps = 24.0
+            var isHdr = dvProf != null
+            var vFmt: Format? = null
+            var aFmt: Format? = null
+            val groups = ArrayList<Tracks.Group>()
+
+            if (streams != null) {
+                for (i in 0 until streams.length()) {
+                    val s = streams.getJSONObject(i)
+                    val stype = s.optString("codec_type")
+                    val idx = s.optInt("index", i)
+                    val tags = s.optJSONObject("tags")
+                    val lang = tags?.optString("language")?.takeIf { it.isNotBlank() }
+                    val title = tags?.optString("title")?.takeIf { it.isNotBlank() }
+                    if (stype == "video" && !foundVideo) {
+                        val w = s.optInt("width", 0)
+                        val h = s.optInt("height", 0)
+                        val trc = s.optString("color_transfer").lowercase()
+                        if (trc == "smpte2084" || trc == "arib-std-b67") {
+                            isHdr = true
+                        }
+                        if (w > 0 && h > 0) {
+                            srcW = w
+                            srcH = h
+                            foundVideo = true
+                            fps = parseFfmpegFrameRate(s.optString("avg_frame_rate"))
+                                ?: parseFfmpegFrameRate(s.optString("r_frame_rate"))
+                                ?: fps
+                            val mime = if (dvProf != null) MimeTypes.VIDEO_DOLBY_VISION else "video/${s.optString("codec_name", "avc")}"
+                            val codecsStr = if (dvProf != null) "dvhe.%02d".format(java.util.Locale.US, dvProf) else null
+                            vFmt = Format.Builder()
+                                .setId("v$idx")
+                                .setSampleMimeType(mime)
+                                .setCodecs(codecsStr)
+                                .setWidth(w)
+                                .setHeight(h)
+                                .setFrameRate(fps.toFloat())
+                                .build()
+                            groups.add(Tracks.Group(TrackGroup("v$idx", vFmt!!), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(true)))
+                        }
+                    } else if (stype == "audio") {
+                        val af = Format.Builder()
+                            .setId("a$idx")
+                            .setLanguage(lang)
+                            .setLabel(title ?: lang ?: "音轨 $idx")
+                            .setSampleMimeType(MimeTypes.AUDIO_UNKNOWN)
+                            .build()
+                        if (!foundAudio) aFmt = af
+                        groups.add(Tracks.Group(TrackGroup("a$idx", af), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(!foundAudio)))
+                        foundAudio = true
+                    } else if (stype == "subtitle") {
+                        val sf = Format.Builder()
+                            .setId("s$idx")
+                            .setLanguage(lang)
+                            .setLabel(title ?: lang ?: "字幕 $idx")
+                            .setSampleMimeType(MimeTypes.TEXT_UNKNOWN)
+                            .build()
+                        groups.add(Tracks.Group(TrackGroup("s$idx", sf), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(false)))
+                    }
+                }
+            }
+            if (!foundVideo && !foundAudio) return null
+            ProbedStreamMeta(
+                srcWidth = srcW,
+                srcHeight = srcH,
+                hasVideo = foundVideo,
+                hasAudio = foundAudio,
+                fps = fps,
+                durationMs = durMs,
+                isHdrOrDv = isHdr,
+                dvProfile = dvProf,
+                videoFormat = vFmt,
+                audioFormat = aFmt,
+                trackGroups = groups,
+            ).also { meta ->
+                if (probeMetaCache.size > 64) probeMetaCache.clear()
+                probeMetaCache[cacheKey] = meta
+                probeMetaCache[url] = meta
+            }
         }.getOrNull()
+    }
+
+    private fun probeDolbyVisionProfileQuick(url: String, headers: Map<String, String>, titleHint: String?): Int? {
+        val isLocal = !url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)
+        val titleLooksDv = com.aisub.player.media.DolbyVisionHelper.looksLikeDolbyVisionTitle(titleHint ?: url)
+        if (!isLocal && !titleLooksDv) return null
+        if (DesktopBinaryFinder.findFfprobe() == null && titleLooksDv) {
+            DesktopBinaryFinder.ensureFfmpeg()
+        }
+        val probed = probeMediaStreamsCached(url, headers, timeoutSec = 4L)
+        return probed?.dvProfile ?: if (titleLooksDv) 5 else null
     }
 
     private fun parseDvProfileFromFfprobeJson(jsonText: String): Int? {
@@ -2033,10 +2220,17 @@ class DesktopExoPlayer(
         headers: Map<String, String>,
         startPosMs: Long,
         useVulkanDevice: Boolean = false,
+        useD3d11Hwdec: Boolean = false,
     ): MutableList<String> {
         val cmd = mutableListOf(ffmpeg, "-v", "error")
+        if (useD3d11Hwdec) {
+            cmd.addAll(listOf("-init_hw_device", "d3d11va=d3d"))
+        }
         if (useVulkanDevice) {
             cmd.addAll(listOf("-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk"))
+        }
+        if (url.startsWith("http://127.0.0.1:", ignoreCase = true) || url.startsWith("http://localhost:", ignoreCase = true)) {
+            cmd.addAll(listOf("-http_proxy", ""))
         }
         if (url.startsWith("http")) {
             cmd.addAll(listOf("-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"))
@@ -2048,24 +2242,27 @@ class DesktopExoPlayer(
             val hdr = headers.entries.joinToString("\r\n") { "${it.key}: ${it.value}" } + "\r\n"
             cmd.addAll(listOf("-headers", hdr))
         }
-        cmd.addAll(listOf("-i", url))
+        if (useD3d11Hwdec) {
+            cmd.addAll(listOf("-hwaccel", "d3d11va", "-hwaccel_device", "d3d"))
+        }
+        cmd.addAll(listOf("-thread_queue_size", "2048", "-i", url))
         return cmd
     }
 
     private fun buildColorMappedVfFilter(
-        fpsStr: String,
         width: Int,
         height: Int,
         mode: Int,
     ): String = when (mode) {
-        // Mode 1: Vulkan GPU libplacebo 动态色调映射（完整支持杜比视界 Profile 5 IPTPQc2 + RPU 及 HDR10 -> BT.709）
-        1 -> "fps=fps=$fpsStr:round=near,libplacebo=w=$width:h=$height:colorspace=bt709:color_primaries=bt709:color_trc=iec61966-2-1:tonemapping=bt.2390:apply_dolbyvision=true:format=bgra"
+        // Mode 1: 高速单趟 Vulkan GPU libplacebo 动态色调映射（关闭多抽头重采样、动态峰值计算着色器与蓝噪点抖动开销，保留完整杜比视界 Profile 5 IPTPQc2 + RPU -> BT.709 映射）
+        1 -> "libplacebo=w=$width:h=$height:upscaler=bilinear:downscaler=bilinear:peak_detect=false:sigmoid=false:apply_filmgrain=false:dithering=none:tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=iec61966-2-1:apply_dolbyvision=true:format=bgra"
         // Mode 2: 无 Vulkan 驱动时的 CPU zscale HDR 色调映射兜底（针对 HDR10 / Profile 7 / Profile 8）
-        2 -> "fps=fps=$fpsStr:round=near,zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,scale=$width:$height:flags=fast_bilinear"
+        2 -> "scale=$width:$height:flags=fast_bilinear,zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv"
         // Mode 0: 标准 SDR 快速缩放管线
-        else -> "fps=fps=$fpsStr:round=near,scale=$width:$height:flags=fast_bilinear"
+        else -> "scale=$width:$height:flags=fast_bilinear"
     }
 
+    @JvmOverloads
     private fun startWithFfmpeg(
         gen: Int,
         url: String,
@@ -2090,137 +2287,44 @@ class DesktopExoPlayer(
                 return@submit
             }
 
-            // 探测时长、帧率、分辨率与杜比视界/HDR色彩元数据
-            var srcWidth = 1280
-            var srcHeight = 720
-            var width = 1280
-            var height = 720
-            var hasVideo = true
-            var hasAudio = true
-            var fps = 24.0
-            var isHdrOrDv = preferLibplacebo
-            var dvProfile: Int? = detectedDolbyProfile
-            val probedGroups = ArrayList<Tracks.Group>()
-            DesktopBinaryFinder.findFfprobe()?.let { ffprobe ->
-                runCatching {
-                    val cmd = mutableListOf(
-                        ffprobe, "-v", "error",
-                        "-probesize", "2M",
-                        "-analyzeduration", "2000000",
-                        "-show_entries", "format=duration:stream=index,codec_type,codec_name,codec_tag_string,color_space,color_transfer,color_primaries,width,height,avg_frame_rate,r_frame_rate,tags,side_data_list",
-                        "-of", "json",
-                    )
-                    if (headers.isNotEmpty() && url.startsWith("http")) {
-                        val hdr = headers.entries.joinToString("\r\n") { "${it.key}: ${it.value}" } + "\r\n"
-                        cmd.addAll(listOf("-headers", hdr))
-                    }
-                    cmd.add(url)
-                    val proc = ProcessBuilder(cmd)
-                        .redirectError(ProcessBuilder.Redirect.DISCARD)
-                        .start()
-                    var jsonText = ""
-                    val readerThread = Thread(
-                        { runCatching { jsonText = proc.inputStream.bufferedReader().readText() } },
-                        "Voxtitle-FfprobeRead",
-                    ).apply { isDaemon = true; start() }
-                    if (!proc.waitFor(10, TimeUnit.SECONDS)) {
-                        proc.destroyForcibly()
-                    }
-                    readerThread.join(500)
-                    if (jsonText.isNotBlank()) {
-                        parseDvProfileFromFfprobeJson(jsonText)?.let {
-                            dvProfile = it
-                            detectedDolbyProfile = it
-                            isHdrOrDv = true
-                        }
-                        val root = JSONObject(jsonText)
-                        val durSec = root.optJSONObject("format")?.optString("duration")?.toDoubleOrNull()
-                        if (durSec != null && durSec > 0) {
-                            duration = (durSec * 1000.0).toLong()
-                        }
-                        val streams = root.optJSONArray("streams")
-                        var foundVideo = false
-                        var foundAudio = false
-                        if (streams != null) {
-                            for (i in 0 until streams.length()) {
-                                val s = streams.getJSONObject(i)
-                                val stype = s.optString("codec_type")
-                                val idx = s.optInt("index", i)
-                                val tags = s.optJSONObject("tags")
-                                val lang = tags?.optString("language")?.takeIf { it.isNotBlank() }
-                                val title = tags?.optString("title")?.takeIf { it.isNotBlank() }
-                                if (stype == "video" && !foundVideo) {
-                                    val w = s.optInt("width", 0)
-                                    val h = s.optInt("height", 0)
-                                    val trc = s.optString("color_transfer").lowercase()
-                                    if (trc == "smpte2084" || trc == "arib-std-b67") {
-                                        isHdrOrDv = true
-                                    }
-                                    if (w > 0 && h > 0) {
-                                        srcWidth = w
-                                        srcHeight = h
-                                        val maxW = DesktopPlayerEngine.displayWidthPx.coerceIn(1280, 1920)
-                                        val maxH = DesktopPlayerEngine.displayHeightPx.coerceIn(720, 1080)
-                                        val scale = minOf(1.0, maxW.toDouble() / w.toDouble(), maxH.toDouble() / h.toDouble())
-                                        width = (((w * scale).roundToInt() / 2) * 2).coerceAtLeast(2)
-                                        height = (((h * scale).roundToInt() / 2) * 2).coerceAtLeast(2)
-                                        foundVideo = true
-                                        fps = parseFfmpegFrameRate(s.optString("avg_frame_rate"))
-                                            ?: parseFfmpegFrameRate(s.optString("r_frame_rate"))
-                                            ?: fps
-                                        val mime = if (dvProfile != null) MimeTypes.VIDEO_DOLBY_VISION else "video/${s.optString("codec_name", "avc")}"
-                                        val codecsStr = if (dvProfile != null) "dvhe.%02d".format(java.util.Locale.US, dvProfile) else null
-                                        val vf = Format.Builder()
-                                            .setId("v$idx")
-                                            .setSampleMimeType(mime)
-                                            .setCodecs(codecsStr)
-                                            .setWidth(w)
-                                            .setHeight(h)
-                                            .setFrameRate(fps.toFloat())
-                                            .build()
-                                        videoFormat = vf
-                                        probedGroups.add(Tracks.Group(TrackGroup("v$idx", vf), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(true)))
-                                    }
-                                } else if (stype == "audio") {
-                                    val af = Format.Builder()
-                                        .setId("a$idx")
-                                        .setLanguage(lang)
-                                        .setLabel(title ?: lang ?: "音轨 $idx")
-                                        .setSampleMimeType(MimeTypes.AUDIO_UNKNOWN)
-                                        .build()
-                                    if (!foundAudio) audioFormat = af
-                                    probedGroups.add(Tracks.Group(TrackGroup("a$idx", af), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(!foundAudio)))
-                                    foundAudio = true
-                                } else if (stype == "subtitle") {
-                                    val sf = Format.Builder()
-                                        .setId("s$idx")
-                                        .setLanguage(lang)
-                                        .setLabel(title ?: lang ?: "字幕 $idx")
-                                        .setSampleMimeType(MimeTypes.TEXT_UNKNOWN)
-                                        .build()
-                                    probedGroups.add(Tracks.Group(TrackGroup("s$idx", sf), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(false)))
-                                }
-                            }
-                        }
-                        if (foundVideo || foundAudio) {
-                            hasVideo = foundVideo
-                            hasAudio = foundAudio
-                        }
-                    }
+            val probed = probeMediaStreamsCached(url, headers, timeoutSec = 8L)
+            if (gen != mediaGeneration.get() || !ffmpegRunning.get()) return@submit
+
+            val srcWidth = probed?.srcWidth ?: 1280
+            val srcHeight = probed?.srcHeight ?: 720
+            val hasVideo = probed?.hasVideo ?: true
+            val hasAudio = probed?.hasAudio ?: true
+            val fps = probed?.fps ?: 24.0
+            val dvProfile = probed?.dvProfile ?: detectedDolbyProfile
+            if (dvProfile != null) detectedDolbyProfile = dvProfile
+            val isHdrOrDv = preferLibplacebo || (probed?.isHdrOrDv == true) || dvProfile != null
+
+            if (probed != null) {
+                if (probed.durationMs != C.TIME_UNSET && probed.durationMs > 0) {
+                    duration = probed.durationMs
+                }
+                probed.videoFormat?.let { videoFormat = it }
+                probed.audioFormat?.let { audioFormat = it }
+                if (probed.trackGroups.isNotEmpty()) {
+                    currentTracks = Tracks(probed.trackGroups)
+                    notifyMain { listeners.forEach { it.onTracksChanged(currentTracks) } }
                 }
             }
 
-            if (gen != mediaGeneration.get() || !ffmpegRunning.get()) return@submit
-
-            if (probedGroups.isNotEmpty()) {
-                currentTracks = Tracks(probedGroups)
-                notifyMain { listeners.forEach { it.onTracksChanged(currentTracks) } }
-            }
+            val maxW = DesktopPlayerEngine.displayWidthPx.coerceIn(1280, 1920)
+            val maxH = DesktopPlayerEngine.displayHeightPx.coerceIn(720, 1080)
+            val scale = minOf(1.0, maxW.toDouble() / srcWidth.toDouble(), maxH.toDouble() / srcHeight.toDouble())
+            // 16 字节行对齐以加速 Vulkan GPU 读回与 Skia 纹理拷贝
+            val width = ((((srcWidth * scale).roundToInt() + 8) / 16) * 16).coerceAtLeast(16)
+            val height = (((srcHeight * scale).roundToInt() / 2) * 2).coerceAtLeast(2)
 
             val usePlacebo = preferLibplacebo || isHdrOrDv
+            val wantD3d11Hwdec = IS_WINDOWS_HOST && (hwdecPreference != false)
+            val hwLabel = if (wantD3d11Hwdec) "D3D11VA 硬解 + " else "FFmpeg 软解 + "
             activePipelineDescription = when {
-                dvProfile != null -> "libplacebo Vulkan · 杜比视界 P$dvProfile → BT.709 (bt.2390)"
-                usePlacebo -> "libplacebo Vulkan · HDR/广色域动态映射管线"
+                dvProfile != null -> "${hwLabel}libplacebo Vulkan · 杜比视界 P$dvProfile → BT.709"
+                usePlacebo -> "${hwLabel}libplacebo Vulkan · HDR 动态色调映射"
+                wantD3d11Hwdec -> "D3D11VA 硬件加速渲染管线"
                 else -> "FFmpeg 软解渲染管线"
             }
 
@@ -2230,7 +2334,7 @@ class DesktopExoPlayer(
                 notifyMain {
                     listeners.forEach { it.onVideoSizeChanged(sz) }
                 }
-                if (hasAudio) {
+                if (hasAudio && selectedFfmpegAudioStreamSpec.isNotEmpty()) {
                     startFfmpegMuxedPlayback(
                         gen = gen,
                         ffmpeg = ffmpeg,
@@ -2241,10 +2345,22 @@ class DesktopExoPlayer(
                         height = height,
                         fps = fps,
                         filterMode = if (usePlacebo) 1 else 0,
+                        useD3d11Hwdec = wantD3d11Hwdec,
                         isHdrFallbackCandidate = isHdrOrDv && dvProfile != 5,
                     )
                 } else {
-                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = if (usePlacebo) 1 else 0)
+                    startFfmpegVideoThread(
+                        gen = gen,
+                        ffmpeg = ffmpeg,
+                        url = url,
+                        headers = headers,
+                        startPosMs = startPosMs,
+                        width = width,
+                        height = height,
+                        fps = fps,
+                        filterMode = if (usePlacebo) 1 else 0,
+                        useD3d11Hwdec = wantD3d11Hwdec,
+                    )
                 }
             } else {
                 startFfmpegAudioThread(gen, ffmpeg, url, headers, startPosMs, markReadyWithoutVideo = true, endWhenDone = true)
@@ -2253,8 +2369,9 @@ class DesktopExoPlayer(
     }
 
     /**
-     * 单进程音画同步解码：video 走 stdout rawvideo（支持 Vulkan libplacebo 杜比视界动态色调映射，若机器无 Vulkan 驱动则自动无缝降级），
-     * audio 走本机回环 TCP PCM。避免起两个进程争抢 115 等单连接网盘。
+     * 单进程双路本机高速回环 TCP + 8 帧预分配异步环形队列音画同步管线：
+     * - 彻底消除 Windows 匿名管道 (pipe:1, 4KB 缓冲) 在视频帧等待 PTS 时阻塞 FFmpeg 复用器导致音频断流与自锁卡顿的问题；
+     * - 支持 D3D11VA 4K 10-bit HEVC 硬件解码 + Vulkan libplacebo 杜比视界动态色调映射，若驱动不支持自动降级重试。
      */
     private fun startFfmpegMuxedPlayback(
         gen: Int,
@@ -2266,45 +2383,77 @@ class DesktopExoPlayer(
         height: Int,
         fps: Double,
         filterMode: Int = 0,
+        useD3d11Hwdec: Boolean = false,
         isHdrFallbackCandidate: Boolean = false,
     ) {
         ioPool.submit {
+            if (gen != mediaGeneration.get() || !ffmpegRunning.get()) return@submit
             val safeFps = fps.coerceIn(12.0, 60.0)
             val fpsStr = "%.6f".format(java.util.Locale.US, safeFps)
-            val audioServer = runCatching {
-                ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).apply { soTimeout = 20_000 }
-            }.getOrElse { e ->
-                Log.e(TAG, "FFmpeg 本地音频套接字创建失败，改用纯视频模式", e)
-                startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode)
+
+            val videoServer = runCatching {
+                ServerSocket().apply {
+                    receiveBufferSize = 16 * 1024 * 1024
+                    bind(java.net.InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 1)
+                    soTimeout = 20_000
+                }
+            }.getOrNull()
+            if (videoServer == null) {
+                startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode, useD3d11Hwdec)
                 return@submit
             }
+            val audioServer = runCatching {
+                ServerSocket().apply {
+                    receiveBufferSize = 1024 * 1024
+                    bind(java.net.InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 1)
+                    soTimeout = 20_000
+                }
+            }.getOrElse { e ->
+                runCatching { videoServer.close() }
+                Log.e(TAG, "FFmpeg 本地音频套接字创建失败，改用纯视频模式", e)
+                startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode, useD3d11Hwdec)
+                return@submit
+            }
+            ffmpegVideoServer = videoServer
             ffmpegAudioServer = audioServer
 
             val hasLiveAudio = AtomicBoolean(true)
             val audioDoneLatch = CountDownLatch(1)
-            val vfStr = buildColorMappedVfFilter(fpsStr, width, height, filterMode)
-            val cmd = buildFfmpegInputArgs(ffmpeg, url, headers, startPosMs, useVulkanDevice = filterMode == 1).apply {
+            val vfStr = buildColorMappedVfFilter(width, height, filterMode)
+            val audioMapSpec = selectedFfmpegAudioStreamSpec.ifEmpty { "0:a:0?" }
+            val cmd = buildFfmpegInputArgs(
+                ffmpeg = ffmpeg,
+                url = url,
+                headers = headers,
+                startPosMs = startPosMs,
+                useVulkanDevice = filterMode == 1,
+                useD3d11Hwdec = useD3d11Hwdec,
+            ).apply {
                 addAll(
                     listOf(
                         "-threads", "0",
                         "-map", "0:v:0", "-sn",
                         "-vf", vfStr,
+                        "-r", fpsStr,
                         "-pix_fmt", "bgra",
-                        "-f", "rawvideo", "pipe:1",
-                        "-map", "0:a:0?", "-vn", "-sn",
+                        "-f", "rawvideo", "tcp://127.0.0.1:${videoServer.localPort}?send_buffer_size=16777216&tcp_nodelay=1",
+                        "-map", audioMapSpec, "-vn", "-sn",
                         "-ac", "2", "-ar", "48000",
-                        "-f", "s16le", "tcp://127.0.0.1:${audioServer.localPort}",
+                        "-f", "s16le", "tcp://127.0.0.1:${audioServer.localPort}?send_buffer_size=1048576&tcp_nodelay=1",
                     ),
                 )
             }
 
             ioPool.submit {
                 try {
-                    val sock = audioServer.accept()
+                    val sock = audioServer.accept().apply {
+                        receiveBufferSize = 1024 * 1024
+                        tcpNoDelay = true
+                    }
                     runCatching { audioServer.close() }
                     if (ffmpegAudioServer === audioServer) ffmpegAudioServer = null
                     sock.use { s ->
-                        s.getInputStream().use { audioIn ->
+                        BufferedInputStream(s.getInputStream(), 65_536).use { audioIn ->
                             pumpPcmToAudioLine(
                                 gen = gen,
                                 ins = audioIn,
@@ -2323,106 +2472,252 @@ class DesktopExoPlayer(
                 }
             }
 
-            runCatching {
+            var framesRead = 0L
+            try {
                 val proc = ProcessBuilder(cmd)
                     .redirectError(ProcessBuilder.Redirect.DISCARD)
                     .start()
                 ffmpegVideoProc = proc
                 ffmpegAudioProc = null
-                val framesRead = readFfmpegVideoStream(
-                    gen = gen,
-                    proc = proc,
-                    width = width,
-                    height = height,
-                    startPosMs = startPosMs,
-                    safeFps = safeFps,
-                    useAudioClock = { hasLiveAudio.get() && ffmpegAudioClockReady },
-                )
+                val videoSock = videoServer.accept().apply {
+                    receiveBufferSize = 16 * 1024 * 1024
+                    tcpNoDelay = true
+                }
+                runCatching { videoServer.close() }
+                if (ffmpegVideoServer === videoServer) ffmpegVideoServer = null
+                videoSock.use { vs ->
+                    val bufferedVideoIn = BufferedInputStream(vs.getInputStream(), 2 * 1024 * 1024)
+                    framesRead = readAndPresentFfmpegVideoRing(
+                        gen = gen,
+                        ins = bufferedVideoIn,
+                        width = width,
+                        height = height,
+                        startPosMs = startPosMs,
+                        safeFps = safeFps,
+                        useAudioClock = { hasLiveAudio.get() && ffmpegAudioClockReady },
+                    )
+                }
                 proc.destroy()
-                audioDoneLatch.await(3, TimeUnit.SECONDS)
-                // 若当前电脑缺少 Vulkan ICD 导致 filterMode=1 (libplacebo) 未输出任何帧，自动降级至 CPU zscale / 标准滤镜续播
-                if (framesRead == 0L && filterMode == 1 && ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                audioDoneLatch.await(2, TimeUnit.SECONDS)
+            } catch (e: Throwable) {
+                Log.w(TAG, "FFmpeg 管线运行退出 (hwdec=$useD3d11Hwdec, mode=$filterMode, frames=$framesRead): ${e.message}")
+            } finally {
+                runCatching { videoServer.close() }
+                runCatching { audioServer.close() }
+                if (ffmpegVideoServer === videoServer) ffmpegVideoServer = null
+                if (ffmpegAudioServer === audioServer) ffmpegAudioServer = null
+            }
+
+            if (framesRead == 0L && ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                // 1) 若 D3D11VA 硬解初始化失败（如老显卡不支持 HEVC Main10 硬解），优先降级为多线程软解 + Vulkan libplacebo（保持杜比视界正常色彩）
+                if (useD3d11Hwdec) {
+                    Log.w(TAG, "当前显卡不支持 D3D11VA 硬解该流，自动回退至多线程解码 + libplacebo 色彩管线")
+                    activePipelineDescription = activePipelineDescription.replace("D3D11VA 硬解 + ", "FFmpeg 多核软解 + ")
+                    // 纯 CPU 解码 4K 时将读回分辨率限制在 1600x900 以进一步减轻 CPU 与总线负担
+                    val softMaxW = width.coerceAtMost(1600).let { ((it + 8) / 16) * 16 }.coerceAtLeast(16)
+                    val softMaxH = if (softMaxW < width) (((height.toDouble() * softMaxW / width).roundToInt() / 2) * 2).coerceAtLeast(2) else height
+                    startFfmpegMuxedPlayback(
+                        gen = gen,
+                        ffmpeg = ffmpeg,
+                        url = url,
+                        headers = headers,
+                        startPosMs = startPosMs,
+                        width = softMaxW,
+                        height = softMaxH,
+                        fps = fps,
+                        filterMode = filterMode,
+                        useD3d11Hwdec = false,
+                        isHdrFallbackCandidate = isHdrFallbackCandidate,
+                    )
+                    return@submit
+                }
+                // 2) 若当前电脑缺少 Vulkan ICD 导致 filterMode=1 未输出任何帧，自动降级至 CPU zscale / 标准滤镜续播
+                if (filterMode == 1) {
                     val nextMode = if (isHdrFallbackCandidate) 2 else 0
                     Log.w(TAG, "当前显卡未启用 Vulkan libplacebo，自动切换至 CPU 色调映射管线 (mode=$nextMode)")
                     activePipelineDescription = if (nextMode == 2) "FFmpeg zscale CPU HDR 色调映射" else "FFmpeg 软解渲染管线"
-                    startFfmpegMuxedPlayback(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = nextMode, isHdrFallbackCandidate = false)
-                    return@runCatching
+                    startFfmpegMuxedPlayback(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = nextMode, useD3d11Hwdec = false, isHdrFallbackCandidate = false)
+                    return@submit
                 }
-                if (ffmpegRunning.get() && gen == mediaGeneration.get() && framesRead > 0L) {
-                    onItemEnded()
-                }
-            }.onFailure { e ->
-                runCatching { audioServer.close() }
-                if (ffmpegAudioServer === audioServer) ffmpegAudioServer = null
-                Log.e(TAG, "FFmpeg 单进程音视频解码异常: $url", e)
+            }
+            if (ffmpegRunning.get() && gen == mediaGeneration.get() && framesRead > 0L) {
+                onItemEnded()
             }
         }
     }
 
-    private fun readFfmpegVideoStream(
+    /**
+     * 零分配 8 帧异步环形缓冲器：
+     * - 独立读取线程全速排空 FFmpeg 视频输出，绝不因 PTS 睡眠阻塞 FFmpeg 内部的音视频复用器；
+     * - 独立呈现线程对齐平滑插值音频时钟精准上屏，解码偶发落后时在环形队列内平滑跳帧追赶。
+     */
+    private fun readAndPresentFfmpegVideoRing(
         gen: Int,
-        proc: Process,
+        ins: InputStream,
         width: Int,
         height: Int,
         startPosMs: Long,
         safeFps: Double,
         useAudioClock: () -> Boolean,
     ): Long {
-        val ins = proc.inputStream
-        var framesRead = 0L
-        var consecutiveSkipped = 0
-        var wallClockAnchorMs = System.currentTimeMillis()
-        var firstFrameDecoded = false
-        while (ffmpegRunning.get() && gen == mediaGeneration.get()) {
-            if (!playWhenReady) {
-                Thread.sleep(30)
-                wallClockAnchorMs += 30L
-                continue
+        val frameBytes = width * height * 4
+        val ringCap = 8
+        val ringBuffers = Array(ringCap) { ByteArray(frameBytes) }
+        val ringPts = LongArray(ringCap)
+        val ringLock = java.util.concurrent.locks.ReentrantLock()
+        val notFull = ringLock.newCondition()
+        val notEmpty = ringLock.newCondition()
+        var writeIdx = 0
+        var readIdx = 0
+        var queued = 0
+        var producerDone = false
+        val totalFramesRead = AtomicLong(0L)
+
+        val readerThread = Thread({
+            var seq = 0L
+            try {
+                while (ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                    val slotIdx: Int
+                    ringLock.lock()
+                    try {
+                        while (queued >= ringCap && ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                            notFull.await(25L, TimeUnit.MILLISECONDS)
+                        }
+                        if (!ffmpegRunning.get() || gen != mediaGeneration.get()) break
+                        slotIdx = writeIdx
+                    } finally {
+                        ringLock.unlock()
+                    }
+                    val target = ringBuffers[slotIdx]
+                    var off = 0
+                    while (off < frameBytes && ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                        val n = ins.read(target, off, frameBytes - off)
+                        if (n < 0) break
+                        off += n
+                    }
+                    if (off < frameBytes) break
+                    val ptsMs = startPosMs + (seq * 1000.0 / safeFps).roundToLong()
+                    seq++
+                    totalFramesRead.incrementAndGet()
+                    ringLock.lock()
+                    try {
+                        ringPts[slotIdx] = ptsMs
+                        writeIdx = (writeIdx + 1) % ringCap
+                        queued++
+                        notEmpty.signal()
+                    } finally {
+                        ringLock.unlock()
+                    }
+                }
+            } catch (_: Throwable) {
+            } finally {
+                ringLock.lock()
+                try {
+                    producerDone = true
+                    notEmpty.signalAll()
+                } finally {
+                    ringLock.unlock()
+                }
             }
-            val audioActive = useAudioClock()
-            val framePtsMs = startPosMs + (framesRead * 1000.0 / safeFps).roundToLong()
-            val refClockMs = if (audioActive) {
-                positionMsInternal
-            } else if (firstFrameDecoded) {
-                startPosMs + (System.currentTimeMillis() - wallClockAnchorMs)
-            } else {
-                startPosMs
-            }
-            // 即使解码略慢于音频时钟，也至多隔帧跳过上传（绝不连续丢弃所有帧导致画面卡死）
-            val isLate = audioActive && framesRead > 0 && (refClockMs - framePtsMs) > 120L && consecutiveSkipped < 1
-            val shouldRender = !isLate && DesktopPlayerEngine.activePlayer === this@DesktopExoPlayer
-            val ok = DesktopPlayerEngine.readFrameBgraStream(
-                width = width,
-                height = height,
-                ins = ins,
-                shouldContinue = { ffmpegRunning.get() && gen == mediaGeneration.get() },
-                renderFrame = shouldRender,
-            )
-            if (!ok) break
-            consecutiveSkipped = if (isLate) consecutiveSkipped + 1 else 0
-            if (!firstFrameDecoded) {
-                firstFrameDecoded = true
-                wallClockAnchorMs = System.currentTimeMillis()
-            }
-            framesRead++
-            if (renderedFirstFrame.compareAndSet(false, true)) {
-                playbackState = Player.STATE_READY
-                val cost = if (prepareStartRealtimeMs > 0L) System.currentTimeMillis() - prepareStartRealtimeMs else 0L
-                Log.i(TAG, "FFmpeg 首帧已渲染 (${width}x${height}), 耗时=${cost}ms")
-                notifyMain { listeners.forEach { it.onRenderedFirstFrame() } }
-            }
-            if (!audioActive) {
-                positionMsInternal = framePtsMs
-                positionAnchorNano = System.nanoTime()
-            }
-            val updatedAudio = useAudioClock()
-            val updatedRef = if (updatedAudio) positionMsInternal else startPosMs + (System.currentTimeMillis() - wallClockAnchorMs)
-            val aheadMs = framePtsMs - updatedRef
-            if (aheadMs > 5L) {
-                Thread.sleep(aheadMs.coerceAtMost(80L))
-            }
+        }, "Voxtitle-FfmpegVideoRead").apply {
+            isDaemon = true
+            priority = (Thread.NORM_PRIORITY + 1).coerceAtMost(Thread.MAX_PRIORITY)
+            start()
         }
-        return framesRead
+
+        var wallClockAnchorMs = System.currentTimeMillis()
+        var firstFramePresented = false
+        var consecutiveDropped = 0
+        try {
+            while (ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                if (!playWhenReady) {
+                    Thread.sleep(20L)
+                    wallClockAnchorMs += 20L
+                    continue
+                }
+                val slotIdx: Int
+                val framePtsMs: Long
+                val remainingAfterPop: Int
+                ringLock.lock()
+                try {
+                    while (queued == 0 && !producerDone && ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                        notEmpty.await(20L, TimeUnit.MILLISECONDS)
+                    }
+                    if (queued == 0) break
+                    slotIdx = readIdx
+                    framePtsMs = ringPts[slotIdx]
+                    remainingAfterPop = queued - 1
+                } finally {
+                    ringLock.unlock()
+                }
+
+                val audioActive = useAudioClock()
+                val refClockMs = if (audioActive) {
+                    currentFfmpegAudioClockMs()
+                } else if (firstFramePresented) {
+                    startPosMs + ((System.currentTimeMillis() - wallClockAnchorMs) * playbackParameters.speed).toLong()
+                } else {
+                    startPosMs
+                }
+
+                val lagMs = refClockMs - framePtsMs
+                val dropFrame = audioActive && firstFramePresented && lagMs > 85L && remainingAfterPop > 0 && consecutiveDropped < 3
+                if (!dropFrame) {
+                    val aheadMs = framePtsMs - refClockMs
+                    if (firstFramePresented && aheadMs > 3L) {
+                        var waitLeft = aheadMs.coerceAtMost(60L)
+                        while (waitLeft > 2L && playWhenReady && ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                            val step = minOf(waitLeft - 1L, 12L).coerceAtLeast(1L)
+                            Thread.sleep(step)
+                            val nowRef = if (useAudioClock()) {
+                                currentFfmpegAudioClockMs()
+                            } else {
+                                startPosMs + ((System.currentTimeMillis() - wallClockAnchorMs) * playbackParameters.speed).toLong()
+                            }
+                            waitLeft = framePtsMs - nowRef
+                        }
+                    }
+                    if (DesktopPlayerEngine.activePlayer === this@DesktopExoPlayer) {
+                        DesktopPlayerEngine.submitFrameBgraBytes(width, height, ringBuffers[slotIdx])
+                    }
+                    consecutiveDropped = 0
+                    if (!firstFramePresented) {
+                        firstFramePresented = true
+                        wallClockAnchorMs = System.currentTimeMillis()
+                    }
+                    if (renderedFirstFrame.compareAndSet(false, true)) {
+                        playbackState = Player.STATE_READY
+                        val cost = if (prepareStartRealtimeMs > 0L) System.currentTimeMillis() - prepareStartRealtimeMs else 0L
+                        Log.i(TAG, "FFmpeg 首帧已渲染 (${width}x${height}), 耗时=${cost}ms")
+                        notifyMain { listeners.forEach { it.onRenderedFirstFrame() } }
+                    }
+                    if (!audioActive) {
+                        positionMsInternal = framePtsMs
+                        positionAnchorNano = System.nanoTime()
+                    }
+                } else {
+                    consecutiveDropped++
+                }
+
+                ringLock.lock()
+                try {
+                    readIdx = (readIdx + 1) % ringCap
+                    queued--
+                    notFull.signal()
+                } finally {
+                    ringLock.unlock()
+                }
+            }
+        } finally {
+            ringLock.lock()
+            try {
+                notFull.signalAll()
+            } finally {
+                ringLock.unlock()
+            }
+            runCatching { readerThread.join(300L) }
+        }
+        return totalFramesRead.get()
     }
 
     private fun pumpPcmToAudioLine(
@@ -2433,11 +2728,12 @@ class DesktopExoPlayer(
     ): Long {
         val format = AudioFormat(48000f, 16, 2, true, false)
         val line = runCatching { AudioSystem.getSourceDataLine(format) }.getOrNull()
-        line?.open(format, 48000 * 4 / 5)
+        // 400ms 充足硬件音频缓冲防止欠载爆音，配合 20ms 小分片写入实现平滑毫秒级时钟更新
+        line?.open(format, 48000 * 4 * 2 / 5)
         line?.start()
         ffmpegAudioLine = line
 
-        val buf = ByteArray(4800 * 4) // 100ms
+        val buf = ByteArray(960 * 4) // 20ms
         var carry = 0
         var bytesPlayed = 0L
         var lineStarted = true
@@ -2448,10 +2744,11 @@ class DesktopExoPlayer(
                         runCatching { line?.stop() }
                         lineStarted = false
                     }
-                    Thread.sleep(30)
+                    Thread.sleep(20)
                     continue
                 }
                 if (!lineStarted) {
+                    positionAnchorNano = System.nanoTime()
                     runCatching { line?.start() }
                     lineStarted = true
                 }
@@ -2508,18 +2805,28 @@ class DesktopExoPlayer(
         height: Int,
         fps: Double,
         filterMode: Int = 0,
+        useD3d11Hwdec: Boolean = false,
     ) {
         ioPool.submit {
+            var framesRead = 0L
             runCatching {
                 val safeFps = fps.coerceIn(12.0, 60.0)
                 val fpsStr = "%.6f".format(java.util.Locale.US, safeFps)
-                val vfStr = buildColorMappedVfFilter(fpsStr, width, height, filterMode)
-                val cmd = buildFfmpegInputArgs(ffmpeg, url, headers, startPosMs, useVulkanDevice = filterMode == 1).apply {
+                val vfStr = buildColorMappedVfFilter(width, height, filterMode)
+                val cmd = buildFfmpegInputArgs(
+                    ffmpeg = ffmpeg,
+                    url = url,
+                    headers = headers,
+                    startPosMs = startPosMs,
+                    useVulkanDevice = filterMode == 1,
+                    useD3d11Hwdec = useD3d11Hwdec,
+                ).apply {
                     addAll(
                         listOf(
                             "-threads", "0",
                             "-an", "-sn",
                             "-vf", vfStr,
+                            "-r", fpsStr,
                             "-pix_fmt", "bgra",
                             "-f", "rawvideo", "-",
                         ),
@@ -2529,9 +2836,9 @@ class DesktopExoPlayer(
                     .redirectError(ProcessBuilder.Redirect.DISCARD)
                     .start()
                 ffmpegVideoProc = proc
-                val framesRead = readFfmpegVideoStream(
+                framesRead = readAndPresentFfmpegVideoRing(
                     gen = gen,
-                    proc = proc,
+                    ins = BufferedInputStream(proc.inputStream, 2 * 1024 * 1024),
                     width = width,
                     height = height,
                     startPosMs = startPosMs,
@@ -2539,15 +2846,21 @@ class DesktopExoPlayer(
                     useAudioClock = { false },
                 )
                 proc.destroy()
-                if (framesRead == 0L && filterMode == 1 && ffmpegRunning.get() && gen == mediaGeneration.get()) {
-                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = 0)
-                    return@runCatching
-                }
-                if (ffmpegRunning.get() && gen == mediaGeneration.get() && framesRead > 0L) {
-                    onItemEnded()
-                }
             }.onFailure { e ->
                 Log.e(TAG, "FFmpeg 视频解码线程异常: $url", e)
+            }
+            if (framesRead == 0L && ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                if (useD3d11Hwdec) {
+                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = filterMode, useD3d11Hwdec = false)
+                    return@submit
+                }
+                if (filterMode == 1) {
+                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = 0, useD3d11Hwdec = false)
+                    return@submit
+                }
+            }
+            if (ffmpegRunning.get() && gen == mediaGeneration.get() && framesRead > 0L) {
+                onItemEnded()
             }
         }
     }
@@ -2654,6 +2967,8 @@ class DesktopExoPlayer(
         vlcStatsFuture?.cancel(false)
         vlcStatsFuture = null
         ffmpegRunning.set(false)
+        runCatching { ffmpegVideoServer?.close() }
+        ffmpegVideoServer = null
         runCatching { ffmpegAudioServer?.close() }
         ffmpegAudioServer = null
         runCatching { ffmpegAudioProc?.destroyForcibly() }
@@ -2705,6 +3020,10 @@ class DesktopExoPlayer(
     companion object {
         /** Windows WASAPI 共享模式扬声器输出缓冲典型延迟补偿（毫秒），使 VLC 播放时钟贴合人耳听到的采样时刻 */
         private const val VLC_SPEAKER_LATENCY_MS = 85L
+        private const val FFMPEG_SPEAKER_LATENCY_MS = 45L
+        private val IS_WINDOWS_HOST: Boolean =
+            System.getProperty("os.name").orEmpty().lowercase().contains("win")
+        private val probeMetaCache = java.util.concurrent.ConcurrentHashMap<String, ProbedStreamMeta>()
 
         private val AUDIO_EXTENSIONS = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma", "ape", "alac", "aiff")
 

@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -92,7 +93,9 @@ import com.aisub.player.meta.DiscoverItem
 import com.aisub.player.remote.RemoteItem
 import com.aisub.player.remote.Server
 import com.aisub.player.remote.ServerType
+import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -1738,7 +1741,7 @@ private fun RematchScrapedItemDialog(
 }
 
 /**
- * 跨自定义媒体库 + Emby / Jellyfin / Plex / OpenList 的全局统一检索与直接播放弹窗。
+ * 跨自定义媒体库 + Emby / Jellyfin / Plex / OpenList 的全局统一检索与直接播放弹窗（Spotlight 液态玻璃风格）。
  */
 @Composable
 fun UnifiedMediaIndexDialog(
@@ -1751,94 +1754,389 @@ fun UnifiedMediaIndexDialog(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val libraries by CustomMediaLibraryStore.libraries.collectAsStateWithLifecycle()
+    val itemsMap by CustomMediaLibraryStore.itemsByLibrary.collectAsStateWithLifecycle()
+    val libState by lib.state.collectAsStateWithLifecycle()
+
     var query by remember { mutableStateOf("") }
+    var kindFilter by remember { mutableStateOf<String?>(null) } // null=全部, "movie"=电影, "tv"=电视剧
     var searching by remember { mutableStateOf(false) }
     var hits by remember { mutableStateOf<List<IndexedPlayHit>>(emptyList()) }
     var searchedOnce by remember { mutableStateOf(false) }
 
-    fun doSearch() {
-        val q = query.trim()
-        if (q.isEmpty()) return
+    val totalScraped = remember(libraries, itemsMap) {
+        libraries.sumOf { l -> (itemsMap[l.id]?.size ?: l.itemCount).coerceAtLeast(0) }
+    }
+    val scopeSubtitle = remember(libraries, totalScraped, libState.servers) {
+        val parts = ArrayList<String>()
+        if (libraries.isNotEmpty()) {
+            parts += if (totalScraped > 0) "${libraries.size} 个媒体库（$totalScraped 部）" else "${libraries.size} 个媒体库"
+        }
+        val serverNames = libState.servers
+            .filter { it.type.isMediaServer || it.type == ServerType.OPENLIST }
+            .map { it.name.ifBlank { it.type.label } }
+            .distinct()
+        if (serverNames.isNotEmpty()) {
+            parts += serverNames.take(3).joinToString(" / ")
+        }
+        parts.joinToString(" · ").ifEmpty { "支持检索本地刮削媒体库与媒体服务器" }
+    }
+
+    // 未输入关键词时展示最近刮削入库的精选片源，避免弹窗下半部分空旷
+    val recentQuickHits = remember(libraries, itemsMap, kindFilter) {
+        val libsById = libraries.associateBy { it.id }
+        itemsMap.entries
+            .flatMap { (libId, list) ->
+                val l = libsById[libId] ?: return@flatMap emptyList()
+                list.map { item -> l to item }
+            }
+            .filter { (_, item) -> kindFilter == null || item.kind == kindFilter }
+            .sortedByDescending { (_, item) -> item.addedAt }
+            .take(6)
+            .map { (l, item) -> IndexedPlayHit.CustomLibraryHit(l, item) }
+    }
+
+    fun executeFullSearch(qRaw: String) {
+        val q = qRaw.trim()
+        if (q.isEmpty()) {
+            hits = emptyList()
+            searching = false
+            searchedOnce = false
+            return
+        }
+        // 先毫秒级返回本机已刮削媒体库命中结果，再并发拉取远端 Emby / Plex / OpenList
+        val instantLocal = CustomMediaLibraryStore.matchInScrapedLibraries(context, q, kind = kindFilter)
+        hits = instantLocal
+        val hasRemoteIndexable = libState.servers.any { it.type.isMediaServer || it.type == ServerType.OPENLIST }
+        if (!hasRemoteIndexable) {
+            searching = false
+            searchedOnce = true
+            return
+        }
         searching = true
-        searchedOnce = true
         scope.launch {
-            hits = runCatching {
+            val all = runCatching {
                 CustomMediaLibraryStore.queryAllIndexedSources(
                     context = context,
                     lib = lib,
                     title = q,
+                    kind = kindFilter,
                 )
-            }.getOrDefault(emptyList())
+            }.getOrDefault(instantLocal)
+            if (query.trim() == q) {
+                hits = all
+                searching = false
+                searchedOnce = true
+            }
+        }
+    }
+
+    // 输入时实时本地检索 + 320ms 防抖远端联动检索
+    LaunchedEffect(query, kindFilter) {
+        val q = query.trim()
+        if (q.isEmpty()) {
+            hits = emptyList()
             searching = false
+            searchedOnce = false
+            return@LaunchedEffect
+        }
+        hits = CustomMediaLibraryStore.matchInScrapedLibraries(context, q, kind = kindFilter)
+        val hasRemoteIndexable = libState.servers.any { it.type.isMediaServer || it.type == ServerType.OPENLIST }
+        if (!hasRemoteIndexable) {
+            searchedOnce = true
+            searching = false
+            return@LaunchedEffect
+        }
+        searching = true
+        delay(320L)
+        val all = runCatching {
+            CustomMediaLibraryStore.queryAllIndexedSources(
+                context = context,
+                lib = lib,
+                title = q,
+                kind = kindFilter,
+            )
+        }.getOrDefault(hits)
+        hits = all
+        searching = false
+        searchedOnce = true
+    }
+
+    val displayedHits = remember(hits, kindFilter) {
+        if (kindFilter == null) hits else hits.filter { h ->
+            when (h) {
+                is IndexedPlayHit.CustomLibraryHit -> h.item.kind == kindFilter
+                is IndexedPlayHit.MediaServerHit -> {
+                    val t = h.item.type
+                    if (kindFilter == "movie") t == "movie" else t != "movie"
+                }
+                is IndexedPlayHit.OpenListHit -> true
+            }
         }
     }
 
     AppDialog(
         onDismissRequest = onDismiss,
-        title = { Text("跨媒体库与 Emby/Plex 统一检索") },
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        modifier = Modifier
+            .padding(horizontal = 16.dp)
+            .fillMaxWidth()
+            .widthIn(max = 460.dp),
+        title = {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Box(
+                    Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(Orange.copy(alpha = 0.16f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(AppIcons.Search, contentDescription = null, tint = Orange, modifier = Modifier.size(18.dp))
+                }
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = "跨库检索",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = scopeSubtitle,
+                        fontSize = 11.5.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Box(
+                    Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.65f))
+                        .tvFocusRing(CircleShape)
+                        .clickable(onClick = onDismiss),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        AppIcons.Close,
+                        contentDescription = "关闭",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+        },
         text = {
             Column(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 420.dp)
-                    .verticalScroll(rememberScrollState()),
+                Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                // 一体化单行胶囊搜索栏（杜绝占位文字折行挤压）
+                CompactSearchField(
+                    value = query,
+                    onValueChange = { query = it },
+                    onSearch = { executeFullSearch(query) },
+                    placeholder = "搜索电影、电视剧名称…",
+                    phoneInput = true,
+                    phoneLabel = "跨库搜索片名",
+                    height = 46.dp,
+                    modifier = Modifier.fillMaxWidth(),
+                    trailingAction = {
+                        val active = query.isNotBlank()
+                        Box(
+                            Modifier
+                                .padding(end = 2.dp)
+                                .height(32.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(
+                                    if (active) Orange
+                                    else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f),
+                                )
+                                .tvFocusRing(RoundedCornerShape(50))
+                                .clickable(enabled = active && !searching) { executeFullSearch(query) }
+                                .padding(horizontal = 13.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (searching) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp,
+                                    color = if (active) Color.White else Orange,
+                                )
+                            } else {
+                                Text(
+                                    text = "搜索",
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (active) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    },
+                )
+
+                // 类型快捷筛选胶囊（全部 / 电影 / 电视剧）
                 Row(
+                    Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    OutlinedTextField(
-                        value = query,
-                        onValueChange = { query = it },
-                        placeholder = { Text("输入电影或电视剧名称…") },
-                        singleLine = true,
-                        phoneInput = true,
-                        phoneLabel = "跨库搜索片名",
-                        colors = appFieldColors(),
-                        modifier = Modifier.weight(1f),
-                    )
-                    Button(
-                        enabled = query.isNotBlank() && !searching,
-                        colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
-                        onClick = ::doSearch,
-                    ) {
-                        Text("检索")
+                    listOf(
+                        null to "全部",
+                        "movie" to "电影",
+                        "tv" to "电视剧",
+                    ).forEach { (k, label) ->
+                        val selected = kindFilter == k
+                        Box(
+                            Modifier
+                                .height(28.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(
+                                    if (selected) Orange.copy(alpha = 0.18f)
+                                    else MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.50f),
+                                )
+                                .border(
+                                    width = 1.dp,
+                                    color = if (selected) Orange.copy(alpha = 0.75f) else Color.Transparent,
+                                    shape = RoundedCornerShape(50),
+                                )
+                                .tvFocusRing(RoundedCornerShape(50))
+                                .clickable { kindFilter = k }
+                                .padding(horizontal = 12.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = label,
+                                fontSize = 12.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (selected) Orange else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    if (query.isNotBlank() && displayedHits.isNotEmpty()) {
+                        Text(
+                            text = "找到 ${displayedHits.size} 项",
+                            fontSize = 11.5.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
 
-                when {
-                    searching -> Row(
-                        Modifier.fillMaxWidth().padding(vertical = 16.dp),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Orange)
-                        Spacer(Modifier.width(8.dp))
-                        Text("正在同步检索本机媒体库与 Emby / Plex 服务器…", style = MaterialTheme.typography.bodySmall)
-                    }
-                    searchedOnce && hits.isEmpty() -> Text(
-                        "未在自定义媒体库或媒体服务器中找到匹配「${query.trim()}」的片源。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    hits.isNotEmpty() -> {
-                        hits.forEach { hit ->
-                            IndexedHitRow(
-                                hit = hit,
-                                onPlay = onPlay,
-                                onOpenCustomItem = onOpenCustomItem,
-                                onOpenServerDetail = onOpenServerDetail,
-                                onOpenRemote = onOpenRemote,
-                            )
+                // 结果列表 / 最近入库推荐区
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 120.dp, max = 380.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    when {
+                        query.isBlank() -> {
+                            if (recentQuickHits.isNotEmpty()) {
+                                Text(
+                                    text = "最近入库",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 2.dp, bottom = 2.dp),
+                                )
+                                recentQuickHits.forEach { hit ->
+                                    IndexedHitRow(
+                                        hit = hit,
+                                        onPlay = onPlay,
+                                        onOpenCustomItem = onOpenCustomItem,
+                                        onOpenServerDetail = onOpenServerDetail,
+                                        onOpenRemote = onOpenRemote,
+                                    )
+                                }
+                            } else {
+                                Column(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 26.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Icon(
+                                        AppIcons.Movie,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                                        modifier = Modifier.size(32.dp),
+                                    )
+                                    Text(
+                                        text = "输入片名一键检索所有媒体库与服务器",
+                                        fontSize = 12.5.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                        displayedHits.isNotEmpty() -> {
+                            displayedHits.forEach { hit ->
+                                IndexedHitRow(
+                                    hit = hit,
+                                    onPlay = onPlay,
+                                    onOpenCustomItem = onOpenCustomItem,
+                                    onOpenServerDetail = onOpenServerDetail,
+                                    onOpenRemote = onOpenRemote,
+                                )
+                            }
+                        }
+                        searching -> {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 28.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = Orange)
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    text = "正在并发检索媒体库与远端服务器…",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        searchedOnce -> {
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 26.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Icon(
+                                    AppIcons.Search,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                    modifier = Modifier.size(30.dp),
+                                )
+                                Text(
+                                    text = "未找到匹配「${query.trim()}」的片源",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = "可尝试使用简短片名、原片名或切换上方分类筛选",
+                                    fontSize = 11.5.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 }
             }
         },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
-        },
+        confirmButton = {},
     )
 }
 
@@ -1850,18 +2148,24 @@ internal fun IndexedHitRow(
     onOpenServerDetail: (serverId: String, ratingKey: String) -> Unit,
     onOpenRemote: (server: Server, path: String, title: String) -> Unit,
 ) {
+    val cardShape = RoundedCornerShape(12.dp)
+    val cardBorder = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+    val cardBg = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.55f)
+
     when (hit) {
         is IndexedPlayHit.CustomLibraryHit -> {
             val it = hit.item
-            val action = if (it.kind == "movie" && it.episodes.size == 1) "直接播放" else "选集/详情"
+            val directMovie = it.kind == "movie" && it.episodes.size == 1
+            val action = if (directMovie) "播放" else "选集"
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.8f))
-                    .tvFocusRing(RoundedCornerShape(9.dp))
+                    .clip(cardShape)
+                    .background(cardBg)
+                    .border(0.6.dp, cardBorder, cardShape)
+                    .tvFocusRing(cardShape)
                     .clickable {
-                        if (it.kind == "movie" && it.episodes.size == 1) {
+                        if (directMovie) {
                             onPlay(listOf(it.episodes.first().toMediaEntry(null)), 0)
                         } else {
                             onOpenCustomItem(hit.library.id, it.id)
@@ -1869,24 +2173,67 @@ internal fun IndexedHitRow(
                     }
                     .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Icon(AppIcons.Movie, null, tint = Orange, modifier = Modifier.size(18.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(it.title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                NetImage(
+                    url = it.posterUrl,
+                    modifier = Modifier
+                        .width(40.dp)
+                        .height(56.dp)
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                    maxSize = 200,
+                    contentScale = ContentScale.Crop,
+                    fallback = AppIcons.Movie,
+                )
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            text = it.title,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        it.rating?.let { r ->
+                            Row(
+                                Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color(0xFFFFC107).copy(alpha = 0.16f))
+                                    .padding(horizontal = 4.dp, vertical = 1.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Icon(AppIcons.Star, null, tint = Color(0xFFFFC107), modifier = Modifier.size(10.dp))
+                                Text("%.1f".format(r), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFFFC107))
+                            }
+                        }
+                    }
                     Text(
-                        buildString {
-                            append("媒体库「${hit.library.name}」")
+                        text = buildString {
+                            append(hit.library.name)
                             it.year?.let { y -> append(" · $y") }
                             it.badgeText?.let { b -> append(" · $b") }
                         },
-                        fontSize = 11.sp,
+                        fontSize = 11.5.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Text(action, style = MaterialTheme.typography.labelMedium, color = Orange, fontWeight = FontWeight.SemiBold)
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Orange.copy(alpha = 0.16f))
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(action, fontSize = 11.5.sp, color = Orange, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
         is IndexedPlayHit.MediaServerHit -> {
@@ -1895,9 +2242,10 @@ internal fun IndexedHitRow(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.8f))
-                    .tvFocusRing(RoundedCornerShape(9.dp))
+                    .clip(cardShape)
+                    .background(cardBg)
+                    .border(0.6.dp, cardBorder, cardShape)
+                    .tvFocusRing(cardShape)
                     .clickable {
                         if (directPlayable) {
                             onPlay(listOf(MediaEntry(it.playUrl!!, it.fileName!!, isVideo = it.type != "track")), 0)
@@ -1907,29 +2255,67 @@ internal fun IndexedHitRow(
                     }
                     .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                ServerSourceIcon(hit.server, size = 22.dp)
-                Column(Modifier.weight(1f)) {
-                    Text(it.title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val posterUrl = if (it.type == "episode") (it.showThumb ?: it.thumb ?: it.art) else (it.thumb ?: it.showThumb ?: it.art)
+                if (!posterUrl.isNullOrBlank()) {
+                    NetImage(
+                        url = posterUrl,
+                        modifier = Modifier
+                            .width(40.dp)
+                            .height(56.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                        maxSize = 200,
+                        contentScale = ContentScale.Crop,
+                        fallback = AppIcons.Movie,
+                    )
+                } else {
+                    Box(
+                        Modifier
+                            .width(40.dp)
+                            .height(56.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        ServerSourceIcon(hit.server, size = 24.dp)
+                    }
+                }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Text(
-                        buildString {
+                        text = it.title,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = buildString {
                             append("${hit.server.name} (${hit.server.type.label})")
                             it.year?.let { y -> append(" · $y") }
                             it.episodeLabel?.let { ep -> append(" · $ep") }
                         },
-                        fontSize = 11.sp,
+                        fontSize = 11.5.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Text(
-                    if (directPlayable) "直接播放" else "进入选集",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = Orange,
-                    fontWeight = FontWeight.SemiBold,
-                )
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Orange.copy(alpha = 0.16f))
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        if (directPlayable) "播放" else "选集",
+                        fontSize = 11.5.sp,
+                        color = Orange,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
             }
         }
         is IndexedPlayHit.OpenListHit -> {
@@ -1937,9 +2323,10 @@ internal fun IndexedHitRow(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.8f))
-                    .tvFocusRing(RoundedCornerShape(9.dp))
+                    .clip(cardShape)
+                    .background(cardBg)
+                    .border(0.6.dp, cardBorder, cardShape)
+                    .tvFocusRing(cardShape)
                     .clickable {
                         if (!it.isDir && it.playUrl != null) {
                             onPlay(listOf(MediaEntry(it.playUrl, it.name)), 0)
@@ -1947,27 +2334,49 @@ internal fun IndexedHitRow(
                             onOpenRemote(hit.server, it.path, it.name)
                         }
                     }
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                    .padding(horizontal = 10.dp, vertical = 9.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                ServerSourceIcon(hit.server, size = 22.dp)
-                Column(Modifier.weight(1f)) {
-                    Text(it.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Box(
+                    Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    ServerSourceIcon(hit.server, size = 22.dp)
+                }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
-                        "${hit.server.name} (OpenList) · ${it.path}",
-                        fontSize = 11.sp,
+                        text = it.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = "${hit.server.name} · ${it.path}",
+                        fontSize = 11.5.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Text(
-                    if (!it.isDir && it.playUrl != null) "直接播放" else "打开目录",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = Orange,
-                    fontWeight = FontWeight.SemiBold,
-                )
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Orange.copy(alpha = 0.16f))
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        if (!it.isDir && it.playUrl != null) "播放" else "打开",
+                        fontSize = 11.5.sp,
+                        color = Orange,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
             }
         }
     }
