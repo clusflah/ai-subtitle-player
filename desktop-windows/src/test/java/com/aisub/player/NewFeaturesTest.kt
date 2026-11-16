@@ -225,4 +225,40 @@ class NewFeaturesTest {
         assertTrue(com.aisub.player.media.DolbyVisionHelper.looksLikeProfile5Title("Movie.2026.dvh1.05.06.mp4"))
         assertTrue(com.aisub.player.media.DolbyVisionHelper.looksLikeProfile5Title("Series.S01E01.2160p.DVP5.mp4"))
     }
+
+    @Test
+    fun desktopContainerBinarySnifferDetectsMp4AndMkvDolbyWithoutFilenameTags() {
+        // 1) MP4 dvcC box (Profile 5: major=1, minor=0, profile=5 -> 5<<1 = 0x0A, flags=0xA0 rpu=1 bl=1)
+        val mp4Header = ByteArray(128)
+        // ftyp at 0..15
+        mp4Header[3] = 16
+        mp4Header[4] = 'f'.code.toByte(); mp4Header[5] = 't'.code.toByte(); mp4Header[6] = 'y'.code.toByte(); mp4Header[7] = 'p'.code.toByte()
+        mp4Header[8] = 'i'.code.toByte(); mp4Header[9] = 's'.code.toByte(); mp4Header[10] = 'o'.code.toByte(); mp4Header[11] = 'm'.code.toByte()
+        // dvcC box at offset 40: [0,0,0,32, 'd','v','c','C', 1, 0, 0x0A, 0x00, 0xA0, ...]
+        mp4Header[43] = 32
+        mp4Header[44] = 'd'.code.toByte(); mp4Header[45] = 'v'.code.toByte(); mp4Header[46] = 'c'.code.toByte(); mp4Header[47] = 'C'.code.toByte()
+        mp4Header[48] = 1
+        mp4Header[49] = 0
+        mp4Header[50] = (5 shl 1).toByte()
+        mp4Header[52] = 0xA0.toByte()
+        assertEquals(5, com.aisub.player.desktop.DesktopExoPlayer.scanDolbyVisionProfileFromBytes(mp4Header, mp4Header.size))
+
+        // 2) MKV BlockAdditionMapping: 0x41 0xE7 0x84 'd''v''c''C' 0x41 0xED 0x98 [major=1, minor=0, profile=8 -> 0x10, 0, 0xA1]
+        val mkvHeader = ByteArray(96)
+        mkvHeader[10] = 0x41.toByte(); mkvHeader[11] = 0xE7.toByte(); mkvHeader[12] = 0x84.toByte()
+        mkvHeader[13] = 'd'.code.toByte(); mkvHeader[14] = 'v'.code.toByte(); mkvHeader[15] = 'c'.code.toByte(); mkvHeader[16] = 'C'.code.toByte()
+        mkvHeader[17] = 0x41.toByte(); mkvHeader[18] = 0xED.toByte(); mkvHeader[19] = 0x98.toByte()
+        mkvHeader[20] = 1
+        mkvHeader[21] = 0
+        mkvHeader[22] = (8 shl 1).toByte()
+        mkvHeader[24] = 0xA1.toByte()
+        assertEquals(8, com.aisub.player.desktop.DesktopExoPlayer.scanDolbyVisionProfileFromBytes(mkvHeader, mkvHeader.size))
+
+        // 3) Normal SDR MP4 header must return null (zero false positives)
+        val sdrMp4 = ByteArray(128)
+        sdrMp4[3] = 16
+        sdrMp4[4] = 'f'.code.toByte(); sdrMp4[5] = 't'.code.toByte(); sdrMp4[6] = 'y'.code.toByte(); sdrMp4[7] = 'p'.code.toByte()
+        sdrMp4[8] = 'm'.code.toByte(); sdrMp4[9] = 'p'.code.toByte(); sdrMp4[10] = '4'.code.toByte(); sdrMp4[11] = '2'.code.toByte()
+        assertEquals(null, com.aisub.player.desktop.DesktopExoPlayer.scanDolbyVisionProfileFromBytes(sdrMp4, sdrMp4.size))
+    }
 }

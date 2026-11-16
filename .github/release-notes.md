@@ -1,4 +1,16 @@
-## 本版更新（2.10.2）
+## 本版更新（2.10.4）
+
+- **「我的」页面精简与右上角设置整合（Android / TV / Windows）**：
+  - 「我的」页面移除「稍后观看」、「播放列表」与「设置与帮助」分组，界面聚焦继续观看/收听/阅读、我的收藏与管理，并在「我的」页右上角提供直达设置入口
+  - 原「设置与帮助」中的「多端同步」、「检查更新」与「关于」完整收纳进右上角「设置」页面底部
+
+## 2.10.3 更新
+
+- **杜比视界跨端智能分流与探测闭环完善（Android / TV / Windows）**：
+  - **非杜比 64 位 HDR10 电视/盒子与中低端手机 4K 防卡顿分流**：所有不支持原生杜比硬解的 Android TV 机顶盒/电视（含 64 位 HDR10 电视）以及主频/核心受限的中低端手机在播放高负载 4K Profile 5 时，自动留在默认 Exo 硬解 + GLES 2.0 杜比着色器（告别电视弱核 CPU 软解 4K 卡顿，同时保证 HDR10 电视播 Profile 7/8 仍原生直出 HDR10）；手动切换「硬解 / 软解」时支持在 Exo 杜比硬解管线与 MPV 软解管线间无感互切，手动切入 VLC 3.x 播 Profile 5 时给出偏色提示
+  - **Windows 默认内核无文件名标记远程/网盘杜比自动识别**：新增进程内 192KB 定长闭合 `Range` 容器头/尾 `dvcC` / `dvvC` / `dby1` 二进制快速嗅探（兼容 MP4 与 MKV `BlockAdditionMapping`），即使 115 网盘、WebDAV 或 NAS 上的杜比片源文件名不含 `DV` 字样，默认内核也能在不触发单连接 403 的前提下毫秒级识别并自动切入 `D3D11VA 硬解 + libplacebo` 管线
+
+## 2.10.2 更新
 
 - **老设备默认 ExoPlayer 内核零拷贝硬解修复杜比视界偏色与发灰（不卡顿、不影响新设备）**：新增 `LegacyDolbyExoBridge`、`DolbyRpuParser` 与 `LegacyDolbyGlSurfaceView`（OpenGL ES 2.0 `GL_TEXTURE_EXTERNAL_OES` 按需渲染管线，兼容 Mali-450 等 32 位老电视 FP16 着色器）。在老设备（GLES 2.0、32 位架构、低内存或 Android 12 以下无 HDR 屏幕设备）及手动指定 Exo 内核时，直接由系统芯片硬件解码 HEVC 并实时解析 `UNSPEC62` RPU 元数据，在 GPU 显存内单趟完成杜比 Profile 5（`IPTPQc2`）紫绿偏色还原与 Profile 7/8（HDR10 / HLG）→ BT.709 SDR 防发灰映射；现代 64 位新手机与 HDR 电视完全走原有原生 `SurfaceView` 管线，零画质与性能干扰
 

@@ -174,6 +174,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
     val testing = remember { mutableStateMapOf<String, Boolean>() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    var aboutOpen by remember { mutableStateOf(false) }
     fun runTest(key: String, block: suspend () -> String) {
         testing[key] = true
         scope.launch {
@@ -809,7 +810,32 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
 
             // ---------------- 备份与迁移 ----------------
             BackupCard(flush = { if (s != vm.state.value.settings) vm.updateSettings(s) })
+
+            // ---------------- 更新与关于 ----------------
+            val activity = context as? android.app.Activity
+            CollapsibleCard(
+                "更新与关于",
+                "当前版本 ${com.aisub.player.BuildConfig.VERSION_NAME} · 检查更新、版本信息与 GitHub 项目地址",
+                initiallyExpanded = true,
+            ) {
+                ListRow(
+                    title = "检查更新",
+                    subtitle = "当前版本 ${com.aisub.player.BuildConfig.VERSION_NAME}",
+                    icon = AppIcons.SystemUpdate,
+                    onClick = { activity?.let { com.aisub.player.update.appUpdater.checkNow(it) } },
+                )
+                CardDivider(inset = 70.dp)
+                ListRow(
+                    title = "关于",
+                    subtitle = "版本信息与 GitHub 项目地址",
+                    icon = AppIcons.Info,
+                    onClick = { aboutOpen = true },
+                )
+            }
         }
+    }
+    if (aboutOpen) {
+        AboutDialog { aboutOpen = false }
     }
 }
 

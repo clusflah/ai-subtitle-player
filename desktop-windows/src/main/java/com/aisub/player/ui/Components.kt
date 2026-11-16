@@ -196,6 +196,7 @@ fun CollapsibleCard(
         "代理" in title || "网络" in title -> AppIcons.Web
         "同步" in title -> AppIcons.Refresh
         "备份" in title -> AppIcons.Cloud
+        "更新" in title || "关于" in title || "帮助" in title -> AppIcons.Info
         else -> AppIcons.Settings
     }
     Surface(

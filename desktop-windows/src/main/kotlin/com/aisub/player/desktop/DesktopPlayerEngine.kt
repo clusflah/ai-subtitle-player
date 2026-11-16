@@ -62,7 +62,11 @@ import java.awt.image.DataBufferInt
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.InputStream
+import java.io.RandomAccessFile
+import java.net.HttpURLConnection
 import java.net.InetAddress
+import java.net.Proxy
+import java.net.URL
 import java.net.ServerSocket
 import java.net.URI
 import java.nio.ByteBuffer
@@ -2189,14 +2193,138 @@ class DesktopExoPlayer(
     }
 
     private fun probeDolbyVisionProfileQuick(url: String, headers: Map<String, String>, titleHint: String?): Int? {
-        val isLocal = !url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)
-        val titleLooksDv = com.aisub.player.media.DolbyVisionHelper.looksLikeDolbyVisionTitle(titleHint ?: url)
-        if (!isLocal && !titleLooksDv) return null
-        if (DesktopBinaryFinder.findFfprobe() == null && titleLooksDv) {
-            DesktopBinaryFinder.ensureFfmpeg()
+        if (isCurrentMediaItemLive) return null
+        val lowerUrl = url.lowercase()
+        if (lowerUrl.contains(".m3u8") || lowerUrl.contains("/live/")) return null
+
+        val cacheKey = currentMediaItem?.localConfiguration?.uri?.toString()?.ifBlank { url } ?: url
+        dvSniffCache[cacheKey]?.let { cached -> return if (cached > 0) cached else null }
+        probeMetaCache[cacheKey]?.let { meta ->
+            val p = meta.dvProfile
+            dvSniffCache[cacheKey] = p ?: 0
+            return p
         }
-        val probed = probeMediaStreamsCached(url, headers, timeoutSec = 4L)
-        return probed?.dvProfile ?: if (titleLooksDv) 5 else null
+
+        val titleLooksDv = com.aisub.player.media.DolbyVisionHelper.looksLikeDolbyVisionTitle(titleHint ?: url)
+        val isHttp = lowerUrl.startsWith("http://") || lowerUrl.startsWith("https://")
+
+        // 1. 先执行进程内零冲突 192KB 容器头（必要时含 MP4 尾部 moov）快速二进制嗅探：
+        //    - 本地文件耗时 < 0.5ms；
+        //    - 远程 / 115 MediaProxy 使用定长闭合 Range (bytes=0-196607 + Connection: close)，读满自然结束关闭，
+        //      绝不触发 115 单连接并发 403，且 MediaProxy 内存块缓存可直接供紧随其后的播放器 0ms 复用！
+        val sniffed = if (!isHttp) {
+            sniffLocalFileDolbyProfile(url)
+        } else {
+            sniffHttpDolbyProfileBounded(url, headers)
+        }
+        if (sniffed != null) {
+            dvSniffCache[cacheKey] = sniffed
+            return sniffed
+        }
+
+        // 2. 若标题明确带有 DV / 杜比字样但前 192KB 未扫到（例如超大 SeekHead 的特殊封装），回退 ffprobe 深度确认
+        if (titleLooksDv || !isHttp) {
+            if (DesktopBinaryFinder.findFfprobe() == null && titleLooksDv) {
+                DesktopBinaryFinder.ensureFfmpeg()
+            }
+            if (!isHttp || titleLooksDv) {
+                val probed = probeMediaStreamsCached(url, headers, timeoutSec = if (isHttp) 4L else 3L)
+                val p = probed?.dvProfile ?: if (titleLooksDv) 5 else null
+                dvSniffCache[cacheKey] = p ?: 0
+                return p
+            }
+        }
+
+        dvSniffCache[cacheKey] = 0
+        return null
+    }
+
+    private fun sniffLocalFileDolbyProfile(path: String): Int? = runCatching {
+        val f = File(path)
+        if (!f.isFile || f.length() < 32L) return null
+        val chunkSize = 196_608
+        val buf = ByteArray(chunkSize)
+        RandomAccessFile(f, "r").use { raf ->
+            val headRead = raf.read(buf, 0, minOf(chunkSize.toLong(), f.length()).toInt())
+            if (headRead > 16) {
+                DesktopExoPlayer.scanDolbyVisionProfileFromBytes(buf, headRead)?.let { return it }
+                val isMp4 = buf[4] == 'f'.code.toByte() && buf[5] == 't'.code.toByte() &&
+                    buf[6] == 'y'.code.toByte() && buf[7] == 'p'.code.toByte()
+                val hasMoov = DesktopExoPlayer.containsAsciiFourCc(buf, headRead, 'm', 'o', 'o', 'v')
+                if (isMp4 && !hasMoov && f.length() > chunkSize * 2L) {
+                    raf.seek(f.length() - chunkSize)
+                    val tailRead = raf.read(buf, 0, chunkSize)
+                    if (tailRead > 16) {
+                        DesktopExoPlayer.scanDolbyVisionProfileFromBytes(buf, tailRead)?.let { return it }
+                    }
+                }
+            }
+        }
+        null
+    }.getOrNull()
+
+    private fun sniffHttpDolbyProfileBounded(url: String, headers: Map<String, String>): Int? = runCatching {
+        val chunkSize = 196_608
+        val headResult = fetchBoundedHttpRange(url, headers, 0L, chunkSize.toLong() - 1L, timeoutMs = 1500) ?: return null
+        val (headBuf, headLen, totalSize) = headResult
+        if (headLen > 16) {
+            DesktopExoPlayer.scanDolbyVisionProfileFromBytes(headBuf, headLen)?.let { return it }
+            val isMp4 = headBuf[4] == 'f'.code.toByte() && headBuf[5] == 't'.code.toByte() &&
+                headBuf[6] == 'y'.code.toByte() && headBuf[7] == 'p'.code.toByte()
+            val hasMoov = DesktopExoPlayer.containsAsciiFourCc(headBuf, headLen, 'm', 'o', 'o', 'v')
+            // 非 faststart 的 MP4（moov 在文件末尾）：仅做一次定长尾部闭合读取
+            if (isMp4 && !hasMoov && totalSize > chunkSize * 2L) {
+                val tailStart = totalSize - chunkSize
+                val tailResult = fetchBoundedHttpRange(url, headers, tailStart, totalSize - 1L, timeoutMs = 1200)
+                if (tailResult != null && tailResult.second > 16) {
+                    DesktopExoPlayer.scanDolbyVisionProfileFromBytes(tailResult.first, tailResult.second)?.let { return it }
+                }
+            }
+        }
+        null
+    }.getOrNull()
+
+    private fun fetchBoundedHttpRange(
+        url: String,
+        headers: Map<String, String>,
+        startByte: Long,
+        endByteInclusive: Long,
+        timeoutMs: Int,
+    ): Triple<ByteArray, Int, Long>? {
+        val isLoopback = url.startsWith("http://127.0.0.1:", ignoreCase = true) ||
+            url.startsWith("http://localhost:", ignoreCase = true)
+        val conn = (if (isLoopback) URL(url).openConnection(Proxy.NO_PROXY) else URL(url).openConnection()) as HttpURLConnection
+        return try {
+            conn.requestMethod = "GET"
+            conn.instanceFollowRedirects = true
+            conn.connectTimeout = timeoutMs
+            conn.readTimeout = timeoutMs
+            conn.setRequestProperty("Range", "bytes=$startByte-$endByteInclusive")
+            conn.setRequestProperty("Connection", "close")
+            for ((k, v) in headers) {
+                conn.setRequestProperty(k, v)
+            }
+            val code = conn.responseCode
+            if (code !in 200..299) return null
+            val contentRange = conn.getHeaderField("Content-Range").orEmpty()
+            val totalSize = contentRange.substringAfter('/', "").trim().toLongOrNull() ?: -1L
+            val expectedMax = (endByteInclusive - startByte + 1L).coerceIn(1L, 262_144L).toInt()
+            val buf = ByteArray(expectedMax)
+            var readTotal = 0
+            conn.inputStream.use { input ->
+                // 仅当服务端遵守 206 Partial Content 时读满定长区间；若老旧服务端忽略 Range 返回 200 全量流则最多读 expectedMax 后关闭
+                while (readTotal < expectedMax) {
+                    val n = input.read(buf, readTotal, expectedMax - readTotal)
+                    if (n < 0) break
+                    readTotal += n
+                }
+            }
+            Triple(buf, readTotal, totalSize)
+        } catch (_: Throwable) {
+            null
+        } finally {
+            runCatching { conn.disconnect() }
+        }
     }
 
     private fun parseDvProfileFromFfprobeJson(jsonText: String): Int? {
@@ -3033,6 +3161,129 @@ class DesktopExoPlayer(
         private val IS_WINDOWS_HOST: Boolean =
             System.getProperty("os.name").orEmpty().lowercase().contains("win")
         private val probeMetaCache = java.util.concurrent.ConcurrentHashMap<String, ProbedStreamMeta>()
+
+        /** 缓存轻量字节头嗅探结果（>0 表示杜比视界 Profile，0 表示已确认为普通非杜比流，避免重复网络读取） */
+        private val dvSniffCache = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+        /**
+         * 从 MP4 / MKV 容器头部（或 MP4 尾部 moov）原始字节中零依赖快速识别杜比视界 Profile：
+         * - 支持 MP4/MOV 的 `dvcC` / `dvvC` / `dvwC` 配置盒、`ftyp` 品牌 `dby1` 及 `stsd` 样本项 `dvh1` / `dvhe` / `dav1`；
+         * - 支持 MKV Matroska 的 `BlockAddIDType` (`dvcC` / `dvvC`) + `BlockAddIDExtraData` (`0x41 0xED`) 24 字节配置记录；
+         * - 严格校验 `dv_version_major == 1`、`dv_version_minor in 0..2` 与 `rpu_present_flag / bl_present_flag`，杜绝普通视频误判。
+         */
+        internal fun scanDolbyVisionProfileFromBytes(buf: ByteArray, length: Int): Int? {
+            val n = minOf(length, buf.size)
+            if (n < 16) return null
+            var sawDvBrandOrEntry = false
+
+            // 1. 检查起始处 MP4 ftyp 兼容品牌是否包含 "dby1"
+            if (n >= 16 &&
+                buf[4] == 'f'.code.toByte() &&
+                buf[5] == 't'.code.toByte() &&
+                buf[6] == 'y'.code.toByte() &&
+                buf[7] == 'p'.code.toByte()
+            ) {
+                val ftypSize = readBeInt(buf, 0)
+                val ftypEnd = if (ftypSize in 16..512) minOf(ftypSize, n) else minOf(64, n)
+                var pos = 8
+                while (pos + 4 <= ftypEnd) {
+                    if (buf[pos] == 'd'.code.toByte() &&
+                        buf[pos + 1] == 'b'.code.toByte() &&
+                        buf[pos + 2] == 'y'.code.toByte() &&
+                        buf[pos + 3] == '1'.code.toByte()
+                    ) {
+                        sawDvBrandOrEntry = true
+                        break
+                    }
+                    pos += 4
+                }
+            }
+
+            // 2. 扫描 dvcC / dvvC / dvwC 配置记录（兼容 MP4 Box 与 MKV BlockAdditionMapping）及 MP4 dvh1/dvhe SampleEntry
+            val limit = n - 8
+            var i = 0
+            while (i <= limit) {
+                val b0 = buf[i]
+                if (b0 == 'd'.code.toByte()) {
+                    val b1 = buf[i + 1]
+                    val b2 = buf[i + 2]
+                    val b3 = buf[i + 3]
+                    // 'dvcC' / 'dvvC' / 'dvwC'
+                    if (b1 == 'v'.code.toByte() &&
+                        (b2 == 'c'.code.toByte() || b2 == 'v'.code.toByte() || b2 == 'w'.code.toByte()) &&
+                        b3 == 'C'.code.toByte()
+                    ) {
+                        // 2a) MP4 Box: [size(4)]['dvcC'(4)][major(1)][minor(1)][profile_level(2)][flags(1)]
+                        parseDoviRecordAt(buf, n, i + 4)?.let { return it }
+
+                        // 2b) MKV BlockAdditionMapping: ['dvcC'(4)] 后紧跟 0x41 0xED (BlockAddIDExtraData) + EBML VINT 长度 + 24B 记录
+                        val mkvEnd = minOf(i + 16, n - 6)
+                        var k = i + 4
+                        while (k <= mkvEnd) {
+                            if ((buf[k].toInt() and 0xFF) == 0x41 && (buf[k + 1].toInt() and 0xFF) == 0xED) {
+                                val vintByte = buf[k + 2].toInt() and 0xFF
+                                val vintLen = when {
+                                    (vintByte and 0x80) != 0 -> 1
+                                    (vintByte and 0x40) != 0 -> 2
+                                    else -> 0
+                                }
+                                if (vintLen > 0) {
+                                    parseDoviRecordAt(buf, n, k + 2 + vintLen)?.let { return it }
+                                }
+                            }
+                            k++
+                        }
+                    }
+
+                    // MP4 VisualSampleEntry: [size(4)]['dvh1'|'dvhe'|'dav1'|'dva1'(4)][reserved 6 bytes == 0]
+                    val isDvSampleEntry = (b1 == 'v'.code.toByte() && b2 == 'h'.code.toByte() && (b3 == '1'.code.toByte() || b3 == 'e'.code.toByte())) ||
+                        (b1 == 'a'.code.toByte() && b2 == 'v'.code.toByte() && b3 == '1'.code.toByte()) ||
+                        (b1 == 'v'.code.toByte() && b2 == 'a'.code.toByte() && b3 == '1'.code.toByte())
+                    if (isDvSampleEntry && i >= 4 && i + 10 <= n) {
+                        val entrySize = readBeInt(buf, i - 4)
+                        val zeroReserved = buf[i + 4].toInt() == 0 && buf[i + 5].toInt() == 0 &&
+                            buf[i + 6].toInt() == 0 && buf[i + 7].toInt() == 0 &&
+                            buf[i + 8].toInt() == 0 && buf[i + 9].toInt() == 0
+                        if (entrySize in 86..65536 && zeroReserved) {
+                            sawDvBrandOrEntry = true
+                        }
+                    }
+                }
+                i++
+            }
+            return if (sawDvBrandOrEntry) 5 else null
+        }
+
+        private fun parseDoviRecordAt(buf: ByteArray, limit: Int, recOffset: Int): Int? {
+            if (recOffset < 0 || recOffset + 5 > limit) return null
+            val major = buf[recOffset].toInt() and 0xFF
+            val minor = buf[recOffset + 1].toInt() and 0xFF
+            if (major != 1 || minor !in 0..2) return null
+            val profile = (buf[recOffset + 2].toInt() and 0xFF) ushr 1
+            val flags = buf[recOffset + 4].toInt() and 0xFF
+            val rpuPresent = (flags and 0x80) != 0
+            val blPresent = (flags and 0x20) != 0
+            return if (profile in 1..20 && rpuPresent && blPresent) profile else null
+        }
+
+        private fun readBeInt(buf: ByteArray, offset: Int): Int {
+            if (offset < 0 || offset + 4 > buf.size) return 0
+            return ((buf[offset].toInt() and 0xFF) shl 24) or
+                ((buf[offset + 1].toInt() and 0xFF) shl 16) or
+                ((buf[offset + 2].toInt() and 0xFF) shl 8) or
+                (buf[offset + 3].toInt() and 0xFF)
+        }
+
+        private fun containsAsciiFourCc(buf: ByteArray, length: Int, c0: Char, c1: Char, c2: Char, c3: Char): Boolean {
+            val b0 = c0.code.toByte(); val b1 = c1.code.toByte(); val b2 = c2.code.toByte(); val b3 = c3.code.toByte()
+            val end = minOf(length, buf.size) - 4
+            var i = 0
+            while (i <= end) {
+                if (buf[i] == b0 && buf[i + 1] == b1 && buf[i + 2] == b2 && buf[i + 3] == b3) return true
+                i++
+            }
+            return false
+        }
 
         private val AUDIO_EXTENSIONS = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma", "ape", "alac", "aiff")
 

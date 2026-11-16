@@ -532,14 +532,17 @@ object LegacyDolbyExoBridge {
      * - 用户在非杜比屏幕上手动指定锁死 Exo 内核（或关闭了自动切 MPV）时也返回 true，避免 Exo 出现紫绿画面；
      * - 其它现代非杜比新手机默认返回 false（保持自动分流至 MPV `libplacebo`）。
      */
-    fun shouldUseExoForProfile5(context: Context, manualExoLocked: Boolean): Boolean {
-        if (DolbyVisionHelper.displaySupportsDolbyVision(context) &&
-            DolbyVisionHelper.hasHardwareDolbyVisionDecoder(requireProfile5 = true)
-        ) {
-            return false
-        }
-        return DolbyVisionHelper.isLegacyDolbyDevice(context) || manualExoLocked
-    }
+    fun shouldUseExoForProfile5(
+        context: Context,
+        format: Format? = null,
+        decodeMode: com.aisub.player.DecodeMode = com.aisub.player.DecodeMode.AUTO,
+        manualExoLocked: Boolean = false,
+    ): Boolean = DolbyVisionHelper.shouldUseExoHardwareShaderForProfile5(
+        context = context,
+        format = format,
+        decodeMode = decodeMode,
+        manualExoLocked = manualExoLocked,
+    )
 
     /**
      * 是否应在 ExoPlayer 内启用 HDR10 / Profile 7 / 8 → SDR 色调映射着色器：
@@ -551,7 +554,12 @@ object LegacyDolbyExoBridge {
     }
 
     /** 由 `MainViewModel.onTracksChanged` 根据当前真正选中的播放轨道精确同步着色器模式（防止播放列表后台预缓冲下一集串台）。 */
-    fun syncFromSelectedTracks(context: Context, formats: Sequence<Format>, manualExoLocked: Boolean) {
+    fun syncFromSelectedTracks(
+        context: Context,
+        formats: Sequence<Format>,
+        decodeMode: com.aisub.player.DecodeMode = com.aisub.player.DecodeMode.AUTO,
+        manualExoLocked: Boolean = false,
+    ) {
         var resolved = LegacyExoShaderMode.OFF
         for (f in formats) {
             val id = f.id.orEmpty()
@@ -579,7 +587,7 @@ object LegacyDolbyExoBridge {
                     }
                 }
             }
-            if (DolbyVisionHelper.isProfile5(f) && shouldUseExoForProfile5(context, manualExoLocked)) {
+            if (DolbyVisionHelper.isProfile5(f) && shouldUseExoForProfile5(context, f, decodeMode, manualExoLocked)) {
                 resolved = LegacyExoShaderMode.PROFILE_5_IPTPQC2
                 break
             }
@@ -601,6 +609,7 @@ object LegacyDolbyExoBridge {
     fun wrapExtractor(
         extractor: Extractor,
         context: Context,
+        decodeModeProvider: () -> com.aisub.player.DecodeMode = { com.aisub.player.DecodeMode.AUTO },
         manualExoLockedProvider: () -> Boolean,
     ): Extractor {
         val appCtx = context.applicationContext
@@ -608,7 +617,7 @@ object LegacyDolbyExoBridge {
             override fun getUnderlyingImplementation(): Extractor = extractor.underlyingImplementation
             override fun sniff(input: ExtractorInput): Boolean = extractor.sniff(input)
             override fun init(output: ExtractorOutput) {
-                extractor.init(DolbyVideoExtractorOutput(output, appCtx, manualExoLockedProvider))
+                extractor.init(DolbyVideoExtractorOutput(output, appCtx, decodeModeProvider, manualExoLockedProvider))
             }
             override fun read(input: ExtractorInput, seekPosition: PositionHolder): Int =
                 extractor.read(input, seekPosition)
@@ -620,12 +629,13 @@ object LegacyDolbyExoBridge {
     private class DolbyVideoExtractorOutput(
         private val downstream: ExtractorOutput,
         private val appContext: Context,
+        private val decodeModeProvider: () -> com.aisub.player.DecodeMode,
         private val manualExoLockedProvider: () -> Boolean,
     ) : ExtractorOutput {
         override fun track(id: Int, type: Int): TrackOutput {
             val out = downstream.track(id, type)
             return if (type == C.TRACK_TYPE_VIDEO) {
-                DolbyVideoTrackOutput(out, appContext, manualExoLockedProvider)
+                DolbyVideoTrackOutput(out, appContext, decodeModeProvider, manualExoLockedProvider)
             } else {
                 out
             }
@@ -638,6 +648,7 @@ object LegacyDolbyExoBridge {
     private class DolbyVideoTrackOutput(
         private val downstream: TrackOutput,
         private val appContext: Context,
+        private val decodeModeProvider: () -> com.aisub.player.DecodeMode,
         private val manualExoLockedProvider: () -> Boolean,
     ) : TrackOutput {
 
@@ -655,7 +666,8 @@ object LegacyDolbyExoBridge {
             val isDv = DolbyVisionHelper.isDolbyVision(format)
             val isP5 = DolbyVisionHelper.isProfile5(format)
 
-            if (isP5 && shouldUseExoForProfile5(appContext, manualLocked) && format.initializationData.isNotEmpty()) {
+            val curDecodeMode = decodeModeProvider()
+            if (isP5 && shouldUseExoForProfile5(appContext, format, curDecodeMode, manualLocked) && format.initializationData.isNotEmpty()) {
                 tapRpu = true
                 onExtractorDetectedInitialMode(LegacyExoShaderMode.PROFILE_5_IPTPQC2)
                 val baseId = format.id.orEmpty().removeSuffix(TAG_DV_PROFILE_5)
@@ -847,25 +859,31 @@ object LegacyDolbyExoBridge {
 @OptIn(UnstableApi::class)
 fun ExtractorsFactory.withLegacyDolbyExoSupport(
     context: Context,
+    decodeModeProvider: () -> com.aisub.player.DecodeMode = { com.aisub.player.DecodeMode.AUTO },
     manualExoLockedProvider: () -> Boolean,
 ): ExtractorsFactory {
     val base = this
     return object : ExtractorsFactory {
         override fun createExtractors(): Array<Extractor> =
-            base.createExtractors().map { LegacyDolbyExoBridge.wrapExtractor(it, context, manualExoLockedProvider) }.toTypedArray()
+            base.createExtractors()
+                .map { LegacyDolbyExoBridge.wrapExtractor(it, context, decodeModeProvider, manualExoLockedProvider) }
+                .toTypedArray()
 
         override fun createExtractors(uri: Uri, responseHeaders: Map<String, List<String>>): Array<Extractor> =
             base.createExtractors(uri, responseHeaders)
-                .map { LegacyDolbyExoBridge.wrapExtractor(it, context, manualExoLockedProvider) }
+                .map { LegacyDolbyExoBridge.wrapExtractor(it, context, decodeModeProvider, manualExoLockedProvider) }
                 .toTypedArray()
 
         override fun experimentalSetTextTrackTranscodingEnabled(enabled: Boolean): ExtractorsFactory =
-            base.experimentalSetTextTrackTranscodingEnabled(enabled).withLegacyDolbyExoSupport(context, manualExoLockedProvider)
+            base.experimentalSetTextTrackTranscodingEnabled(enabled)
+                .withLegacyDolbyExoSupport(context, decodeModeProvider, manualExoLockedProvider)
 
         override fun setSubtitleParserFactory(factory: SubtitleParser.Factory): ExtractorsFactory =
-            base.setSubtitleParserFactory(factory).withLegacyDolbyExoSupport(context, manualExoLockedProvider)
+            base.setSubtitleParserFactory(factory)
+                .withLegacyDolbyExoSupport(context, decodeModeProvider, manualExoLockedProvider)
 
         override fun experimentalSetCodecsToParseWithinGopSampleDependencies(codecs: Int): ExtractorsFactory =
-            base.experimentalSetCodecsToParseWithinGopSampleDependencies(codecs).withLegacyDolbyExoSupport(context, manualExoLockedProvider)
+            base.experimentalSetCodecsToParseWithinGopSampleDependencies(codecs)
+                .withLegacyDolbyExoSupport(context, decodeModeProvider, manualExoLockedProvider)
     }
 }

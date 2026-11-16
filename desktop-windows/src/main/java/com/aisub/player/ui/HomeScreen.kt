@@ -119,10 +119,8 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 
 /** 首页里需要弹出的对话框。 */
 private sealed interface HomeDialog {
-    data object About : HomeDialog
     data object Stream : HomeDialog
     data object Link : HomeDialog
-    data object NewPlaylist : HomeDialog
     /** 添加：kinds 为空 = 全部（浏览页右上角），否则只列那几类（分区的「添加」） */
     data class AddSource(val kinds: Set<AddKind> = emptySet()) : HomeDialog
     data class AddToPlaylist(val entries: List<MediaEntry>) : HomeDialog
@@ -130,7 +128,6 @@ private sealed interface HomeDialog {
     data class CloudLogin(val type: ServerType, val existing: Server?) : HomeDialog
     data class RenameServer(val server: Server) : HomeDialog
     data object NewCustomLibrary : HomeDialog
-    data object Sync : HomeDialog
     data class LocalFilter(val initialTab: Int = 0) : HomeDialog
 }
 
@@ -384,6 +381,13 @@ fun HomeScreen(
                                         )
                                     }
                                 }
+                            }
+                            if (tab == Tab.ME) {
+                                LiquidGlassIconButton(
+                                    onClick = openSettings,
+                                    icon = AppIcons.Settings,
+                                    contentDescription = "设置",
+                                )
                             }
                             var menu by remember { mutableStateOf(false) }
                             Box {
@@ -746,20 +750,13 @@ fun HomeScreen(
                     lib = lib,
                     state = state,
                     settings = mainUi.settings,
-                    onSettings = openSettings,
-                    onAbout = { dialog = HomeDialog.About },
                     onLink = if (main.linkDownloader != null) ({ dialog = HomeDialog.Link }) else null,
                     onHistory = { music -> nav.push(Screen.History(music)) },
                     onPlayHistory = { item -> play(listOf(item.entry), 0) },
                     onRemoveHistory = lib::removeHistory,
                     onPlayMusic = play,
                     onOpenPlaylist = { nav.push(Screen.PlaylistDetail(it.id)) },
-                    onPlayPlaylist = { p -> if (p.items.isNotEmpty()) play(p.items, 0) },
-                    onNewPlaylist = { dialog = HomeDialog.NewPlaylist },
-                    onPlaylistFromHistory = lib::playlistFromHistory,
-                    onDeletePlaylist = { lib.deletePlaylist(it.id) },
                     onHiddenFolders = { nav.push(Screen.HiddenFolders) },
-                    onRefreshStats = lib::refreshPlaybackStats,
                     openFavorite = { f ->
                         if (f.serverId == null) nav.push(Screen.LocalFolder(f.path, f.title))
                         else nav.push(Screen.Remote(f.serverId, f.path, f.title))
@@ -773,7 +770,6 @@ fun HomeScreen(
                     openWebManga = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
                     openServer = openServer,
                     openServerItem = { s, item -> nav.push(Screen.ServerDetail(s.id, item.ratingKey)) },
-                    onSync = { dialog = HomeDialog.Sync },
                 )
             }
         }
@@ -783,7 +779,6 @@ fun HomeScreen(
 
     when (val d = dialog) {
         null -> {}
-        HomeDialog.About -> AboutDialog { dialog = null }
         HomeDialog.Link -> TextInputDialog(
             title = "从链接下载", label = "视频网页链接（YouTube、B 站等）", confirm = "下载",
             onDismiss = { dialog = null },
@@ -802,11 +797,6 @@ fun HomeScreen(
                 dialog = null
                 play(listOf(MediaEntry(url, url.substringAfterLast('/').ifEmpty { url })), 0)
             },
-        )
-        HomeDialog.NewPlaylist -> TextInputDialog(
-            title = "新建播放列表", label = "名称", confirm = "创建",
-            onDismiss = { dialog = null },
-            onConfirm = { lib.createPlaylist(it); dialog = null },
         )
         is HomeDialog.AddSource -> AddSourceDialog(
             kinds = d.kinds,
@@ -854,10 +844,6 @@ fun HomeScreen(
                     com.aisub.player.media.CustomMediaLibraryStore.startScrape(context, saved.id, mainUi.settings, lib)
                 }
             },
-        )
-        HomeDialog.Sync -> MultiDeviceSyncQuickDialog(
-            onOpenSettings = { dialog = null; openSettings() },
-            onDismiss = { dialog = null },
         )
         is HomeDialog.LocalFilter -> LocalMediaFilterDialog(
             initialTab = d.initialTab,
@@ -1542,14 +1528,12 @@ private fun ServerContinueRow(
     }
 }
 
-/** 我的：上方集中展示继续观看、继续收听、继续阅读、最近浏览等全部历史记录；下方为稍后观看、收藏、播放列表与设置。 */
+/** 我的：上方展示继续观看、继续收听、继续阅读；下方展示我的收藏与管理。 */
 @Composable
 private fun MeTab(
     lib: LibraryViewModel,
     state: LibraryState,
     settings: com.aisub.player.AppSettings,
-    onSettings: () -> Unit,
-    onAbout: () -> Unit,
     onLink: (() -> Unit)?,
     /** 参数：true 打开音乐的最近播放，false 打开视频的 */
     onHistory: (Boolean) -> Unit,
@@ -1557,12 +1541,7 @@ private fun MeTab(
     onRemoveHistory: (String) -> Unit,
     onPlayMusic: (List<MediaEntry>, Int) -> Unit,
     onOpenPlaylist: (Playlist) -> Unit,
-    onPlayPlaylist: (Playlist) -> Unit,
-    onNewPlaylist: () -> Unit,
-    onPlaylistFromHistory: () -> Unit,
-    onDeletePlaylist: (Playlist) -> Unit,
     onHiddenFolders: () -> Unit,
-    onRefreshStats: () -> Unit,
     openFavorite: (FavoriteFolder) -> Unit,
     removeFavorite: (FavoriteFolder) -> Unit,
     openWebBookmarks: () -> Unit,
@@ -1573,7 +1552,6 @@ private fun MeTab(
     openWebManga: (String) -> Unit = {},
     openServer: (Server) -> Unit = {},
     openServerItem: (Server, com.aisub.player.remote.cloud.ServerItem) -> Unit = { _, _ -> },
-    onSync: () -> Unit = {},
 ) {
     val context = LocalContext.current
 
@@ -1613,12 +1591,8 @@ private fun MeTab(
         }).sortedByDescending { it.time }.take(12)
     }
 
-    val watchLater = state.playlists.firstOrNull { it.name == com.aisub.player.media.WATCH_LATER_PLAYLIST }
     val favoriteVideos = state.playlists.firstOrNull { it.name == com.aisub.player.media.FAVORITE_VIDEOS_PLAYLIST }
     val likedMusic = state.playlists.firstOrNull { it.name == com.aisub.player.media.LIKED_PLAYLIST }
-    val playlists = state.playlists.filter { it.name !in setOf(
-        com.aisub.player.media.WATCH_LATER_PLAYLIST, com.aisub.player.media.FAVORITE_VIDEOS_PLAYLIST, com.aisub.player.media.LIKED_PLAYLIST,
-    ) }
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 104.dp)) {
         // 1. 继续观看（未看完进度卡片）
@@ -1660,25 +1634,6 @@ private fun MeTab(
             SectionHeader("继续阅读")
             LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(reading, key = { (if (it.book) "b:" else "m:") + it.key }) { r -> ReadingTile(r) }
-            }
-        }
-
-        // ---- 稍后观看 ----
-        val later = watchLater?.items.orEmpty()
-        SectionHeader(
-            "稍后观看" + if (later.isNotEmpty()) " ${later.size}" else "",
-            actionLabel = if (later.isNotEmpty()) "全部" else null, onAction = { watchLater?.let(onOpenPlaylist) },
-        )
-        if (later.isEmpty()) {
-            Text(
-                "在本机或网盘视频的「⋮」菜单里选「稍后观看」，想看的先存在这里", color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 20.dp),
-            )
-        } else {
-            LazyRow(contentPadding = PaddingValues(horizontal = 10.dp)) {
-                itemsIndexed(later.take(10), key = { _, e -> e.uri }) { i, e ->
-                    Box(Modifier.width(170.dp)) { VideoCard(e, emptyList()) { onPlayMusic(later, i) } }
-                }
             }
         }
 
@@ -1731,32 +1686,6 @@ private fun MeTab(
             ListRow("收藏的电子书", if (favoriteBooks.isEmpty()) "在电子书阅读列表里点星标" else "${favoriteBooks.size} 本", AppIcons.Description, onClick = openBooks)
         }
 
-        SectionHeader("播放列表", actionLabel = "新建", onAction = onNewPlaylist)
-        SurfaceCard {
-            if (playlists.isEmpty()) {
-                ListRow(
-                    "还没有播放列表", "在视频或音频的「⋮」菜单里加入；或者用最近播放生成一个", AppIcons.QueueMusic, mutedIcon = true,
-                    onClick = if (state.history.isNotEmpty()) onPlaylistFromHistory else onNewPlaylist,
-                )
-            }
-            playlists.forEachIndexed { i, p ->
-                if (i > 0) HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                val updated = if (p.updatedAt > 0) " · " + DateUtils.getRelativeTimeSpanString(p.updatedAt) + "更新" else ""
-                ListRow(
-                    p.name, "${p.items.size} 项$updated", AppIcons.QueueMusic,
-                    trailing = {
-                        Row {
-                            IconButton(onClick = { onPlayPlaylist(p) }, enabled = p.items.isNotEmpty()) {
-                                Icon(AppIcons.PlayArrow, "播放全部", tint = MaterialTheme.colorScheme.primary)
-                            }
-                            OverflowMenu(listOf(MenuAction("删除") { onDeletePlaylist(p) }))
-                        }
-                    },
-                    onClick = { onOpenPlaylist(p) },
-                )
-            }
-        }
-
         SectionHeader("管理")
         SurfaceCard {
             ListRow("下载管理", "网盘、WebDAV 下载的文件和进度（系统下载列表）", AppIcons.Download, onClick = {
@@ -1773,19 +1702,6 @@ private fun MeTab(
                 HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 ListRow("从链接下载", "下载视频网站的视频，自动准备字幕后播放（也可以在其他 App 里分享给译幕）", AppIcons.Download, onClick = onLink)
             }
-        }
-
-        SectionHeader("设置与帮助")
-        SurfaceCard {
-            ListRow("多端同步", "跨手机、电视、Windows 双向同步进度、自定义媒体库与服务器", AppIcons.Refresh, onClick = onSync)
-            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-            ListRow("设置", "语音识别、字幕翻译、播放、朗读、同步", AppIcons.Settings, onClick = onSettings)
-            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-            val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
-            ListRow("检查更新", "当前版本 ${com.aisub.player.BuildConfig.VERSION_NAME}", AppIcons.SystemUpdate,
-                onClick = { activity?.let { com.aisub.player.update.appUpdater.checkNow(it) } })
-            HorizontalDivider(Modifier.padding(start = 70.dp), color = MaterialTheme.colorScheme.outlineVariant)
-            ListRow("关于", "版本信息与 GitHub 项目地址", AppIcons.Info, onClick = onAbout)
         }
     }
 }

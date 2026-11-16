@@ -203,7 +203,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val extractors = DefaultExtractorsFactory()
             .withAssMkvSupport(assParsers, assHandler)
             .withAiff()
-            .withLegacyDolbyExoSupport(app) { isManualExoLockedForCurrent() }
+            .withLegacyDolbyExoSupport(
+                context = app,
+                decodeModeProvider = { _state.value.settings.decodeMode },
+                manualExoLockedProvider = { isManualExoLockedForCurrent() },
+            )
         val sources = DefaultMediaSourceFactory(authDataSourceFactory(app), extractors)
         sources.setSubtitleParserFactory(assParsers)
         ExoPlayer.Builder(app)
@@ -541,7 +545,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     .asSequence()
                     .filter { it.type == C.TRACK_TYPE_VIDEO }
                     .flatMap { g -> (0 until g.length).asSequence().map { g.getTrackFormat(it) } }
-                    .firstOrNull { DolbyVisionHelper.requiresMpvForColorAccuracy(getApplication(), it) }
+                    .firstOrNull { DolbyVisionHelper.requiresMpvForColorAccuracy(getApplication(), it, _state.value.settings.decodeMode) }
                 if (dvFormat != null) {
                     val desc = DolbyVisionHelper.describeFormat(dvFormat) ?: "杜比视界"
                     android.util.Log.i("Voxtitle", "检测到 $desc 且当前屏幕不支持原生直出，自动切换 MPV 内核（libplacebo 色调映射）：${cur.uri}")
@@ -566,6 +570,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 LegacyDolbyExoBridge.syncFromSelectedTracks(
                     context = getApplication(),
                     formats = selectedVideoFormats,
+                    decodeMode = _state.value.settings.decodeMode,
                     manualExoLocked = isManualExoLockedForCurrent(),
                 )
             }
@@ -1066,6 +1071,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
             PlayerKernel.VLC -> {
+                val wasDolbyP5 = isCurrentDolbyShunted ||
+                    LegacyDolbyExoBridge.shaderModeFlow.value == LegacyExoShaderMode.PROFILE_5_IPTPQC2 ||
+                    mpvPlayer?.detectedDolbyProfile == 5 ||
+                    DolbyVisionHelper.looksLikeProfile5Title(entry.title)
                 playWithVlc(
                     entry = entry,
                     positionMs = resumePos,
@@ -1073,6 +1082,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     playWhenReady = wasPlaying,
                     speed = curSpeed,
                 )
+                if (manual && wasDolbyP5 && reasonBanner == null) {
+                    extras.emit("提示：VLC 3.x 暂不支持杜比 Profile 5 色彩还原，若画面偏紫请切回「默认」或「MPV」内核")
+                }
             }
             PlayerKernel.EXO -> {
                 mpvPlayer?.stop()
@@ -1376,10 +1388,49 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun applyDecodeModeLive(mode: DecodeMode) {
+        val cur = _state.value.current
+        // 若此前因杜比 Profile 5 自动分流至 MPV 软解，用户手动切为「硬解」时：
+        // 由于安卓 MediaCodec 在 MPV 内会剥离 RPU 造成偏紫，自动切回默认 Exo 杜比硬解着色器管线，兼顾 4K 硬解流畅度与正常色彩
+        if (mode == DecodeMode.HW &&
+            cur != null &&
+            !cur.isLive &&
+            usingMpv &&
+            isCurrentDolbyShunted &&
+            manualEntryKernel[cur.uri] != PlayerKernel.MPV &&
+            (mpvPlayer?.detectedDolbyProfile == 5 || mpvPlayer?.dolbyProfile5Hint == true)
+        ) {
+            mpvPlayer?.setHwdecPreference(mode.forceHwdecFlag)
+            vlcPlayer?.setHwdecPreference(mode.forceHwdecFlag)
+            switchKernel(
+                target = PlayerKernel.EXO,
+                manual = false,
+                reasonBanner = "已切换至默认内核杜比硬解着色管线，兼顾硬解流畅度与正常色彩",
+            )
+            return
+        }
+        // 反之若在默认 Exo 杜比硬解管线下用户手动选了「软解」（且设备支持 GLES 3.0+），无缝切至 MPV 多核软解 + libplacebo
+        if (mode == DecodeMode.SW &&
+            cur != null &&
+            !cur.isLive &&
+            !usingExternalKernel &&
+            LegacyDolbyExoBridge.shaderModeFlow.value == LegacyExoShaderMode.PROFILE_5_IPTPQC2 &&
+            manualEntryKernel[cur.uri] != PlayerKernel.EXO &&
+            DolbyVisionHelper.supportsOpenGlEs3(getApplication())
+        ) {
+            mpvPlayer?.setHwdecPreference(mode.forceHwdecFlag)
+            vlcPlayer?.setHwdecPreference(mode.forceHwdecFlag)
+            switchKernel(
+                target = PlayerKernel.MPV,
+                manual = false,
+                dolbyP5Hint = true,
+                reasonBanner = "已切换至 MPV 纯软解 + libplacebo 色调映射管线",
+            )
+            return
+        }
+
         val flag = mode.forceHwdecFlag
         mpvPlayer?.setHwdecPreference(flag)
         vlcPlayer?.setHwdecPreference(flag)
-        val cur = _state.value.current
         if (!usingExternalKernel && cur != null && (cur.isVideo || cur.isLive) && exoPlayer.playbackState != Player.STATE_IDLE) {
             val resumePos = if (cur.isLive) C.TIME_UNSET else exoPlayer.currentPosition.coerceAtLeast(0L)
             val idx = exoPlayer.currentMediaItemIndex.coerceAtLeast(0)

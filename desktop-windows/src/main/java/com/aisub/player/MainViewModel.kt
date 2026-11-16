@@ -815,9 +815,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             cancelAll()
         }
         _state.update { it.copy(playbackError = null, videoProblem = null) }
+        val wasDolbyP5 = (exoPlayer as? com.aisub.player.desktop.DesktopExoPlayer)?.detectedDolbyProfile == 5 ||
+            DolbyVisionHelper.looksLikeProfile5Title(entry.title)
         when (target) {
             PlayerKernel.MPV -> playWithMpv(entry, resumePos, savedQueue, playWhenReady = wasPlaying, speed = curSpeed, repeatMode = curRepeat)
-            PlayerKernel.VLC -> playWithVlc(entry, resumePos, savedQueue, playWhenReady = wasPlaying, speed = curSpeed)
+            PlayerKernel.VLC -> {
+                playWithVlc(entry, resumePos, savedQueue, playWhenReady = wasPlaying, speed = curSpeed)
+                if (manual && wasDolbyP5) {
+                    extras.emit("提示：VLC 3.x 暂不支持杜比 Profile 5 色彩还原，若画面偏紫请切回「默认」或「MPV」内核")
+                }
+            }
             PlayerKernel.EXO -> {
                 mpvPlayer?.stop()
                 mpvPlayer?.clearMediaItems()

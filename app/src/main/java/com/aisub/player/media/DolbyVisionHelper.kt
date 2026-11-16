@@ -175,11 +175,50 @@ object DolbyVisionHelper {
             context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
     }
 
+    @Volatile
+    private var cachedCanSoftDecode4kP5: Boolean? = null
+
     /**
-     * 严格判定是否为需要由 ExoPlayer 原生硬解 + GLES 2.0 着色器直接修复杜比色彩的「老设备」：
+     * 评估当前移动设备 CPU 是否具备流畅软解高码率 4K 杜比视界 Profile 5 的算力：
+     * - 所有电视/机顶盒（普遍采用四核 A53/A55 低功耗核心）恒返回 false，确保电视播 4K P5 走芯片硬解不卡顿；
+     * - 64 位 8 核且大核主频 >= 2.35GHz、总内存 >= 5.5GB 的旗舰/次旗舰手机/平板返回 true（享受 MPV 16-bit libplacebo）；
+     * - 中低端或老款 64 位手机返回 false（1080p P5 仍走 MPV，4K P5 自动走 Exo 零拷贝硬解 + 着色器防掉帧发热）。
+     */
+    fun canSmoothlySoftDecode4kProfile5(context: Context): Boolean {
+        cachedCanSoftDecode4kP5?.let { return it }
+        val result = runCatching {
+            if (isTelevisionDevice(context) || isLegacyDolbyDevice(context)) return@runCatching false
+            val cores = Runtime.getRuntime().availableProcessors()
+            if (cores < 8) return@runCatching false
+            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            val memInfo = ActivityManager.MemoryInfo()
+            am?.getMemoryInfo(memInfo)
+            val totalRam = memInfo.totalMem
+            if (totalRam in 1L until 5_500_000_000L) return@runCatching false
+
+            var maxFreqKhz = 0L
+            for (i in 0 until minOf(cores, 12)) {
+                val f = java.io.File("/sys/devices/system/cpu/cpu$i/cpufreq/cpuinfo_max_freq")
+                if (f.isFile && f.canRead()) {
+                    val v = runCatching { f.readText().trim().toLongOrNull() ?: 0L }.getOrDefault(0L)
+                    if (v > maxFreqKhz) maxFreqKhz = v
+                }
+            }
+            if (maxFreqKhz in 100_000L until 2_350_000L) {
+                false
+            } else {
+                // 若系统限制读取 cpufreq，则以 8 核 + >= 7.2GB 内存作为现代高性能机型判据
+                maxFreqKhz >= 2_350_000L || totalRam >= 7_200_000_000L
+            }
+        }.getOrDefault(false)
+        cachedCanSoftDecode4kP5 = result
+        return result
+    }
+
+    /**
+     * 严格判定是否为传统老旧 SDR/32 位/GLES 2.0 设备：
      * - 凡具备原生杜比视界显示与硬解的设备恒为 false；
-     * - 仅命中：GLES 2.0 老 GPU（如 Mali-450）、32 位架构（如小米电视 4A）、低内存设备，或无任何 HDR 能力且系统低于 Android 12 的老设备；
-     * - 现代 64 位 GLES 3.0+ 手机/平板与现代 HDR 电视恒为 false，确保绝不改变新设备的任何原生播放效果。
+     * - 仅命中：GLES 2.0 老 GPU（如 Mali-450）、32 位架构（如小米电视 4A）、低内存设备，或无任何 HDR 能力且系统低于 Android 12 的设备。
      */
     fun isLegacyDolbyDevice(context: Context): Boolean {
         if (displaySupportsDolbyVision(context) && hasHardwareDolbyVisionDecoder(requireProfile5 = true)) {
@@ -192,13 +231,51 @@ object DolbyVisionHelper {
         return !supportsOpenGlEs3(context) || is32Bit || isLowRam || isOldSdr
     }
 
-    fun requiresMpvForColorAccuracy(context: Context, format: Format?): Boolean {
+    /**
+     * 统一判定杜比视界 Profile 5 是否应留在 ExoPlayer 走「芯片纯硬解 + 零拷贝 GLES 2.0 杜比着色器」：
+     * 1. 原生杜比视界屏幕 + 硬解认证设备：false（走系统原生杜比硬件直出，不挂着色器）；
+     * 2. 用户手动指定默认内核（Exo）或手动选了「硬解」模式：true（安卓上唯有 Exo 杜比硬解管线能同时硬解且不偏紫）；
+     * 3. 用户手动选了「软解」模式（且支持 GLES 3.0+）：false（交由 MPV 多核软解 + libplacebo）；
+     * 4. 所有不支持原生杜比视界的 Android TV / 机顶盒（含 64 位 HDR10 电视）：true（避免电视弱 CPU 软解 4K P5 卡顿；同时 P7/P8 仍直出 HDR10）；
+     * 5. 老设备（[isLegacyDolbyDevice]）：true；
+     * 6. 中低端 64 位手机遇到 4K / 高帧率 Profile 5：true（1080p P5 仍交 MPV，4K P5 留 Exo 硬解防掉帧）。
+     */
+    fun shouldUseExoHardwareShaderForProfile5(
+        context: Context,
+        format: Format?,
+        decodeMode: com.aisub.player.DecodeMode = com.aisub.player.DecodeMode.AUTO,
+        manualExoLocked: Boolean = false,
+    ): Boolean {
+        if (displaySupportsDolbyVision(context) && hasHardwareDolbyVisionDecoder(requireProfile5 = true)) {
+            return false
+        }
+        if (manualExoLocked) return true
+        if (!supportsOpenGlEs3(context)) return true
+        if (decodeMode == com.aisub.player.DecodeMode.HW) return true
+        if (decodeMode == com.aisub.player.DecodeMode.SW) return false
+        if (isTelevisionDevice(context) || isLegacyDolbyDevice(context)) return true
+
+        val w = format?.width ?: 0
+        val h = format?.height ?: 0
+        val fps = format?.frameRate ?: 0f
+        val isHeavy4kOrHfr = w >= 3000 || h >= 1800 || (w >= 1900 && fps >= 55f)
+        if (isHeavy4kOrHfr && !canSmoothlySoftDecode4kProfile5(context)) {
+            return true
+        }
+        return false
+    }
+
+    fun requiresMpvForColorAccuracy(
+        context: Context,
+        format: Format?,
+        decodeMode: com.aisub.player.DecodeMode = com.aisub.player.DecodeMode.AUTO,
+    ): Boolean {
         if (!isDolbyVision(format)) return false
         val dvDisplay = displaySupportsDolbyVision(context)
         if (isProfile5(format)) {
-            // 老设备不再强行转 MPV CPU 软解（4K 会卡且 GLES 2.0 仍偏色），留在 Exo 走零拷贝硬解 + GLES 2.0 杜比着色器；
-            // 现代非杜比新手机维持自动切 MPV (gpu-next + libplacebo) 的 16-bit 高精度管线不变
-            if (isLegacyDolbyDevice(context)) return false
+            if (shouldUseExoHardwareShaderForProfile5(context, format, decodeMode, manualExoLocked = false)) {
+                return false
+            }
             return !dvDisplay || !hasHardwareDolbyVisionDecoder(requireProfile5 = true)
         }
         return false
