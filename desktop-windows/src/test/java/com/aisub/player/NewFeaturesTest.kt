@@ -228,31 +228,47 @@ class NewFeaturesTest {
 
     @Test
     fun desktopContainerBinarySnifferDetectsMp4AndMkvDolbyWithoutFilenameTags() {
-        // 1) MP4 dvcC box (Profile 5: major=1, minor=0, profile=5 -> 5<<1 = 0x0A, flags=0xA0 rpu=1 bl=1)
+        // 1) MP4 dvcC box (ISO/IEC 14496-15 DOVIDecoderConfigurationRecord, Profile 5:
+        //    byte0=1, byte1=0, byte2=(5<<1)|0=0x0A, byte3=(6<<3)|rpu(4)|bl(1)=0x35, byte4=0x00)
         val mp4Header = ByteArray(128)
         // ftyp at 0..15
         mp4Header[3] = 16
         mp4Header[4] = 'f'.code.toByte(); mp4Header[5] = 't'.code.toByte(); mp4Header[6] = 'y'.code.toByte(); mp4Header[7] = 'p'.code.toByte()
         mp4Header[8] = 'i'.code.toByte(); mp4Header[9] = 's'.code.toByte(); mp4Header[10] = 'o'.code.toByte(); mp4Header[11] = 'm'.code.toByte()
-        // dvcC box at offset 40: [0,0,0,32, 'd','v','c','C', 1, 0, 0x0A, 0x00, 0xA0, ...]
+        // dvcC box at offset 40: [0,0,0,32, 'd','v','c','C', 1, 0, 0x0A, 0x35, 0x00, ...]
         mp4Header[43] = 32
         mp4Header[44] = 'd'.code.toByte(); mp4Header[45] = 'v'.code.toByte(); mp4Header[46] = 'c'.code.toByte(); mp4Header[47] = 'C'.code.toByte()
         mp4Header[48] = 1
         mp4Header[49] = 0
-        mp4Header[50] = (5 shl 1).toByte()
-        mp4Header[52] = 0xA0.toByte()
+        mp4Header[50] = 0x0A.toByte()
+        mp4Header[51] = 0x35.toByte()
+        mp4Header[52] = 0x00.toByte()
         assertEquals(5, com.aisub.player.desktop.DesktopExoPlayer.scanDolbyVisionProfileFromBytes(mp4Header, mp4Header.size))
 
-        // 2) MKV BlockAdditionMapping: 0x41 0xE7 0x84 'd''v''c''C' 0x41 0xED 0x98 [major=1, minor=0, profile=8 -> 0x10, 0, 0xA1]
-        val mkvHeader = ByteArray(96)
-        mkvHeader[10] = 0x41.toByte(); mkvHeader[11] = 0xE7.toByte(); mkvHeader[12] = 0x84.toByte()
-        mkvHeader[13] = 'd'.code.toByte(); mkvHeader[14] = 'v'.code.toByte(); mkvHeader[15] = 'c'.code.toByte(); mkvHeader[16] = 'C'.code.toByte()
-        mkvHeader[17] = 0x41.toByte(); mkvHeader[18] = 0xED.toByte(); mkvHeader[19] = 0x98.toByte()
-        mkvHeader[20] = 1
-        mkvHeader[21] = 0
-        mkvHeader[22] = (8 shl 1).toByte()
-        mkvHeader[24] = 0xA1.toByte()
-        assertEquals(8, com.aisub.player.desktop.DesktopExoPlayer.scanDolbyVisionProfileFromBytes(mkvHeader, mkvHeader.size))
+        // 2a) MKV BlockAdditionMapping Profile 5 (exact real-world layout):
+        //     0x41 0xE7 0x84 'd''v''c''C' 0x41 0xED 0x98 [1, 0, 0x0A, 0x35, 0x00]
+        val mkvP5Header = ByteArray(96)
+        mkvP5Header[10] = 0x41.toByte(); mkvP5Header[11] = 0xE7.toByte(); mkvP5Header[12] = 0x84.toByte()
+        mkvP5Header[13] = 'd'.code.toByte(); mkvP5Header[14] = 'v'.code.toByte(); mkvP5Header[15] = 'c'.code.toByte(); mkvP5Header[16] = 'C'.code.toByte()
+        mkvP5Header[17] = 0x41.toByte(); mkvP5Header[18] = 0xED.toByte(); mkvP5Header[19] = 0x98.toByte()
+        mkvP5Header[20] = 1
+        mkvP5Header[21] = 0
+        mkvP5Header[22] = 0x0A.toByte()
+        mkvP5Header[23] = 0x35.toByte()
+        mkvP5Header[24] = 0x00.toByte()
+        assertEquals(5, com.aisub.player.desktop.DesktopExoPlayer.scanDolbyVisionProfileFromBytes(mkvP5Header, mkvP5Header.size))
+
+        // 2b) MKV BlockAdditionMapping Profile 8.1: [1, 0, 0x10, 0x35, 0x10] (compat=1)
+        val mkvP8Header = ByteArray(96)
+        mkvP8Header[10] = 0x41.toByte(); mkvP8Header[11] = 0xE7.toByte(); mkvP8Header[12] = 0x84.toByte()
+        mkvP8Header[13] = 'd'.code.toByte(); mkvP8Header[14] = 'v'.code.toByte(); mkvP8Header[15] = 'c'.code.toByte(); mkvP8Header[16] = 'C'.code.toByte()
+        mkvP8Header[17] = 0x41.toByte(); mkvP8Header[18] = 0xED.toByte(); mkvP8Header[19] = 0x98.toByte()
+        mkvP8Header[20] = 1
+        mkvP8Header[21] = 0
+        mkvP8Header[22] = 0x10.toByte()
+        mkvP8Header[23] = 0x35.toByte()
+        mkvP8Header[24] = 0x10.toByte()
+        assertEquals(8, com.aisub.player.desktop.DesktopExoPlayer.scanDolbyVisionProfileFromBytes(mkvP8Header, mkvP8Header.size))
 
         // 3) Normal SDR MP4 header must return null (zero false positives)
         val sdrMp4 = ByteArray(128)
@@ -260,5 +276,85 @@ class NewFeaturesTest {
         sdrMp4[4] = 'f'.code.toByte(); sdrMp4[5] = 't'.code.toByte(); sdrMp4[6] = 'y'.code.toByte(); sdrMp4[7] = 'p'.code.toByte()
         sdrMp4[8] = 'm'.code.toByte(); sdrMp4[9] = 'p'.code.toByte(); sdrMp4[10] = '4'.code.toByte(); sdrMp4[11] = '2'.code.toByte()
         assertEquals(null, com.aisub.player.desktop.DesktopExoPlayer.scanDolbyVisionProfileFromBytes(sdrMp4, sdrMp4.size))
+    }
+
+    @Test
+    fun desktopSwitchToMpvKernelPlays10BitHevcSmoothlyWithoutFreeze() {
+        val ffmpeg = com.aisub.player.desktop.DesktopBinaryFinder.ensureFfmpeg()!!
+        val tempDir = java.nio.file.Files.createTempDirectory("voxtitle-mpv-switch-test").toFile()
+        val mkvFile = java.io.File(tempDir, "hevc_10bit_sample.mkv")
+        android.content.Context.customAppDataRoot = tempDir
+        try {
+            val gen = ProcessBuilder(
+                ffmpeg, "-y", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc=duration=4:size=1280x720:rate=24",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4",
+                "-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p10le",
+                "-c:a", "aac", "-shortest",
+                mkvFile.absolutePath,
+            ).start()
+            assertEquals(0, gen.waitFor())
+
+            com.aisub.player.desktop.DesktopPlayerEngine.updateDisplaySize(1280, 720)
+            val dsFactory = androidx.media3.datasource.DefaultDataSource.Factory(android.content.GlobalDesktopApp)
+            val exo = com.aisub.player.desktop.DesktopExoPlayer(android.content.GlobalDesktopApp, dsFactory)
+            val mpv = com.aisub.player.media.MpvPlayer(android.content.GlobalDesktopApp, dsFactory)
+            try {
+                val item = androidx.media3.common.MediaItem.fromUri(android.net.Uri.fromFile(mkvFile))
+                exo.playWhenReady = true
+                exo.setMediaItem(item, 0L)
+                exo.prepare()
+                val exoDeadline = System.currentTimeMillis() + 6_000L
+                while (System.currentTimeMillis() < exoDeadline && exo.playbackState != androidx.media3.common.Player.STATE_READY) {
+                    Thread.sleep(50)
+                }
+
+                // 模拟播放过程中用户切换至 MPV 内核，从 1_000ms 处无缝接续播放
+                exo.stop()
+                exo.clearMediaItems()
+                com.aisub.player.desktop.DesktopPlayerEngine.activePlayer = null
+
+                val tickBefore = com.aisub.player.desktop.DesktopPlayerEngine.frameTick.longValue
+                mpv.playWhenReady = true
+                mpv.setMediaItem(item, 1_000L)
+                mpv.prepare()
+                mpv.play()
+
+                val mpvDeadline = System.currentTimeMillis() + 8_000L
+                while (System.currentTimeMillis() < mpvDeadline) {
+                    if (mpv.playbackState == androidx.media3.common.Player.STATE_READY &&
+                        com.aisub.player.desktop.DesktopPlayerEngine.frameTick.longValue >= tickBefore + 8L &&
+                        mpv.currentPosition >= 1_200L
+                    ) {
+                        break
+                    }
+                    Thread.sleep(50)
+                }
+                assertEquals(
+                    "MpvPlayer must reach STATE_READY cleanly (err=${mpv.playerError?.message})",
+                    androidx.media3.common.Player.STATE_READY,
+                    mpv.playbackState,
+                )
+                assertTrue(
+                    "MpvPlayer must render frames without freezing (before=$tickBefore, now=${com.aisub.player.desktop.DesktopPlayerEngine.frameTick.longValue})",
+                    com.aisub.player.desktop.DesktopPlayerEngine.frameTick.longValue >= tickBefore + 8L,
+                )
+                assertTrue(
+                    "MpvPlayer position must advance past 1200ms (got ${mpv.currentPosition})",
+                    mpv.currentPosition >= 1_200L,
+                )
+            } finally {
+                val releaseStart = System.currentTimeMillis()
+                exo.stop()
+                exo.release()
+                mpv.stop()
+                mpv.release()
+                val releaseCost = System.currentTimeMillis() - releaseStart
+                assertTrue("stop/release must not block calling thread (took ${releaseCost}ms)", releaseCost < 500L)
+            }
+        } finally {
+            android.content.Context.customAppDataRoot = null
+            tempDir.deleteRecursively()
+        }
     }
 }

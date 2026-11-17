@@ -79,6 +79,7 @@ import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import javax.sound.sampled.AudioFormat
 import javax.sound.sampled.AudioSystem
 import javax.sound.sampled.Clip
@@ -2075,7 +2076,7 @@ class DesktopExoPlayer(
                 ffprobe, "-v", "error",
                 "-probesize", "1500000",
                 "-analyzeduration", "1500000",
-                "-show_entries", "format=duration:stream=index,codec_type,codec_name,codec_tag_string,color_space,color_transfer,color_primaries,width,height,avg_frame_rate,r_frame_rate,tags,side_data_list",
+                "-show_entries", "format=duration:stream=index,codec_type,codec_name,codec_tag_string,color_space,color_transfer,color_primaries,width,height,avg_frame_rate,r_frame_rate:stream_tags=language,title:stream_side_data",
                 "-of", "json",
             )
             if (url.startsWith("http://127.0.0.1:", ignoreCase = true) || url.startsWith("http://localhost:", ignoreCase = true)) {
@@ -2382,7 +2383,7 @@ class DesktopExoPlayer(
         if (useD3d11Hwdec) {
             cmd.addAll(listOf("-hwaccel", "d3d11va", "-hwaccel_device", "d3d"))
         }
-        cmd.addAll(listOf("-thread_queue_size", "2048", "-i", url))
+        cmd.addAll(listOf("-i", url))
         return cmd
     }
 
@@ -2505,6 +2506,67 @@ class DesktopExoPlayer(
         }
     }
 
+    private fun captureProcessStderrTail(proc: Process): AtomicReference<String> {
+        val tail = AtomicReference("")
+        Thread({
+            runCatching {
+                val sb = StringBuilder()
+                proc.errorStream.bufferedReader().use { reader ->
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        val trimmed = line.trim()
+                        if (trimmed.isEmpty() ||
+                            "Failed to send close message" in trimmed ||
+                            "Discarding stream metadata" in trimmed ||
+                            "Last message repeated" in trimmed
+                        ) {
+                            continue
+                        }
+                        if (sb.isNotEmpty()) sb.append(" | ")
+                        sb.append(trimmed)
+                        if (sb.length > 600) {
+                            sb.delete(0, sb.length - 400)
+                        }
+                        tail.set(sb.toString().takeLast(400))
+                    }
+                }
+            }
+        }, "Voxtitle-FfmpegStderr").apply {
+            isDaemon = true
+            start()
+        }
+        return tail
+    }
+
+    private fun acceptLoopbackWhileProcAlive(
+        server: ServerSocket,
+        proc: Process?,
+        gen: Int,
+        timeoutMs: Long = 20_000L,
+    ): java.net.Socket {
+        server.soTimeout = 200
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (!ffmpegRunning.get() || gen != mediaGeneration.get()) {
+                throw java.io.IOException("Playback cancelled")
+            }
+            try {
+                return server.accept()
+            } catch (_: java.net.SocketTimeoutException) {
+                if (proc != null && !proc.isAlive) {
+                    // Check once with 5ms timeout in case a loopback connection arrived right before process exit
+                    server.soTimeout = 5
+                    try {
+                        return server.accept()
+                    } catch (_: java.net.SocketTimeoutException) {
+                        throw java.io.IOException("FFmpeg exited early (code=${proc.exitValue()})")
+                    }
+                }
+            }
+        }
+        throw java.net.SocketTimeoutException("Accept timed out after ${timeoutMs}ms")
+    }
+
     /**
      * 单进程双路本机高速回环 TCP + 8 帧预分配异步环形队列音画同步管线：
      * - 彻底消除 Windows 匿名管道 (pipe:1, 4KB 缓冲) 在视频帧等待 PTS 时阻塞 FFmpeg 复用器导致音频断流与自锁卡顿的问题；
@@ -2532,7 +2594,6 @@ class DesktopExoPlayer(
                 ServerSocket().apply {
                     receiveBufferSize = 16 * 1024 * 1024
                     bind(java.net.InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 1)
-                    soTimeout = 20_000
                 }
             }.getOrNull()
             if (videoServer == null) {
@@ -2543,7 +2604,6 @@ class DesktopExoPlayer(
                 ServerSocket().apply {
                     receiveBufferSize = 1024 * 1024
                     bind(java.net.InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 1)
-                    soTimeout = 20_000
                 }
             }.getOrElse { e ->
                 runCatching { videoServer.close() }
@@ -2581,42 +2641,44 @@ class DesktopExoPlayer(
                 )
             }
 
-            ioPool.submit {
-                try {
-                    val sock = audioServer.accept().apply {
-                        receiveBufferSize = 1024 * 1024
-                        tcpNoDelay = true
-                    }
-                    runCatching { audioServer.close() }
-                    if (ffmpegAudioServer === audioServer) ffmpegAudioServer = null
-                    sock.use { s ->
-                        BufferedInputStream(s.getInputStream(), 65_536).use { audioIn ->
-                            pumpPcmToAudioLine(
-                                gen = gen,
-                                ins = audioIn,
-                                startPosMs = startPosMs,
-                                markReadyWithoutVideo = false,
-                            )
-                        }
-                    }
-                } catch (_: Exception) {
-                    hasLiveAudio.set(false)
-                    ffmpegAudioClockReady = false
-                } finally {
-                    runCatching { audioServer.close() }
-                    if (ffmpegAudioServer === audioServer) ffmpegAudioServer = null
-                    audioDoneLatch.countDown()
-                }
-            }
-
             var framesRead = 0L
+            val stderrTailRef = AtomicReference("")
+            var procTail: AtomicReference<String>? = null
             try {
-                val proc = ProcessBuilder(cmd)
-                    .redirectError(ProcessBuilder.Redirect.DISCARD)
-                    .start()
+                val proc = ProcessBuilder(cmd).start()
+                procTail = captureProcessStderrTail(proc)
                 ffmpegVideoProc = proc
                 ffmpegAudioProc = null
-                val videoSock = videoServer.accept().apply {
+
+                ioPool.submit {
+                    try {
+                        val sock = acceptLoopbackWhileProcAlive(audioServer, proc, gen, 20_000L).apply {
+                            receiveBufferSize = 1024 * 1024
+                            tcpNoDelay = true
+                        }
+                        runCatching { audioServer.close() }
+                        if (ffmpegAudioServer === audioServer) ffmpegAudioServer = null
+                        sock.use { s ->
+                            BufferedInputStream(s.getInputStream(), 65_536).use { audioIn ->
+                                pumpPcmToAudioLine(
+                                    gen = gen,
+                                    ins = audioIn,
+                                    startPosMs = startPosMs,
+                                    markReadyWithoutVideo = false,
+                                )
+                            }
+                        }
+                    } catch (_: Exception) {
+                        hasLiveAudio.set(false)
+                        ffmpegAudioClockReady = false
+                    } finally {
+                        runCatching { audioServer.close() }
+                        if (ffmpegAudioServer === audioServer) ffmpegAudioServer = null
+                        audioDoneLatch.countDown()
+                    }
+                }
+
+                val videoSock = acceptLoopbackWhileProcAlive(videoServer, proc, gen, 20_000L).apply {
                     receiveBufferSize = 16 * 1024 * 1024
                     tcpNoDelay = true
                 }
@@ -2636,9 +2698,13 @@ class DesktopExoPlayer(
                 }
                 proc.destroy()
                 audioDoneLatch.await(2, TimeUnit.SECONDS)
+                stderrTailRef.set(procTail?.get().orEmpty())
             } catch (e: Throwable) {
-                Log.w(TAG, "FFmpeg 管线运行退出 (hwdec=$useD3d11Hwdec, mode=$filterMode, frames=$framesRead): ${e.message}")
+                runCatching { Thread.sleep(30L) }
+                val errDetail = procTail?.get().orEmpty().also { stderrTailRef.set(it) }
+                Log.w(TAG, "FFmpeg 管线运行退出 (hwdec=$useD3d11Hwdec, mode=$filterMode, frames=$framesRead): ${e.message}" + if (errDetail.isNotBlank()) " [$errDetail]" else "")
             } finally {
+                runCatching { ffmpegVideoProc?.destroy() }
                 runCatching { videoServer.close() }
                 runCatching { audioServer.close() }
                 if (ffmpegVideoServer === videoServer) ffmpegVideoServer = null
@@ -2676,6 +2742,22 @@ class DesktopExoPlayer(
                     startFfmpegMuxedPlayback(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = nextMode, useD3d11Hwdec = false, isHdrFallbackCandidate = false)
                     return@submit
                 }
+                if (filterMode == 2) {
+                    Log.w(TAG, "CPU HDR 色调映射管线未输出帧，回退至标准缩放管线")
+                    activePipelineDescription = "FFmpeg 软解渲染管线"
+                    startFfmpegMuxedPlayback(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = 0, useD3d11Hwdec = false, isHdrFallbackCandidate = false)
+                    return@submit
+                }
+                ffmpegRunning.set(false)
+                val detail = stderrTailRef.get().takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
+                onError(
+                    PlaybackException(
+                        "MPV/FFmpeg 渲染管线无法打开该媒体流$detail",
+                        null,
+                        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+                    ),
+                )
+                return@submit
             }
             if (ffmpegRunning.get() && gen == mediaGeneration.get() && framesRead > 0L) {
                 onItemEnded()
@@ -2924,7 +3006,11 @@ class DesktopExoPlayer(
                 }
                 carry = nextCarry
             }
-            line?.drain()
+            if (ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                line?.drain()
+            } else {
+                runCatching { line?.flush() }
+            }
         } finally {
             runCatching { line?.close() }
             if (ffmpegAudioLine === line) ffmpegAudioLine = null
@@ -2946,6 +3032,8 @@ class DesktopExoPlayer(
     ) {
         ioPool.submit {
             var framesRead = 0L
+            val stderrTailRef = AtomicReference("")
+            var procTail: AtomicReference<String>? = null
             runCatching {
                 val safeFps = fps.coerceIn(12.0, 60.0)
                 val fpsStr = "%.6f".format(java.util.Locale.US, safeFps)
@@ -2969,9 +3057,8 @@ class DesktopExoPlayer(
                         ),
                     )
                 }
-                val proc = ProcessBuilder(cmd)
-                    .redirectError(ProcessBuilder.Redirect.DISCARD)
-                    .start()
+                val proc = ProcessBuilder(cmd).start()
+                procTail = captureProcessStderrTail(proc)
                 ffmpegVideoProc = proc
                 framesRead = readAndPresentFfmpegVideoRing(
                     gen = gen,
@@ -2983,8 +3070,11 @@ class DesktopExoPlayer(
                     useAudioClock = { false },
                 )
                 proc.destroy()
+                stderrTailRef.set(procTail?.get().orEmpty())
             }.onFailure { e ->
-                Log.e(TAG, "FFmpeg 视频解码线程异常: $url", e)
+                runCatching { Thread.sleep(30L) }
+                val detail = procTail?.get().orEmpty().also { stderrTailRef.set(it) }
+                Log.e(TAG, "FFmpeg 视频解码线程异常: $url" + if (detail.isNotBlank()) " [$detail]" else "", e)
             }
             if (framesRead == 0L && ffmpegRunning.get() && gen == mediaGeneration.get()) {
                 if (useD3d11Hwdec) {
@@ -2995,6 +3085,16 @@ class DesktopExoPlayer(
                     startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = 0, useD3d11Hwdec = false)
                     return@submit
                 }
+                ffmpegRunning.set(false)
+                val detail = stderrTailRef.get().takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
+                onError(
+                    PlaybackException(
+                        "MPV/FFmpeg 视频渲染管线无法打开该媒体流$detail",
+                        null,
+                        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+                    ),
+                )
+                return@submit
             }
             if (ffmpegRunning.get() && gen == mediaGeneration.get() && framesRead > 0L) {
                 onItemEnded()
@@ -3259,11 +3359,15 @@ class DesktopExoPlayer(
             val major = buf[recOffset].toInt() and 0xFF
             val minor = buf[recOffset + 1].toInt() and 0xFF
             if (major != 1 || minor !in 0..2) return null
-            val profile = (buf[recOffset + 2].toInt() and 0xFF) ushr 1
-            val flags = buf[recOffset + 4].toInt() and 0xFF
-            val rpuPresent = (flags and 0x80) != 0
-            val blPresent = (flags and 0x20) != 0
-            return if (profile in 1..20 && rpuPresent && blPresent) profile else null
+            val b2 = buf[recOffset + 2].toInt() and 0xFF
+            val b3 = buf[recOffset + 3].toInt() and 0xFF
+            val b4 = buf[recOffset + 4].toInt() and 0xFF
+            val profile = (b2 ushr 1) and 0x7F
+            val level = ((b2 and 0x01) shl 5) or (b3 ushr 3)
+            val rpuPresent = (b3 and 0x04) != 0
+            val blPresent = (b3 and 0x01) != 0
+            val reservedLowZero = (b4 and 0x0F) == 0
+            return if (profile in 1..20 && level in 1..20 && rpuPresent && blPresent && reservedLowZero) profile else null
         }
 
         private fun readBeInt(buf: ByteArray, offset: Int): Int {

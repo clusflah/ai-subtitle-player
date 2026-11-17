@@ -29,6 +29,9 @@ object DesktopBinaryFinder {
     @Volatile
     private var cachedMpv: String? = null
 
+    private val ffmpegLock = Any()
+    private val ytdlpLock = Any()
+
     fun findMpv(): String? {
         cachedMpv?.let { if (File(it).exists()) return it }
         findExecutable("mpv.exe")?.let {
@@ -76,39 +79,51 @@ object DesktopBinaryFinder {
 
     fun ensureYtDlp(onProgress: ((String) -> Unit)? = null): String {
         findYtDlp()?.let { return it }
-        val target = File(binDir, "yt-dlp.exe")
-        onProgress?.invoke("正在下载 Windows 组件 yt-dlp.exe…")
-        val url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-        downloadFile(url, target)
-        cachedYtDlp = target.absolutePath
-        return target.absolutePath
+        synchronized(ytdlpLock) {
+            findYtDlp()?.let { return it }
+            val target = File(binDir, "yt-dlp.exe")
+            onProgress?.invoke("正在下载 Windows 组件 yt-dlp.exe…")
+            val url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+            downloadFile(url, target)
+            cachedYtDlp = target.absolutePath
+            return target.absolutePath
+        }
     }
 
     fun ensureFfmpeg(onProgress: ((String) -> Unit)? = null): String? {
         findFfmpeg()?.let { return it }
-        val target = File(binDir, "ffmpeg.exe")
-        if (target.exists()) {
-            cachedFfmpeg = target.absolutePath
-            return target.absolutePath
-        }
-        runCatching {
-            onProgress?.invoke("正在下载 Windows 音视频解码组件 ffmpeg…")
-            val zipUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-            val tmpZip = File(binDir, "ffmpeg-win64.zip")
-            downloadFile(zipUrl, tmpZip)
-            ZipInputStream(tmpZip.inputStream().buffered()).use { zis ->
-                while (true) {
-                    val entry = zis.nextEntry ?: break
-                    val name = entry.name.substringAfterLast('/')
-                    if (!entry.isDirectory && (name == "ffmpeg.exe" || name == "ffprobe.exe")) {
-                        val out = File(binDir, name)
-                        out.outputStream().use { zis.copyTo(it) }
+        synchronized(ffmpegLock) {
+            findFfmpeg()?.let { return it }
+            val target = File(binDir, "ffmpeg.exe")
+            if (target.isFile && target.length() > 1_000_000L) {
+                cachedFfmpeg = target.absolutePath
+                return target.absolutePath
+            }
+            runCatching {
+                onProgress?.invoke("正在下载 Windows 音视频解码组件 ffmpeg…")
+                val zipUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+                val tmpZip = File(binDir, "ffmpeg-win64.zip")
+                downloadFile(zipUrl, tmpZip)
+                ZipInputStream(tmpZip.inputStream().buffered()).use { zis ->
+                    while (true) {
+                        val entry = zis.nextEntry ?: break
+                        val name = entry.name.substringAfterLast('/')
+                        if (!entry.isDirectory && (name == "ffmpeg.exe" || name == "ffprobe.exe")) {
+                            val part = File(binDir, "$name.part")
+                            val dest = File(binDir, name)
+                            part.outputStream().use { zis.copyTo(it) }
+                            if (dest.exists()) dest.delete()
+                            if (!part.renameTo(dest)) {
+                                part.copyTo(dest, overwrite = true)
+                                part.delete()
+                            }
+                        }
                     }
                 }
+                tmpZip.delete()
             }
-            tmpZip.delete()
+            return findFfmpeg()
         }
-        return findFfmpeg()
     }
 
     private fun findExecutable(exeName: String): String? {

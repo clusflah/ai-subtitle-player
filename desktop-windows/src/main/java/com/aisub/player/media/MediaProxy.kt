@@ -128,7 +128,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
                 return
             }
             val reqSpan = knownEndExclusive - start
-            if (end != null && reqSpan <= MAX_PURE_CACHE_READ_BYTES && state.contiguousCachedEnd(start, knownEndExclusive) >= knownEndExclusive) {
+            if (reqSpan in 1L..MAX_PURE_CACHE_READ_BYTES && state.contiguousCachedEnd(start, knownEndExclusive) >= knownEndExclusive) {
                 writeHeaders(out, hasRange, start, knownEndExclusive, knownTotal)
                 streamCachedRange(state, start, knownEndExclusive, out, pacer) { !client.isClosed }
                 out.flush()
@@ -159,13 +159,18 @@ class MediaProxy(private val factory: DataSource.Factory) {
                 if (cachedEnd > start) {
                     writeHeaders(out, hasRange, start, knownEndExclusive, freshTotal)
                     headersSent = true
-                    streamCachedRange(state, start, cachedEnd, out, pacer) {
+                    if (cachedEnd >= knownEndExclusive) {
+                        streamCachedRange(state, start, cachedEnd, out, pacer) { !client.isClosed }
+                        out.flush()
+                        completedCleanly = !client.isClosed
+                        return
+                    }
+                    val writtenEnd = streamCachedRange(state, start, cachedEnd, out, pacer) {
                         mySeq == state.requestSeq.get() && !client.isClosed
                     }
                     out.flush()
-                    if (cachedEnd >= knownEndExclusive) {
-                        completedCleanly = true
-                        return
+                    if (writtenEnd < cachedEnd || mySeq != state.requestSeq.get() || client.isClosed) {
+                        throw InterruptedIOException("Superseded while streaming cached prefix")
                     }
                     streamStart = cachedEnd
                 }
@@ -396,7 +401,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
         out: BufferedOutputStream,
         pacer: LoopbackPacer,
         shouldContinue: () -> Boolean,
-    ) {
+    ): Long {
         var pos = start
         val buf = ByteArray(1 shl 16)
         while (pos < endExclusive && shouldContinue()) {
@@ -404,8 +409,10 @@ class MediaProxy(private val factory: DataSource.Factory) {
             val n = state.readCachedAt(pos, buf, want)
             if (n <= 0) break
             pacer.writeChunked(out, buf, 0, n, shouldContinue)
+            if (!shouldContinue()) break
             pos += n
         }
+        return pos
     }
 
     /**
