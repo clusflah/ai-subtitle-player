@@ -135,7 +135,8 @@ object RecommendationEngine {
 
     /** 解析当前可用的对话大模型及其名称标签；若均未配置则返回 null */
     fun resolveChatTranslator(settings: AppSettings): Pair<String, Translator>? {
-        val candidates = listOf(settings.provider) + CHAT_PROVIDERS.filter { it != settings.provider }
+        val preferred = listOfNotNull(settings.aiRecommendProvider, settings.provider).distinct()
+        val candidates = preferred + CHAT_PROVIDERS.filter { it !in preferred }
         for (p in candidates) {
             if (p !in CHAT_PROVIDERS) continue
             val c = settings.configOf(p)

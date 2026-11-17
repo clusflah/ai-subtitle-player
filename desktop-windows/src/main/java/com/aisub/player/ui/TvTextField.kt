@@ -177,6 +177,7 @@ fun CompactSearchField(
     phoneInput: Boolean = true,
     phoneLabel: String = "",
     height: Dp = 42.dp,
+    cornerRadius: Dp = 12.dp,
     marqueeText: Boolean = false,
     onTapOrFocus: (() -> Unit)? = null,
     trailingAction: (@Composable () -> Unit)? = null,
@@ -192,7 +193,7 @@ fun CompactSearchField(
 ) { m, kb ->
     var isFocused by remember { mutableStateOf(false) }
     val glass = LocalLiquidGlassEnabled.current
-    val shape = RoundedCornerShape(12.dp)
+    val shape = RoundedCornerShape(cornerRadius)
     val containerColor = if (glass) {
         if (isFocused) currentVisualPalette().cardTint else currentVisualPalette().fieldContainerTint
     } else {

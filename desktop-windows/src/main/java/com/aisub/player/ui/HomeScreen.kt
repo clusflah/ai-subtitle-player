@@ -279,39 +279,41 @@ fun HomeScreen(
                                 )
                             }
                         }
-                        val subBtnTint = when {
-                            globalSubActive -> if (glass) Orange.copy(alpha = 0.90f) else Orange
-                            glass -> headerPalette.iconButtonTint
-                            else -> MaterialTheme.colorScheme.surfaceContainerHigh
-                        }
-                        val subBtnFg = if (globalSubActive) Color.White else MaterialTheme.colorScheme.onSurface
-                        GlassBox(
-                            modifier = Modifier
-                                .height(if (glass) 42.dp else 36.dp)
-                                .let { if (glass) it.glassShadow(pillShape, GlassStyle.Floating, if (isDarkHeader) 6.dp else 4.dp) else it },
-                            shape = pillShape,
-                            style = GlassStyle.Floating,
-                            tint = subBtnTint,
-                            onClick = { com.aisub.player.desktop.DesktopGlobalSubtitles.onToggle() },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 14.dp),
-                                verticalAlignment = Alignment.CenterVertically,
+                        if (globalSubActive || tab == Tab.HOME) {
+                            val subBtnTint = when {
+                                globalSubActive -> if (glass) Orange.copy(alpha = 0.90f) else Orange
+                                glass -> headerPalette.iconButtonTint
+                                else -> MaterialTheme.colorScheme.surfaceContainerHigh
+                            }
+                            val subBtnFg = if (globalSubActive) Color.White else MaterialTheme.colorScheme.onSurface
+                            GlassBox(
+                                modifier = Modifier
+                                    .height(if (glass) 42.dp else 36.dp)
+                                    .let { if (glass) it.glassShadow(pillShape, GlassStyle.Floating, if (isDarkHeader) 6.dp else 4.dp) else it },
+                                shape = pillShape,
+                                style = GlassStyle.Floating,
+                                tint = subBtnTint,
+                                onClick = { com.aisub.player.desktop.DesktopGlobalSubtitles.onToggle() },
+                                contentAlignment = Alignment.Center,
                             ) {
-                                Icon(
-                                    imageVector = AppIcons.AutoAwesome,
-                                    contentDescription = "桌面全局字幕",
-                                    tint = if (globalSubActive) Color.White else Orange,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    text = if (globalSubActive) "桌面字幕: 运行中" else "桌面全局字幕",
-                                    color = subBtnFg,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Medium,
-                                )
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 14.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(
+                                        imageVector = AppIcons.AutoAwesome,
+                                        contentDescription = "桌面全局字幕",
+                                        tint = if (globalSubActive) Color.White else Orange,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        text = if (globalSubActive) "桌面字幕: 运行中" else "桌面全局字幕",
+                                        color = subBtnFg,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                    )
+                                }
                             }
                         }
                         if (isDiscover) {
@@ -329,162 +331,264 @@ fun HomeScreen(
                                 size = 38.dp,
                             )
                         } else {
-                            val mediaTab = tab == Tab.LOCAL
-                            // 浏览页与首页右上角：点击「+」直接弹出液态玻璃来源菜单（仿演示视频与截图）
-                            if (tab == Tab.BROWSE || tab == Tab.HOME) {
-                                var addMenu by remember { mutableStateOf(false) }
-                                Box {
-                                    LiquidGlassIconButton(
-                                        onClick = { addMenu = true },
-                                        icon = AppIcons.Add,
-                                        contentDescription = "添加",
-                                    )
-                                    AddSourceDropdownMenu(
-                                        expanded = addMenu,
-                                        onDismiss = { addMenu = false },
-                                        onNewMediaLibrary = { addMenu = false; dialog = HomeDialog.NewCustomLibrary },
-                                        onPick = { type ->
-                                            addMenu = false
-                                            dialog = when (type) {
-                                                ServerType.WEBDAV, ServerType.OPENLIST ->
-                                                    HomeDialog.EditServer(Server(type = type, name = if (type == ServerType.OPENLIST) "OpenList" else "", baseUrl = ""))
-                                                else -> HomeDialog.CloudLogin(type, null)
+                            when (tab) {
+                                Tab.HOME -> {
+                                    // 首页：仅保留与首页自定义媒体库及媒体服务器有关的新建 / 接入 / 刮削刷新操作
+                                    var addMenu by remember { mutableStateOf(false) }
+                                    Box {
+                                        LiquidGlassIconButton(
+                                            onClick = { addMenu = true },
+                                            icon = AppIcons.Add,
+                                            contentDescription = "添加媒体库",
+                                        )
+                                        AppMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
+                                            DropdownMenuItem(
+                                                leadingIcon = { Icon(AppIcons.Movie, null, tint = Orange, modifier = Modifier.size(24.dp)) },
+                                                text = { Text("新建电影 / 剧集媒体库", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium) },
+                                                onClick = { addMenu = false; dialog = HomeDialog.NewCustomLibrary },
+                                            )
+                                            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                                            listOf(ServerType.EMBY, ServerType.JELLYFIN, ServerType.PLEX).forEach { type ->
+                                                DropdownMenuItem(
+                                                    leadingIcon = { ServerTypeIcon(type, size = 26.dp) },
+                                                    text = { Text("接入 ${type.label}", style = MaterialTheme.typography.bodyLarge) },
+                                                    onClick = {
+                                                        addMenu = false
+                                                        dialog = HomeDialog.CloudLogin(type, null)
+                                                    },
+                                                )
                                             }
-                                        },
-                                        onLive = { addMenu = false; nav.push(Screen.Live) },
-                                        onStream = { addMenu = false; dialog = HomeDialog.Stream },
-                                        onTelegram = { addMenu = false; nav.push(Screen.Telegram) },
-                                    )
-                                }
-                            }
-                            val localTabIdx = when {
-                                localPhotos -> 2
-                                localVideo -> 0
-                                else -> 1
-                            }
-                            if (mediaTab) {
-                                LiquidGlassIconButton(
-                                    onClick = {
-                                        searching = !searching
-                                        if (!searching) { query = ""; lib.searchSubtitles("") }
-                                    },
-                                    icon = if (searching) AppIcons.Close else AppIcons.Search,
-                                    contentDescription = "搜索",
-                                )
-                                Box {
-                                    LiquidGlassIconButton(
-                                        onClick = { dialog = HomeDialog.LocalFilter(localTabIdx) },
-                                        icon = AppIcons.Tune,
-                                        contentDescription = "过滤",
-                                    )
-                                    if (state.localFilter.totalActiveCount > 0) {
-                                        Box(
-                                            Modifier
-                                                .align(Alignment.TopEnd)
-                                                .padding(3.dp)
-                                                .size(8.dp)
-                                                .background(Orange, CircleShape),
-                                        )
-                                    }
-                                }
-                            }
-                            if (tab == Tab.ME) {
-                                LiquidGlassIconButton(
-                                    onClick = openSettings,
-                                    icon = AppIcons.Settings,
-                                    contentDescription = "设置",
-                                )
-                            }
-                            var menu by remember { mutableStateOf(false) }
-                            Box {
-                                LiquidGlassIconButton(
-                                    onClick = { menu = true },
-                                    icon = AppIcons.MoreHoriz,
-                                    contentDescription = "更多设置",
-                                )
-                                AppMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                                    if (mediaTab) {
-                                        val page = when {
-                                            localPhotos -> "image"
-                                            localVideo -> "video"
-                                            else -> "audio"
-                                        }
-                                        val current = when {
-                                            localPhotos -> state.imageSort
-                                            localVideo -> state.videoSort
-                                            else -> state.audioSort
-                                        }
-                                        val sortChoices = if (localPhotos) {
-                                            SortOrder.entries.filter { it != SortOrder.DURATION }
-                                        } else {
-                                            SortOrder.entries
-                                        }
-                                        sortChoices.forEach { o ->
+                                            HorizontalDivider(Modifier.padding(vertical = 4.dp))
                                             DropdownMenuItem(
-                                                text = { Text("按${o.label}排序") },
-                                                trailingIcon = if (o == current) {
-                                                    {
-                                                        Icon(
-                                                            AppIcons.Check,
-                                                            contentDescription = null,
-                                                            tint = MaterialTheme.colorScheme.primary,
-                                                            modifier = Modifier.size(18.dp),
-                                                        )
-                                                    }
-                                                } else null,
-                                                onClick = { menu = false; lib.setSort(page, o) },
-                                            )
-                                        }
-                                        if (localVideo && !localPhotos) {
-                                            DropdownMenuItem(
-                                                text = { Text(if (state.videoGrid) "列表视图" else "网格视图") },
-                                                onClick = { menu = false; lib.setVideoGrid(!state.videoGrid) },
-                                            )
-                                        }
-                                        val activeCnt = state.localFilter.activeCountForTab(localTabIdx)
-                                        DropdownMenuItem(
-                                            leadingIcon = {
-                                                Icon(
-                                                    AppIcons.Tune,
-                                                    contentDescription = null,
-                                                    tint = if (activeCnt > 0) Orange else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    modifier = Modifier.size(20.dp),
-                                                )
-                                            },
-                                            text = {
-                                                Text(
-                                                    "过滤",
-                                                    color = if (activeCnt > 0) Orange else Color.Unspecified,
-                                                )
-                                            },
-                                            onClick = {
-                                                menu = false
-                                                dialog = HomeDialog.LocalFilter(localTabIdx)
-                                            },
-                                        )
-                                        if (activeCnt > 0) {
-                                            DropdownMenuItem(
-                                                text = { Text("清除当前分类过滤条件") },
+                                                leadingIcon = { Icon(AppIcons.Cloud, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp)) },
+                                                text = { Text("添加 NAS / 网盘存储…", style = MaterialTheme.typography.bodyLarge) },
                                                 onClick = {
-                                                    menu = false
-                                                    com.aisub.player.media.LocalMediaFilterStore.clearTab(context, localTabIdx)
+                                                    addMenu = false
+                                                    dialog = HomeDialog.AddSource(setOf(AddKind.STORAGE))
                                                 },
                                             )
                                         }
-                                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                                     }
-                                    DropdownMenuItem(
-                                        text = { Text("刷新媒体库") },
-                                        onClick = {
-                                            menu = false
-                                            lib.refreshMedia()
-                                            if (localPhotos) lib.refreshImages()
-                                        },
-                                    )
-                                    DropdownMenuItem(text = { Text("打开文件…") }, onClick = { menu = false; pickFile.launch(arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream")) })
-                                    DropdownMenuItem(text = { Text("隐藏的文件夹") }, onClick = { menu = false; nav.push(Screen.HiddenFolders) })
-                                    DropdownMenuItem(text = { Text("设置") }, onClick = { menu = false; openSettings() })
+                                    var homeMenu by remember { mutableStateOf(false) }
+                                    Box {
+                                        LiquidGlassIconButton(
+                                            onClick = { homeMenu = true },
+                                            icon = AppIcons.MoreHoriz,
+                                            contentDescription = "首页媒体库选项",
+                                        )
+                                        AppMenu(expanded = homeMenu, onDismissRequest = { homeMenu = false }) {
+                                            DropdownMenuItem(
+                                                leadingIcon = { Icon(AppIcons.Add, null, modifier = Modifier.size(20.dp)) },
+                                                text = { Text("新建电影 / 剧集媒体库") },
+                                                onClick = { homeMenu = false; dialog = HomeDialog.NewCustomLibrary },
+                                            )
+                                            DropdownMenuItem(
+                                                leadingIcon = { Icon(AppIcons.Refresh, null, modifier = Modifier.size(20.dp)) },
+                                                text = { Text("刷新首页媒体库") },
+                                                onClick = {
+                                                    homeMenu = false
+                                                    com.aisub.player.media.CustomMediaLibraryStore.ensureInit(context)
+                                                    com.aisub.player.media.CustomMediaLibraryStore.libraries.value.forEach { item ->
+                                                        com.aisub.player.media.CustomMediaLibraryStore.startScrape(context, item.id, mainUi.settings, lib)
+                                                    }
+                                                },
+                                            )
+                                        }
+                                    }
                                 }
+
+                                Tab.BROWSE -> {
+                                    // 浏览页：仅保留文件来源接入、打开本地文件、刷新本地目录与隐藏文件夹
+                                    var addMenu by remember { mutableStateOf(false) }
+                                    Box {
+                                        LiquidGlassIconButton(
+                                            onClick = { addMenu = true },
+                                            icon = AppIcons.Add,
+                                            contentDescription = "添加来源",
+                                        )
+                                        AddSourceDropdownMenu(
+                                            expanded = addMenu,
+                                            onDismiss = { addMenu = false },
+                                            onNewMediaLibrary = null,
+                                            onPick = { type ->
+                                                addMenu = false
+                                                dialog = when (type) {
+                                                    ServerType.WEBDAV, ServerType.OPENLIST ->
+                                                        HomeDialog.EditServer(Server(type = type, name = if (type == ServerType.OPENLIST) "OpenList" else "", baseUrl = ""))
+                                                    else -> HomeDialog.CloudLogin(type, null)
+                                                }
+                                            },
+                                            onLive = { addMenu = false; nav.push(Screen.Live) },
+                                            onStream = { addMenu = false; dialog = HomeDialog.Stream },
+                                            onTelegram = { addMenu = false; nav.push(Screen.Telegram) },
+                                        )
+                                    }
+                                    var browseMenu by remember { mutableStateOf(false) }
+                                    Box {
+                                        LiquidGlassIconButton(
+                                            onClick = { browseMenu = true },
+                                            icon = AppIcons.MoreHoriz,
+                                            contentDescription = "浏览页选项",
+                                        )
+                                        AppMenu(expanded = browseMenu, onDismissRequest = { browseMenu = false }) {
+                                            DropdownMenuItem(
+                                                leadingIcon = { Icon(AppIcons.File, null, modifier = Modifier.size(20.dp)) },
+                                                text = { Text("打开文件…") },
+                                                onClick = {
+                                                    browseMenu = false
+                                                    pickFile.launch(
+                                                        arrayOf("video/*", "audio/*", "application/x-iso9660-image", "application/octet-stream") +
+                                                            com.aisub.player.manga.MangaArchive.TYPES + "text/plain",
+                                                    )
+                                                },
+                                            )
+                                            DropdownMenuItem(
+                                                leadingIcon = { Icon(AppIcons.Refresh, null, modifier = Modifier.size(20.dp)) },
+                                                text = { Text("刷新本地目录") },
+                                                onClick = { browseMenu = false; lib.refreshMedia() },
+                                            )
+                                            DropdownMenuItem(
+                                                leadingIcon = { Icon(AppIcons.Lock, null, modifier = Modifier.size(20.dp)) },
+                                                text = { Text("隐藏的文件夹") },
+                                                onClick = { browseMenu = false; nav.push(Screen.HiddenFolders) },
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Tab.LOCAL -> {
+                                    // 本机页：仅保留搜索、过滤、排序、视图切换、刷新本机媒体与隐藏本机文件夹
+                                    val localTabIdx = when {
+                                        localPhotos -> 2
+                                        localVideo -> 0
+                                        else -> 1
+                                    }
+                                    LiquidGlassIconButton(
+                                        onClick = {
+                                            searching = !searching
+                                            if (!searching) { query = ""; lib.searchSubtitles("") }
+                                        },
+                                        icon = if (searching) AppIcons.Close else AppIcons.Search,
+                                        contentDescription = "搜索",
+                                    )
+                                    Box {
+                                        LiquidGlassIconButton(
+                                            onClick = { dialog = HomeDialog.LocalFilter(localTabIdx) },
+                                            icon = AppIcons.Tune,
+                                            contentDescription = "过滤",
+                                        )
+                                        if (state.localFilter.totalActiveCount > 0) {
+                                            Box(
+                                                Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .padding(3.dp)
+                                                    .size(8.dp)
+                                                    .background(Orange, CircleShape),
+                                            )
+                                        }
+                                    }
+                                    var localMenu by remember { mutableStateOf(false) }
+                                    Box {
+                                        LiquidGlassIconButton(
+                                            onClick = { localMenu = true },
+                                            icon = AppIcons.MoreHoriz,
+                                            contentDescription = "本机列表选项",
+                                        )
+                                        AppMenu(expanded = localMenu, onDismissRequest = { localMenu = false }) {
+                                            val page = when {
+                                                localPhotos -> "image"
+                                                localVideo -> "video"
+                                                else -> "audio"
+                                            }
+                                            val current = when {
+                                                localPhotos -> state.imageSort
+                                                localVideo -> state.videoSort
+                                                else -> state.audioSort
+                                            }
+                                            val sortChoices = if (localPhotos) {
+                                                SortOrder.entries.filter { it != SortOrder.DURATION }
+                                            } else {
+                                                SortOrder.entries
+                                            }
+                                            sortChoices.forEach { o ->
+                                                DropdownMenuItem(
+                                                    text = { Text("按${o.label}排序") },
+                                                    trailingIcon = if (o == current) {
+                                                        {
+                                                            Icon(
+                                                                AppIcons.Check,
+                                                                contentDescription = null,
+                                                                tint = MaterialTheme.colorScheme.primary,
+                                                                modifier = Modifier.size(18.dp),
+                                                            )
+                                                        }
+                                                    } else null,
+                                                    onClick = { localMenu = false; lib.setSort(page, o) },
+                                                )
+                                            }
+                                            if (localVideo && !localPhotos) {
+                                                DropdownMenuItem(
+                                                    text = { Text(if (state.videoGrid) "列表视图" else "网格视图") },
+                                                    onClick = { localMenu = false; lib.setVideoGrid(!state.videoGrid) },
+                                                )
+                                            }
+                                            val activeCnt = state.localFilter.activeCountForTab(localTabIdx)
+                                            DropdownMenuItem(
+                                                leadingIcon = {
+                                                    Icon(
+                                                        AppIcons.Tune,
+                                                        contentDescription = null,
+                                                        tint = if (activeCnt > 0) Orange else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        modifier = Modifier.size(20.dp),
+                                                    )
+                                                },
+                                                text = {
+                                                    Text(
+                                                        "过滤",
+                                                        color = if (activeCnt > 0) Orange else Color.Unspecified,
+                                                    )
+                                                },
+                                                onClick = {
+                                                    localMenu = false
+                                                    dialog = HomeDialog.LocalFilter(localTabIdx)
+                                                },
+                                            )
+                                            if (activeCnt > 0) {
+                                                DropdownMenuItem(
+                                                    text = { Text("清除当前分类过滤条件") },
+                                                    onClick = {
+                                                        localMenu = false
+                                                        com.aisub.player.media.LocalMediaFilterStore.clearTab(context, localTabIdx)
+                                                    },
+                                                )
+                                            }
+                                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                                            DropdownMenuItem(
+                                                text = { Text("刷新本机媒体") },
+                                                onClick = {
+                                                    localMenu = false
+                                                    lib.refreshMedia()
+                                                    if (localPhotos) lib.refreshImages()
+                                                },
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("隐藏的文件夹") },
+                                                onClick = { localMenu = false; nav.push(Screen.HiddenFolders) },
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Tab.ME -> {
+                                    // 我的页：右上角仅保留「设置」图标，不再重复叠放无关菜单
+                                    LiquidGlassIconButton(
+                                        onClick = openSettings,
+                                        icon = AppIcons.Settings,
+                                        contentDescription = "设置",
+                                    )
+                                }
+
+                                Tab.DISCOVER -> {}
                             }
                         }
                     }

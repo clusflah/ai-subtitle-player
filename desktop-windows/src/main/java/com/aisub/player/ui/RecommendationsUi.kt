@@ -121,7 +121,7 @@ fun MediaRecommendationsSection(
     var aiTriggerNonce by remember(title) { mutableIntStateOf(if (resolvedChat != null) 1 else 0) }
     var seenAiTitles by remember(title) { mutableStateOf<List<String>>(emptyList()) }
 
-    LaunchedEffect(title, selectedAngle, aiTriggerNonce, settings.provider, settings.providerConfigs) {
+    LaunchedEffect(title, selectedAngle, aiTriggerNonce, settings.aiRecommendProvider, settings.provider, settings.providerConfigs) {
         if (aiTriggerNonce <= 0) return@LaunchedEffect
         if (RecommendationEngine.resolveChatTranslator(settings) == null) {
             aiError = "尚未配置 AI 大模型密钥"
@@ -404,6 +404,7 @@ fun MediaRecommendationsSection(
             settings = settings,
             title = "选择 AI 推荐模型",
             onDismiss = { choosingModel = false },
+            forAiRecommend = true,
         ) { updated ->
             onUpdateSettings(updated)
             choosingModel = false

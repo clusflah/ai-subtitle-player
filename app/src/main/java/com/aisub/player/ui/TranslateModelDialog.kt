@@ -37,13 +37,35 @@ import kotlinx.coroutines.launch
 /** 这些服务没有「模型」可选（离线翻译不用；Azure 翻译那一栏填的是区域） */
 private val Provider.hasModel get() = this != Provider.OFFLINE_TRANSLATOR && this != Provider.AZURE_TRANSLATOR
 
-/** 翻译前选的服务和模型（对话框里的临时状态，确认后写回设置） */
+/** AI 影视推荐仅展示对话生成大模型，排除离线翻译模型、Index-Translate 专用翻译模型与 Azure 机器翻译 */
+private val Provider.isAiRecommendCapable: Boolean
+    get() = this != Provider.OFFLINE_TRANSLATOR &&
+        this != Provider.INDEX_TRANSLATE &&
+        this != Provider.AZURE_TRANSLATOR
+
+/** 选服务和模型（对话框里的临时状态，保存后写回设置） */
 @Stable
-class TranslatePick(private val settings: AppSettings) {
-    /** 已经配置好、能直接用的翻译服务 */
-    val ready: List<Provider> = Provider.entries.filter { settings.copy(provider = it).translatorProblem() == null }
-    var provider by mutableStateOf(settings.provider)
-    var model by mutableStateOf(settings.configOf(settings.provider).model)
+class TranslatePick(
+    private val settings: AppSettings,
+    val forAiRecommend: Boolean = false,
+) {
+    /** 已经配置好、能直接用的服务列表 */
+    val ready: List<Provider> = Provider.entries.filter { p ->
+        (!forAiRecommend || p.isAiRecommendCapable) &&
+            settings.copy(provider = p).translatorProblem() == null
+    }
+
+    private val initialProvider: Provider = run {
+        val preferred = if (forAiRecommend) {
+            settings.aiRecommendProvider ?: settings.provider
+        } else {
+            settings.provider
+        }
+        if (preferred in ready) preferred else ready.firstOrNull() ?: preferred
+    }
+
+    var provider by mutableStateOf(initialProvider)
+    var model by mutableStateOf(settings.configOf(initialProvider).model)
     var models by mutableStateOf<List<String>>(emptyList())
     var error by mutableStateOf<String?>(null)
 
@@ -56,19 +78,26 @@ class TranslatePick(private val settings: AppSettings) {
         error = null
     }
 
-    /** 把选择写进设置：选的服务成为默认，模型存到这个服务的配置里 */
+    /** 把选择写进设置：推荐模式仅更新 AI 推荐模型配置，不覆盖用户正在使用的离线/专用字幕翻译服务 */
     fun applyTo(s: AppSettings): AppSettings {
         val withModel = if (provider.hasModel) {
             s.withConfig(provider, (s.providerConfigs[provider] ?: s.configOf(provider)).copy(model = model.trim()))
         } else s
-        return withModel.copy(provider = provider)
+        return if (forAiRecommend) {
+            withModel.copy(aiRecommendProvider = provider)
+        } else {
+            withModel.copy(provider = provider)
+        }
     }
 }
 
 @Composable
-fun rememberTranslatePick(settings: AppSettings) = remember(settings) { TranslatePick(settings) }
+fun rememberTranslatePick(
+    settings: AppSettings,
+    forAiRecommend: Boolean = false,
+) = remember(settings, forAiRecommend) { TranslatePick(settings, forAiRecommend) }
 
-/** 翻译服务（点选）+ 模型（手填或从服务商拉取列表） */
+/** 服务商（点选）+ 模型（手填或从服务商拉取列表） */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TranslateModelPicker(pick: TranslatePick, settings: AppSettings) {
@@ -77,19 +106,31 @@ fun TranslateModelPicker(pick: TranslatePick, settings: AppSettings) {
     val scope = rememberCoroutineScope()
     Column {
         if (pick.ready.isEmpty()) {
-            Text("还没有配置好的翻译服务，请先在「设置 → 字幕翻译」里填写。", color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+            val hint = if (pick.forAiRecommend) {
+                "还没有配置可用的 AI 推荐大模型，请先在「设置 → 字幕翻译」里配置 DeepSeek、Gemini、阿里云百炼、火山方舟、Claude、自定义或本地模型。"
+            } else {
+                "还没有配置好的翻译服务，请先在「设置 → 字幕翻译」里填写。"
+            }
+            Text(hint, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
             return@Column
         }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             pick.ready.forEach { p ->
-                FilterChip(selected = pick.provider == p, onClick = { pick.pick(p) }, label = { Text(p.label) })
+                FilterChip(
+                    selected = pick.provider == p,
+                    onClick = { pick.pick(p) },
+                    label = { Text(p.label, maxLines = 1, softWrap = false) },
+                )
             }
         }
         if (pick.provider.hasModel && pick.provider in pick.ready) {
-            Box(Modifier.padding(top = 4.dp)) {
+            Box(Modifier.padding(top = 6.dp)) {
                 OutlinedTextField(
                     value = pick.model, onValueChange = { pick.model = it },
-                    label = { Text("翻译模型") }, singleLine = true,
+                    label = { Text(if (pick.forAiRecommend) "推荐模型" else "翻译模型") }, singleLine = true,
                     trailingIcon = {
                         if (loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                         else IconButton(onClick = {
@@ -119,17 +160,18 @@ fun TranslateModelPicker(pick: TranslatePick, settings: AppSettings) {
 }
 
 /**
- * 翻译前选翻译服务和模型（翻译已有字幕、重新翻译时用；生成字幕时合并在选语言的对话框里）。
- * 选好后保存为默认（下次打开就是它），再开始翻译。
+ * 选择模型与服务商弹窗（字幕翻译及 AI 推荐影片共用；AI 推荐场景自动过滤纯翻译引擎）。
  */
 @Composable
 fun TranslateModelDialog(
     settings: AppSettings,
     title: String,
     onDismiss: () -> Unit,
+    forAiRecommend: Boolean = false,
+    confirmText: String = "保存",
     onConfirm: (AppSettings) -> Unit,
 ) {
-    val pick = rememberTranslatePick(settings)
+    val pick = rememberTranslatePick(settings, forAiRecommend = forAiRecommend)
     AppDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
@@ -138,7 +180,7 @@ fun TranslateModelDialog(
                 TranslateModelPicker(pick, settings)
             }
         },
-        confirmButton = { TextButton(enabled = pick.valid, onClick = { onConfirm(pick.applyTo(settings)) }) { Text("开始翻译") } },
+        confirmButton = { TextButton(enabled = pick.valid, onClick = { onConfirm(pick.applyTo(settings)) }) { Text(confirmText) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }

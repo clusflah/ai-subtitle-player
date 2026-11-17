@@ -233,6 +233,8 @@ data class AppSettings(
     val preferredKernel: PlayerKernel = PlayerKernel.EXO,
     val decodeMode: DecodeMode = DecodeMode.AUTO,
     val autoDolbyMpv: Boolean = true,
+    /** AI 影视推荐专用服务商（为空时自动选用已配置的对话大模型，不覆盖字幕翻译用的离线/专用翻译模型） */
+    val aiRecommendProvider: Provider? = null,
 ) {
     /** 某个服务商的配置，未填的字段用默认值补齐。 */
     fun configOf(p: Provider): ProviderConfig {
@@ -440,6 +442,9 @@ class SettingsRepository(context: Context) {
             decodeMode = runCatching { DecodeMode.valueOf(prefs.getString("decodeMode", d.decodeMode.name)!!) }
                 .getOrDefault(d.decodeMode),
             autoDolbyMpv = prefs.getBoolean("autoDolbyMpv", d.autoDolbyMpv),
+            aiRecommendProvider = prefs.getString("aiRecommendProvider", null)?.let { raw ->
+                runCatching { Provider.valueOf(raw) }.getOrNull()
+            },
         )
     }
 
@@ -506,6 +511,7 @@ class SettingsRepository(context: Context) {
             .putString("preferredKernel", s.preferredKernel.name)
             .putString("decodeMode", s.decodeMode.name)
             .putBoolean("autoDolbyMpv", s.autoDolbyMpv)
+            .putString("aiRecommendProvider", s.aiRecommendProvider?.name.orEmpty())
         for (e in TtsEngineType.entries) editor.putString("ttsVoice.${e.name}", s.ttsVoices[e].orEmpty())
         for ((p, c) in s.providerConfigs) {
             editor.putString("${p.name}.apiKey", c.apiKey)

@@ -260,25 +260,21 @@ fun DiscoverTab(
 
     LazyColumn(
         state = listState,
-        contentPadding = PaddingValues(top = 2.dp, bottom = 82.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(top = 4.dp, bottom = 88.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxSize(),
     ) {
-        // 仅在点击右上角搜索图标展开后，才显示搜索框与搜索历史
-        item(key = "discover_search_expandable") {
-            AnimatedVisibility(
-                visible = searchExpanded,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut(),
-            ) {
+        if (searchExpanded) {
+            // 专属沉浸式搜索界面：统一胶囊搜索栏 + 磁力识别 + 历史胶囊 + 多渠道片源直达 / 海报网格
+            item(key = "discover_search_panel") {
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 2.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                        .padding(horizontal = 14.dp, vertical = 2.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    var sourceMenuOpen by remember { mutableStateOf(false) }
-                    SingleLineKeywordSearchBar(
+                    val searchBarHeight = if (tv) 48.dp else 46.dp
+                    CompactSearchField(
                         value = queryInput,
                         onValueChange = {
                             queryInput = it
@@ -289,74 +285,60 @@ fun DiscoverTab(
                             }
                         },
                         onSearch = { submitSearch() },
-                        placeholder = "搜电影 / 剧集，粘贴磁力 / Hash，或点右侧切换搜索源立即检索",
-                        candidates = history.take(8),
-                        onPickCandidate = { kw -> submitSearch(kw) },
-                        sourceLabel = "搜索源 (${allSources.size})",
-                        sourceMenuExpanded = sourceMenuOpen,
-                        onSourceClick = { sourceMenuOpen = true },
-                        onSourceDismiss = { sourceMenuOpen = false },
-                        showSubmitButton = true,
-                    ) {
-                        val quickQ = queryInput.trim().ifBlank { appliedQuery.trim() }
-                        if (quickQ.isNotEmpty()) {
-                            DropdownMenuItem(
-                                text = { Text("Telegram 全频道搜「$quickQ」", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                leadingIcon = { Icon(AppIcons.Telegram, null, tint = Orange, modifier = Modifier.size(18.dp)) },
-                                onClick = {
-                                    sourceMenuOpen = false
-                                    DiscoverSearchStore.recordHistory(context, quickQ)
-                                    history = DiscoverSearchStore.history(context)
-                                    onOpenTelegramSearch(quickQ)
-                                },
-                            )
-                            allSources.forEach { src ->
-                                val isRe0Builtin = src.id == "re0_search"
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            if (isRe0Builtin) "影巢 · 系统浏览器搜「$quickQ」" else "${src.name} 搜「$quickQ」",
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    },
-                                    leadingIcon = {
-                                        Icon(if (isRe0Builtin) AppIcons.OpenInNew else AppIcons.Web, null, modifier = Modifier.size(17.dp))
-                                    },
-                                    onClick = {
-                                        sourceMenuOpen = false
-                                        DiscoverSearchStore.recordHistory(context, quickQ)
-                                        history = DiscoverSearchStore.history(context)
-                                        if (isRe0Builtin) {
-                                            openSystemBrowser(src.buildUrl(quickQ))
-                                        } else {
-                                            onOpenWeb(src.buildUrl(quickQ))
-                                        }
-                                    },
+                        placeholder = "搜电影、剧集，或粘贴磁力链接",
+                        phoneLabel = "搜索影视或磁力链接",
+                        height = searchBarHeight,
+                        cornerRadius = 23.dp,
+                        marqueeText = false,
+                        trailingAction = {
+                            val canSubmit = queryInput.isNotBlank()
+                            Box(
+                                Modifier
+                                    .padding(end = 3.dp)
+                                    .height(36.dp)
+                                    .clip(RoundedCornerShape(18.dp))
+                                    .background(
+                                        if (canSubmit) Orange
+                                        else MaterialTheme.colorScheme.surfaceContainerHighest,
+                                    )
+                                    .tvFocusRing(RoundedCornerShape(18.dp))
+                                    .clickable {
+                                        if (canSubmit) submitSearch()
+                                    }
+                                    .padding(horizontal = 14.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    "搜索",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (canSubmit) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    softWrap = false,
                                 )
                             }
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        }
-                        DropdownMenuItem(
-                            text = { Text("管理 / 自定义搜索源…") },
-                            leadingIcon = { Icon(AppIcons.Settings, null, modifier = Modifier.size(17.dp)) },
-                            onClick = {
-                                sourceMenuOpen = false
-                                manageSourcesOpen = true
-                            },
-                        )
-                    }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
 
                     detectedMagnet?.let { mag ->
                         SurfaceCard(Modifier.fillMaxWidth()) {
                             Row(
-                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
-                                Icon(AppIcons.Link, null, tint = Orange, modifier = Modifier.size(18.dp))
+                                Box(
+                                    Modifier
+                                        .size(36.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Orange.copy(alpha = 0.16f)),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(AppIcons.Link, null, tint = Orange, modifier = Modifier.size(18.dp))
+                                }
                                 Column(Modifier.weight(1f)) {
-                                    Text("识别到磁力链接 / InfoHash", style = MaterialTheme.typography.labelLarge)
+                                    Text("已识别磁力链接 / InfoHash", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                                     Text(
                                         MagnetLinks.displayName(mag),
                                         style = MaterialTheme.typography.bodySmall,
@@ -367,164 +349,332 @@ fun DiscoverTab(
                                 }
                                 Button(
                                     onClick = { onOpenMagnet(mag) },
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
+                                    shape = RoundedCornerShape(50),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
                                     modifier = Modifier.height(34.dp),
                                 ) {
-                                    Text("离线 / 打开", fontSize = 12.sp)
+                                    Text("离线 / 打开", fontSize = 12.sp, maxLines = 1, softWrap = false)
                                 }
                             }
                         }
                     }
 
-                    // 搜索历史仅在点击右上角搜索图标展开后才显示
-                    if (history.isNotEmpty()) {
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                "搜索历史",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Text(
-                                "清空历史",
-                                fontSize = 12.sp,
-                                color = Orange,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .clickable {
-                                        DiscoverSearchStore.clearHistory(context)
-                                        history = emptyList()
-                                    }
-                                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                            )
-                        }
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            history.take(10).forEach { h ->
-                                Box(
-                                    Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
-                                        .tvFocusRing(RoundedCornerShape(8.dp))
-                                        .clickable { submitSearch(h) }
-                                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    if (appliedQuery.isBlank()) {
+                        // 搜索待输入态：搜索历史胶囊 + 快捷外站检索卡片
+                        if (history.isNotEmpty()) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    Text(h, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Icon(
+                                        AppIcons.History,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                    Spacer(Modifier.width(5.dp))
+                                    Text(
+                                        "搜索历史",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Row(
+                                        Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .tvFocusRing(RoundedCornerShape(8.dp))
+                                            .clickable {
+                                                DiscoverSearchStore.clearHistory(context)
+                                                history = emptyList()
+                                            }
+                                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                    ) {
+                                        Icon(
+                                            AppIcons.Delete,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(13.dp),
+                                        )
+                                        Text(
+                                            "清空",
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    history.take(12).forEach { h ->
+                                        val pillShape = RoundedCornerShape(50)
+                                        Row(
+                                            Modifier
+                                                .clip(pillShape)
+                                                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                                                .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f), pillShape)
+                                                .tvFocusRing(pillShape)
+                                                .clickable { submitSearch(h) }
+                                                .padding(horizontal = 13.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Text(
+                                                h,
+                                                fontSize = 12.5.sp,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 快捷片源渠道卡片（彻底取代原先悬空的单行下拉菜单）
+                        val quickKeyword = queryInput.trim()
+                        SurfaceCard(Modifier.fillMaxWidth()) {
+                            Column(
+                                Modifier.padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(
+                                        AppIcons.Explore,
+                                        contentDescription = null,
+                                        tint = Orange,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        "多渠道找片与片源直达",
+                                        fontSize = 13.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Row(
+                                        Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .tvFocusRing(RoundedCornerShape(8.dp))
+                                            .clickable { manageSourcesOpen = true }
+                                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        Icon(
+                                            AppIcons.Settings,
+                                            contentDescription = null,
+                                            tint = Orange,
+                                            modifier = Modifier.size(13.dp),
+                                        )
+                                        Text(
+                                            "管理搜索源 (${allSources.size})",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = Orange,
+                                        )
+                                    }
+                                }
+                                Text(
+                                    if (quickKeyword.isNotEmpty()) {
+                                        "点击下方渠道，立即检索「$quickKeyword」"
+                                    } else {
+                                        "在上方输入片名点「搜索」查海报评分，或先输关键词再点下方渠道直达外站"
+                                    },
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    DiscoverQuickJumpButton(
+                                        icon = AppIcons.AutoAwesome,
+                                        label = "AI 智能荐片",
+                                        accent = true,
+                                        onClick = { onOpenAiRecommend(quickKeyword) },
+                                    )
+                                    DiscoverQuickJumpButton(
+                                        icon = AppIcons.Telegram,
+                                        label = if (quickKeyword.isNotEmpty()) "Telegram 搜「$quickKeyword」" else "Telegram 频道搜",
+                                        onClick = {
+                                            if (quickKeyword.isNotEmpty()) {
+                                                DiscoverSearchStore.recordHistory(context, quickKeyword)
+                                                history = DiscoverSearchStore.history(context)
+                                            }
+                                            onOpenTelegramSearch(quickKeyword)
+                                        },
+                                    )
+                                    allSources.forEach { src ->
+                                        val isRe0Builtin = src.id == "re0_search"
+                                        val srcIcon = when {
+                                            isRe0Builtin -> AppIcons.OpenInNew
+                                            src.category == SearchCategory.PAN -> AppIcons.Cloud
+                                            src.category == SearchCategory.MAGNET -> AppIcons.Link
+                                            else -> AppIcons.Web
+                                        }
+                                        val cleanLabel = src.name.substringBefore("（")
+                                        DiscoverQuickJumpButton(
+                                            icon = srcIcon,
+                                            label = cleanLabel,
+                                            onClick = {
+                                                if (quickKeyword.isNotEmpty()) {
+                                                    DiscoverSearchStore.recordHistory(context, quickKeyword)
+                                                    history = DiscoverSearchStore.history(context)
+                                                    if (isRe0Builtin) openSystemBrowser(src.buildUrl(quickKeyword))
+                                                    else onOpenWeb(src.buildUrl(quickKeyword))
+                                                } else {
+                                                    val homeUrl = if (isRe0Builtin) "https://re0.me" else src.buildUrl("")
+                                                    if (isRe0Builtin) openSystemBrowser(homeUrl)
+                                                    else onOpenWeb(homeUrl)
+                                                }
+                                            },
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-        }
 
-        if (searchExpanded && appliedQuery.isNotBlank()) {
-            // 搜索结果态：紧凑快捷站外直达条 + 海报网格
-            item(key = "discover_quick_jump") {
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    item(key = "ai_recommend_jump") {
-                        DiscoverQuickJumpButton(
-                            icon = AppIcons.AutoAwesome,
-                            label = "AI 按此需求荐片",
-                            onClick = { onOpenAiRecommend(appliedQuery) },
-                        )
-                    }
-                    item {
-                        DiscoverQuickJumpButton(
-                            icon = AppIcons.Telegram,
-                            label = "TG 搜「$appliedQuery」",
-                            onClick = { onOpenTelegramSearch(appliedQuery) },
-                        )
-                    }
-                    val directTarget = searchResults.firstOrNull { it.tmdbId != null }
-                    if (directTarget?.tmdbId != null) {
-                        item(key = "re0_direct_jump") {
+            if (appliedQuery.isNotBlank()) {
+                // 搜索结果态：精致胶囊外站直达栏 + 海报网格
+                item(key = "discover_quick_jump") {
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        item(key = "ai_recommend_jump") {
                             DiscoverQuickJumpButton(
-                                icon = AppIcons.Web,
-                                label = "影巢 · 词条直达",
+                                icon = AppIcons.AutoAwesome,
+                                label = "AI 按此需求荐片",
+                                accent = true,
+                                onClick = { onOpenAiRecommend(appliedQuery) },
+                            )
+                        }
+                        item(key = "tg_search_jump") {
+                            DiscoverQuickJumpButton(
+                                icon = AppIcons.Telegram,
+                                label = "Telegram 搜",
+                                onClick = { onOpenTelegramSearch(appliedQuery) },
+                            )
+                        }
+                        val directTarget = searchResults.firstOrNull { it.tmdbId != null }
+                        if (directTarget?.tmdbId != null) {
+                            item(key = "re0_direct_jump") {
+                                DiscoverQuickJumpButton(
+                                    icon = AppIcons.Web,
+                                    label = "影巢直达",
+                                    onClick = {
+                                        onOpenWeb(DiscoverSearchStore.buildRe0DirectUrl(directTarget.kind, directTarget.tmdbId))
+                                    },
+                                )
+                            }
+                        }
+                        item(key = "re0_external_jump") {
+                            DiscoverQuickJumpButton(
+                                icon = AppIcons.OpenInNew,
+                                label = "影巢 · 浏览器",
                                 onClick = {
-                                    onOpenWeb(DiscoverSearchStore.buildRe0DirectUrl(directTarget.kind, directTarget.tmdbId))
+                                    val targetUrl = directTarget?.tmdbId?.takeIf {
+                                        directTarget.title.equals(appliedQuery.trim(), ignoreCase = true) ||
+                                            directTarget.originalTitle.equals(appliedQuery.trim(), ignoreCase = true)
+                                    }?.let { tid ->
+                                        DiscoverSearchStore.buildRe0DirectUrl(directTarget.kind, tid)
+                                    } ?: DiscoverSearchStore.buildRe0SearchUrl(appliedQuery)
+                                    openSystemBrowser(targetUrl)
                                 },
                             )
                         }
-                    }
-                    item(key = "re0_external_jump") {
-                        DiscoverQuickJumpButton(
-                            icon = AppIcons.OpenInNew,
-                            label = "影巢 · 系统浏览器",
-                            onClick = {
-                                val targetUrl = directTarget?.tmdbId?.takeIf {
-                                    directTarget.title.equals(appliedQuery.trim(), ignoreCase = true) ||
-                                        directTarget.originalTitle.equals(appliedQuery.trim(), ignoreCase = true)
-                                }?.let { tid ->
-                                    DiscoverSearchStore.buildRe0DirectUrl(directTarget.kind, tid)
-                                } ?: DiscoverSearchStore.buildRe0SearchUrl(appliedQuery)
-                                openSystemBrowser(targetUrl)
-                            },
-                        )
-                    }
-                    items(allSources.filter { it.category == SearchCategory.PAN }.take(2), key = { it.id }) { src ->
-                        DiscoverQuickJumpButton(
-                            icon = AppIcons.Cloud,
-                            label = src.name.substringBefore("（"),
-                            onClick = { onOpenWeb(src.buildUrl(appliedQuery)) },
-                        )
-                    }
-                    items(allSources.filter { it.category == SearchCategory.MAGNET }.take(2), key = { it.id }) { src ->
-                        DiscoverQuickJumpButton(
-                            icon = AppIcons.Link,
-                            label = src.name.substringBefore("（"),
-                            onClick = { onOpenWeb(src.buildUrl(appliedQuery)) },
-                        )
-                    }
-                }
-            }
-
-            when {
-                searchLoading -> {
-                    item(key = "search_loading") {
-                        Box(Modifier.fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(Modifier.size(28.dp))
+                        items(allSources.filter { it.category == SearchCategory.PAN }.take(3), key = { it.id }) { src ->
+                            DiscoverQuickJumpButton(
+                                icon = AppIcons.Cloud,
+                                label = src.name.substringBefore("（"),
+                                onClick = { onOpenWeb(src.buildUrl(appliedQuery)) },
+                            )
+                        }
+                        items(allSources.filter { it.category == SearchCategory.MAGNET }.take(3), key = { it.id }) { src ->
+                            DiscoverQuickJumpButton(
+                                icon = AppIcons.Link,
+                                label = src.name.substringBefore("（"),
+                                onClick = { onOpenWeb(src.buildUrl(appliedQuery)) },
+                            )
+                        }
+                        item(key = "manage_sources_jump") {
+                            DiscoverQuickJumpButton(
+                                icon = AppIcons.Settings,
+                                label = "搜索源",
+                                onClick = { manageSourcesOpen = true },
+                            )
                         }
                     }
                 }
-                searchError != null && searchResults.isEmpty() -> {
-                    item(key = "search_error") {
-                        EmptyState("影视数据库搜索失败：$searchError\n可使用上方按钮直接去 Telegram / 影巢 / 网盘搜索", icon = AppIcons.Search)
-                    }
-                }
-                searchResults.isEmpty() -> {
-                    item(key = "search_empty") {
-                        EmptyState("暂未搜到「$appliedQuery」\n可点上方按钮直接去 Telegram / 影巢 / 网盘找片源", icon = AppIcons.Movie)
-                    }
-                }
-                else -> {
-                    items(searchResults.chunked(if (wide || tv) 5 else 3), key = { row -> row.first().id }) { row ->
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            val cols = if (wide || tv) 5 else 3
-                            for (i in 0 until cols) {
-                                val item = row.getOrNull(i)
-                                if (item != null) {
-                                    DiscoverPosterCard(
-                                        item = item,
-                                        width = null,
-                                        modifier = Modifier.weight(1f),
-                                        onClick = { onOpenDetail(item) },
+
+                when {
+                    searchLoading -> {
+                        item(key = "search_loading") {
+                            Box(Modifier.fillMaxWidth().padding(36.dp), contentAlignment = Alignment.Center) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    CircularProgressIndicator(Modifier.size(28.dp), color = Orange, strokeWidth = 2.6.dp)
+                                    Text(
+                                        "正在搜索「$appliedQuery」…",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
-                                } else {
-                                    Spacer(Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    }
+                    searchError != null && searchResults.isEmpty() -> {
+                        item(key = "search_error") {
+                            EmptyState("影视数据库搜索失败：$searchError\n可使用上方胶囊按钮直接去 Telegram / 影巢 / 网盘检索", icon = AppIcons.Search)
+                        }
+                    }
+                    searchResults.isEmpty() -> {
+                        item(key = "search_empty") {
+                            EmptyState("暂未搜到「$appliedQuery」\n可点上方胶囊按钮去 Telegram / 影巢 / 网盘找片，或让 AI 荐片", icon = AppIcons.Movie)
+                        }
+                    }
+                    else -> {
+                        item(key = "search_result_count") {
+                            Text(
+                                "找到 ${searchResults.size} 部相关影视",
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 14.dp),
+                            )
+                        }
+                        items(searchResults.chunked(if (wide || tv) 5 else 3), key = { row -> row.first().id }) { row ->
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                val cols = if (wide || tv) 5 else 3
+                                for (i in 0 until cols) {
+                                    val item = row.getOrNull(i)
+                                    if (item != null) {
+                                        DiscoverPosterCard(
+                                            item = item,
+                                            width = null,
+                                            modifier = Modifier.weight(1f),
+                                            onClick = { onOpenDetail(item) },
+                                        )
+                                    } else {
+                                        Spacer(Modifier.weight(1f))
+                                    }
                                 }
                             }
                         }
@@ -532,14 +682,7 @@ fun DiscoverTab(
                 }
             }
         } else {
-            // 默认浏览态：顶部 AI 推荐影片入口 + 微缩流媒体榜单条 + 紧凑高密度横向海报栏
-            item(key = "discover_ai_recommend_entry") {
-                DiscoverAiEntryBanner(
-                    settings = settings,
-                    onClick = { onOpenAiRecommend("") },
-                )
-            }
-
+            // 默认浏览态：不常驻显示 AI 推荐卡片（仅点右上角 AI 图标进入），直接展示流媒体榜单条与海报栏
             item(key = "streaming_platforms") {
                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Row(
@@ -695,7 +838,7 @@ fun SingleLineKeywordSearchBar(
                 placeholder = placeholder,
                 phoneLabel = "搜索关键词",
                 height = barHeight,
-                marqueeText = true,
+                marqueeText = false,
                 onTapOrFocus = {
                     if (candidates.isNotEmpty()) candidatesPopupOpen = true
                 },
@@ -2322,19 +2465,27 @@ private fun DiscoverResourceSearchDialog(
 private fun DiscoverQuickJumpButton(
     icon: ImageVector,
     label: String,
+    accent: Boolean = false,
     onClick: () -> Unit,
 ) {
-    OutlinedButton(
-        onClick = onClick,
-        shape = RoundedCornerShape(9.dp),
-        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-        modifier = Modifier
+    val shape = RoundedCornerShape(50)
+    val bg = if (accent) Orange.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerLow
+    val borderColor = if (accent) Orange.copy(alpha = 0.45f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
+    val fg = if (accent) Orange else MaterialTheme.colorScheme.onSurface
+    Row(
+        Modifier
             .height(34.dp)
-            .tvFocusRing(RoundedCornerShape(9.dp)),
+            .clip(shape)
+            .background(bg)
+            .border(1.dp, borderColor, shape)
+            .tvFocusRing(shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        Icon(icon, null, modifier = Modifier.size(14.dp))
-        Spacer(Modifier.width(4.dp))
-        Text(label, fontSize = 12.sp, maxLines = 1)
+        Icon(icon, null, tint = if (accent) Orange else MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+        Text(label, fontSize = 12.sp, fontWeight = if (accent) FontWeight.SemiBold else FontWeight.Normal, color = fg, maxLines = 1, softWrap = false)
     }
 }
 
@@ -2713,104 +2864,6 @@ fun SearchSourcesManageDialog(
         },
     )
 }
-/** 发现页顶部的「AI 推荐影片」紧凑入口卡片 */
-@Composable
-private fun DiscoverAiEntryBanner(
-    settings: AppSettings,
-    onClick: () -> Unit,
-) {
-    val resolvedModel = remember(settings.provider, settings.providerConfigs) {
-        com.aisub.player.meta.RecommendationEngine.resolveChatTranslator(settings)?.first
-    }
-    val savedPrompt = com.aisub.player.meta.AiDiscoverStore.sessionPrompt
-    val shape = RoundedCornerShape(14.dp)
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp)
-            .clip(shape)
-            .background(
-                Brush.horizontalGradient(
-                    colors = listOf(
-                        Orange.copy(alpha = 0.16f),
-                        MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.88f),
-                    ),
-                ),
-            )
-            .border(1.dp, Orange.copy(alpha = 0.36f), shape)
-            .tvFocusRing(shape)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Box(
-            Modifier
-                .size(34.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(Orange.copy(alpha = 0.2f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                AppIcons.AutoAwesome,
-                contentDescription = null,
-                tint = Orange,
-                modifier = Modifier.size(19.dp),
-            )
-        }
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Text(
-                    "AI 推荐影片",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                if (!resolvedModel.isNullOrBlank()) {
-                    Text(
-                        resolvedModel,
-                        fontSize = 10.5.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            Text(
-                if (savedPrompt.isNotBlank()) "上次需求：$savedPrompt"
-                else "向 AI 描述想看的题材、剧情设定或心情，智能推荐对应影视作品",
-                fontSize = 11.5.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Row(
-            Modifier
-                .clip(RoundedCornerShape(50))
-                .background(Orange)
-                .padding(horizontal = 10.dp, vertical = 5.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            Text(
-                "找片",
-                fontSize = 11.5.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color.White,
-            )
-            Icon(
-                AppIcons.ChevronRight,
-                contentDescription = null,
-                tint = Color.White,
-                modifier = Modifier.size(14.dp),
-            )
-        }
-    }
-}
 
 private val AI_DISCOVER_PRESETS = listOf(
     "节奏紧凑、结局反转惊艳的高分悬疑片",
@@ -2845,7 +2898,7 @@ fun DiscoverAiRecommendScreen(
     val scope = rememberCoroutineScope()
     val libState by lib.state.collectAsStateWithLifecycle()
 
-    val resolvedChat = remember(settings.provider, settings.providerConfigs) {
+    val resolvedChat = remember(settings.aiRecommendProvider, settings.provider, settings.providerConfigs) {
         com.aisub.player.meta.RecommendationEngine.resolveChatTranslator(settings)
     }
 
@@ -2957,11 +3010,6 @@ fun DiscoverAiRecommendScreen(
         title = "AI 推荐影片",
         onBack = onBack,
         actions = {
-            if (onUpdateSettings != null) {
-                IconButton(onClick = { choosingModel = true }) {
-                    Icon(AppIcons.Translate, contentDescription = "切换 AI 模型")
-                }
-            }
             IconButton(onClick = onOpenSettings) {
                 Icon(AppIcons.Settings, contentDescription = "设置")
             }
@@ -2976,14 +3024,14 @@ fun DiscoverAiRecommendScreen(
                 SurfaceCard(Modifier.fillMaxWidth()) {
                     Column(
                         Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         Row(
                             Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Icon(AppIcons.AutoAwesome, null, tint = Orange, modifier = Modifier.size(19.dp))
+                            Icon(AppIcons.AutoAwesome, null, tint = Orange, modifier = Modifier.size(20.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(
                                     "向 AI 描述你的观影需求",
@@ -2991,7 +3039,7 @@ fun DiscoverAiRecommendScreen(
                                     fontWeight = FontWeight.SemiBold,
                                 )
                                 Text(
-                                    if (resolvedChat != null) "当前模型：${modelLabel.ifBlank { resolvedChat.first }}"
+                                    if (resolvedChat != null) "当前模型：${resolvedChat.first}"
                                     else "尚未配置 AI 大模型，点击右侧选择或前往设置填写密钥",
                                     fontSize = 11.5.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -3000,11 +3048,24 @@ fun DiscoverAiRecommendScreen(
                                 )
                             }
                             if (onUpdateSettings != null) {
-                                TextButton(
-                                    onClick = { choosingModel = true },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                val switchShape = RoundedCornerShape(50)
+                                Box(
+                                    Modifier
+                                        .clip(switchShape)
+                                        .background(Orange.copy(alpha = 0.14f))
+                                        .border(1.dp, Orange.copy(alpha = 0.38f), switchShape)
+                                        .tvFocusRing(switchShape)
+                                        .clickable { choosingModel = true }
+                                        .padding(horizontal = 11.dp, vertical = 5.dp),
                                 ) {
-                                    Text(if (resolvedChat == null) "配置模型" else "换模型", fontSize = 12.sp)
+                                    Text(
+                                        if (resolvedChat == null) "配置模型" else "换模型",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = Orange,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                    )
                                 }
                             }
                         }
@@ -3025,57 +3086,77 @@ fun DiscoverAiRecommendScreen(
                                     }
                                 }
                             } else null,
-                            minLines = 2,
-                            maxLines = 4,
+                            minLines = 3,
+                            maxLines = 5,
                             phoneLabel = "描述想看的影视需求",
                             modifier = Modifier.fillMaxWidth(),
                         )
 
+                        // 类型筛选与提交操作分行布局，彻底杜绝窄屏下第 3 个筛选胶囊被挤压成空竖框
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            com.aisub.player.meta.AiDiscoverFilter.entries.forEach { f ->
+                                FilterChip(
+                                    selected = selectedFilter == f,
+                                    onClick = {
+                                        selectedFilter = f
+                                        if (promptInput.isNotBlank() && results.isNotEmpty() && !loading) {
+                                            triggerRecommend(targetPrompt = promptInput, targetFilter = f, refreshBatch = false)
+                                        }
+                                    },
+                                    label = {
+                                        Text(
+                                            f.label,
+                                            fontSize = 12.5.sp,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                        )
+                                    },
+                                )
+                            }
+                        }
+
                         Row(
                             Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Row(
-                                Modifier.weight(1f),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                com.aisub.player.meta.AiDiscoverFilter.entries.forEach { f ->
-                                    FilterChip(
-                                        selected = selectedFilter == f,
-                                        onClick = {
-                                            selectedFilter = f
-                                            if (promptInput.isNotBlank() && results.isNotEmpty() && !loading) {
-                                                triggerRecommend(targetPrompt = promptInput, targetFilter = f, refreshBatch = false)
-                                            }
-                                        },
-                                        label = { Text(f.label, fontSize = 12.sp) },
-                                    )
-                                }
-                            }
-
                             if (results.isNotEmpty()) {
                                 OutlinedButton(
                                     onClick = { triggerRecommend(refreshBatch = true) },
                                     enabled = !loading && promptInput.isNotBlank(),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                    modifier = Modifier.height(42.dp),
                                 ) {
-                                    Icon(AppIcons.Refresh, null, modifier = Modifier.size(15.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("换一批", fontSize = 12.5.sp)
+                                    Icon(AppIcons.Refresh, null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(5.dp))
+                                    Text("换一批", fontSize = 13.sp, maxLines = 1, softWrap = false)
                                 }
                             }
 
                             Button(
                                 onClick = { triggerRecommend(refreshBatch = false) },
                                 enabled = !loading,
+                                shape = RoundedCornerShape(12.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(42.dp),
                             ) {
                                 Icon(AppIcons.AutoAwesome, null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.width(5.dp))
-                                Text(if (loading) "推荐中…" else "AI 推荐", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    if (loading) "正在生成推荐…" else "AI 推荐影片",
+                                    fontSize = 13.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
                             }
                         }
 
@@ -3278,6 +3359,7 @@ fun DiscoverAiRecommendScreen(
             settings = settings,
             title = "选择 AI 推荐模型",
             onDismiss = { choosingModel = false },
+            forAiRecommend = true,
         ) { updated ->
             onUpdateSettings(updated)
             choosingModel = false
@@ -3353,7 +3435,7 @@ private fun DiscoverAiResultCard(
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
+                        modifier = Modifier.weight(1f),
                     )
                     item.rating?.let { r ->
                         Text(
@@ -3362,6 +3444,7 @@ private fun DiscoverAiResultCard(
                             fontWeight = FontWeight.SemiBold,
                             color = Orange,
                             maxLines = 1,
+                            softWrap = false,
                         )
                     }
                 }
