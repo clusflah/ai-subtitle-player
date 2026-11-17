@@ -121,8 +121,12 @@ abstract class StreamingCloudEngine : SpeechEngine {
         fun failed(message: String, fatal: Boolean = false) {
             log("流式识别出错（${if (fatal) "不再重连" else "会重连"}）：$message")
             hadError = true
-            lastError = message
-            if (fatal) fatalError = message
+            if (fatal) {
+                fatalError = message
+                lastError = message
+            } else if (fatalError == null) {
+                lastError = message
+            }
             end()
         }
 
@@ -219,9 +223,17 @@ abstract class StreamingCloudEngine : SpeechEngine {
 
     protected fun checkSend(socket: WebSocket, events: Events, ok: Boolean) {
         if (events.ended || cancelled) return
-        if (!ok || socket.queueSize() > MAX_QUEUE_BYTES) {
+        if (socket.queueSize() > MAX_QUEUE_BYTES) {
             socket.cancel()
             events.failed("流式识别发送通道已断开或拥塞")
+            return
+        }
+        if (!ok) {
+            events.done.await(300, TimeUnit.MILLISECONDS)
+            if (!events.ended && !cancelled) {
+                socket.cancel()
+                events.failed("流式识别发送通道已断开或拥塞")
+            }
         }
     }
 
@@ -318,6 +330,7 @@ abstract class StreamingCloudEngine : SpeechEngine {
                 throw IOException(lastError ?: "流式识别连接失败")
             }
             if (e != null && e.hadError) Thread.sleep(minOf(500L * failures, 2_000L))
+            fatalError?.let { throw IOException(it) }
             e = Events(sent * 1000 / SAMPLE_RATE)
             events = e
             lastObservedServerActivityMs = e.lastActivityMs
