@@ -27,6 +27,77 @@ data class AiRecommendedItem(
     val inLibraryName: String? = null,
 )
 
+/** 发现页 AI 按需求荐片的类型过滤 */
+enum class AiDiscoverFilter(val label: String, val promptConstraint: String) {
+    ALL("不限类型", "电影或剧集均可（择优推荐最契合需求的作品）"),
+    MOVIE("仅电影", "只推荐电影，kind 字段必须全部为 \"movie\""),
+    TV("仅剧集", "只推荐电视剧、迷你剧、纪录剧集或动画番剧，kind 字段必须全部为 \"tv\""),
+}
+
+/** 发现页「AI 推荐影片」会话快照与需求历史存储（从详情页返回时保持上次推荐结果免重复请求） */
+object AiDiscoverStore {
+    private const val PREF_NAME = "discover_search"
+    private const val KEY_AI_HISTORY = "ai_prompt_history"
+    private const val MAX_HISTORY = 12
+
+    @Volatile
+    var sessionPrompt: String = ""
+
+    @Volatile
+    var sessionFilter: AiDiscoverFilter = AiDiscoverFilter.ALL
+
+    @Volatile
+    var sessionModelLabel: String = ""
+
+    @Volatile
+    var sessionResults: List<AiRecommendedItem> = emptyList()
+
+    @Volatile
+    var sessionSeenTitles: List<String> = emptyList()
+
+    fun history(context: Context): List<String> {
+        val raw = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_AI_HISTORY, null)
+            .orEmpty()
+        return parseHistoryJson(raw)
+    }
+
+    fun recordHistory(context: Context, prompt: String) {
+        val clean = prompt.trim()
+        if (clean.isEmpty()) return
+        val updated = (listOf(clean) + history(context).filterNot { it.equals(clean, ignoreCase = true) })
+            .take(MAX_HISTORY)
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_AI_HISTORY, encodeHistoryJson(updated))
+            .apply()
+    }
+
+    fun clearHistory(context: Context) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_AI_HISTORY)
+            .apply()
+    }
+
+    internal fun encodeHistoryJson(items: List<String>): String {
+        val arr = JSONArray()
+        items.forEach { if (it.isNotBlank()) arr.put(it.trim()) }
+        return arr.toString()
+    }
+
+    internal fun parseHistoryJson(raw: String): List<String> {
+        if (raw.isBlank()) return emptyList()
+        val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return emptyList()
+        val list = ArrayList<String>(arr.length())
+        for (i in 0 until arr.length()) {
+            val s = arr.optString(i).trim()
+            if (s.isNotEmpty()) list += s
+        }
+        return list
+    }
+}
+
 /** AI 推荐角度预设 */
 enum class AiRecommendAngle(val label: String, val promptInstruction: String) {
     SIMILAR_VIBE("同风格佳作", "推荐与本片核心叙事气质、视听美学或情感共鸣最相近的高分代表作"),
@@ -317,6 +388,133 @@ object RecommendationEngine {
         }
 
         aiCache[cacheKey] = enriched
+        modelLabel to enriched
+    }
+
+    /**
+     * 发现页「AI 推荐影片」：根据用户自然语言描述的需求（题材、氛围、剧情设定、年代、地区、观影场景等），
+     * 智能推荐匹配的影视作品，并并发补齐高清海报、豆瓣/TMDB 评分与本地刮削媒体库可播角标。
+     */
+    suspend fun fetchAiRecommendationsByDescription(
+        context: Context,
+        settings: AppSettings,
+        requirement: String,
+        filter: AiDiscoverFilter = AiDiscoverFilter.ALL,
+        recentWatchedTitles: List<String> = emptyList(),
+        excludeTitles: List<String> = emptyList(),
+        forceRefresh: Boolean = false,
+    ): Pair<String, List<AiRecommendedItem>> = withContext(Dispatchers.IO) {
+        val cleanReq = requirement.trim()
+        require(cleanReq.isNotEmpty()) { "请先输入你想看的影视需求描述" }
+
+        val resolved = resolveChatTranslator(settings)
+            ?: throw IllegalStateException("尚未配置可用的 AI 模型，请先配置 DeepSeek / Gemini / 通义千问 / 豆包 / Claude / 本地模型")
+        val (modelLabel, translator) = resolved
+
+        val cacheKey = "discover_desc|${filter.name}|$cleanReq"
+        if (!forceRefresh && excludeTitles.isEmpty()) {
+            aiCache[cacheKey]?.let { if (it.isNotEmpty()) return@withContext modelLabel to it }
+        }
+
+        val systemPrompt = """
+            你是资深电影与剧集策展顾问。用户会用自然语言描述想看的影视作品需求（如题材类型、剧情设定、叙事节奏、情绪氛围、年代地区、类似作品或避雷条件）。
+            请精准推荐 8 部最契合用户需求的真实电影或剧集。
+            规则：
+            1. 严格遵循用户的类型筛选、题材设定、年代地区与避雷要求，绝不虚构不存在的作品，也不推荐要求排除的作品；
+            2. 推荐理由（reason）用中文撰写，控制在 24～56 字，具体点明该作如何契合用户的描述需求与核心看点，不剧透关键结局；
+            3. kind 字段只能填 "movie" 或 "tv"；title 填最通用的中文正式译名，originalTitle 填原片名；
+            4. 严格只输出合法 JSON 对象，格式如下，不要输出任何额外解释文字：
+            {"recommendations":[{"title":"片名","originalTitle":"原名","year":2022,"kind":"movie","reason":"契合需求的推荐理由"}]}
+        """.trimIndent()
+
+        val userPrompt = buildString {
+            appendLine("用户观影需求：$cleanReq")
+            appendLine("作品类型限制：${filter.promptConstraint}")
+            if (recentWatchedTitles.isNotEmpty()) {
+                appendLine("用户近期看过的作品（可辅助参考口味，但以本次需求描述为最高优先）：${recentWatchedTitles.take(8).joinToString("、")}")
+            }
+            if (excludeTitles.isNotEmpty()) {
+                appendLine("请务必避开以下已推荐过的作品，换一批新的高分选择：${excludeTitles.take(18).joinToString("、")}")
+            }
+        }
+
+        val rawReply = translator.chat(systemPrompt, userPrompt)
+        val rawItems = parseAiRecommendationsJson(rawReply)
+        if (rawItems.isEmpty()) {
+            throw IllegalStateException("AI 未返回有效的影视推荐列表，请重试或换个描述方式")
+        }
+
+        val normExcluded = excludeTitles.map(::normalizeTitle).toSet()
+        val filteredRaw = rawItems
+            .filter { rec ->
+                val nt = normalizeTitle(rec.title)
+                nt.isNotEmpty() && nt !in normExcluded && when (filter) {
+                    AiDiscoverFilter.ALL -> true
+                    AiDiscoverFilter.MOVIE -> rec.kind == "movie"
+                    AiDiscoverFilter.TV -> rec.kind == "tv"
+                }
+            }
+            .ifEmpty { rawItems }
+            .take(8)
+
+        val enriched = coroutineScope {
+            filteredRaw.map { rec ->
+                async {
+                    val searchHits = runCatching {
+                        DiscoverRepository.search(settings, rec.title)
+                    }.getOrDefault(emptyList())
+
+                    val rt = normalizeTitle(rec.title)
+                    val ro = normalizeTitle(rec.originalTitle)
+                    val bestMatch = searchHits.firstOrNull { hit ->
+                        val ht = normalizeTitle(hit.title)
+                        val ho = normalizeTitle(hit.originalTitle)
+                        val titleExact = ht == rt || (ro.isNotEmpty() && (ho == ro || ht == ro))
+                        titleExact && (rec.year == null || hit.year == null || kotlin.math.abs(hit.year - rec.year) <= 1)
+                    } ?: searchHits.firstOrNull { hit ->
+                        val ht = normalizeTitle(hit.title)
+                        ht == rt || (rec.year != null && hit.year == rec.year)
+                    } ?: searchHits.firstOrNull()
+
+                    val finalKind = when (filter) {
+                        AiDiscoverFilter.MOVIE -> "movie"
+                        AiDiscoverFilter.TV -> "tv"
+                        AiDiscoverFilter.ALL -> bestMatch?.kind?.ifBlank { rec.kind } ?: rec.kind
+                    }
+
+                    val discoverItem = bestMatch?.copy(
+                        kind = finalKind,
+                    ) ?: DiscoverItem(
+                        id = "ai:${finalKind}:${rec.title}:${rec.year ?: 0}",
+                        kind = finalKind,
+                        title = rec.title,
+                        originalTitle = rec.originalTitle,
+                        year = rec.year,
+                        overview = rec.reason,
+                    )
+
+                    val libHit = CustomMediaLibraryStore.matchInScrapedLibraries(
+                        context = context,
+                        title = discoverItem.title,
+                        origTitle = discoverItem.originalTitle.ifBlank { rec.originalTitle },
+                        tmdbId = discoverItem.tmdbId,
+                        doubanId = discoverItem.doubanId,
+                        imdbId = discoverItem.imdbId,
+                        kind = discoverItem.kind,
+                    ).firstOrNull()
+
+                    AiRecommendedItem(
+                        item = discoverItem,
+                        reason = rec.reason,
+                        inLibraryName = libHit?.library?.name,
+                    )
+                }
+            }.awaitAll()
+        }
+
+        if (excludeTitles.isEmpty()) {
+            aiCache[cacheKey] = enriched
+        }
         modelLabel to enriched
     }
 

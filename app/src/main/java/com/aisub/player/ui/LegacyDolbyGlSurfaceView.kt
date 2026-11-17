@@ -55,11 +55,22 @@ class LegacyDolbyGlSurfaceView(
     fun releaseSurfaceResources() {
         val oldSurface = decoderSurface
         decoderSurface = null
-        mainHandler.post { onDecoderSurfaceChanged(null) }
-        queueEvent {
-            rendererImpl.releaseGlResources()
+        // 必须先让 ExoPlayer 解绑 Surface，再执行 oldSurface.release()，避免解码器持有已释放的 Surface 引发崩溃
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            onDecoderSurfaceChanged(null)
+            queueEvent {
+                rendererImpl.releaseGlResources()
+            }
+            oldSurface?.release()
+        } else {
+            mainHandler.post {
+                onDecoderSurfaceChanged(null)
+                queueEvent {
+                    rendererImpl.releaseGlResources()
+                }
+                oldSurface?.release()
+            }
         }
-        oldSurface?.release()
     }
 
     override fun onDetachedFromWindow() {
@@ -173,9 +184,9 @@ class LegacyDolbyGlSurfaceView(
             val prevSurface = decoderSurface
             val newSurface = Surface(st)
             decoderSurface = newSurface
-            prevSurface?.release()
             mainHandler.post {
                 onDecoderSurfaceChanged(newSurface)
+                prevSurface?.release()
             }
         }
 

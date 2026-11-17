@@ -89,6 +89,13 @@ class MpvNativeBridge(
         nativeCommand(h, arrayOf(*args))
     }
 
+    /** 同步执行 mpv 命令（用于切换播放内核时立即停止解复用与解码管线，避免与新内核抢占资源） */
+    fun commandSync(vararg args: String) {
+        val h = handle
+        if (h == 0L || args.isEmpty()) return
+        nativeCommandSync(h, arrayOf(*args))
+    }
+
     fun attachSurface(surface: Surface) {
         val h = handle
         if (h != 0L && surface.isValid) {
@@ -149,6 +156,7 @@ class MpvNativeBridge(
     private external fun nativeGetPropertyLong(handle: Long, name: String, fallback: Long): Long
     private external fun nativeGetPropertyDouble(handle: Long, name: String, fallback: Double): Double
     private external fun nativeCommand(handle: Long, args: Array<String>)
+    private external fun nativeCommandSync(handle: Long, args: Array<String>)
     private external fun nativeAttachSurface(handle: Long, surface: Surface)
     private external fun nativeDetachSurface(handle: Long)
     private external fun nativeDestroy(handle: Long)

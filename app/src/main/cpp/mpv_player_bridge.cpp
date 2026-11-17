@@ -485,12 +485,7 @@ Java_com_aisub_player_media_MpvNativeBridge_nativeGetPropertyDouble(
     return rc >= 0 ? (jdouble)val : fallback;
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_aisub_player_media_MpvNativeBridge_nativeCommand(
-    JNIEnv* env, jobject thiz, jlong handle, jobjectArray jargs
-) {
-    (void)thiz;
-    MpvInstance* inst = reinterpret_cast<MpvInstance*>(handle);
+static void run_mpv_command_internal(JNIEnv* env, MpvInstance* inst, jobjectArray jargs, bool sync_mode) {
     if (!inst || !inst->mpv || !jargs) return;
     jsize len = env->GetArrayLength(jargs);
     if (len <= 0 || len > 32) return;
@@ -503,7 +498,7 @@ Java_com_aisub_player_media_MpvNativeBridge_nativeCommand(
     }
     cargs[len] = nullptr;
 
-    if (g_api.command_async) {
+    if (!sync_mode && g_api.command_async) {
         g_api.command_async(inst->mpv, 0, cargs);
     } else {
         g_api.command(inst->mpv, cargs);
@@ -518,6 +513,22 @@ Java_com_aisub_player_media_MpvNativeBridge_nativeCommand(
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_aisub_player_media_MpvNativeBridge_nativeCommand(
+    JNIEnv* env, jobject thiz, jlong handle, jobjectArray jargs
+) {
+    (void)thiz;
+    run_mpv_command_internal(env, reinterpret_cast<MpvInstance*>(handle), jargs, false);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_aisub_player_media_MpvNativeBridge_nativeCommandSync(
+    JNIEnv* env, jobject thiz, jlong handle, jobjectArray jargs
+) {
+    (void)thiz;
+    run_mpv_command_internal(env, reinterpret_cast<MpvInstance*>(handle), jargs, true);
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_aisub_player_media_MpvNativeBridge_nativeAttachSurface(
     JNIEnv* env, jobject thiz, jlong handle, jobject surface
 ) {
@@ -526,16 +537,25 @@ Java_com_aisub_player_media_MpvNativeBridge_nativeAttachSurface(
     if (!inst || !inst->mpv || !surface) return;
 
     pthread_mutex_lock(&inst->surface_lock);
-    if (inst->surface_global) {
-        env->DeleteGlobalRef(inst->surface_global);
-        inst->surface_global = nullptr;
-    }
-    inst->surface_global = env->NewGlobalRef(surface);
-    int64_t wid = static_cast<int64_t>(reinterpret_cast<intptr_t>(inst->surface_global));
+    jobject old_surface = inst->surface_global;
+    jobject new_surface = env->NewGlobalRef(surface);
+    inst->surface_global = new_surface;
+    int64_t wid = static_cast<int64_t>(reinterpret_cast<intptr_t>(new_surface));
     if (inst->initialized) {
+        // 先切回 vo=null 确保旧 VO 完全解绑旧 Surface，再绑定新 wid 并开启 gpu-next/gpu 渲染管线
+        if (old_surface) {
+            g_api.set_property_string(inst->mpv, "vo", "null");
+        }
         g_api.set_property(inst->mpv, "wid", MPV_FORMAT_INT64, &wid);
+        g_api.set_property_string(inst->mpv, "force-window", "yes");
+        g_api.set_property_string(inst->mpv, "vo", "gpu-next,gpu");
     } else {
         g_api.set_option(inst->mpv, "wid", MPV_FORMAT_INT64, &wid);
+        g_api.set_option_string(inst->mpv, "force-window", "yes");
+        g_api.set_option_string(inst->mpv, "vo", "gpu-next,gpu");
+    }
+    if (old_surface) {
+        env->DeleteGlobalRef(old_surface);
     }
     pthread_mutex_unlock(&inst->surface_lock);
 }
@@ -549,14 +569,17 @@ Java_com_aisub_player_media_MpvNativeBridge_nativeDetachSurface(
     if (!inst || !inst->mpv) return;
 
     pthread_mutex_lock(&inst->surface_lock);
-    if (inst->initialized) {
-        // 先关闭视频输出让 EGL 同步释放 ANativeWindow，避免 surfaceDestroyed 后报 EGL_BAD_NATIVE_WINDOW
-        g_api.set_property_string(inst->mpv, "vid", "no");
-    }
     int64_t wid = 0;
     if (inst->initialized) {
+        // 必须先关闭 force-window 并切换 vo=null，触发 libmpv 同步销毁 VO 渲染线程与 EGLSurface / ANativeWindow，
+        // 随后再将 wid 置 0 并释放 JNI GlobalRef，彻底避免 surfaceDestroyed / 切核时访问已删除引用导致闪退
+        g_api.set_property_string(inst->mpv, "force-window", "no");
+        g_api.set_property_string(inst->mpv, "vid", "no");
+        g_api.set_property_string(inst->mpv, "vo", "null");
         g_api.set_property(inst->mpv, "wid", MPV_FORMAT_INT64, &wid);
     } else {
+        g_api.set_option_string(inst->mpv, "force-window", "no");
+        g_api.set_option_string(inst->mpv, "vo", "null");
         g_api.set_option(inst->mpv, "wid", MPV_FORMAT_INT64, &wid);
     }
     if (inst->surface_global) {
@@ -585,13 +608,15 @@ Java_com_aisub_player_media_MpvNativeBridge_nativeDestroy(
 
     pthread_mutex_lock(&inst->surface_lock);
     if (inst->mpv) {
-        if (inst->initialized && g_api.set_property_string) {
-            g_api.set_property_string(inst->mpv, "vid", "no");
-        }
         int64_t wid = 0;
-        if (inst->initialized && g_api.set_property) {
+        if (inst->initialized && g_api.set_property_string && g_api.set_property) {
+            g_api.set_property_string(inst->mpv, "force-window", "no");
+            g_api.set_property_string(inst->mpv, "vid", "no");
+            g_api.set_property_string(inst->mpv, "vo", "null");
             g_api.set_property(inst->mpv, "wid", MPV_FORMAT_INT64, &wid);
-        } else if (g_api.set_option) {
+        } else if (g_api.set_option && g_api.set_option_string) {
+            g_api.set_option_string(inst->mpv, "force-window", "no");
+            g_api.set_option_string(inst->mpv, "vo", "null");
             g_api.set_option(inst->mpv, "wid", MPV_FORMAT_INT64, &wid);
         }
     }

@@ -676,11 +676,14 @@ object LegacyDolbyExoBridge {
                     .setColorRange(C.COLOR_RANGE_FULL)
                     .setColorTransfer(C.COLOR_TRANSFER_SDR)
                     .build()
+                val cleanInitData = format.initializationData
+                    .filterNot { buf -> isDolbyConfigRecord(buf) }
+                    .ifEmpty { format.initializationData.take(1) }
                 val rewritten = format.buildUpon()
                     .setId(baseId + TAG_DV_PROFILE_5)
                     .setSampleMimeType(MimeTypes.VIDEO_H265)
                     .setCodecs(null)
-                    .setInitializationData(format.initializationData.take(1))
+                    .setInitializationData(cleanInitData)
                     .setColorInfo(fullRangeBt709)
                     .build()
                 downstream.format(rewritten)
@@ -700,10 +703,13 @@ object LegacyDolbyExoBridge {
                     val builder = format.buildUpon().setId(baseId + tag)
                     // Android 6.0 (API 23) 等老系统不认识 video/dolby-vision，直接剥离 dvcC 改标标准 video/hevc 硬解底流
                     if (isDv && format.initializationData.isNotEmpty()) {
+                        val cleanInitData = format.initializationData
+                            .filterNot { buf -> isDolbyConfigRecord(buf) }
+                            .ifEmpty { format.initializationData.take(1) }
                         builder
                             .setSampleMimeType(MimeTypes.VIDEO_H265)
                             .setCodecs(null)
-                            .setInitializationData(format.initializationData.take(1))
+                            .setInitializationData(cleanInitData)
                     }
                     downstream.format(builder.build())
                     return
@@ -725,6 +731,10 @@ object LegacyDolbyExoBridge {
             if (expectingNalHeader) {
                 if (length <= ioScratch.size) {
                     val n = input.read(ioScratch, 0, length)
+                    if (n == C.RESULT_END_OF_INPUT) {
+                        if (allowEndOfInput) return C.RESULT_END_OF_INPUT
+                        throw java.io.EOFException()
+                    }
                     if (n <= 0) return n
                     val nalType = (ioScratch[0].toInt() and 0x7E) ushr 1
                     expectingNalHeader = false
@@ -740,6 +750,10 @@ object LegacyDolbyExoBridge {
                 } else {
                     // 大体积视频帧 Slice：仅窥探首 2 字节 NAL 头，剩余几十 KB 数据后续 100% 零拷贝直通 SampleQueue
                     val n = input.read(tinyHeader, 0, minOf(2, length))
+                    if (n == C.RESULT_END_OF_INPUT) {
+                        if (allowEndOfInput) return C.RESULT_END_OF_INPUT
+                        throw java.io.EOFException()
+                    }
                     if (n <= 0) return n
                     val nalType = (tinyHeader[0].toInt() and 0x7E) ushr 1
                     expectingNalHeader = false
@@ -754,6 +768,10 @@ object LegacyDolbyExoBridge {
             }
             if (capturingRpu && length <= ioScratch.size) {
                 val n = input.read(ioScratch, 0, length)
+                if (n == C.RESULT_END_OF_INPUT) {
+                    if (allowEndOfInput) return C.RESULT_END_OF_INPUT
+                    throw java.io.EOFException()
+                }
                 if (n <= 0) return n
                 appendRpuBytes(ioScratch, 0, n)
                 downstream.sampleData(ParsableByteArray(ioScratch, n), n, sampleDataPart)
@@ -841,6 +859,15 @@ object LegacyDolbyExoBridge {
             val n = minOf(room, count)
             System.arraycopy(src, offset, rpuBuf, rpuLen, n)
             rpuLen += n
+        }
+
+        private fun isDolbyConfigRecord(buf: ByteArray): Boolean {
+            val looksAnnexB = buf.size >= 4 &&
+                buf[0].toInt() == 0 &&
+                buf[1].toInt() == 0 &&
+                (buf[2].toInt() == 1 || (buf[2].toInt() == 0 && buf[3].toInt() == 1))
+            if (looksAnnexB) return false
+            return DolbyVisionHelper.parseDvccProfile(listOf(buf)) != null
         }
 
         private fun flushCapturedRpu() {

@@ -891,8 +891,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         LegacyDolbyExoBridge.reset()
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
-        vlcPlayer?.setAsrAudioConsumer(null, null)
-        vlcPlayer?.stop()
+        vlcPlayer?.deactivateForKernelSwitch()
         queue = entries ?: listOf(entry)
         isCurrentDolbyShunted = dolbyP5Hint
         val m = mpv()
@@ -920,8 +919,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         LegacyDolbyExoBridge.reset()
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
-        mpvPlayer?.stop()
-        mpvPlayer?.clearMediaItems()
+        mpvPlayer?.deactivateForKernelSwitch()
         queue = channels ?: listOf(entry)
         isCurrentDolbyShunted = false
         val v = vlc()
@@ -1029,9 +1027,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 PlayerKernel.MPV -> playWithMpv(entry, 0L, savedQueue, dolbyP5Hint = false, playWhenReady = true, speed = curSpeed, repeatMode = curRepeat)
                 PlayerKernel.VLC -> playWithVlc(entry, 0L, savedQueue, playWhenReady = true, speed = curSpeed)
                 PlayerKernel.EXO -> {
-                    mpvPlayer?.stop()
-                    mpvPlayer?.clearMediaItems()
-                    vlcPlayer?.stop()
+                    mpvPlayer?.deactivateForKernelSwitch()
+                    vlcPlayer?.deactivateForKernelSwitch()
                     isCurrentDolbyShunted = false
                     pendingExoUri = entry.uri
                     LegacyDolbyExoBridge.reset()
@@ -1087,10 +1084,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             PlayerKernel.EXO -> {
-                mpvPlayer?.stop()
-                mpvPlayer?.clearMediaItems()
-                vlcPlayer?.setAsrAudioConsumer(null, null)
-                vlcPlayer?.stop()
+                mpvPlayer?.deactivateForKernelSwitch()
+                vlcPlayer?.deactivateForKernelSwitch()
                 isCurrentDolbyShunted = false
                 pendingExoUri = entry.uri
                 LegacyDolbyExoBridge.reset()
@@ -1190,10 +1185,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         vlcLiveWatch?.cancel()
-        mpvPlayer?.stop()
-        mpvPlayer?.clearMediaItems()
-        vlcPlayer?.setAsrAudioConsumer(null, null)
-        vlcPlayer?.stop()
+        mpvPlayer?.deactivateForKernelSwitch()
+        vlcPlayer?.deactivateForKernelSwitch()
         isCurrentDolbyShunted = false
         pendingExoUri = start.uri
         LegacyDolbyExoBridge.reset()

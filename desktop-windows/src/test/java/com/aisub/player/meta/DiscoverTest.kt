@@ -331,4 +331,41 @@ class DiscoverTest {
         assertEquals("https://custom.example/", customReq.header("Referer"))
         assertEquals("CustomUA/1.0", customReq.header("User-Agent"))
     }
+
+    @Test
+    fun aiRecommendationsJsonAndPromptHistoryRoundTrip() {
+        val raw = """
+            <think>用户想看时间循环科幻悬疑</think>
+            ```json
+            {
+              "recommendations": [
+                {
+                  "title": "《源代码》",
+                  "originalTitle": "Source Code",
+                  "year": 2011,
+                  "kind": "movie",
+                  "reason": "8分钟列车时间循环极限追凶，节奏凌厉且反转扎实"
+                },
+                {
+                  "title": "暗黑",
+                  "originalTitle": "Dark",
+                  "year": 2017,
+                  "kind": "电视剧",
+                  "reason": "三代家族跨越33年时间闭环，宿命感与逻辑精密度拉满"
+                }
+              ]
+            }
+            ```
+        """.trimIndent()
+        val parsed = RecommendationEngine.parseAiRecommendationsJson(raw)
+        assertEquals(2, parsed.size)
+        assertEquals("源代码", parsed[0].title)
+        assertEquals("movie", parsed[0].kind)
+        assertEquals(2011, parsed[0].year)
+        assertEquals("暗黑", parsed[1].title)
+        assertEquals("tv", parsed[1].kind)
+
+        val encoded = AiDiscoverStore.encodeHistoryJson(listOf("时间循环科幻片", "治愈系日剧"))
+        assertEquals(listOf("时间循环科幻片", "治愈系日剧"), AiDiscoverStore.parseHistoryJson(encoded))
+    }
 }

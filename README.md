@@ -64,28 +64,28 @@
 
 ## 截图
 
-| 视频 | 音频 | 浏览 | 更多 |
+| 首页（刮削媒体库） | 发现（榜单与 AI 荐片） | 浏览（网盘与 NAS） | 本机与「我的」 |
 |---|---|---|---|
-| <img src="docs/screenshots/home-video.jpg" width="200" alt="视频"> | <img src="docs/screenshots/home-audio.jpg" width="200" alt="音频"> | <img src="docs/screenshots/home-browse.jpg" width="200" alt="浏览"> | <img src="docs/screenshots/home-more.jpg" width="200" alt="更多"> |
+| <img src="docs/screenshots/home-library.jpg" width="200" alt="首页（刮削媒体库）"> | <img src="docs/screenshots/discover.jpg" width="200" alt="发现（榜单与 AI 荐片）"> | <img src="docs/screenshots/home-browse.jpg" width="200" alt="浏览（网盘与 NAS）"> | <img src="docs/screenshots/mine.jpg" width="200" alt="我的页面"> |
 
-| 字幕面板（双语、拼音、朗读、角色） | 播放器「更多」菜单 | 在线下载字幕 | 影视详情 |
+| 双语 AI 字幕播放 | AI 字幕面板 | 切换播放内核与软硬解 | AI 智能推荐与相似作品 |
 |---|---|---|---|
-| <img src="docs/screenshots/player-subtitle-panel.jpg" width="200" alt="字幕面板（双语、拼音、朗读、角色）"> | <img src="docs/screenshots/player-more.jpg" width="200" alt="播放器「更多」菜单"> | <img src="docs/screenshots/player-online-subtitles.jpg" width="200" alt="在线下载字幕"> | <img src="docs/screenshots/detail.jpg" width="200" alt="影视详情"> |
+| <img src="docs/screenshots/player-bilingual.jpg" width="200" alt="双语 AI 字幕播放"> | <img src="docs/screenshots/player-subtitle-panel.jpg" width="200" alt="AI 字幕面板"> | <img src="docs/screenshots/player-kernel.jpg" width="200" alt="切换播放内核与软硬解"> | <img src="docs/screenshots/detail-ai-recommend.jpg" width="200" alt="AI 智能推荐与相似作品"> |
 
-| 本地识别模型 | 翻译服务 | 拼音字幕预览 | 朗读设置 |
+| 媒体库影视详情 | 发现页影视详情 | 搜索片源（影巢 / TG / 网盘） | 设置中心 |
 |---|---|---|---|
-| <img src="docs/screenshots/settings-asr-local.jpg" width="200" alt="本地识别模型"> | <img src="docs/screenshots/settings-translate.jpg" width="200" alt="翻译服务"> | <img src="docs/screenshots/settings-subtitle-style.jpg" width="200" alt="拼音字幕预览"> | <img src="docs/screenshots/settings-tts.jpg" width="200" alt="朗读设置"> |
+| <img src="docs/screenshots/detail.jpg" width="200" alt="媒体库影视详情"> | <img src="docs/screenshots/discover-detail.jpg" width="200" alt="发现页影视详情"> | <img src="docs/screenshots/discover-sources.jpg" width="200" alt="搜索片源"> | <img src="docs/screenshots/settings.jpg" width="200" alt="设置中心"> |
 
 <details>
 <summary>更多截图</summary>
 
-| 添加网盘与媒体服务器 | 云端识别（Azure） | 云端识别服务 | 目标语言 |
+| 首页（收藏与媒体服务器） | 浏览（在线内容与阅读） | 本机媒体与过滤 | 播放器「更多」菜单 |
 |---|---|---|---|
-| <img src="docs/screenshots/net-add.jpg" width="200" alt="添加网盘与媒体服务器"> | <img src="docs/screenshots/settings-asr-azure.jpg" width="200" alt="云端识别（Azure）"> | <img src="docs/screenshots/settings-asr-cloud.jpg" width="200" alt="云端识别服务"> | <img src="docs/screenshots/settings-target-language.jpg" width="200" alt="目标语言"> |
+| <img src="docs/screenshots/home-sources.jpg" width="200" alt="首页（收藏与媒体服务器）"> | <img src="docs/screenshots/browse-online.jpg" width="200" alt="浏览（在线内容与阅读）"> | <img src="docs/screenshots/home-video.jpg" width="200" alt="本机媒体与过滤"> | <img src="docs/screenshots/player-more.jpg" width="200" alt="播放器「更多」菜单"> |
 
-| 影视信息来源 | TheTVDB / Fanart.tv | 在线字幕来源 | 音轨与字幕 |
+| 本地识别模型 | 翻译服务 | 拼音字幕预览 | 朗读设置 |
 |---|---|---|---|
-| <img src="docs/screenshots/settings-meta.jpg" width="200" alt="影视信息来源"> | <img src="docs/screenshots/settings-meta-2.jpg" width="200" alt="TheTVDB / Fanart.tv"> | <img src="docs/screenshots/settings-online-subtitles.jpg" width="200" alt="在线字幕来源"> | <img src="docs/screenshots/player-subtitle-panel-2.jpg" width="200" alt="音轨与字幕"> |
+| <img src="docs/screenshots/settings-asr-local.jpg" width="200" alt="本地识别模型"> | <img src="docs/screenshots/settings-translate.jpg" width="200" alt="翻译服务"> | <img src="docs/screenshots/settings-subtitle-style.jpg" width="200" alt="拼音字幕预览"> | <img src="docs/screenshots/settings-tts.jpg" width="200" alt="朗读设置"> |
 
 </details>
 
@@ -218,7 +218,7 @@
 | 左右滑 | 拖动进度 |
 | 长按 | 2 倍速播放，松开恢复 |
 
-<p><img src="docs/screenshots/player-more.jpg" width="240" alt="播放器「更多」菜单"></p>
+<p><img src="docs/screenshots/player-bilingual.jpg" width="240" alt="视频播放与双语 AI 字幕"> <img src="docs/screenshots/player-kernel.jpg" width="240" alt="切换播放内核与软硬解"></p>
 
 底部按钮栏有锁定屏幕；右下角「更多」最上面一排是倍速、画面比例、悬浮窗、定时关闭，下面分组：播放（循环、A-B 循环、转到时间、只播放声音）、跳转（章节与片段、书签与关键帧、片头片尾与跳过）、其他（均衡器、视频信息、保存为播放列表、设置）。第一次播放视频、音乐时会说明手势。
 
@@ -281,7 +281,7 @@ DVD / 蓝光 ISO 镜像自动用 VLC 内核播放，直接进入正片。普通�
 
 ### 网络位置与网盘
 
-<p><img src="docs/screenshots/home-browse.jpg" width="240" alt="浏览"> <img src="docs/screenshots/net-add.jpg" width="240" alt="添加网络位置"></p>
+<p><img src="docs/screenshots/home-browse.jpg" width="240" alt="浏览网络存储与网盘"> <img src="docs/screenshots/browse-online.jpg" width="240" alt="媒体服务器与在线阅读"></p>
 
 在「浏览」标签右上角的「+」（或各分区的「添加」）添加。浏览页分五块：本地文件、网络存储（NAS、网盘）、媒体服务器（Plex、Emby / Jellyfin）、在线内容（电视直播、网络串流、网页、Telegram）、阅读（漫画、电子书）；分区可以折叠，标题后面是里面有几项。每个网络服务下面显示上次打开的时间，上次连不上时右边标「连接失败」。
 
@@ -301,7 +301,7 @@ DVD / 蓝光 ISO 镜像自动用 VLC 内核播放，直接进入正片。普通�
 
 ### 影视信息
 
-<p><img src="docs/screenshots/detail.jpg" width="240" alt="影视详情"> <img src="docs/screenshots/settings-meta.jpg" width="240" alt="影视信息设置"></p>
+<p><img src="docs/screenshots/detail.jpg" width="240" alt="影视详情"> <img src="docs/screenshots/detail-ai-recommend.jpg" width="240" alt="AI 智能推荐与相似作品"></p>
 
 网络位置和网盘里点视频进入详情页；本地视频在「⋮」菜单里选「影视信息」。
 

@@ -1,4 +1,15 @@
-## 本版更新（2.10.5）
+## 本版更新（2.10.6）
+
+- **修复从 MPV 内核切换到默认 ExoPlayer 内核闪退问题**：
+  - 补齐 `MpvPlayer` 与 `VlcPlayer` 在 Media3 `SimpleBasePlayer` 下的 `handleRemoveMediaItems` / `handleAddMediaItems` / `handleMoveMediaItems` 列表变更实现，根治切回 ExoPlayer 调用 `clearMediaItems()` 时触发 `IllegalStateException` 导致的主线程闪退
+  - 重构原生层 `mpv_player_bridge.cpp` Surface 解绑与切核停机时序：先关闭 `force-window` 并同步切换 `vo=null` 销毁 OpenGL 渲染线程与 `ANativeWindow`、同步执行 `stop`，最后再安全释放 JNI `GlobalRef`，消除底层访问悬垂引用或 BufferQueue 争用崩溃
+  - 隔离播放页默认 ExoPlayer 与外部内核视图生命周期（避免反复重绑 `AssHandler`），并修正 `LegacyDolbyGlSurfaceView` 先从 ExoPlayer 解绑再释放 `Surface` 的安全顺序
+- **「发现」页新增 AI 推荐影片入口（Android / TV / Windows）**：
+  - 在「发现」页顶部横幅、顶栏按钮及搜索结果快捷栏新增「AI 推荐影片」入口，支持用自然语言自由描述想看的题材、剧情设定、叙事节奏、年代或观影心情（兼容电视端遥控器与手机扫码输入）
+  - 支持「不限类型 / 仅电影 / 仅剧集」筛选、快捷灵感标签、历史描述记录与「换一批」（自动避开已推荐片单），并发补齐高清海报、豆瓣/TMDB 评分与自定义刮削媒体库「库内可播」角标，点开即可播放或检索片源
+- **更新 README 界面截图**：同步替换为最新版首页刮削媒体库、发现页、搜索片源、浏览页、本机与我的页、设置中心、AI 智能推荐、双语字幕播放及内核切换全套高清截图
+
+## 2.10.5 更新
 
 - **修复 Windows 电脑端切换 MPV 内核卡死与无后缀杜比视界 P5 自动识别**：
   - 移除 FFmpeg 8 不再支持作用于输入端的 `-thread_queue_size` 参数，修复切换 MPV 内核时底层解码进程瞬退及套接字阻塞等待 60s 导致画面卡死的问题，并补齐进程异常秒级中断检测与报错回传

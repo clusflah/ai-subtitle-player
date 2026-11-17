@@ -255,7 +255,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
             .setPlaybackState(if (items.isEmpty()) Player.STATE_IDLE else playbackState)
             .setPlayerError(error)
             .setPlaylist(playlist)
-            .setCurrentMediaItemIndex(0)
+            .setCurrentMediaItemIndex(if (playlist.isEmpty()) C.INDEX_UNSET else 0)
             .setContentPositionMs(
                 PositionSupplier {
                     when {
@@ -273,11 +273,70 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
     }
 
     override fun handleSetMediaItems(mediaItems: List<MediaItem>, startIndex: Int, startPositionMs: Long): ListenableFuture<*> {
-        items = mediaItems.take(1)
+        items = mediaItems.drop(startIndex.coerceAtLeast(0)).take(1).ifEmpty { mediaItems.take(1) }
         this.startPositionMs = startPositionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0) ?: 0
         durationMs = C.TIME_UNSET
         tracks = Tracks.EMPTY
+        error = null
+        if (items.isEmpty()) {
+            mp.stop()
+            playbackState = Player.STATE_IDLE
+        }
         return Futures.immediateVoidFuture()
+    }
+
+    override fun handleAddMediaItems(index: Int, mediaItems: List<MediaItem>): ListenableFuture<*> {
+        if (mediaItems.isEmpty()) return Futures.immediateVoidFuture()
+        if (items.isEmpty()) items = mediaItems.take(1)
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleMoveMediaItems(fromIndex: Int, toIndex: Int, newIndex: Int): ListenableFuture<*> =
+        Futures.immediateVoidFuture()
+
+    override fun handleRemoveMediaItems(fromIndex: Int, toIndex: Int): ListenableFuture<*> {
+        if (items.isEmpty()) return Futures.immediateVoidFuture()
+        val safeFrom = fromIndex.coerceIn(0, items.size)
+        val safeTo = toIndex.coerceIn(safeFrom, items.size)
+        if (safeFrom < safeTo) {
+            val mutable = items.toMutableList()
+            mutable.subList(safeFrom, safeTo).clear()
+            items = mutable.take(1)
+        }
+        if (items.isEmpty()) {
+            directRemoteStream = false
+            lastDirectReadBytes = -1L
+            started = false
+            pendingSeekMs = null
+            mp.stop()
+            playbackState = Player.STATE_IDLE
+            durationMs = C.TIME_UNSET
+            tracks = Tracks.EMPTY
+            videoSize = VideoSize.UNKNOWN
+            error = null
+        }
+        return Futures.immediateVoidFuture()
+    }
+
+    /** 切换至其它播放内核前同步解绑音频回调、Surface 与停止播放 */
+    fun deactivateForKernelSwitch() {
+        setAsrAudioConsumer(null, null)
+        directRemoteStream = false
+        lastDirectReadBytes = -1L
+        playWhenReady = false
+        started = false
+        pendingSeekMs = null
+        videoView?.removeOnLayoutChangeListener(layoutListener)
+        videoView = null
+        if (mp.vlcVout.areViewsAttached()) mp.vlcVout.detachViews()
+        mp.stop()
+        items = emptyList()
+        playbackState = Player.STATE_IDLE
+        durationMs = C.TIME_UNSET
+        tracks = Tracks.EMPTY
+        videoSize = VideoSize.UNKNOWN
+        error = null
+        invalidateState()
     }
 
     override fun handlePrepare(): ListenableFuture<*> {

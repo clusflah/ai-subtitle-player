@@ -576,33 +576,51 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 else Modifier,
             ),
     ) {
-        // ---- 画面（按内核隔离 SurfaceView 实例；新设备与普通视频 100% 走系统原生 PlayerView，仅老设备 Exo 杜比/HDR 时挂载零拷贝 GLES 2.0 着色器视图） ----
+        // ---- 画面（默认 ExoPlayer 常驻单一 PlayerView 防止重复绑定 assHandler 崩溃；MPV / VLC 使用独立隔离 SurfaceView 并在释放时解绑 player） ----
         val useLegacyExoGlSurface = !usingExternalKernel &&
             legacyExoShaderMode != com.aisub.player.media.LegacyExoShaderMode.OFF &&
             !audioOnly
-        androidx.compose.runtime.key(activeKernel) {
-            var legacyGlView by remember { mutableStateOf<LegacyDolbyGlSurfaceView?>(null) }
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        this.player = player
-                        useController = false
-                        // 遮罩透明：画面背景本来就是黑色；MPV / VLC 内核直接向 Surface 渲染帧
-                        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                        findViewById<android.view.View>(androidx.media3.ui.R.id.exo_content_frame)
-                            ?.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, _ ->
+        var legacyGlView by remember { mutableStateOf<LegacyDolbyGlSurfaceView?>(null) }
+
+        // 1. 默认 ExoPlayer 专属视图（在播放页生命周期内仅初始化一次 AssHandler，切到外部内核时隐藏并置空 player 释放 Surface）
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    useController = false
+                    setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                    findViewById<android.view.View>(androidx.media3.ui.R.id.exo_content_frame)
+                        ?.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, _ ->
+                            if (!vm.usingExternalKernel) {
                                 videoBottomPx = bottom
                                 viewHeightPx = height
                             }
-                    }.also { playerView = it }
-                },
-                update = {
-                    // ASS / SSA 字幕：默认内核由 ass-media 绘制在 SubtitleView 上；MPV 内核自身已内建原版 libass 硬渲染
-                    if (!usingExternalKernel && state.current?.isVideo != false && it.tag != "ass") {
-                        it.subtitleView?.withAssSupport(vm.assHandler)
+                        }
+                }.also { if (!usingExternalKernel) playerView = it }
+            },
+            update = {
+                if (usingExternalKernel) {
+                    if (legacyGlView != null) {
+                        val old = legacyGlView
+                        legacyGlView = null
+                        old?.onPause()
+                        old?.releaseSurfaceResources()
+                        (old?.parent as? android.view.ViewGroup)?.removeView(old)
+                    }
+                    if (it.player != null) {
+                        it.player = null
+                    }
+                    it.videoSurfaceView?.visibility = android.view.View.GONE
+                    it.visibility = android.view.View.GONE
+                } else {
+                    it.visibility = android.view.View.VISIBLE
+                    if (state.current?.isVideo != false && it.tag != "ass") {
+                        runCatching { it.subtitleView?.withAssSupport(vm.assHandler) }
                         it.tag = "ass"
                     }
-                    if (it.player !== player) it.player = player
+                    if (it.player !== vm.exoPlayer) {
+                        it.player = vm.exoPlayer
+                    }
+                    playerView = it
                     it.resizeMode = RESIZE_MODES[resizeIndex].first
 
                     val contentFrame = it.findViewById<android.widget.FrameLayout>(androidx.media3.ui.R.id.exo_content_frame)
@@ -611,10 +629,13 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         if (glView == null || glView.parent !== contentFrame) {
                             glView?.let { old -> (old.parent as? android.view.ViewGroup)?.removeView(old) }
                             glView = LegacyDolbyGlSurfaceView(it.context) { surface ->
-                                if (!vm.usingExternalKernel && com.aisub.player.media.LegacyDolbyExoBridge.shaderModeFlow.value != com.aisub.player.media.LegacyExoShaderMode.OFF) {
-                                    if (surface != null && surface.isValid) {
-                                        vm.exoPlayer.setVideoSurface(surface)
-                                    }
+                                if (surface == null) {
+                                    vm.exoPlayer.clearVideoSurface()
+                                } else if (!vm.usingExternalKernel &&
+                                    com.aisub.player.media.LegacyDolbyExoBridge.shaderModeFlow.value != com.aisub.player.media.LegacyExoShaderMode.OFF &&
+                                    surface.isValid
+                                ) {
+                                    vm.exoPlayer.setVideoSurface(surface)
                                 }
                             }.apply {
                                 layoutParams = android.widget.FrameLayout.LayoutParams(
@@ -630,16 +651,18 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         glView.currentDecoderSurface()?.takeIf { s -> s.isValid }?.let { s ->
                             vm.exoPlayer.setVideoSurface(s)
                         }
-                    } else if (legacyGlView != null) {
-                        val old = legacyGlView
-                        legacyGlView = null
-                        old?.onPause()
-                        old?.releaseSurfaceResources()
-                        (old?.parent as? android.view.ViewGroup)?.removeView(old)
-                        it.videoSurfaceView?.visibility = android.view.View.VISIBLE
-                        if (!usingExternalKernel) {
-                            (it.videoSurfaceView as? android.view.SurfaceView)?.let(vm.exoPlayer::setVideoSurfaceView)
+                    } else {
+                        if (legacyGlView != null) {
+                            val old = legacyGlView
+                            legacyGlView = null
+                            old?.onPause()
+                            old?.releaseSurfaceResources()
+                            (old?.parent as? android.view.ViewGroup)?.removeView(old)
                         }
+                        if (it.videoSurfaceView?.visibility != android.view.View.VISIBLE) {
+                            it.videoSurfaceView?.visibility = android.view.View.VISIBLE
+                        }
+                        (it.videoSurfaceView as? android.view.SurfaceView)?.let(vm.exoPlayer::setVideoSurfaceView)
                     }
 
                     // 视频自带字幕和 AI 字幕同时显示时，把自带字幕抬高，避免叠在一起
@@ -649,20 +672,51 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     val embeddedInAi = aiVisible && (state.embeddedTracks != null || state.extractingEmbedded)
                     it.subtitleView?.visibility = if (state.liveCaptions || embeddedInAi) android.view.View.GONE else android.view.View.VISIBLE
                     vm.extras.attachVideoView(legacyGlView ?: it.videoSurfaceView)
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
-            DisposableEffect(playerView) {
-                vm.extras.attachVideoView(legacyGlView ?: playerView?.videoSurfaceView)
-                onDispose {
-                    legacyGlView?.let { old ->
-                        old.onPause()
-                        old.releaseSurfaceResources()
-                        (old.parent as? android.view.ViewGroup)?.removeView(old)
-                    }
-                    legacyGlView = null
+                }
+            },
+            onRelease = { view ->
+                legacyGlView?.let { old ->
+                    old.onPause()
+                    old.releaseSurfaceResources()
+                    (old.parent as? android.view.ViewGroup)?.removeView(old)
+                }
+                legacyGlView = null
+                view.player = null
+                if (!vm.usingExternalKernel) {
                     vm.extras.attachVideoView(null)
                 }
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
+
+        // 2. 外部内核（MPV / VLC）专属隔离视图：切换内核或退出时通过 onRelease 立即解绑 Surface
+        if (usingExternalKernel) {
+            androidx.compose.runtime.key(activeKernel) {
+                AndroidView(
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            this.player = player
+                            useController = false
+                            setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                            subtitleView?.visibility = android.view.View.GONE
+                            findViewById<android.view.View>(androidx.media3.ui.R.id.exo_content_frame)
+                                ?.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, _ ->
+                                    videoBottomPx = bottom
+                                    viewHeightPx = height
+                                }
+                        }.also { playerView = it }
+                    },
+                    update = {
+                        if (it.player !== player) it.player = player
+                        it.resizeMode = RESIZE_MODES[resizeIndex].first
+                        it.subtitleView?.visibility = android.view.View.GONE
+                        vm.extras.attachVideoView(it.videoSurfaceView)
+                    },
+                    onRelease = { view ->
+                        view.player = null
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
         }
         if (audioOnly) {

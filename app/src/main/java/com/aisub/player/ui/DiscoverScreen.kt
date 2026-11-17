@@ -130,6 +130,7 @@ fun DiscoverTab(
     onOpenTelegramSearch: (String) -> Unit,
     onOpenWeb: (String) -> Unit,
     onOpenMagnet: (String) -> Unit,
+    onOpenAiRecommend: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -430,6 +431,13 @@ fun DiscoverTab(
                     contentPadding = PaddingValues(horizontal = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
+                    item(key = "ai_recommend_jump") {
+                        DiscoverQuickJumpButton(
+                            icon = AppIcons.AutoAwesome,
+                            label = "AI 按此需求荐片",
+                            onClick = { onOpenAiRecommend(appliedQuery) },
+                        )
+                    }
                     item {
                         DiscoverQuickJumpButton(
                             icon = AppIcons.Telegram,
@@ -524,7 +532,14 @@ fun DiscoverTab(
                 }
             }
         } else {
-            // 默认浏览态：微缩流媒体榜单条 + 紧凑高密度横向海报栏
+            // 默认浏览态：顶部 AI 推荐影片入口 + 微缩流媒体榜单条 + 紧凑高密度横向海报栏
+            item(key = "discover_ai_recommend_entry") {
+                DiscoverAiEntryBanner(
+                    settings = settings,
+                    onClick = { onOpenAiRecommend("") },
+                )
+            }
+
             item(key = "streaming_platforms") {
                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Row(
@@ -2697,4 +2712,691 @@ fun SearchSourcesManageDialog(
             TextButton(onClick = onDismiss) { Text("完成") }
         },
     )
+}
+/** 发现页顶部的「AI 推荐影片」紧凑入口卡片 */
+@Composable
+private fun DiscoverAiEntryBanner(
+    settings: AppSettings,
+    onClick: () -> Unit,
+) {
+    val resolvedModel = remember(settings.provider, settings.providerConfigs) {
+        com.aisub.player.meta.RecommendationEngine.resolveChatTranslator(settings)?.first
+    }
+    val savedPrompt = com.aisub.player.meta.AiDiscoverStore.sessionPrompt
+    val shape = RoundedCornerShape(14.dp)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp)
+            .clip(shape)
+            .background(
+                Brush.horizontalGradient(
+                    colors = listOf(
+                        Orange.copy(alpha = 0.16f),
+                        MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.88f),
+                    ),
+                ),
+            )
+            .border(1.dp, Orange.copy(alpha = 0.36f), shape)
+            .tvFocusRing(shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
+            Modifier
+                .size(34.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Orange.copy(alpha = 0.2f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                AppIcons.AutoAwesome,
+                contentDescription = null,
+                tint = Orange,
+                modifier = Modifier.size(19.dp),
+            )
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    "AI 推荐影片",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                if (!resolvedModel.isNullOrBlank()) {
+                    Text(
+                        resolvedModel,
+                        fontSize = 10.5.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            Text(
+                if (savedPrompt.isNotBlank()) "上次需求：$savedPrompt"
+                else "向 AI 描述想看的题材、剧情设定或心情，智能推荐对应影视作品",
+                fontSize = 11.5.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Row(
+            Modifier
+                .clip(RoundedCornerShape(50))
+                .background(Orange)
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                "找片",
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White,
+            )
+            Icon(
+                AppIcons.ChevronRight,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(14.dp),
+            )
+        }
+    }
+}
+
+private val AI_DISCOVER_PRESETS = listOf(
+    "节奏紧凑、结局反转惊艳的高分悬疑片",
+    "硬核时间循环或平行宇宙科幻佳作",
+    "适合周末放松观看的温情治愈喜剧",
+    "逻辑严密、全员智商在线的犯罪悬疑剧",
+    "评分 8.0 以上但相对冷门的沧海遗珠",
+    "画面唯美、配乐动人的高分动画电影",
+    "根据我最近看过的作品推荐同口味佳作",
+)
+
+/**
+ * 发现页「AI 推荐影片」独立交互页面：
+ * 用户输入任意自然语言观影需求，AI 结合需求（及可选历史偏好）生成定制片单、推荐理由、海报评分与本机入库状态，
+ * 点击任意卡片直达影视详情页（可直接播放或搜索网盘 / Telegram / 影巢片源），返回时完整保留当前推荐现场。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun DiscoverAiRecommendScreen(
+    initialPrompt: String = "",
+    settings: AppSettings,
+    lib: LibraryViewModel,
+    onBack: () -> Unit,
+    onOpenDetail: (DiscoverItem) -> Unit,
+    onOpenSettings: () -> Unit,
+    onUpdateSettings: ((AppSettings) -> Unit)? = null,
+) {
+    val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
+    val wide = LocalWideLayout.current
+    val tv = LocalTv.current
+    val scope = rememberCoroutineScope()
+    val libState by lib.state.collectAsStateWithLifecycle()
+
+    val resolvedChat = remember(settings.provider, settings.providerConfigs) {
+        com.aisub.player.meta.RecommendationEngine.resolveChatTranslator(settings)
+    }
+
+    var promptInput by rememberSaveable {
+        mutableStateOf(
+            initialPrompt.trim().ifEmpty { com.aisub.player.meta.AiDiscoverStore.sessionPrompt },
+        )
+    }
+    var selectedFilter by remember {
+        mutableStateOf(com.aisub.player.meta.AiDiscoverStore.sessionFilter)
+    }
+    var results by remember {
+        mutableStateOf(com.aisub.player.meta.AiDiscoverStore.sessionResults)
+    }
+    var modelLabel by remember(resolvedChat) {
+        mutableStateOf(
+            com.aisub.player.meta.AiDiscoverStore.sessionModelLabel.ifBlank { resolvedChat?.first.orEmpty() },
+        )
+    }
+    var seenTitles by remember {
+        mutableStateOf(com.aisub.player.meta.AiDiscoverStore.sessionSeenTitles)
+    }
+    var history by remember {
+        mutableStateOf(com.aisub.player.meta.AiDiscoverStore.history(context))
+    }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var choosingModel by remember { mutableStateOf(false) }
+
+    val recentWatchedTitles = remember(libState.history) {
+        libState.history
+            .asSequence()
+            .filter { it.entry.isVideo && !it.entry.isLive }
+            .map { NameParser.parse(it.entry.title).title.ifBlank { it.entry.displayTitle } }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(8)
+            .toList()
+    }
+
+    fun triggerRecommend(
+        targetPrompt: String = promptInput,
+        targetFilter: com.aisub.player.meta.AiDiscoverFilter = selectedFilter,
+        refreshBatch: Boolean = false,
+    ) {
+        val clean = targetPrompt.trim()
+        if (clean.isEmpty()) {
+            error = "请先描述你想看的影视类型、剧情或氛围需求"
+            return
+        }
+        if (com.aisub.player.meta.RecommendationEngine.resolveChatTranslator(settings) == null) {
+            if (onUpdateSettings != null) choosingModel = true else onOpenSettings()
+            return
+        }
+        promptInput = clean
+        selectedFilter = targetFilter
+        focusManager.clearFocus()
+
+        com.aisub.player.meta.AiDiscoverStore.recordHistory(context, clean)
+        history = com.aisub.player.meta.AiDiscoverStore.history(context)
+
+        val sameSession = clean == com.aisub.player.meta.AiDiscoverStore.sessionPrompt &&
+            targetFilter == com.aisub.player.meta.AiDiscoverStore.sessionFilter
+        val excludes = if (refreshBatch && sameSession) seenTitles else emptyList()
+
+        scope.launch {
+            loading = true
+            error = null
+            runCatching {
+                com.aisub.player.meta.RecommendationEngine.fetchAiRecommendationsByDescription(
+                    context = context,
+                    settings = settings,
+                    requirement = clean,
+                    filter = targetFilter,
+                    recentWatchedTitles = recentWatchedTitles,
+                    excludeTitles = excludes,
+                    forceRefresh = refreshBatch,
+                )
+            }.onSuccess { (label, list) ->
+                modelLabel = label
+                results = list
+                val nextSeen = ((if (sameSession) seenTitles else emptyList()) + list.map { it.item.title }).distinct()
+                seenTitles = nextSeen
+                com.aisub.player.meta.AiDiscoverStore.sessionPrompt = clean
+                com.aisub.player.meta.AiDiscoverStore.sessionFilter = targetFilter
+                com.aisub.player.meta.AiDiscoverStore.sessionModelLabel = label
+                com.aisub.player.meta.AiDiscoverStore.sessionResults = list
+                com.aisub.player.meta.AiDiscoverStore.sessionSeenTitles = nextSeen
+            }.onFailure { e ->
+                error = e.message ?: "AI 推荐请求失败，请检查模型配置或网络后重试"
+            }
+            loading = false
+        }
+    }
+
+    LaunchedEffect(initialPrompt) {
+        val initClean = initialPrompt.trim()
+        if (initClean.isNotEmpty() &&
+            initClean != com.aisub.player.meta.AiDiscoverStore.sessionPrompt &&
+            resolvedChat != null
+        ) {
+            triggerRecommend(targetPrompt = initClean, refreshBatch = false)
+        }
+    }
+
+    val columns = if (wide || tv) 2 else 1
+
+    DetailScaffold(
+        title = "AI 推荐影片",
+        onBack = onBack,
+        actions = {
+            if (onUpdateSettings != null) {
+                IconButton(onClick = { choosingModel = true }) {
+                    Icon(AppIcons.Translate, contentDescription = "切换 AI 模型")
+                }
+            }
+            IconButton(onClick = onOpenSettings) {
+                Icon(AppIcons.Settings, contentDescription = "设置")
+            }
+        },
+    ) {
+        LazyColumn(
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            item(key = "ai_input_card") {
+                SurfaceCard(Modifier.fillMaxWidth()) {
+                    Column(
+                        Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(AppIcons.AutoAwesome, null, tint = Orange, modifier = Modifier.size(19.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    "向 AI 描述你的观影需求",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    if (resolvedChat != null) "当前模型：${modelLabel.ifBlank { resolvedChat.first }}"
+                                    else "尚未配置 AI 大模型，点击右侧选择或前往设置填写密钥",
+                                    fontSize = 11.5.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            if (onUpdateSettings != null) {
+                                TextButton(
+                                    onClick = { choosingModel = true },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                ) {
+                                    Text(if (resolvedChat == null) "配置模型" else "换模型", fontSize = 12.sp)
+                                }
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = promptInput,
+                            onValueChange = { promptInput = it },
+                            placeholder = {
+                                Text(
+                                    "例如：想看几部像《暗黑》《源代码》那样逻辑严密的时间循环悬疑片，2010年以后，不要恐怖片…",
+                                    fontSize = 13.sp,
+                                )
+                            },
+                            trailingIcon = if (promptInput.isNotEmpty()) {
+                                {
+                                    IconButton(onClick = { promptInput = "" }) {
+                                        Icon(AppIcons.Close, contentDescription = "清空输入", modifier = Modifier.size(18.dp))
+                                    }
+                                }
+                            } else null,
+                            minLines = 2,
+                            maxLines = 4,
+                            phoneLabel = "描述想看的影视需求",
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Row(
+                                Modifier.weight(1f),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                com.aisub.player.meta.AiDiscoverFilter.entries.forEach { f ->
+                                    FilterChip(
+                                        selected = selectedFilter == f,
+                                        onClick = {
+                                            selectedFilter = f
+                                            if (promptInput.isNotBlank() && results.isNotEmpty() && !loading) {
+                                                triggerRecommend(targetPrompt = promptInput, targetFilter = f, refreshBatch = false)
+                                            }
+                                        },
+                                        label = { Text(f.label, fontSize = 12.sp) },
+                                    )
+                                }
+                            }
+
+                            if (results.isNotEmpty()) {
+                                OutlinedButton(
+                                    onClick = { triggerRecommend(refreshBatch = true) },
+                                    enabled = !loading && promptInput.isNotBlank(),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                ) {
+                                    Icon(AppIcons.Refresh, null, modifier = Modifier.size(15.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("换一批", fontSize = 12.5.sp)
+                                }
+                            }
+
+                            Button(
+                                onClick = { triggerRecommend(refreshBatch = false) },
+                                enabled = !loading,
+                                colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                            ) {
+                                Icon(AppIcons.AutoAwesome, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text(if (loading) "推荐中…" else "AI 推荐", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+
+                        // 灵感示例与历史记录
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                "快捷灵感",
+                                fontSize = 11.5.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                AI_DISCOVER_PRESETS.forEach { preset ->
+                                    Box(
+                                        Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.78f))
+                                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                                            .tvFocusRing(RoundedCornerShape(8.dp))
+                                            .clickable(enabled = !loading) {
+                                                promptInput = preset
+                                                triggerRecommend(targetPrompt = preset, refreshBatch = false)
+                                            }
+                                            .padding(horizontal = 9.dp, vertical = 4.dp),
+                                    ) {
+                                        Text(preset, fontSize = 11.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+                        }
+
+                        if (history.isNotEmpty()) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        "历史描述",
+                                        fontSize = 11.5.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Text(
+                                        "清空",
+                                        fontSize = 11.5.sp,
+                                        color = Orange,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                com.aisub.player.meta.AiDiscoverStore.clearHistory(context)
+                                                history = emptyList()
+                                            }
+                                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    )
+                                }
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    history.take(8).forEach { h ->
+                                        Box(
+                                            Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                                                .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                                                .tvFocusRing(RoundedCornerShape(8.dp))
+                                                .clickable(enabled = !loading) {
+                                                    promptInput = h
+                                                    triggerRecommend(targetPrompt = h, refreshBatch = false)
+                                                }
+                                                .padding(horizontal = 9.dp, vertical = 4.dp),
+                                        ) {
+                                            Text(h, fontSize = 11.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (resolvedChat == null) {
+                item(key = "ai_unconfigured") {
+                    SurfaceCard(Modifier.fillMaxWidth()) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Text(
+                                "请先在「字幕翻译」设置中配置任意对话大模型（支持 DeepSeek、Gemini、通义千问、火山豆包、Claude、OpenAI 兼容接口或本地 Ollama），即可根据你的口语化需求智能找片。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Button(
+                                onClick = { if (onUpdateSettings != null) choosingModel = true else onOpenSettings() },
+                                colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
+                            ) {
+                                Text("去配置", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (loading) {
+                item(key = "ai_loading") {
+                    SurfaceCard(Modifier.fillMaxWidth()) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 24.dp, horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.4.dp, color = Orange)
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                "AI 正在根据你的需求挑选影视作品并匹配海报评分…",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+
+            error?.let { errMsg ->
+                item(key = "ai_error") {
+                    SurfaceCard(Modifier.fillMaxWidth()) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Text(
+                                errMsg,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.weight(1f),
+                            )
+                            OutlinedButton(
+                                onClick = { triggerRecommend(refreshBatch = false) },
+                                enabled = !loading && promptInput.isNotBlank(),
+                            ) {
+                                Text("重试", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!loading && results.isNotEmpty()) {
+                item(key = "ai_result_header") {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "为你推荐 ${results.size} 部影视作品（点开可查看详情、直接播放或搜片源）",
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+
+                items(
+                    results.chunked(columns),
+                    key = { row -> row.joinToString("|") { it.item.id + it.reason.hashCode() } },
+                ) { row ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        for (i in 0 until columns) {
+                            val rec = row.getOrNull(i)
+                            if (rec != null) {
+                                DiscoverAiResultCard(
+                                    rec = rec,
+                                    onClick = { onOpenDetail(rec.item) },
+                                    modifier = Modifier.weight(1f),
+                                )
+                            } else {
+                                Spacer(Modifier.weight(1f))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (choosingModel && onUpdateSettings != null) {
+        TranslateModelDialog(
+            settings = settings,
+            title = "选择 AI 推荐模型",
+            onDismiss = { choosingModel = false },
+        ) { updated ->
+            onUpdateSettings(updated)
+            choosingModel = false
+            if (promptInput.isNotBlank()) {
+                triggerRecommend(refreshBatch = true)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiscoverAiResultCard(
+    rec: com.aisub.player.meta.AiRecommendedItem,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val item = rec.item
+    val shape = RoundedCornerShape(14.dp)
+    SurfaceCard(
+        modifier = modifier
+            .tvFocusRing(shape, scale = true)
+            .clickable(onClick = onClick),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(11.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Box(
+                Modifier
+                    .width(82.dp)
+                    .aspectRatio(2f / 3f)
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+            ) {
+                NetImage(
+                    url = item.posterUrl,
+                    modifier = Modifier.fillMaxSize(),
+                    maxSize = 360,
+                    contentScale = ContentScale.Crop,
+                    fallback = AppIcons.Movie,
+                )
+                rec.inLibraryName?.let {
+                    Text(
+                        "库内可播",
+                        color = Color.White,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(4.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Orange)
+                            .padding(horizontal = 4.dp, vertical = 1.dp),
+                    )
+                }
+            }
+
+            Column(
+                Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        item.title,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    item.rating?.let { r ->
+                        Text(
+                            "★ %.1f".format(r) + (item.ratingLabel?.let { " $it" }.orEmpty()),
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Orange,
+                            maxLines = 1,
+                        )
+                    }
+                }
+
+                val metaLine = buildList {
+                    add(if (item.kind == "tv") "剧集" else "电影")
+                    item.year?.let { add("$it") }
+                    if (item.countries.isNotEmpty()) add(item.countries.take(2).joinToString("/"))
+                    if (item.genres.isNotEmpty()) add(item.genres.take(3).joinToString("·"))
+                }.joinToString(" · ")
+                Text(
+                    metaLine,
+                    fontSize = 11.5.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Orange.copy(alpha = 0.10f))
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                ) {
+                    Text(
+                        rec.reason,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.92f),
+                        maxLines = 4,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
 }

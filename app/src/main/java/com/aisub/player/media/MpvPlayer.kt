@@ -138,7 +138,7 @@ class MpvPlayer(
         }
 
         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-            if (width > 0 && height > 0) {
+            if (width > 0 && height > 0 && surfaceAttached) {
                 bridge.setPropertyString("android-surface-size", "${width}x${height}")
             }
         }
@@ -151,6 +151,10 @@ class MpvPlayer(
 
     private val textureSurfaceListener = object : TextureView.SurfaceTextureListener {
         override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
+            if (surfaceAttached) {
+                surfaceAttached = false
+                bridge.detachSurface()
+            }
             textureSurface?.release()
             val s = Surface(st)
             textureSurface = s
@@ -164,7 +168,7 @@ class MpvPlayer(
         }
 
         override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {
-            if (width > 0 && height > 0) {
+            if (width > 0 && height > 0 && surfaceAttached) {
                 bridge.setPropertyString("android-surface-size", "${width}x${height}")
             }
         }
@@ -189,6 +193,7 @@ class MpvPlayer(
 
         override fun onPropertyDouble(name: String, value: Double) {
             mainHandler.post {
+                if (items.isEmpty()) return@post
                 when (name) {
                     "time-pos" -> if (!value.isNaN() && value >= 0.0) {
                         positionMs = (value * 1000.0).toLong()
@@ -206,6 +211,7 @@ class MpvPlayer(
 
         override fun onPropertyBoolean(name: String, value: Boolean) {
             mainHandler.post {
+                if (items.isEmpty()) return@post
                 when (name) {
                     "paused-for-cache" -> if (playbackState != Player.STATE_IDLE && playbackState != Player.STATE_ENDED) {
                         val next = if (value) Player.STATE_BUFFERING else Player.STATE_READY
@@ -263,15 +269,14 @@ class MpvPlayer(
         bridge.setOptionString("config", "no")
         bridge.setOptionString("idle", "yes")
         bridge.setOptionString("keep-open", "no")
-        bridge.setOptionString("force-window", "yes")
+        // Surface 尚未绑定前保持 vo=null 与 force-window=no，待 Surface 有效时由 attachSurface 激活 gpu-next/gpu
+        bridge.setOptionString("force-window", "no")
+        bridge.setOptionString("vo", "null")
         bridge.setOptionString("input-default-bindings", "no")
         bridge.setOptionString("input-vo-keyboard", "no")
         bridge.setOptionString("osc", "no")
         bridge.setOptionString("osd-level", "0")
 
-        // 优先使用 gpu-next（内置 libplacebo 7.x，完整支持杜比视界 Profile 5 IPTPQc2 与 RPU 动态色调映射），
-        // 老旧仅支持 GLES 2.0 的芯片自动无缝回退至 gpu
-        bridge.setOptionString("vo", "gpu-next,gpu")
         bridge.setOptionString("gpu-context", "android")
         bridge.setOptionString("gpu-api", "opengl")
 
@@ -404,7 +409,7 @@ class MpvPlayer(
     /** 供「视频信息」面板展示当前色彩与解码链路详情。 */
     val pipelineSummary: String
         get() {
-            val vo = activeVo ?: "gpu-next"
+            val vo = activeVo?.takeIf { it.isNotBlank() && it != "null" } ?: "gpu-next"
             val hw = activeHwdec?.takeIf { it.isNotBlank() && it != "no" }?.let { "硬解 ($it)" } ?: "FFmpeg 软解"
             val dvProf = detectedDolbyProfile
             val isDv = dvProf != null || dolbyProfile5Hint || activeColorMatrix.equals("dolbyvision", ignoreCase = true)
@@ -447,6 +452,33 @@ class MpvPlayer(
         return positionMs
     }
 
+    /**
+     * 切换至其它播放内核（如 ExoPlayer / VLC）前调用：
+     * 1. 先同步解绑 Surface 并将 mpv `vo` 切为 `null`，确保 EGL 渲染线程与 `ANativeWindow` 完整释放；
+     * 2. 再同步执行 `stop` 关闭解复用连接与音频输出，清空当前播放项，彻底消除跨内核切换闪退与单连接抢流。
+     */
+    fun deactivateForKernelSwitch() {
+        pendingLoadUrl = null
+        directRemoteStream = false
+        lastDirectPollMs = 0L
+        playWhenReady = false
+        detachCurrentViews()
+        if (bridge.isCreated) {
+            bridge.commandSync("stop")
+        }
+        items = emptyList()
+        playbackState = Player.STATE_IDLE
+        durationMs = C.TIME_UNSET
+        positionMs = 0L
+        videoSize = VideoSize.UNKNOWN
+        error = null
+        tracks = Tracks.EMPTY
+        chaptersList = emptyList()
+        detectedDolbyProfile = null
+        activeColorMatrix = null
+        invalidateState()
+    }
+
     private fun restoreVideoTrackAfterSurface() {
         if (C.TRACK_TYPE_VIDEO !in trackParams.disabledTrackTypes && items.isNotEmpty()) {
             val targetVid = if (activeVideoTrackId > 0) activeVideoTrackId.toString() else "auto"
@@ -481,6 +513,9 @@ class MpvPlayer(
     }
 
     private fun handleMpvEvent(eventId: Int, reason: Int, errCode: Int) {
+        if (items.isEmpty() && eventId != MpvNativeBridge.EVENT_SHUTDOWN) {
+            return
+        }
         when (eventId) {
             MpvNativeBridge.EVENT_START_FILE -> {
                 if (items.isNotEmpty()) {
@@ -759,7 +794,7 @@ class MpvPlayer(
             .setPlaybackState(if (items.isEmpty()) Player.STATE_IDLE else playbackState)
             .setPlayerError(error)
             .setPlaylist(playlist)
-            .setCurrentMediaItemIndex(0)
+            .setCurrentMediaItemIndex(if (playlist.isEmpty()) C.INDEX_UNSET else 0)
             .setContentPositionMs(
                 PositionSupplier {
                     if (playbackState == Player.STATE_ENDED && durationMs != C.TIME_UNSET) durationMs
@@ -787,6 +822,53 @@ class MpvPlayer(
         chaptersList = emptyList()
         detectedDolbyProfile = null
         activeColorMatrix = null
+        error = null
+        if (items.isEmpty() && bridge.isCreated) {
+            pendingLoadUrl = null
+            playbackState = Player.STATE_IDLE
+            bridge.commandSync("stop")
+        }
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleAddMediaItems(index: Int, mediaItems: List<MediaItem>): ListenableFuture<*> {
+        if (mediaItems.isEmpty()) return Futures.immediateVoidFuture()
+        if (items.isEmpty()) {
+            items = mediaItems.take(1)
+        }
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleMoveMediaItems(fromIndex: Int, toIndex: Int, newIndex: Int): ListenableFuture<*> {
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleRemoveMediaItems(fromIndex: Int, toIndex: Int): ListenableFuture<*> {
+        if (items.isEmpty()) return Futures.immediateVoidFuture()
+        val safeFrom = fromIndex.coerceIn(0, items.size)
+        val safeTo = toIndex.coerceIn(safeFrom, items.size)
+        if (safeFrom < safeTo) {
+            val mutable = items.toMutableList()
+            mutable.subList(safeFrom, safeTo).clear()
+            items = mutable.take(1)
+        }
+        if (items.isEmpty()) {
+            pendingLoadUrl = null
+            directRemoteStream = false
+            lastDirectPollMs = 0L
+            playbackState = Player.STATE_IDLE
+            durationMs = C.TIME_UNSET
+            positionMs = 0L
+            videoSize = VideoSize.UNKNOWN
+            error = null
+            tracks = Tracks.EMPTY
+            chaptersList = emptyList()
+            detectedDolbyProfile = null
+            activeColorMatrix = null
+            if (bridge.isCreated) {
+                bridge.commandSync("stop")
+            }
+        }
         return Futures.immediateVoidFuture()
     }
 
@@ -843,7 +925,7 @@ class MpvPlayer(
             pendingLoadStartSec = startSec
             pendingHeaders = headersForMpv
             mainHandler.postDelayed({
-                if (pendingLoadUrl == targetUrl) {
+                if (pendingLoadUrl == targetUrl && items.isNotEmpty()) {
                     flushPendingLoadIfReady()
                 }
             }, 120L)
@@ -986,13 +1068,20 @@ class MpvPlayer(
 
     override fun handleStop(): ListenableFuture<*> {
         pendingLoadUrl = null
-        bridge.command("stop")
+        directRemoteStream = false
+        lastDirectPollMs = 0L
+        if (bridge.isCreated) {
+            bridge.commandSync("stop")
+        }
         playbackState = Player.STATE_IDLE
         return Futures.immediateVoidFuture()
     }
 
     override fun handleRelease(): ListenableFuture<*> {
         pendingLoadUrl = null
+        directRemoteStream = false
+        lastDirectPollMs = 0L
+        items = emptyList()
         detachCurrentViews()
         bridge.destroy()
         playbackState = Player.STATE_IDLE

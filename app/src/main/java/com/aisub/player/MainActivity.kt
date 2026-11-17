@@ -362,6 +362,15 @@ class MainActivity : ComponentActivity() {
                                 nav.push(Screen.Web)
                             },
                         )
+                        is Screen.DiscoverAiRecommend -> com.aisub.player.ui.DiscoverAiRecommendScreen(
+                            initialPrompt = screen.initialPrompt,
+                            settings = ui.settings,
+                            lib = lib,
+                            onBack = back,
+                            onOpenDetail = { item -> nav.push(Screen.DiscoverDetail(item)) },
+                            onOpenSettings = { nav.push(Screen.Settings) },
+                            onUpdateSettings = main::updateSettings,
+                        )
                         is Screen.TelegramSearch -> com.aisub.player.ui.TelegramGlobalSearchScreen(
                             initialQuery = screen.query,
                             lib = lib,

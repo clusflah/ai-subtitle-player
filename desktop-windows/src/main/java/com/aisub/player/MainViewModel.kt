@@ -830,7 +830,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 mpvPlayer?.clearMediaItems()
                 vlcPlayer?.stop()
                 (exoPlayer as? com.aisub.player.desktop.DesktopExoPlayer)?.let { d ->
-                    d.autoDolbyProtection = _state.value.settings.autoDolbyMpv
+                    d.autoDolbyProtection = _state.value.settings.autoDolbyMpv && manualEntryKernel[entry.uri] != PlayerKernel.EXO
                     d.hwdecPreference = _state.value.settings.decodeMode.forceHwdecFlag
                 }
                 val cleanQueue = savedQueue.filter { it == entry || !VlcPlayer.needsVlc(it.title) }
@@ -901,7 +901,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         mpvPlayer?.stop()
         mpvPlayer?.clearMediaItems()
         vlcPlayer?.stop()
-        (exoPlayer as? com.aisub.player.desktop.DesktopExoPlayer)?.autoDolbyProtection = _state.value.settings.autoDolbyMpv
+        (exoPlayer as? com.aisub.player.desktop.DesktopExoPlayer)?.autoDolbyProtection =
+            _state.value.settings.autoDolbyMpv && manualEntryKernel[start.uri] != PlayerKernel.EXO
         _player.value = exoPlayer
         // 连播队列里跳过光盘镜像，ExoPlayer 打不开
         queue = entries.filter { it == start || !VlcPlayer.needsVlc(it.title) }

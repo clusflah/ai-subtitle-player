@@ -57,6 +57,8 @@ sealed interface Screen {
     data class DiscoverDetail(val item: com.aisub.player.meta.DiscoverItem) : Screen
     /** 发现页的流媒体榜单 / 豆瓣与 TMDB 全部分类榜单网格页。 */
     data class DiscoverChart(val chartId: String? = null) : Screen
+    /** 发现页 AI 推荐影片页：向 AI 描述需求，智能推荐对应影视作品。 */
+    data class DiscoverAiRecommend(val initialPrompt: String = "") : Screen
     /** 站内 Telegram 全局跨频道搜索页。 */
     data class TelegramSearch(val query: String) : Screen
 }

@@ -315,6 +315,12 @@ fun HomeScreen(
                             }
                         }
                         if (isDiscover) {
+                            LiquidGlassIconButton(
+                                onClick = { nav.push(Screen.DiscoverAiRecommend()) },
+                                icon = AppIcons.AutoAwesome,
+                                contentDescription = "AI 推荐影片",
+                                size = 38.dp,
+                            )
                             // 发现页：搜索行缩减为右上角搜索图标，替换原有的「···」按钮
                             LiquidGlassIconButton(
                                 onClick = { val next = !discoverSearching; discoverSearching = next; com.aisub.player.meta.DiscoverRepository.setSessionSearchExpanded(next) },
@@ -716,6 +722,7 @@ fun HomeScreen(
                         nav.push(Screen.Web)
                     },
                     onOpenMagnet = { mag -> com.aisub.player.meta.MagnetLaunch.pending = mag },
+                    onOpenAiRecommend = { prompt -> nav.push(Screen.DiscoverAiRecommend(prompt)) },
                 )
                 Tab.BROWSE -> BrowseTab(
                     state = state,
