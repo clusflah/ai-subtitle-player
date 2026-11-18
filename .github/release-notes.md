@@ -1,4 +1,14 @@
-## 本版更新（2.10.8）
+## 本版更新（2.10.9）
+
+- **彻底解决 Windows 电脑端 MPV 内核 4K 高码率卡顿与音画不同步问题**：
+  - 视频帧传输由本机回环 TCP 切换为 OS 匿名管道 `pipe:1` 并采用 `64KB` 分块读取，消除回环栈限速及 OpenJDK Windows JNI 大块管道读取触发的 `VirtualAlloc`/`VirtualFree` 页表抖动；`Plex / Emby / Jellyfin` 媒体服务器直连绕过本机中转，跑满 4K 杜比视界高码率原盘解码吞吐
+  - 新增 `-af aresample=async=1:first_pts=0` 时间戳对齐、WASAPI 音频线并行预打开、首帧互斥门控握手与 `atempo` 倍速同步，根治跳转或切内核后的唇音不同步与起播掉帧
+- **全面修复 VLC 与 MPV 内核下内嵌字幕不显示、无法提取翻译再显示的问题（Windows / Android / TV）**：
+  - **Windows MPV / VLC 内核**：MPV 管线支持多路内嵌文本字幕同步解复用、播放页叠加显示、0ms 无缝切轨及同语言空轨自动切换至有对白轨道；补齐桌面端 `VlcPlayer` / `LibVlcCompat` 独立 `VLC_ONLY` 后端的真实音轨与 SPU 字幕轨枚举、语言/Forced 识别、选轨与 AI 字幕开启时的自动避让
+  - **Android / TV MPV 与 VLC 内核**：为 `libmpv` 配置 `config=yes` 与系统字体 `subfont.ttf`（解决无 `fontconfig` 环境下 SRT 内嵌字幕无法渲染的问题），修复 JNI `MPV_FORMAT_NONE` 字幕清空事件并实时接入 `sub-text` 流；为 `VlcPlayer` 挂载透明字幕 `SurfaceView`（`setSubtitlesView`），解除外部内核选轨记忆与首选语言拦截
+  - **远程大体积 MKV 内嵌字幕秒级流式提取与实时翻译**：MPV 播放中零额外连接直接复用已解复用出的内嵌字幕交由翻译器；远程大文件提取采用 `-copyts -ss` + `-map 0:v:0?` 保留 Matroska 关键帧索引并按滑动窗口流式吐字、拖动自动补读，自动跳过无对白空轨与强制轨，秒出首句译文
+
+## 2.10.8 更新
 
 - **修复 Windows 电脑端默认内核播放 HDR10 / HLG / BT.2020 / 杜比视界影片偏色问题**：
   - 升级容器首尾字节探测（支持 >4GB 64 位 `mdat` 非 faststart 超大 MP4 精确定位尾部 `moov`/`stsd`、MP4 `colr`/`mdcv`/`clli`、MKV `Colour` 与双向 `dvcC` 扫描）及 `ffprobe` 色彩空间判定，在默认内核下自动识别 HDR10 / HLG / BT.2020 与杜比视界片源并切换至 GPU `libplacebo` 动态色调映射管线，消除 LibVLC `vmem` 软缩放回调无色调映射导致的灰白、偏黄橙或紫绿偏色；普通 SDR 片源在默认自动解码模式下同步启用硬件加速

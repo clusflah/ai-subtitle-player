@@ -87,6 +87,63 @@ object EmbeddedSubtitles {
         listener(demuxedTracks())
     }
 
+    internal fun parseLanguageFromLabel(desc: String?): String? {
+        if (desc.isNullOrBlank()) return null
+        val d = desc.lowercase()
+        return when {
+            "english" in d || "英语" in d || "英文" in d || "[en]" in d -> "en"
+            "chinese" in d || "mandarin" in d || "cantonese" in d || "中文" in d || "汉语" in d || "国语" in d || "粤语" in d || "简" in d || "繁" in d || "[zh]" in d -> "zh"
+            "japanese" in d || "日本語" in d || "日语" in d || "日文" in d || "[ja]" in d -> "ja"
+            "korean" in d || "한국어" in d || "韩语" in d || "韩文" in d || "[ko]" in d -> "ko"
+            "french" in d || "français" in d || "法语" in d || "法文" in d || "[fr]" in d -> "fr"
+            "german" in d || "deutsch" in d || "德语" in d || "德文" in d || "[de]" in d -> "de"
+            "spanish" in d || "español" in d || "西班牙" in d || "[es]" in d -> "es"
+            "portuguese" in d || "português" in d || "葡萄牙" in d || "[pt]" in d -> "pt"
+            "russian" in d || "русский" in d || "俄语" in d || "[ru]" in d -> "ru"
+            "italian" in d || "italiano" in d || "意大利" in d || "[it]" in d -> "it"
+            "arabic" in d || "阿拉伯" in d || "[ar]" in d -> "ar"
+            "thai" in d || "泰语" in d || "[th]" in d -> "th"
+            "vietnamese" in d || "越南" in d || "[vi]" in d -> "vi"
+            else -> null
+        }
+    }
+
+    internal fun recordExternalCue(
+        trackId: Int,
+        language: String?,
+        label: String?,
+        codec: String?,
+        startMs: Long,
+        endMs: Long,
+        lines: List<String>,
+        notify: Boolean = true,
+    ) {
+        if (lines.isEmpty() || startMs < 0L) return
+        val collector = demuxCollectors.getOrPut(trackId) {
+            TextCollector(trackId).apply {
+                format = Format.Builder()
+                    .setId(trackId.toString())
+                    .setLanguage(language)
+                    .setLabel(label)
+                    .setSampleMimeType(MimeTypes.APPLICATION_MEDIA3_CUES)
+                    .setCodecs(codec)
+                    .build()
+            }
+        }
+        val existing = collector.format
+        if (existing != null && ((existing.language == null && language != null) || (existing.label == null && label != null) || (existing.codecs == null && codec != null))) {
+            collector.format = existing.buildUpon()
+                .setLanguage(existing.language ?: language)
+                .setLabel(existing.label ?: label)
+                .setCodecs(existing.codecs ?: codec)
+                .build()
+        }
+        val durationUs = (endMs - startMs).takeIf { it > 0L }?.times(1000L) ?: C.TIME_UNSET
+        if (collector.addSample(startMs * 1000L, durationUs, lines) && notify) {
+            notifyDemuxUpdated()
+        }
+    }
+
     private fun recordDemuxedCues(
         format: Format,
         startUs: Long,
@@ -331,6 +388,7 @@ object EmbeddedSubtitles {
                             val pt = sm.getSeekPoints(targetUs).first
                             if (kotlin.math.abs(pt.position - pos) > (1L shl 20)) {
                                 output.texts.values.forEach { it.clearSamples() }
+                                output.maxMediaTimeUs = 0L
                                 adapter.seek(pt.position, pt.timeUs)
                                 position.position = pt.position
                                 result = Extractor.RESULT_SEEK
@@ -347,6 +405,19 @@ object EmbeddedSubtitles {
                             onPartial(mergeTracks(output.texts.values.map { it.toTrack() }, demuxedTracks()))
                         }
                     }
+                    // 远程大文件只预先解析当前播放点起 15 分钟内的字幕窗口，拖到更后面再按需补读
+                    val isRemoteUri = uri.scheme?.lowercase() in setOf("http", "https", "cloud", "smb", "webdav", "ftp", "rtsp")
+                    if (isRemoteUri && (length > 300L * 1024 * 1024 || length == C.LENGTH_UNSET.toLong()) &&
+                        output.tracksEnded && (seekedToStart || startMs <= 15_000L)
+                    ) {
+                        val horizonUs = (startMs + 15L * 60_000L) * 1000L
+                        val reachedHorizon = (output.totalSamples() > 0 && output.maxTimeUs() >= horizonUs) ||
+                            output.maxMediaTimeUs >= horizonUs + 30_000_000L
+                        if (reachedHorizon) {
+                            result = Extractor.RESULT_END_OF_INPUT
+                            break
+                        }
+                    }
                 }
                 dataSource.close()
                 // MKV 读完文件末尾的 Cues 索引后会返回 RESULT_SEEK 跳回 0:00，此时直接改跳到当前播放位置附近，省去回 0:00 的多余连接
@@ -357,6 +428,7 @@ object EmbeddedSubtitles {
                         val targetUs = (startMs - 5_000L).coerceAtLeast(0L) * 1000L
                         val pt = sm.getSeekPoints(targetUs).first
                         output.texts.values.forEach { it.clearSamples() }
+                        output.maxMediaTimeUs = 0L
                         adapter.seek(pt.position, pt.timeUs)
                         position.position = pt.position
                     }
@@ -384,9 +456,29 @@ object EmbeddedSubtitles {
         val texts = LinkedHashMap<Int, TextCollector>()
         var tracksEnded = false
         var seekMap: SeekMap? = null
+        @Volatile
+        var maxMediaTimeUs = 0L
 
         override fun track(id: Int, type: Int): TrackOutput =
-            if (type == C.TRACK_TYPE_TEXT) texts.getOrPut(id) { TextCollector(id) } else DiscardingTrackOutput()
+            if (type == C.TRACK_TYPE_TEXT) {
+                texts.getOrPut(id) { TextCollector(id) }
+            } else {
+                val delegate = DiscardingTrackOutput()
+                object : TrackOutput by delegate {
+                    override fun sampleMetadata(
+                        timeUs: Long,
+                        flags: Int,
+                        size: Int,
+                        offset: Int,
+                        cryptoData: TrackOutput.CryptoData?,
+                    ) {
+                        if (timeUs != C.TIME_UNSET && timeUs > maxMediaTimeUs) {
+                            maxMediaTimeUs = timeUs
+                        }
+                        delegate.sampleMetadata(timeUs, flags, size, offset, cryptoData)
+                    }
+                }
+            }
 
         override fun endTracks() {
             tracksEnded = true
@@ -397,6 +489,8 @@ object EmbeddedSubtitles {
         }
 
         fun totalSamples(): Int = texts.values.sumOf { it.sampleCount() }
+
+        fun maxTimeUs(): Long = texts.values.maxOfOrNull { it.maxTimeUs() } ?: 0L
     }
 
     /** 收集一条字幕轨的样本。转码后的样本是 Media3 自己的格式，用 CueDecoder 解开。 */
@@ -410,14 +504,19 @@ object EmbeddedSubtitles {
 
         /** (开始, 时长, 文字)，时长未知时为 C.TIME_UNSET */
         private val samples = ArrayList<Triple<Long, Long, List<String>>>()
+        private var maxSampleUs = 0L
 
         @Synchronized
         fun sampleCount(): Int = samples.size
 
         @Synchronized
+        fun maxTimeUs(): Long = maxSampleUs
+
+        @Synchronized
         fun clearSamples() {
             samples.clear()
             sampleKeys.clear()
+            maxSampleUs = 0L
         }
 
         @Synchronized
@@ -426,6 +525,7 @@ object EmbeddedSubtitles {
             val key = ((startUs / 1000L) shl 20) xor lines.hashCode().toLong()
             if (!sampleKeys.add(key)) return false
             samples += Triple(startUs, durationUs, lines)
+            if (startUs > maxSampleUs) maxSampleUs = startUs
             return true
         }
 

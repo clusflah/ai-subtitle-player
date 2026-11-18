@@ -73,6 +73,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
             MediaPlayer.Event.Playing -> {
                 vlcPlaybackState = Player.STATE_READY
                 pendingSeekMs?.let { mp.setTime(it); pendingSeekMs = null }
+                applyTrackParamsToMp()
                 refreshTracks()
             }
             MediaPlayer.Event.Paused -> if (vlcPlaybackState == Player.STATE_BUFFERING) vlcPlaybackState = Player.STATE_READY
@@ -88,7 +89,11 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
                 vlcPlaybackState = Player.STATE_IDLE
             }
             MediaPlayer.Event.LengthChanged -> durationMs = e.lengthChanged.takeIf { it > 0 } ?: C.TIME_UNSET
-            MediaPlayer.Event.ESAdded, MediaPlayer.Event.ESDeleted, MediaPlayer.Event.ESSelected -> refreshTracks()
+            MediaPlayer.Event.ESAdded, MediaPlayer.Event.ESDeleted -> {
+                applyTrackParamsToMp()
+                refreshTracks()
+            }
+            MediaPlayer.Event.ESSelected -> refreshTracks()
             // 画面开始输出：通知 PlayerView 去掉黑色遮罩，并更新视频尺寸（决定画面比例）
             MediaPlayer.Event.Vout -> if (e.voutCount > 0) {
                 firstFrame = true
@@ -128,20 +133,34 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         mp.getChapters(-1).orEmpty().map { Chapter(it.timeOffset, (it.timeOffset + it.duration).takeIf { _ -> it.duration > 0 }, it.name.orEmpty()) }
     }.getOrDefault(emptyList())
 
+    /** 是否暂不显示内嵌 SPU 字幕（AI 字幕已覆盖显示时避让双重字幕） */
+    fun setEmbeddedSubtitlesSuppressed(suppressed: Boolean) {
+        mp.setEmbeddedSubtitlesSuppressed(suppressed)
+    }
+
     /** VLC 的音轨、内嵌字幕轨转成 Media3 的 Tracks，播放页的音轨列表直接可用。 */
     private fun refreshTracks() {
         val groups = ArrayList<Tracks.Group>()
         val audio = mp.audioTracks.orEmpty().filter { it.id >= 0 }
         val currentAudio = mp.audioTrack
         audio.forEach { t ->
-            val f = Format.Builder().setId("a${t.id}").setLabel(t.name).setSampleMimeType(MimeTypes.AUDIO_UNKNOWN).build()
-            groups += Tracks.Group(TrackGroup("a${t.id}", f), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(t.id == currentAudio))
+            val lang = com.aisub.player.subtitle.EmbeddedSubtitles.parseLanguageFromLabel(t.name)
+            val fb = Format.Builder().setId("a${t.id}").setLabel(t.name).setSampleMimeType(MimeTypes.AUDIO_UNKNOWN)
+            if (lang != null) fb.setLanguage(lang)
+            groups += Tracks.Group(TrackGroup("a${t.id}", fb.build()), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(t.id == currentAudio))
         }
         val spu = mp.spuTracks.orEmpty().filter { it.id >= 0 }
         val currentSpu = mp.spuTrack
         spu.forEach { t ->
-            val f = Format.Builder().setId("s${t.id}").setLabel(t.name).setSampleMimeType(MimeTypes.TEXT_UNKNOWN).build()
-            groups += Tracks.Group(TrackGroup("s${t.id}", f), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(t.id == currentSpu))
+            val lang = com.aisub.player.subtitle.EmbeddedSubtitles.parseLanguageFromLabel(t.name)
+            val selFlag = if ("forced" in t.name.lowercase()) C.SELECTION_FLAG_FORCED else 0
+            val fb = Format.Builder()
+                .setId("s${t.id}")
+                .setLabel(t.name)
+                .setSampleMimeType(MimeTypes.TEXT_UNKNOWN)
+                .setSelectionFlags(selFlag)
+            if (lang != null) fb.setLanguage(lang)
+            groups += Tracks.Group(TrackGroup("s${t.id}", fb.build()), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(t.id == currentSpu))
         }
         tracks = Tracks(groups)
     }
@@ -203,7 +222,14 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         val uri = item.localConfiguration?.uri ?: Uri.parse(item.mediaId)
         val name = item.mediaMetadata.title?.toString() ?: uri.lastPathSegment.orEmpty()
         error = null
-        val media = Media(libVlc, Uri.parse(proxy.register(uri, name)))
+        val scheme = uri.scheme?.lowercase().orEmpty()
+        val isLocalFile = scheme.isEmpty() || scheme == "file" || scheme == "content"
+        val targetUri = if (isLocalFile && !needsVlc(name)) {
+            runCatching { Uri.parse(proxy.register(uri, name)) }.getOrDefault(uri)
+        } else {
+            uri
+        }
+        val media = Media(libVlc, targetUri)
         when (userForceHwdec) {
             true -> media.setHWDecoderEnabled(true, true)
             false -> {
@@ -263,19 +289,48 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         return Futures.immediateVoidFuture()
     }
 
+    private fun applyTrackParamsToMp(params: TrackSelectionParameters = trackParams) {
+        val audioOverride = params.overrides.values.firstOrNull { it.type == C.TRACK_TYPE_AUDIO }
+        val audioDescs = mp.audioTracks.orEmpty().filter { it.id >= 0 }
+        when {
+            C.TRACK_TYPE_AUDIO in params.disabledTrackTypes -> mp.setAudioTrack(-1)
+            audioOverride != null -> audioOverride.mediaTrackGroup.id.removePrefix("a").toIntOrNull()?.let { mp.setAudioTrack(it) }
+            params.preferredAudioLanguages.isNotEmpty() && audioDescs.isNotEmpty() -> {
+                for (rawPref in params.preferredAudioLanguages) {
+                    val pref = com.aisub.player.subtitle.EmbeddedSubtitles.normalizeLang(rawPref) ?: rawPref.lowercase()
+                    val hit = audioDescs.firstOrNull { com.aisub.player.subtitle.EmbeddedSubtitles.parseLanguageFromLabel(it.name) == pref }
+                    if (hit != null) {
+                        mp.setAudioTrack(hit.id)
+                        break
+                    }
+                }
+            }
+        }
+        val textOverride = params.overrides.values.firstOrNull { it.type == C.TRACK_TYPE_TEXT }
+        val spuDescs = mp.spuTracks.orEmpty().filter { it.id >= 0 }
+        when {
+            C.TRACK_TYPE_TEXT in params.disabledTrackTypes -> mp.setSpuTrack(-1)
+            textOverride != null -> textOverride.mediaTrackGroup.id.removePrefix("s").toIntOrNull()?.let { mp.setSpuTrack(it) }
+            params.preferredTextLanguages.isNotEmpty() && spuDescs.isNotEmpty() -> {
+                for (rawPref in params.preferredTextLanguages) {
+                    val pref = com.aisub.player.subtitle.EmbeddedSubtitles.normalizeLang(rawPref) ?: rawPref.lowercase()
+                    val hit = spuDescs.firstOrNull { t ->
+                        !"forced".equals(t.name.trim(), ignoreCase = true) && !t.name.contains("forced", ignoreCase = true) &&
+                            com.aisub.player.subtitle.EmbeddedSubtitles.parseLanguageFromLabel(t.name) == pref
+                    } ?: spuDescs.firstOrNull { com.aisub.player.subtitle.EmbeddedSubtitles.parseLanguageFromLabel(it.name) == pref }
+                    if (hit != null) {
+                        mp.setSpuTrack(hit.id)
+                        break
+                    }
+                }
+            }
+        }
+        mp.setVideoTrackEnabled(C.TRACK_TYPE_VIDEO !in params.disabledTrackTypes)
+    }
+
     override fun handleSetTrackSelectionParameters(trackSelectionParameters: TrackSelectionParameters): ListenableFuture<*> {
         trackParams = trackSelectionParameters
-        val audioOverride = trackSelectionParameters.overrides.values.firstOrNull { it.type == C.TRACK_TYPE_AUDIO }
-        when {
-            C.TRACK_TYPE_AUDIO in trackSelectionParameters.disabledTrackTypes -> mp.setAudioTrack(-1)
-            audioOverride != null -> audioOverride.mediaTrackGroup.id.removePrefix("a").toIntOrNull()?.let { mp.setAudioTrack(it) }
-        }
-        val textOverride = trackSelectionParameters.overrides.values.firstOrNull { it.type == C.TRACK_TYPE_TEXT }
-        when {
-            C.TRACK_TYPE_TEXT in trackSelectionParameters.disabledTrackTypes -> mp.setSpuTrack(-1)
-            textOverride != null -> textOverride.mediaTrackGroup.id.removePrefix("s").toIntOrNull()?.let { mp.setSpuTrack(it) }
-        }
-        mp.setVideoTrackEnabled(C.TRACK_TYPE_VIDEO !in trackSelectionParameters.disabledTrackTypes)
+        applyTrackParamsToMp(trackSelectionParameters)
         refreshTracks()
         return Futures.immediateVoidFuture()
     }

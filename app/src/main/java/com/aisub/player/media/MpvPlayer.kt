@@ -31,6 +31,7 @@ import com.aisub.player.live.LiveHeaders
 import com.aisub.player.remote.AuthRegistry
 import com.aisub.player.remote.Endpoints
 import com.aisub.player.remote.cloud.CloudRegistry
+import com.aisub.player.subtitle.EmbeddedSubtitles
 import com.aisub.player.telegram.Telegram
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
@@ -75,7 +76,16 @@ class MpvPlayer(
     private var pendingLoadStartSec: Double = 0.0
     private var pendingHeaders: Map<String, String> = emptyMap()
     private var surfaceAttached = false
+    private var released = false
     private var activeVideoTrackId: Int = 1
+    private var suppressNativeSubtitles = false
+    private var activeSubTrackId: Int = 0
+    private var activeSubLang: String? = null
+    private var activeSubLabel: String? = null
+    private var activeSubCodec: String? = null
+    private var subStartSec: Double = Double.NaN
+    private var subEndSec: Double = Double.NaN
+    private var lastRecordedSubKey: Pair<Long, String>? = null
     private var directRemoteStream = false
     private var lastDirectPollMs = 0L
 
@@ -205,6 +215,8 @@ class MpvPlayer(
                             invalidateState()
                         }
                     }
+                    "sub-start" -> subStartSec = value
+                    "sub-end" -> subEndSec = value
                 }
             }
         }
@@ -242,6 +254,46 @@ class MpvPlayer(
                     }
                     "hwdec-current" -> activeHwdec = value
                     "current-vo" -> activeVo = value
+                    "sub-text" -> {
+                        if (value.isNullOrBlank()) {
+                            subStartSec = Double.NaN
+                            subEndSec = Double.NaN
+                            return@post
+                        }
+                        val lines = value.trim().lines().map { it.trim() }.filter { it.isNotEmpty() }
+                        if (lines.isEmpty()) return@post
+                        val liveStart = if (!subStartSec.isNaN() && subStartSec >= 0.0) {
+                            subStartSec
+                        } else {
+                            bridge.getPropertyDouble("sub-start", Double.NaN)
+                        }
+                        val liveEnd = if (!subEndSec.isNaN() && subEndSec > liveStart) {
+                            subEndSec
+                        } else {
+                            bridge.getPropertyDouble("sub-end", Double.NaN)
+                        }
+                        val startSec = if (!liveStart.isNaN() && liveStart >= 0.0) {
+                            liveStart
+                        } else {
+                            positionMs.coerceAtLeast(0L) / 1000.0
+                        }
+                        val endSec = if (!liveEnd.isNaN() && liveEnd > startSec) liveEnd else (startSec + 3.5)
+                        val startMs = (startSec * 1000.0).toLong().coerceAtLeast(0L)
+                        val endMs = (endSec * 1000.0).toLong().coerceAtLeast(startMs + 200L)
+                        val key = (startMs / 50L) to lines.joinToString("\n")
+                        if (lastRecordedSubKey != key) {
+                            lastRecordedSubKey = key
+                            EmbeddedSubtitles.recordExternalCue(
+                                trackId = activeSubTrackId.takeIf { it > 0 } ?: 1,
+                                language = activeSubLang,
+                                label = activeSubLabel,
+                                codec = activeSubCodec,
+                                startMs = startMs,
+                                endMs = endMs,
+                                lines = lines,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -266,7 +318,13 @@ class MpvPlayer(
         val lowRam = isLowRamOr32BitDevice()
         val dvDisplay = DolbyVisionHelper.displaySupportsDolbyVision(appContext)
 
-        bridge.setOptionString("config", "no")
+        val configDir = ensureMpvSubFontDir()
+        if (configDir != null) {
+            bridge.setOptionString("config", "yes")
+            bridge.setOptionString("config-dir", configDir.absolutePath)
+        } else {
+            bridge.setOptionString("config", "no")
+        }
         bridge.setOptionString("idle", "yes")
         bridge.setOptionString("keep-open", "no")
         // Surface 尚未绑定前保持 vo=null 与 force-window=no，待 Surface 有效时由 attachSurface 激活 gpu-next/gpu
@@ -328,11 +386,12 @@ class MpvPlayer(
         bridge.setOptionString("audio-pitch-correction", "yes")
         bridge.setOptionString("volume-max", "150")
 
-        // 内嵌字幕渲染（ASS/SSA 原样特效渲染）
+        // 内嵌字幕渲染（ASS/SSA 原样特效渲染，同时挂系统回退字体以支持无内嵌字体的 SRT/ASS）
         bridge.setOptionString("sub-auto", "no")
         bridge.setOptionString("sub-ass", "yes")
         bridge.setOptionString("embeddedfonts", "yes")
         bridge.setOptionString("sub-font-provider", "none")
+        bridge.setOptionString("sub-fonts-dir", "/system/fonts")
 
         // 网络与缓存（32 位老电视控制内存峰值）
         bridge.setOptionString("demuxer-max-bytes", if (lowRam) "24MiB" else "64MiB")
@@ -349,6 +408,45 @@ class MpvPlayer(
                 null,
                 PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
             )
+        }
+    }
+
+    private fun ensureMpvSubFontDir(): File? = runCatching {
+        val dir = File(appContext.filesDir, "mpv_config")
+        if (!dir.exists()) dir.mkdirs()
+        val subfont = File(dir, "subfont.ttf")
+        if (!subfont.exists() || subfont.length() == 0L) {
+            val candidates = listOf(
+                "/system/fonts/NotoSansCJK-Regular.ttc",
+                "/system/fonts/NotoSansSC-Regular.otf",
+                "/system/fonts/NotoSerifCJK-Regular.ttc",
+                "/system/fonts/DroidSansFallback.ttf",
+                "/system/fonts/NotoSans-Regular.ttf",
+                "/system/fonts/Roboto-Regular.ttf",
+            )
+            val src = candidates.map(::File).firstOrNull { it.isFile && it.canRead() && it.length() > 0L }
+                ?: File("/system/fonts").listFiles()
+                    ?.firstOrNull { f ->
+                        f.isFile && f.canRead() && f.length() > 0L &&
+                            f.extension.lowercase() in setOf("ttf", "otf", "ttc") &&
+                            (f.name.contains("CJK", true) || f.name.contains("SC", true) || f.name.contains("Sans", true))
+                    }
+            if (src != null) {
+                src.inputStream().use { input ->
+                    subfont.outputStream().use { output -> input.copyTo(output) }
+                }
+            }
+        }
+        dir.takeIf { subfont.exists() && subfont.length() > 0L }
+    }.getOrNull()
+
+    fun setEmbeddedSubtitlesSuppressed(suppressed: Boolean) {
+        if (suppressNativeSubtitles == suppressed) return
+        suppressNativeSubtitles = suppressed
+        mainHandler.post {
+            if (!released) {
+                applyTrackSelectionInternal()
+            }
         }
     }
 
@@ -474,6 +572,13 @@ class MpvPlayer(
         error = null
         tracks = Tracks.EMPTY
         chaptersList = emptyList()
+        activeSubTrackId = 0
+        activeSubLang = null
+        activeSubLabel = null
+        activeSubCodec = null
+        subStartSec = Double.NaN
+        subEndSec = Double.NaN
+        lastRecordedSubKey = null
         detectedDolbyProfile = null
         activeColorMatrix = null
         invalidateState()
@@ -548,6 +653,7 @@ class MpvPlayer(
                     applyEffectiveHwdec(isDolbyP5 = false, reloadVideoIfChanged = false)
                 }
                 applyTrackSelectionInternal()
+                refreshTracksAndChapters()
                 bridge.setPropertyBoolean("pause", !playWhenReady)
                 playbackState = Player.STATE_READY
                 invalidateState()
@@ -685,12 +791,23 @@ class MpvPlayer(
                         "dvb_subtitle" in codec -> "application/dvbsubs"
                         else -> MimeTypes.TEXT_UNKNOWN
                     }
+                    val normalizedLang = lang?.takeIf { it.isNotBlank() && it != "und" }
+                        ?: EmbeddedSubtitles.parseLanguageFromLabel(title)
+                    val forced = bridge.getPropertyString("track-list/$i/forced") == "yes" ||
+                        (title?.contains("forced", ignoreCase = true) == true)
+                    if (selected) {
+                        activeSubTrackId = id
+                        activeSubLang = normalizedLang
+                        activeSubLabel = title
+                        activeSubCodec = codecTag
+                    }
                     val fb = Format.Builder()
                         .setId("s$id")
                         .setLabel(title)
-                        .setLanguage(lang)
+                        .setLanguage(normalizedLang)
                         .setSampleMimeType(codecTag)
                         .setCodecs(codecTag)
+                    if (forced) fb.setSelectionFlags(C.SELECTION_FLAG_FORCED)
                     groups += Tracks.Group(TrackGroup("s$id", fb.build()), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(selected))
                 }
             }
@@ -734,6 +851,7 @@ class MpvPlayer(
 
         val textDisabled = C.TRACK_TYPE_TEXT in trackParams.disabledTrackTypes
         val textOverride = trackParams.overrides.values.firstOrNull { it.type == C.TRACK_TYPE_TEXT }
+        val showNative = !suppressNativeSubtitles
         when {
             textDisabled -> {
                 bridge.setPropertyBoolean("sub-visibility", false)
@@ -742,14 +860,18 @@ class MpvPlayer(
             textOverride != null -> {
                 textOverride.mediaTrackGroup.id.removePrefix("s").toIntOrNull()?.let { id ->
                     bridge.setPropertyString("sid", id.toString())
-                    bridge.setPropertyBoolean("sub-visibility", true)
+                    bridge.setPropertyBoolean("sub-visibility", showNative)
                 }
             }
             else -> {
                 val prefLangs = trackParams.preferredTextLanguages
                 if (prefLangs.isNotEmpty()) {
                     bridge.setPropertyString("slang", prefLangs.joinToString(","))
-                    bridge.setPropertyBoolean("sub-visibility", true)
+                    bridge.setPropertyString("sid", "auto")
+                    bridge.setPropertyBoolean("sub-visibility", showNative)
+                } else {
+                    bridge.setPropertyBoolean("sub-visibility", false)
+                    bridge.setPropertyString("sid", "no")
                 }
             }
         }
@@ -820,6 +942,13 @@ class MpvPlayer(
         durationMs = C.TIME_UNSET
         tracks = Tracks.EMPTY
         chaptersList = emptyList()
+        activeSubTrackId = 0
+        activeSubLang = null
+        activeSubLabel = null
+        activeSubCodec = null
+        subStartSec = Double.NaN
+        subEndSec = Double.NaN
+        lastRecordedSubKey = null
         detectedDolbyProfile = null
         activeColorMatrix = null
         error = null
@@ -1078,6 +1207,7 @@ class MpvPlayer(
     }
 
     override fun handleRelease(): ListenableFuture<*> {
+        released = true
         pendingLoadUrl = null
         directRemoteStream = false
         lastDirectPollMs = 0L

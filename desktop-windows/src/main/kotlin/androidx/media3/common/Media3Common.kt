@@ -478,12 +478,16 @@ class TrackSelectionOverride(val mediaTrackGroup: TrackGroup, val trackIndices: 
 open class TrackSelectionParameters(
     val overrides: Map<TrackGroup, TrackSelectionOverride> = emptyMap(),
     val disabledTrackTypes: Set<Int> = emptySet(),
+    val preferredAudioLanguages: List<String> = emptyList(),
+    val preferredTextLanguages: List<String> = emptyList(),
 ) {
     open fun buildUpon(): Builder = Builder(this)
 
     open class Builder(params: TrackSelectionParameters = DEFAULT) {
         protected val overrides = LinkedHashMap<TrackGroup, TrackSelectionOverride>(params.overrides)
         protected val disabledTrackTypes = LinkedHashSet<Int>(params.disabledTrackTypes)
+        protected var preferredAudioLanguages: List<String> = params.preferredAudioLanguages
+        protected var preferredTextLanguages: List<String> = params.preferredTextLanguages
 
         open fun setTrackTypeDisabled(trackType: Int, disabled: Boolean): Builder = apply {
             if (disabled) disabledTrackTypes.add(trackType) else disabledTrackTypes.remove(trackType)
@@ -498,14 +502,21 @@ open class TrackSelectionParameters(
             overrides[override.mediaTrackGroup] = override
         }
 
-        open fun setPreferredAudioLanguages(vararg languages: String): Builder = this
-        open fun setPreferredTextLanguages(vararg languages: String): Builder = this
+        open fun setPreferredAudioLanguages(vararg languages: String): Builder = apply {
+            preferredAudioLanguages = languages.filter { it.isNotBlank() }
+        }
+
+        open fun setPreferredTextLanguages(vararg languages: String): Builder = apply {
+            preferredTextLanguages = languages.filter { it.isNotBlank() }
+        }
 
         open fun setForceLowestBitrate(forceLowestBitrate: Boolean): Builder = this
 
         open fun build(): TrackSelectionParameters = TrackSelectionParameters(
             overrides = HashMap(overrides),
             disabledTrackTypes = HashSet(disabledTrackTypes),
+            preferredAudioLanguages = preferredAudioLanguages,
+            preferredTextLanguages = preferredTextLanguages,
         )
     }
 

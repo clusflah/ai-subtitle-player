@@ -174,9 +174,18 @@ class PlaybackFeatures(
             }
         }
         if (tracks.groups.isNotEmpty()) pendingTrackMemory?.let { m ->
-            pendingTrackMemory = null
-            applyTrackMemory(m, tracks)
+            pendingTrackMemory = applyTrackMemoryIncremental(m, tracks)
         }
+    }
+
+    /** 切换播放内核时（同一视频不走 onEntryChanged），为新内核重新准备偏好设置与按视频记住的音轨/字幕 */
+    fun onKernelSwitched(e: MediaEntry) {
+        if (entry?.uri != e.uri) {
+            onEntryChanged(e)
+            return
+        }
+        pendingTrackMemory = store.trackMemory(e.uri)
+        applyTrackDefaults()
     }
 
     /** ViewModel 清理时调用（这时协程作用域已经取消） */
@@ -508,17 +517,45 @@ class PlaybackFeatures(
         }
     }
 
-    private fun applyTrackMemory(m: TrackMemory, tracks: Tracks) {
+    private fun applyTrackMemoryIncremental(m: TrackMemory, tracks: Tracks): TrackMemory? {
         val p = player()
         var b = p.trackSelectionParameters.buildUpon()
-        m.audio?.let { choice -> find(tracks, C.TRACK_TYPE_AUDIO, choice)?.let { (g, i) -> b = b.setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false).setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)) } }
+        var remAudio = m.audio
+        var remText = m.text
+        var remTextOff = m.textOff
+        var changed = false
+
+        val hasAudioTracks = tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO }
+        val hasTextTracks = tracks.groups.any { it.type == C.TRACK_TYPE_TEXT }
+
+        if (m.audio != null && hasAudioTracks) {
+            find(tracks, C.TRACK_TYPE_AUDIO, m.audio)?.let { (g, i) ->
+                b = b.setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                    .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i))
+                changed = true
+            }
+            remAudio = null
+        }
         when {
-            m.textOff -> b = b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-            m.text != null -> find(tracks, C.TRACK_TYPE_TEXT, m.text)?.let { (g, i) ->
-                b = b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i))
+            m.textOff -> {
+                b = b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                changed = true
+                remTextOff = false
+            }
+            m.text != null && hasTextTracks -> {
+                find(tracks, C.TRACK_TYPE_TEXT, m.text)?.let { (g, i) ->
+                    b = b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i))
+                    changed = true
+                }
+                remText = null
             }
         }
-        p.trackSelectionParameters = b.build()
+        if (changed) {
+            p.trackSelectionParameters = b.build()
+        }
+        val stillPending = remAudio != null || remText != null || remTextOff
+        return if (stillPending) TrackMemory(audio = remAudio, text = remText, textOff = remTextOff) else null
     }
 
     /** 按语言+名称、语言、序号的顺序找回记住的那条轨 */

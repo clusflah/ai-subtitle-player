@@ -431,6 +431,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 网盘视频识别到结尾后，盯着播放位置：拖回没识别过的地方就接着识别 */
     private var gapWatch: Job? = null
+    private var embeddedGapWatch: Job? = null
+    private val embeddedCoveredWindows = mutableListOf<LongRange>()
 
     /** 这次翻译用的服务和模型；翻出第一批后才显示到播放页 */
     private var pendingTranslateInfo: String? = null
@@ -446,7 +448,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var translateEmbedded = false
     private var streamingEmbeddedTrackId: Int? = null
     private var streamingEmbeddedTranslate = false
-    private var embeddedCueListenerAdded = false
+    private var embeddedCueListenerPlayer: Player? = null
     private val embeddedCueListener = object : Player.Listener {
         override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
             if (!streamingEmbeddedTranslate && _state.value.embeddedTracks == null) return
@@ -901,11 +903,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         m.setPlaybackSpeed(speed)
         m.setMediaItem(itemOf(entry), positionMs)
         _state.update { it.copy(playbackError = null, videoProblem = null) }
+        _player.value = m
+        val sameEntry = _state.value.current?.uri == entry.uri
+        if (sameEntry) extras.onKernelSwitched(entry) else onEntryChanged(entry)
         m.playWhenReady = playWhenReady
         m.prepare()
         startPlaybackService()
-        _player.value = m
-        onEntryChanged(entry)
     }
 
     /** 用 VLC 内核播放一个文件。保留播放列表/频道列表。 */
@@ -927,12 +930,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         v.setPlaybackSpeed(speed)
         v.setMediaItem(itemOf(entry), positionMs)
         _state.update { it.copy(playbackError = null, videoProblem = null) }
+        _player.value = v
+        val sameEntry = _state.value.current?.uri == entry.uri
+        if (sameEntry) extras.onKernelSwitched(entry) else onEntryChanged(entry)
         v.playWhenReady = playWhenReady
         v.prepare()
         if (playWhenReady) v.play()
         startPlaybackService()
-        _player.value = v
-        onEntryChanged(entry)
         if (entry.isLive) watchVlcLive(entry)
     }
 
@@ -1095,13 +1099,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 exoPlayer.repeatMode = curRepeat
                 exoPlayer.setPlaybackSpeed(curSpeed)
                 exoPlayer.setMediaItems(cleanQueue.map(::itemOf), targetIdx, resumePos)
+                _player.value = exoPlayer
+                extras.onKernelSwitched(entry)
                 exoPlayer.playWhenReady = wasPlaying
                 exoPlayer.prepare()
-                _player.value = exoPlayer
                 startPlaybackService()
             }
         }
-        extras.applyTrackDefaults()
         reasonBanner?.let(extras::emit)
     }
 
@@ -2410,6 +2414,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 识别结束后盯着播放位置：拖到没识别过的地方，就接着识别那里（等这次识别真正结束后才开始） */
     private fun startGapWatch(uri: Uri) {
         gapWatch?.cancel()
+        embeddedGapWatch?.cancel()
         gapWatch = viewModelScope.launch {
             while (true) {
                 delay(1000)
@@ -2424,8 +2429,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 远程大文件按窗口读取自带字幕后，盯住播放位置：拖到还没读取过的时间段时自动补读。 */
+    private fun startEmbeddedGapWatch(uri: Uri) {
+        embeddedGapWatch?.cancel()
+        if (_state.value.current?.let(::isRemote) != true) return
+        embeddedGapWatch = viewModelScope.launch {
+            while (true) {
+                delay(1000)
+                if (_state.value.videoUri != uri) return@launch
+                if (embeddedJob?.isActive == true || transcribeJob?.isActive == true) continue
+                if (streamingEmbeddedTrackId == null) continue
+                val p = player.currentPosition
+                if (p < 0L) continue
+                val inWindow = synchronized(embeddedCoveredWindows) {
+                    embeddedCoveredWindows.any { p in it }
+                }
+                if (inWindow) continue
+                val coveredByCues = _state.value.cues.any { p in (it.startMs - 5_000L)..(it.endMs + 25_000L) }
+                if (coveredByCues) continue
+                runEmbeddedExtract(
+                    translate = streamingEmbeddedTranslate || translateEmbedded,
+                    overrideStartMs = p,
+                )
+                return@launch
+            }
+        }
+    }
+
     fun cancelAll() {
         gapWatch?.cancel()
+        embeddedGapWatch?.cancel()
+        synchronized(embeddedCoveredWindows) { embeddedCoveredWindows.clear() }
         transcribeJob?.cancel()
         translateJob?.cancel()
         embeddedJob?.cancel()
@@ -2433,10 +2467,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         EmbeddedSubtitles.setDemuxListener(null)
         streamingEmbeddedTrackId = null
         streamingEmbeddedTranslate = false
-        if (embeddedCueListenerAdded) {
-            exoPlayer.removeListener(embeddedCueListener)
-            embeddedCueListenerAdded = false
-        }
+        embeddedCueListenerPlayer?.removeListener(embeddedCueListener)
+        embeddedCueListenerPlayer = null
     }
 
     /** 全部重新翻译（例如换了翻译模型）：清掉已有译文，从头翻。 */
@@ -2619,12 +2651,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return c.copy(text = combined, translation = null)
     }
 
+    private fun isForcedFormat(format: androidx.media3.common.Format): Boolean =
+        (format.selectionFlags and C.SELECTION_FLAG_FORCED) != 0 ||
+            (format.label?.contains("forced", ignoreCase = true) == true)
+
+    private fun isForcedTrack(label: String?): Boolean =
+        label?.contains("forced", ignoreCase = true) == true
+
     /** 点 AI 字幕面板的「翻译字幕」时，是否应该读取并翻译视频自带字幕。 */
     fun shouldExtractEmbeddedOnTranslate(): Boolean {
         val s = _state.value
         if (s.current?.isLive == true && usingExternalKernel) return false
         if (s.cues.isEmpty()) return true
-        val hasTextSubtitles = !usingVlc && player.currentTracks.groups.any { g ->
+        val hasTextSubtitles = player.currentTracks.groups.any { g ->
             g.type == C.TRACK_TYPE_TEXT && (0 until g.length).any { i ->
                 val f = g.getTrackFormat(i)
                 (f.codecs ?: f.sampleMimeType) !in listOf("application/pgs", "application/vobsub", "application/dvbsubs")
@@ -2635,26 +2674,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return s.asrInfo == null && s.embeddedTracks == null && s.cues.none { pos in (it.startMs - 15_000L)..(it.endMs + 30_000L) }
     }
 
-    /** 优先选当前播放器已选中的字幕轨（或已经开始流式提取的那条），否则选第一条有文字的字幕轨。 */
+    /** 优先选当前播放器已选中的字幕轨（或已经开始流式提取的那条），跳过强制空轨，否则选第一条有文字的字幕轨。 */
     private fun preferredEmbeddedTrack(tracks: List<EmbeddedSubtitles.Track>): EmbeddedSubtitles.Track? {
         val usable = tracks.filter { it.cues.isNotEmpty() }
         if (usable.isEmpty()) return null
         streamingEmbeddedTrackId?.let { id -> usable.firstOrNull { it.id == id }?.let { return it } }
-        if (!usingVlc) {
-            val selected = player.currentTracks.groups
-                .firstOrNull { it.type == C.TRACK_TYPE_TEXT && it.isSelected }
-                ?.takeIf { it.length > 0 }
-                ?.getTrackFormat(0)
-            if (selected != null) {
-                selected.id?.toIntOrNull()?.let { sid -> usable.firstOrNull { it.id == sid } }?.let { return it }
-                usable.firstOrNull {
-                    (selected.language != null && it.language == selected.language) &&
-                        (selected.label == null || it.label == selected.label)
-                }?.let { return it }
-                usable.firstOrNull { selected.language != null && it.language == selected.language }?.let { return it }
-            }
+        val nonForced = usable.filterNot { isForcedTrack(it.label) }
+        val selected = player.currentTracks.groups
+            .firstOrNull { it.type == C.TRACK_TYPE_TEXT && it.isSelected }
+            ?.takeIf { it.length > 0 }
+            ?.getTrackFormat(0)
+        if (selected != null && (!isForcedFormat(selected) || nonForced.isEmpty())) {
+            selected.id?.removePrefix("s")?.toIntOrNull()?.let { sid -> usable.firstOrNull { it.id == sid } }?.let { return it }
+            usable.firstOrNull {
+                (selected.language != null && it.language == selected.language) &&
+                    (selected.label == null || it.label == selected.label)
+            }?.let { return it }
+            usable.firstOrNull { selected.language != null && it.language == selected.language }?.let { return it }
         }
-        return usable.first()
+        return nonForced.firstOrNull() ?: usable.first()
     }
 
     /**
@@ -2703,7 +2741,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * 选中后调用 [useEmbeddedTrack]。
      * @param translate 载入后一定翻译，不看自动翻译设置
      */
-    fun extractEmbeddedSubtitles(translate: Boolean = false) {
+    fun extractEmbeddedSubtitles(translate: Boolean = false) =
+        runEmbeddedExtract(translate = translate, overrideStartMs = null)
+
+    private fun runEmbeddedExtract(translate: Boolean, overrideStartMs: Long?) {
         // 直播读不完整个文件：改成边播边翻译
         if (_state.value.current?.isLive == true) return startLiveCaptions()
         val uri = _state.value.videoUri ?: return
@@ -2720,26 +2761,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val remote = _state.value.current?.let(::isRemote) == true
-        if (!remote) {
+        if (!remote && overrideStartMs == null) {
             _state.value.embeddedTracks?.takeIf { it.any { t -> t.cues.isNotEmpty() } }?.let { tracks ->
                 offerEmbedded(tracks)
                 return
             }
         }
+        if (overrideStartMs == null) {
+            synchronized(embeddedCoveredWindows) { embeddedCoveredWindows.clear() }
+        }
         transcribeJob?.cancel()
         gapWatch?.cancel()
-        if (streamingEmbeddedTrackId == null) {
+        embeddedGapWatch?.cancel()
+        if (streamingEmbeddedTrackId == null && overrideStartMs == null) {
             store.deleteCues(uri)
             _state.update { it.copy(cues = emptyList(), embeddedTracks = null) }
         }
-        if (!usingExternalKernel) {
-            val texts = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
-            if (texts.isNotEmpty() && (C.TRACK_TYPE_TEXT in exoPlayer.trackSelectionParameters.disabledTrackTypes || texts.none { it.isSelected })) {
-                extras.selectTrack(C.TRACK_TYPE_TEXT, texts[0], 0)
+        if (streamingEmbeddedTrackId == null) {
+            val activePlayer = player
+            val texts = activePlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
+            if (texts.isNotEmpty() && (C.TRACK_TYPE_TEXT in activePlayer.trackSelectionParameters.disabledTrackTypes || texts.none { it.isSelected })) {
+                val preferred = texts.firstOrNull { g -> (0 until g.length).any { !isForcedFormat(g.getTrackFormat(it)) } } ?: texts[0]
+                extras.selectTrack(C.TRACK_TYPE_TEXT, preferred, 0)
             }
-            if (!embeddedCueListenerAdded) {
-                exoPlayer.addListener(embeddedCueListener)
-                embeddedCueListenerAdded = true
+            if (embeddedCueListenerPlayer !== activePlayer) {
+                embeddedCueListenerPlayer?.removeListener(embeddedCueListener)
+                activePlayer.addListener(embeddedCueListener)
+                embeddedCueListenerPlayer = activePlayer
             }
         }
         EmbeddedSubtitles.setDemuxListener { partial ->
@@ -2751,14 +2799,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         preferredEmbeddedTrack(initialDemuxed)?.let {
             applyProgressiveEmbeddedTrack(it, translate)
         }
-        // 115 等网盘严格限制单连接（另开连接会被 403 拒绝或挤断播放），若播放内核已经解封装出字幕轨，直接跟随播放流式提取与翻译
-        if (CloudRegistry.isCloud(uri.toString()) && initialDemuxed.any { it.cues.isNotEmpty() }) {
+        val posNow = player.currentPosition.coerceAtLeast(0L)
+        val hasNearbyDemuxed = initialDemuxed.any { t -> t.cues.any { posNow in (it.startMs - 30_000L)..(it.endMs + 30_000L) } }
+        // 115 等网盘严格限制单连接（另开连接会被 403 拒绝或挤断播放），若播放内核已经解封装出当前位置附近字幕轨，直接跟随播放流式提取与翻译
+        if (overrideStartMs == null && CloudRegistry.isCloud(uri.toString()) && !usingVlc && hasNearbyDemuxed) {
             _state.update { it.copy(extractingEmbedded = false, embeddedTracks = initialDemuxed, progress = null, error = null) }
             offerEmbedded(initialDemuxed)
             return
         }
         _state.update { it.copy(extractingEmbedded = true, status = "正在读取视频自带的字幕…", progress = 0f, error = null) }
-        val startMs = if (remote) player.currentPosition.coerceAtLeast(0L) else 0L
+        val startMs = overrideStartMs ?: if (remote) posNow else 0L
         embeddedJob = viewModelScope.launch {
             try {
                 val tracks = withContext(Dispatchers.IO) {
@@ -2777,8 +2827,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 val merged = EmbeddedSubtitles.mergeTracks(tracks, EmbeddedSubtitles.demuxedTracks())
+                if (remote) {
+                    val maxCueEnd = merged.maxOfOrNull { t -> t.cues.maxOfOrNull { it.endMs } ?: 0L } ?: 0L
+                    val windowEnd = maxOf(startMs + 60_000L, maxCueEnd + 15_000L)
+                    synchronized(embeddedCoveredWindows) {
+                        embeddedCoveredWindows.add((startMs - 5_000L).coerceAtLeast(0L)..windowEnd)
+                    }
+                }
                 _state.update { it.copy(embeddedTracks = merged, progress = null) }
-                offerEmbedded(merged)
+                if (overrideStartMs != null && streamingEmbeddedTrackId != null) {
+                    preferredEmbeddedTrack(merged)?.let { applyProgressiveEmbeddedTrack(it, translate || streamingEmbeddedTranslate) }
+                } else {
+                    offerEmbedded(merged)
+                }
+                if (remote) startEmbeddedGapWatch(uri)
             } catch (e: CancellationException) {
                 _state.update { it.copy(status = "已取消", progress = null) }
                 throw e
@@ -2788,7 +2850,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 android.util.Log.e("Voxtitle", "读取内嵌字幕失败", e)
                 val demuxed = EmbeddedSubtitles.demuxedTracks()
                 preferredEmbeddedTrack(demuxed)?.let { applyProgressiveEmbeddedTrack(it, streamingEmbeddedTranslate) }
-                val hasPlayerTextTrack = !usingExternalKernel && exoPlayer.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
+                val hasPlayerTextTrack = player.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
                 if (_state.value.cues.isNotEmpty() || hasPlayerTextTrack) {
                     _state.update {
                         it.copy(
@@ -3019,8 +3081,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         when {
             usable.size == 1 -> useEmbeddedTrack(usable[0])
             usable.isEmpty() -> {
-                val hasPlayerTextTrack = !usingExternalKernel &&
-                    exoPlayer.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.isSupported } &&
+                val hasPlayerTextTrack = player.currentTracks.groups.any { it.type == C.TRACK_TYPE_TEXT && it.isSupported } &&
                     tracks.none { it.imageBased }
                 if (_state.value.cues.isNotEmpty() || hasPlayerTextTrack) {
                     _state.update {

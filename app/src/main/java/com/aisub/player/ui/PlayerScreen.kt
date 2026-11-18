@@ -710,6 +710,13 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         if (it.player !== player) it.player = player
                         it.resizeMode = RESIZE_MODES[resizeIndex].first
                         it.subtitleView?.visibility = android.view.View.GONE
+                        val aiVisible = state.settings.showAiSubtitles && state.cues.isNotEmpty()
+                        val embeddedInAi = aiVisible && (state.embeddedTracks != null || state.extractingEmbedded)
+                        val suppressNativeSub = state.liveCaptions || embeddedInAi
+                        when (val activePlayer = player) {
+                            is com.aisub.player.media.MpvPlayer -> activePlayer.setEmbeddedSubtitlesSuppressed(suppressNativeSub)
+                            is com.aisub.player.media.VlcPlayer -> activePlayer.setEmbeddedSubtitlesSuppressed(suppressNativeSub)
+                        }
                         vm.extras.attachVideoView(it.videoSurfaceView)
                     },
                     onRelease = { view ->
@@ -2392,6 +2399,15 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
     var audioOpen by remember(state.current?.uri) { mutableStateOf(false) }
     var embeddedOpen by remember { mutableStateOf(false) }
     var version by remember { mutableIntStateOf(0) } // 选轨后刷新
+    androidx.compose.runtime.DisposableEffect(player) {
+        val l = object : Player.Listener {
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                version++
+            }
+        }
+        player.addListener(l)
+        onDispose { player.removeListener(l) }
+    }
 
     val textGroups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT } }
     val hasTextSubtitles = remember(textGroups) {
@@ -2404,7 +2420,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
     }
     val live = state.current?.isLive == true
     // MPV / VLC 内核下直播通过「语音识别生成字幕」识别语音，不走内嵌隐藏式字幕提取；点播视频三内核均可读取内嵌字幕翻译
-    val canRead = if (live) !usingExternal && hasTextSubtitles else hasTextSubtitles || usingVlc
+    val canRead = if (live) !usingExternal && hasTextSubtitles else hasTextSubtitles || usingExternal
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(vertical = 6.dp)) {
         // ---------------- AI 字幕：识别、外挂文件或提取出的字幕，由本应用显示 ----------------
@@ -2514,7 +2530,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
                     version++
                 }
             }
-            if (textGroups.isEmpty() && !usingVlc) {
+            if (textGroups.isEmpty()) {
                 if (!hasLoadedCues) TrackRow("这个视频没有自带字幕", false, enabled = false) {}
             } else {
                 if (!hasLoadedCues) {

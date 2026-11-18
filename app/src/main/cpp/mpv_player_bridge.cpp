@@ -239,7 +239,16 @@ static void* mpv_event_loop(void* arg) {
             }
             case MPV_EVENT_PROPERTY_CHANGE: {
                 mpv_event_property* prop = reinterpret_cast<mpv_event_property*>(ev->data);
-                if (!prop || !prop->name || !prop->data) break;
+                if (!prop || !prop->name) break;
+                if (prop->format == MPV_FORMAT_NONE) {
+                    jstring jname = env->NewStringUTF(prop->name);
+                    if (jname) {
+                        env->CallVoidMethod(inst->callback_global, inst->mid_on_prop_string, jname, nullptr);
+                        env->DeleteLocalRef(jname);
+                    }
+                    break;
+                }
+                if (!prop->data) break;
                 jstring jname = env->NewStringUTF(prop->name);
                 if (!jname) break;
                 switch (prop->format) {
@@ -361,6 +370,9 @@ Java_com_aisub_player_media_MpvNativeBridge_nativeInitialize(JNIEnv* env, jobjec
     g_api.observe_property(inst->mpv, 6, "video-params/colormatrix", MPV_FORMAT_STRING);
     g_api.observe_property(inst->mpv, 7, "hwdec-current", MPV_FORMAT_STRING);
     g_api.observe_property(inst->mpv, 8, "current-vo", MPV_FORMAT_STRING);
+    g_api.observe_property(inst->mpv, 9, "sub-text", MPV_FORMAT_STRING);
+    g_api.observe_property(inst->mpv, 10, "sub-start", MPV_FORMAT_DOUBLE);
+    g_api.observe_property(inst->mpv, 11, "sub-end", MPV_FORMAT_DOUBLE);
 
     inst->stopping = 0;
     if (pthread_create(&inst->event_thread, nullptr, mpv_event_loop, inst) == 0) {

@@ -48,11 +48,14 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.aisub.player.desktop.DesktopPlayerEngine
@@ -86,76 +89,102 @@ fun <T : View> AndroidView(
                     var filter: androidx.compose.ui.graphics.ColorFilter? = null
                 }
             }
-            Canvas(
+            var containerHeightPx by remember { androidx.compose.runtime.mutableIntStateOf(720) }
+            Box(
                 modifier = modifier
                     .background(Color.Black)
                     .fillMaxSize()
                     .onSizeChanged { sz ->
+                        containerHeightPx = sz.height
                         DesktopPlayerEngine.updateDisplaySize(sz.width, sz.height)
                     },
             ) {
-                // 仅在 Draw 阶段读取 frameTick 与 brightnessState，只触发 Canvas 重绘，跳过 Composable 重组与布局
-                @Suppress("UNUSED_VARIABLE")
-                val tick = DesktopPlayerEngine.frameTick.longValue
-                val brightness = DesktopPlayerEngine.brightnessState.floatValue
-                if (brightness != brightnessCache.brightness) {
-                    brightnessCache.brightness = brightness
-                    brightnessCache.filter = if (kotlin.math.abs(brightness - 1f) < 0.005f) {
-                        null
-                    } else {
-                        val scale = if (brightness <= 1f) brightness else 1f + (brightness - 1f) * 0.65f
-                        val lift = if (brightness <= 1f) 0f else (brightness - 1f) * 32f
-                        androidx.compose.ui.graphics.ColorFilter.colorMatrix(
-                            androidx.compose.ui.graphics.ColorMatrix(
-                                floatArrayOf(
-                                    scale, 0f, 0f, 0f, lift,
-                                    0f, scale, 0f, 0f, lift,
-                                    0f, 0f, scale, 0f, lift,
-                                    0f, 0f, 0f, 1f, 0f,
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    // 仅在 Draw 阶段读取 frameTick 与 brightnessState，只触发 Canvas 重绘，跳过 Composable 重组与布局
+                    @Suppress("UNUSED_VARIABLE")
+                    val tick = DesktopPlayerEngine.frameTick.longValue
+                    val brightness = DesktopPlayerEngine.brightnessState.floatValue
+                    if (brightness != brightnessCache.brightness) {
+                        brightnessCache.brightness = brightness
+                        brightnessCache.filter = if (kotlin.math.abs(brightness - 1f) < 0.005f) {
+                            null
+                        } else {
+                            val scale = if (brightness <= 1f) brightness else 1f + (brightness - 1f) * 0.65f
+                            val lift = if (brightness <= 1f) 0f else (brightness - 1f) * 32f
+                            androidx.compose.ui.graphics.ColorFilter.colorMatrix(
+                                androidx.compose.ui.graphics.ColorMatrix(
+                                    floatArrayOf(
+                                        scale, 0f, 0f, 0f, lift,
+                                        0f, scale, 0f, 0f, lift,
+                                        0f, 0f, scale, 0f, lift,
+                                        0f, 0f, 0f, 1f, 0f,
+                                    ),
                                 ),
-                            ),
+                            )
+                        }
+                    }
+                    val img = DesktopPlayerEngine.currentDrawBitmap ?: return@Canvas
+                    val cw = size.width
+                    val ch = size.height
+                    val bw = img.width.toFloat()
+                    val bh = img.height.toFloat()
+                    if (cw <= 0f || ch <= 0f || bw <= 0f || bh <= 0f) return@Canvas
+
+                    val dstW: Int
+                    val dstH: Int
+                    when (resizeMode) {
+                        AspectRatioFrameLayout.RESIZE_MODE_FILL -> {
+                            dstW = cw.roundToInt()
+                            dstH = ch.roundToInt()
+                        }
+                        AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> {
+                            val s = maxOf(cw / bw, ch / bh)
+                            dstW = (bw * s).roundToInt()
+                            dstH = (bh * s).roundToInt()
+                        }
+                        AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH -> {
+                            val s = cw / bw
+                            dstW = cw.roundToInt()
+                            dstH = (bh * s).roundToInt()
+                        }
+                        else -> {
+                            val s = minOf(cw / bw, ch / bh)
+                            dstW = (bw * s).roundToInt()
+                            dstH = (bh * s).roundToInt()
+                        }
+                    }
+                    val dstX = ((cw - dstW) / 2f).roundToInt()
+                    val dstY = ((ch - dstH) / 2f).roundToInt()
+                    clipRect {
+                        drawImage(
+                            image = img,
+                            dstOffset = IntOffset(dstX, dstY),
+                            dstSize = IntSize(dstW.coerceAtLeast(1), dstH.coerceAtLeast(1)),
+                            filterQuality = FilterQuality.Low,
+                            colorFilter = brightnessCache.filter,
                         )
                     }
                 }
-                val img = DesktopPlayerEngine.currentDrawBitmap ?: return@Canvas
-                val cw = size.width
-                val ch = size.height
-                val bw = img.width.toFloat()
-                val bh = img.height.toFloat()
-                if (cw <= 0f || ch <= 0f || bw <= 0f || bh <= 0f) return@Canvas
-
-                val dstW: Int
-                val dstH: Int
-                when (resizeMode) {
-                    AspectRatioFrameLayout.RESIZE_MODE_FILL -> {
-                        dstW = cw.roundToInt()
-                        dstH = ch.roundToInt()
+                val subText by DesktopPlayerEngine.currentEmbeddedSubtitleText
+                val subVisible = view.subtitleView?.visibleState?.value != false
+                if (subVisible && subText.isNotBlank()) {
+                    val padFrac = view.subtitleView?.bottomPaddingFractionState?.floatValue ?: 0.08f
+                    val bottomPadDp = with(LocalDensity.current) {
+                        (containerHeightPx * padFrac).toDp().coerceAtLeast(24.dp)
                     }
-                    AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> {
-                        val s = maxOf(cw / bw, ch / bh)
-                        dstW = (bw * s).roundToInt()
-                        dstH = (bh * s).roundToInt()
-                    }
-                    AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH -> {
-                        val s = cw / bw
-                        dstW = cw.roundToInt()
-                        dstH = (bh * s).roundToInt()
-                    }
-                    else -> {
-                        val s = minOf(cw / bw, ch / bh)
-                        dstW = (bw * s).roundToInt()
-                        dstH = (bh * s).roundToInt()
-                    }
-                }
-                val dstX = ((cw - dstW) / 2f).roundToInt()
-                val dstY = ((ch - dstH) / 2f).roundToInt()
-                clipRect {
-                    drawImage(
-                        image = img,
-                        dstOffset = IntOffset(dstX, dstY),
-                        dstSize = IntSize(dstW.coerceAtLeast(1), dstH.coerceAtLeast(1)),
-                        filterQuality = FilterQuality.Low,
-                        colorFilter = brightnessCache.filter,
+                    Text(
+                        text = subText,
+                        color = Color.White,
+                        fontSize = 21.sp,
+                        lineHeight = 28.sp,
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(start = 36.dp, end = 36.dp, bottom = bottomPadDp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xA6000000))
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
                     )
                 }
             }

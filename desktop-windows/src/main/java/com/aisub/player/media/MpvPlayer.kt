@@ -29,6 +29,10 @@ class MpvPlayer(
         engine.updateHwdecPreference(forceHwdec)
     }
 
+    fun setEmbeddedSubtitlesSuppressed(suppressed: Boolean) {
+        engine.setEmbeddedSubtitlesSuppressed(suppressed)
+    }
+
     val detectedDolbyProfile: Int?
         get() = engine.detectedDolbyProfile
 

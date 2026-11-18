@@ -705,7 +705,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 it.subtitleView?.setBottomPaddingFraction(if (aiVisible) 0.32f else androidx.media3.ui.SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
                 // 正在翻译直播自带字幕，或自带字幕已载入 AI 字幕：自带字幕不再原样显示，免得同一句出现两遍
                 val embeddedInAi = aiVisible && (state.embeddedTracks != null || state.extractingEmbedded)
-                it.subtitleView?.visibility = if (state.liveCaptions || embeddedInAi) android.view.View.GONE else android.view.View.VISIBLE
+                val showNativeSub = !state.liveCaptions && !embeddedInAi
+                it.subtitleView?.syncVisible(showNativeSub)
+                (it.player as? com.aisub.player.desktop.DesktopExoPlayer)?.setEmbeddedSubtitlesSuppressed(!showNativeSub)
+                (it.player as? com.aisub.player.media.MpvPlayer)?.setEmbeddedSubtitlesSuppressed(!showNativeSub)
+                (it.player as? com.aisub.player.media.VlcPlayer)?.setEmbeddedSubtitlesSuppressed(!showNativeSub)
             },
             modifier = Modifier.fillMaxSize(),
         )
@@ -2549,7 +2553,16 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
     // 桌面端侧边栏空间充足，默认直接展开字幕与音频两栏，点开即可切换，无需二次点按展开
     var audioOpen by remember(state.current?.uri) { mutableStateOf(true) }
     var embeddedOpen by remember { mutableStateOf(true) }
-    var version by remember { mutableIntStateOf(0) } // 选轨后刷新
+    var version by remember { mutableIntStateOf(0) } // 选轨或底层音轨/字幕轨异步就绪后刷新
+    androidx.compose.runtime.DisposableEffect(player) {
+        val l = object : Player.Listener {
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                version++
+            }
+        }
+        player.addListener(l)
+        onDispose { player.removeListener(l) }
+    }
 
     val textGroups = remember(version, state.current?.uri, player) { player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT } }
     val hasTextSubtitles = remember(textGroups) {
@@ -2561,8 +2574,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
         }
     }
     val live = state.current?.isLive == true
-    // 兼容模式下直播拿不到字幕的文字
-    val canRead = if (live) !vm.usingVlc && hasTextSubtitles else hasTextSubtitles || vm.usingVlc
+    val canRead = if (live) !vm.usingExternalKernel && hasTextSubtitles else hasTextSubtitles || vm.usingExternalKernel
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(top = 2.dp, bottom = 12.dp)) {
         // ---------------- AI 字幕：识别、外挂文件或提取出的字幕，由本应用显示 ----------------
@@ -2665,7 +2677,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
                     version++
                 }
             }
-            if (textGroups.isEmpty() && !vm.usingVlc) {
+            if (textGroups.isEmpty()) {
                 if (!hasLoadedCues) TrackRow("这个视频没有自带字幕", false, enabled = false) {}
             } else {
                 if (!hasLoadedCues) {

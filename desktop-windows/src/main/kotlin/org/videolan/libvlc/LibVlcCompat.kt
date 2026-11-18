@@ -6,7 +6,9 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
+import com.aisub.player.desktop.DesktopBackendMode
 import com.aisub.player.desktop.DesktopExoPlayer
 import org.videolan.libvlc.interfaces.IVLCVout
 
@@ -66,7 +68,13 @@ class MediaPlayer(libVLC: LibVLC) {
         val orientation: Int = 0,
     )
 
-    private val engine = DesktopExoPlayer(libVLC.context, null)
+    private val engine = DesktopExoPlayer(
+        context = libVLC.context,
+        dataSourceFactory = (libVLC.context.applicationContext as? android.app.Application)?.let { app ->
+            runCatching { com.aisub.player.authDataSourceFactory(app) }.getOrNull()
+        },
+        backendMode = DesktopBackendMode.VLC_ONLY,
+    )
     private var eventListener: EventListener? = null
 
     val vlcVout: IVLCVout = object : IVLCVout {}
@@ -86,19 +94,31 @@ class MediaPlayer(libVLC: LibVLC) {
         }
     var currentVideoTrack: VideoTrack? = VideoTrack()
         private set
-    val audioTracks: Array<TrackDescription>? = emptyArray()
-    val audioTrack: Int = -1
-    val spuTracks: Array<TrackDescription>? = emptyArray()
-    val spuTrack: Int = -1
+
+    val audioTracks: Array<TrackDescription>?
+        get() = engine.vlcAudioTrackDescriptions().map { TrackDescription(it.first, it.second) }.toTypedArray()
+
+    val audioTrack: Int
+        get() = engine.vlcAudioTrackId()
+
+    val spuTracks: Array<TrackDescription>?
+        get() = engine.vlcSpuTrackDescriptions().map { TrackDescription(it.first, it.second) }.toTypedArray()
+
+    val spuTrack: Int
+        get() = engine.vlcSpuTrackId()
 
     init {
         engine.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 when (playbackState) {
-                    Player.STATE_BUFFERING -> eventListener?.onEvent(Event(Event.Opening))
+                    Player.STATE_BUFFERING -> {
+                        eventListener?.onEvent(Event(Event.Opening))
+                        eventListener?.onEvent(Event(Event.Buffering, buffering = 0f))
+                    }
                     Player.STATE_READY -> {
                         val d = engine.duration
                         if (d > 0) eventListener?.onEvent(Event(Event.LengthChanged, lengthChanged = d))
+                        eventListener?.onEvent(Event(Event.Buffering, buffering = 100f))
                         if (engine.playWhenReady) {
                             eventListener?.onEvent(Event(Event.Playing))
                         } else {
@@ -117,6 +137,10 @@ class MediaPlayer(libVLC: LibVLC) {
                 }
             }
 
+            override fun onTracksChanged(tracks: Tracks) {
+                eventListener?.onEvent(Event(Event.ESAdded))
+            }
+
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 if (videoSize.width > 0 && videoSize.height > 0) {
                     currentVideoTrack = VideoTrack(videoSize.width, videoSize.height)
@@ -125,6 +149,8 @@ class MediaPlayer(libVLC: LibVLC) {
             }
 
             override fun onRenderedFirstFrame() {
+                val d = engine.duration
+                if (d > 0) eventListener?.onEvent(Event(Event.LengthChanged, lengthChanged = d))
                 eventListener?.onEvent(Event(Event.Vout, voutCount = 1))
             }
 
@@ -143,6 +169,10 @@ class MediaPlayer(libVLC: LibVLC) {
 
     fun setHwdecPreference(forceHwdec: Boolean?) {
         engine.updateHwdecPreference(forceHwdec)
+    }
+
+    fun setEmbeddedSubtitlesSuppressed(suppressed: Boolean) {
+        engine.setEmbeddedSubtitlesSuppressed(suppressed)
     }
 
     fun play() {
@@ -181,8 +211,11 @@ class MediaPlayer(libVLC: LibVLC) {
         return time
     }
 
-    fun setAudioTrack(id: Int): Boolean = true
-    fun setSpuTrack(id: Int): Boolean = true
-    fun setVideoTrackEnabled(enabled: Boolean) {}
-    fun getChapters(title: Int): Array<Chapter>? = emptyArray()
+    fun setAudioTrack(id: Int): Boolean = engine.setVlcAudioTrackId(id)
+    fun setSpuTrack(id: Int): Boolean = engine.setVlcSpuTrackId(id)
+    fun setVideoTrackEnabled(enabled: Boolean) {
+        engine.setVlcVideoTrackEnabled(enabled)
+    }
+    fun getChapters(title: Int): Array<Chapter>? =
+        engine.chapters().map { Chapter(it.startMs, (it.endMs ?: it.startMs) - it.startMs, it.title) }.toTypedArray()
 }

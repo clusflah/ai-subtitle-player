@@ -21,7 +21,22 @@ object AspectRatioFrameLayout {
 }
 
 class SubtitleView(context: Context = android.content.GlobalDesktopApp) : ViewGroup(context) {
-    fun setBottomPaddingFraction(fraction: Float) {}
+    val bottomPaddingFractionState = androidx.compose.runtime.mutableFloatStateOf(DEFAULT_BOTTOM_PADDING_FRACTION)
+    val visibleState = androidx.compose.runtime.mutableStateOf(true)
+
+    fun syncVisible(visible: Boolean) {
+        if (visibleState.value != visible) {
+            visibleState.value = visible
+        }
+        visibility = if (visible) View.VISIBLE else View.GONE
+    }
+
+    fun setBottomPaddingFraction(fraction: Float) {
+        val safe = fraction.coerceIn(0f, 0.7f)
+        if (bottomPaddingFractionState.floatValue != safe) {
+            bottomPaddingFractionState.floatValue = safe
+        }
+    }
 
     companion object {
         const val DEFAULT_BOTTOM_PADDING_FRACTION = 0.08f
