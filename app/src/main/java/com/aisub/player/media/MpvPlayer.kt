@@ -246,7 +246,7 @@ class MpvPlayer(
                 when (name) {
                     "video-params/colormatrix" -> {
                         activeColorMatrix = value
-                        if (value.equals("dolbyvision", ignoreCase = true) && !DolbyVisionHelper.displaySupportsDolbyVision(appContext)) {
+                        if (value.equals("dolbyvision", ignoreCase = true)) {
                             bridge.setPropertyString("target-prim", "bt.709")
                             bridge.setPropertyString("target-trc", "srgb")
                             bridge.setPropertyString("tone-mapping", "bt.2390")
@@ -306,9 +306,11 @@ class MpvPlayer(
     }
 
     private fun initMpvKernel() {
+        MpvNativeBridge.bindAppContext(appContext)
         if (!bridge.create()) {
+            val detail = MpvNativeBridge.lastLoadError?.let { "（$it）" }.orEmpty()
             error = PlaybackException(
-                "当前设备未能加载 MPV 原生引擎（libmpv.so）",
+                "当前设备未能加载 MPV 原生引擎$detail",
                 null,
                 PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
             )
@@ -316,7 +318,7 @@ class MpvPlayer(
         }
 
         val lowRam = isLowRamOr32BitDevice()
-        val dvDisplay = DolbyVisionHelper.displaySupportsDolbyVision(appContext)
+        val weakCpuFor4kSw = lowRam || DolbyVisionHelper.isTelevisionDevice(appContext)
 
         val configDir = ensureMpvSubFontDir()
         if (configDir != null) {
@@ -352,24 +354,19 @@ class MpvPlayer(
         bridge.setOptionString("hwdec", initHwdec)
         bridge.setOptionString("hwdec-codecs", "all")
         bridge.setOptionString("vd-lavc-threads", "0")
-        if (lowRam || initHwdec == "no") {
+        if (weakCpuFor4kSw || initHwdec == "no") {
             bridge.setOptionString("vd-lavc-fast", "yes")
         }
-        if (lowRam) {
+        if (weakCpuFor4kSw && initHwdec == "no") {
             bridge.setOptionString("vd-lavc-skiploopfilter", "nonref")
         }
 
-        // 杜比视界与 HDR 色彩管线设置：非杜比视界屏幕映射为标准 Rec.709 + sRGB，彻底消除紫绿偏色与 HDR 灰白画面
-        if (!dvDisplay) {
-            bridge.setOptionString("target-colorspace-hint", "no")
-            bridge.setOptionString("target-prim", "bt.709")
-            bridge.setOptionString("target-trc", "srgb")
-            bridge.setOptionString("tone-mapping", "bt.2390")
-            bridge.setOptionString("hdr-compute-peak", "no")
-        } else {
-            bridge.setOptionString("target-colorspace-hint", "yes")
-            bridge.setOptionString("tone-mapping", "bt.2390")
-        }
+        // Android 端 gpu-context=android 输出至 8-bit SDR EGLSurface，统一将 HDR / 杜比视界动态映射至 BT.709 + sRGB
+        bridge.setOptionString("target-colorspace-hint", "no")
+        bridge.setOptionString("target-prim", "bt.709")
+        bridge.setOptionString("target-trc", "srgb")
+        bridge.setOptionString("tone-mapping", "bt.2390")
+        bridge.setOptionString("hdr-compute-peak", "no")
 
         runCatching {
             val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
@@ -390,7 +387,6 @@ class MpvPlayer(
         bridge.setOptionString("sub-auto", "no")
         bridge.setOptionString("sub-ass", "yes")
         bridge.setOptionString("embeddedfonts", "yes")
-        bridge.setOptionString("sub-font-provider", "none")
         bridge.setOptionString("sub-fonts-dir", "/system/fonts")
 
         // 网络与缓存（32 位老电视控制内存峰值）
@@ -403,6 +399,7 @@ class MpvPlayer(
         }
 
         if (!bridge.initialize()) {
+            bridge.destroy()
             error = PlaybackException(
                 "初始化 MPV 内核失败",
                 null,
@@ -487,7 +484,9 @@ class MpvPlayer(
             null -> if (isDolbyP5) "no" else "mediacodec-copy"
         }
         val wantSw = target == "no"
-        bridge.setPropertyString("vd-lavc-fast", if (wantSw || isLowRamOr32BitDevice()) "yes" else "no")
+        val weakCpu = isLowRamOr32BitDevice() || DolbyVisionHelper.isTelevisionDevice(appContext)
+        bridge.setPropertyString("vd-lavc-fast", if (wantSw || weakCpu) "yes" else "no")
+        bridge.setPropertyString("vd-lavc-skiploopfilter", if (wantSw && weakCpu) "nonref" else "default")
         bridge.setPropertyString("hwdec", target)
         if (reloadVideoIfChanged &&
             playbackState != Player.STATE_IDLE &&
@@ -512,10 +511,7 @@ class MpvPlayer(
             val dvProf = detectedDolbyProfile
             val isDv = dvProf != null || dolbyProfile5Hint || activeColorMatrix.equals("dolbyvision", ignoreCase = true)
             val color = when {
-                isDv && DolbyVisionHelper.displaySupportsDolbyVision(appContext) ->
-                    "杜比视界${dvProf?.let { " P$it" }.orEmpty()} 直出"
-                isDv ->
-                    "杜比视界${dvProf?.let { " P$it" }.orEmpty()} → Rec.709 (libplacebo bt.2390 映射)"
+                isDv -> "杜比视界${dvProf?.let { " P$it" }.orEmpty()} → Rec.709 (libplacebo bt.2390 映射)"
                 !activeColorMatrix.isNullOrBlank() -> activeColorMatrix!!
                 else -> "标准色彩"
             }

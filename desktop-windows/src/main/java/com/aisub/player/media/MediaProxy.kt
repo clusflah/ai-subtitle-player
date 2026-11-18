@@ -8,6 +8,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.HttpDataSource
 import com.aisub.player.remote.cloud.CloudRegistry
+import com.aisub.player.telegram.Telegram
 import java.io.BufferedOutputStream
 import java.io.InterruptedIOException
 import java.net.InetAddress
@@ -16,6 +17,7 @@ import java.net.Socket
 import java.util.LinkedHashMap
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
@@ -59,6 +61,11 @@ class MediaProxy(private val factory: DataSource.Factory) {
             }
         }
         return "http://127.0.0.1:${socket.localPort}/$token/${Uri.encode(name)}"
+    }
+
+    fun clearRoutesOnly() {
+        routes.clear()
+        uriStates.values.forEach { it.preemptActive() }
     }
 
     fun clear() {
@@ -148,10 +155,16 @@ class MediaProxy(private val factory: DataSource.Factory) {
             }
         }
 
-        val mySeq = state.requestSeq.incrementAndGet()
-        val hadPrev = state.active != null
-        // 在同步等待 openLock 之前先立即抢占关闭旧上游，破解 VLC/FFmpeg「先开新 Socket 再关旧 Socket」导致的 403 死锁
-        state.active?.preempt()
+        val singleFlight = requiresSingleFlight(uri)
+        val myEpoch = state.clearEpoch.get()
+        val mySeq = if (singleFlight) state.requestSeq.incrementAndGet() else state.requestSeq.get()
+        val hadPrev = singleFlight && state.active != null
+        fun stillValid(): Boolean = !client.isClosed && myEpoch == state.clearEpoch.get() && (!singleFlight || mySeq == state.requestSeq.get())
+        // 仅对单连接网盘/Telegram 抢占关闭旧上游，破解 VLC/FFmpeg「先开新 Socket 再关旧 Socket」导致的 403 死锁；
+        // WebDAV / OpenList / Plex / Emby 允许并发 Range 请求，避免 ffprobe/ffmpeg 拖动时互相掐断预热连接
+        if (singleFlight) {
+            state.active?.preempt()
+        }
 
         var headersSent = false
         var hasContentLength = false
@@ -172,16 +185,16 @@ class MediaProxy(private val factory: DataSource.Factory) {
                     hasContentLength = writeHeaders(out, hasRange, start, knownEndExclusive, freshTotal)
                     headersSent = true
                     if (cachedEnd >= knownEndExclusive) {
-                        streamCachedRange(state, start, cachedEnd, out) { !client.isClosed }
+                        streamCachedRange(state, start, cachedEnd, out) { !client.isClosed && myEpoch == state.clearEpoch.get() }
                         out.flush()
-                        completedCleanly = !client.isClosed
+                        completedCleanly = !client.isClosed && myEpoch == state.clearEpoch.get()
                         return
                     }
                     val writtenEnd = streamCachedRange(state, start, cachedEnd, out) {
-                        mySeq == state.requestSeq.get() && !client.isClosed
+                        stillValid()
                     }
                     out.flush()
-                    if (writtenEnd < cachedEnd || mySeq != state.requestSeq.get() || client.isClosed) {
+                    if (writtenEnd < cachedEnd || !stillValid()) {
                         throw InterruptedIOException("Superseded while streaming cached prefix")
                     }
                     streamStart = cachedEnd
@@ -205,16 +218,37 @@ class MediaProxy(private val factory: DataSource.Factory) {
                 return
             }
 
-            val openedResult = openUpstreamSingleFlight(
-                state = state,
-                uri = uri,
-                mySeq = mySeq,
-                hadPrev = hadPrev,
-                client = client,
-                start = streamStart,
-                end = end,
-                length = upstreamLen,
-            )
+            val openedResult = if (singleFlight) {
+                synchronized(state.openLock) {
+                    state.active?.preempt()
+                    state.active = null
+                    openUpstreamImpl(
+                        state = state,
+                        uri = uri,
+                        singleFlight = true,
+                        mySeq = mySeq,
+                        myEpoch = myEpoch,
+                        hadPrev = hadPrev,
+                        client = client,
+                        start = streamStart,
+                        end = end,
+                        length = upstreamLen,
+                    )
+                }
+            } else {
+                openUpstreamImpl(
+                    state = state,
+                    uri = uri,
+                    singleFlight = false,
+                    mySeq = mySeq,
+                    myEpoch = myEpoch,
+                    hadPrev = false,
+                    client = client,
+                    start = streamStart,
+                    end = end,
+                    length = upstreamLen,
+                )
+            }
             activeHandle = openedResult.handle
 
             if (!headersSent) {
@@ -228,7 +262,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
                 val staging = BlockStaging(streamStart, state)
                 val buf = ByteArray(IO_BUFFER_BYTES)
                 try {
-                    while (mySeq == state.requestSeq.get() && !activeHandle.preempted && !client.isClosed) {
+                    while (stillValid() && !activeHandle.preempted) {
                         val n = activeHandle.source.read(buf, 0, buf.size)
                         if (n == C.RESULT_END_OF_INPUT) break
                         if (n > 0) {
@@ -241,9 +275,9 @@ class MediaProxy(private val factory: DataSource.Factory) {
                 }
             }
             out.flush()
-            completedCleanly = mySeq == state.requestSeq.get() && !activeHandle.preempted
+            completedCleanly = stillValid() && !activeHandle.preempted
         } catch (e: Exception) {
-            if (mySeq == state.requestSeq.get() && e !is InterruptedIOException) {
+            if (stillValid() && e !is InterruptedIOException) {
                 Log.d("Voxtitle", "中转连接结束：${e.message}")
             }
             if (!headersSent) {
@@ -254,8 +288,11 @@ class MediaProxy(private val factory: DataSource.Factory) {
             }
         } finally {
             activeHandle?.preempt()
-            if (activeHandle != null && state.active === activeHandle) {
-                state.active = null
+            if (activeHandle != null) {
+                if (state.active === activeHandle) {
+                    state.active = null
+                }
+                state.concurrentActive.remove(activeHandle)
             }
             if (completedCleanly) {
                 finishGracefully(client, hasContentLength)
@@ -275,39 +312,61 @@ class MediaProxy(private val factory: DataSource.Factory) {
         return sb.toString()
     }
 
-    private fun openUpstreamSingleFlight(
+    private fun requiresSingleFlight(uri: Uri): Boolean {
+        val raw = uri.toString()
+        if (Telegram.isTelegram(raw)) return true
+        if (CloudRegistry.isCloud(raw)) {
+            val srv = uri.host?.let(CloudRegistry.serverLookup)
+            return srv == null || !srv.type.isMediaServer
+        }
+        return false
+    }
+
+    private fun openUpstreamImpl(
         state: UriStreamState,
         uri: Uri,
+        singleFlight: Boolean,
         mySeq: Long,
+        myEpoch: Long,
         hadPrev: Boolean,
         client: Socket,
         start: Long,
         end: Long?,
         length: Long,
-    ): UpstreamOpenResult = synchronized(state.openLock) {
-        state.active?.preempt()
-        state.active = null
+    ): UpstreamOpenResult {
+        fun superseded(): Boolean = myEpoch != state.clearEpoch.get() || client.isClosed || (singleFlight && mySeq != state.requestSeq.get())
 
         val isCloud = CloudRegistry.isCloud(uri.toString())
-        if (hadPrev && isCloud) {
-            sleepChecking(PREEMPT_SETTLE_MS, state, mySeq, client)
+        if (singleFlight && hadPrev && isCloud) {
+            sleepChecking(PREEMPT_SETTLE_MS, state, singleFlight, mySeq, myEpoch, client)
         }
 
         val maxAttempts = 4
         var lastError: Exception? = null
         for (attempt in 0 until maxAttempts) {
-            if (mySeq != state.requestSeq.get() || client.isClosed) {
+            if (superseded()) {
                 throw InterruptedIOException("Superseded by newer proxy request")
             }
             val src = factory.createDataSource()
-            val handle = ActiveUpstream(mySeq, src)
-            state.active = handle
+            val handle = ActiveUpstream(if (singleFlight) mySeq else myEpoch, src)
+            if (singleFlight) {
+                state.active = handle
+            } else {
+                state.concurrentActive.add(handle)
+            }
+            fun detachHandle() {
+                handle.preempt()
+                if (singleFlight) {
+                    if (state.active === handle) state.active = null
+                } else {
+                    state.concurrentActive.remove(handle)
+                }
+            }
             try {
                 val spec = DataSpec.Builder().setUri(uri).setPosition(start).setLength(length).build()
                 val opened = src.open(spec)
-                if (handle.preempted || mySeq != state.requestSeq.get()) {
-                    handle.preempt()
-                    if (state.active === handle) state.active = null
+                if (handle.preempted || superseded()) {
+                    detachHandle()
                     throw InterruptedIOException("Superseded while opening upstream")
                 }
                 val endExclusive = if (opened == C.LENGTH_UNSET.toLong()) null else start + opened
@@ -324,10 +383,9 @@ class MediaProxy(private val factory: DataSource.Factory) {
                 return UpstreamOpenResult(handle, opened, endExclusive, resourceTotal)
             } catch (e: Exception) {
                 val wasPreempted = handle.preempted
-                handle.preempt()
-                if (state.active === handle) state.active = null
+                detachHandle()
                 lastError = e
-                if (wasPreempted || mySeq != state.requestSeq.get() || e is InterruptedIOException) {
+                if (wasPreempted || superseded() || e is InterruptedIOException) {
                     throw e
                 }
                 val retryable = isRetryableOpenFailure(e)
@@ -340,7 +398,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
                 }
                 val backoffMs = 150L * (1 shl attempt)
                 Log.d("Voxtitle", "中转上游打开受限（${e.message}），${backoffMs}ms 后重试(${attempt + 1}/$maxAttempts)")
-                sleepChecking(backoffMs, state, mySeq, client)
+                sleepChecking(backoffMs, state, singleFlight, mySeq, myEpoch, client)
             }
         }
         throw lastError ?: InterruptedIOException("Upstream open failed")
@@ -355,10 +413,17 @@ class MediaProxy(private val factory: DataSource.Factory) {
         return msg.contains("HTTP 401") || msg.contains("HTTP 403") || msg.contains("HTTP 429") || msg.contains("HTTP 502") || msg.contains("HTTP 503")
     }
 
-    private fun sleepChecking(totalMs: Long, state: UriStreamState, mySeq: Long, client: Socket) {
+    private fun sleepChecking(
+        totalMs: Long,
+        state: UriStreamState,
+        singleFlight: Boolean,
+        mySeq: Long,
+        myEpoch: Long,
+        client: Socket,
+    ) {
         var rem = totalMs
         while (rem > 0L) {
-            if (mySeq != state.requestSeq.get() || client.isClosed) {
+            if (myEpoch != state.clearEpoch.get() || client.isClosed || (singleFlight && mySeq != state.requestSeq.get())) {
                 throw InterruptedIOException("Superseded while waiting")
             }
             val step = minOf(25L, rem)
@@ -479,10 +544,13 @@ class MediaProxy(private val factory: DataSource.Factory) {
 
     private class UriStreamState(val uri: Uri) {
         val requestSeq = AtomicLong(0L)
+        val clearEpoch = AtomicLong(0L)
         val openLock = Any()
 
         @Volatile
         var active: ActiveUpstream? = null
+
+        val concurrentActive = CopyOnWriteArraySet<ActiveUpstream>()
 
         @Volatile
         var totalLength: Long = C.LENGTH_UNSET.toLong()
@@ -544,10 +612,17 @@ class MediaProxy(private val factory: DataSource.Factory) {
             }
         }
 
-        fun close() {
+        fun preemptActive() {
+            clearEpoch.incrementAndGet()
             requestSeq.incrementAndGet()
             active?.preempt()
             active = null
+            concurrentActive.forEach { it.preempt() }
+            concurrentActive.clear()
+        }
+
+        fun close() {
+            preemptActive()
             synchronized(cacheLock) { blocks.clear() }
         }
 

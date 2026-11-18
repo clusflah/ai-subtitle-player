@@ -9,14 +9,23 @@ import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.text.CueGroup
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
 import com.aisub.player.media.MediaProxy
 import com.aisub.player.media.VlcPlayer
 import com.aisub.player.subtitle.EmbeddedSubtitles
+import java.io.BufferedOutputStream
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.Proxy
+import java.net.ServerSocket
+import java.net.URL
 import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.concurrent.thread
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -277,5 +286,174 @@ class DesktopPlaybackDiagnosticTest {
         assertEquals("en", EmbeddedSubtitles.parseLanguageFromLabel("English [Canadian]"))
         assertEquals("zh", EmbeddedSubtitles.parseLanguageFromLabel("简体中文"))
         assertEquals("fr", EmbeddedSubtitles.parseLanguageFromLabel("Français"))
+    }
+
+    @Test
+    fun libplaceboFilterUsesRgbaDownloadWithoutSwappingWarmOrangePixels() {
+        val player = DesktopExoPlayer(GlobalDesktopApp, null)
+        try {
+            val hdrVf = player.buildColorMappedVfFilter(64, 64, mode = 1, sourceFps = 24.0, isHdrOrDv = true)
+            assertTrue("HDR libplacebo filter must download RGBA: $hdrVf", hdrVf.contains("format=rgba,hwdownload,format=rgba"))
+            assertTrue("HDR libplacebo filter must apply bt.2390 tonemapping: $hdrVf", hdrVf.contains("tonemapping=bt.2390"))
+
+            val sdrVf = player.buildColorMappedVfFilter(64, 64, mode = 1, sourceFps = 24.0, isHdrOrDv = false)
+            assertTrue("SDR libplacebo filter must download RGBA: $sdrVf", sdrVf.contains("format=rgba,hwdownload,format=rgba"))
+            assertTrue("SDR libplacebo filter must disable DV mapping: $sdrVf", sdrVf.contains("apply_dolbyvision=false"))
+            assertFalse("SDR libplacebo filter must not apply HDR tonemapping: $sdrVf", sdrVf.contains("tonemapping=bt.2390"))
+
+            val ffmpeg = DesktopBinaryFinder.ensureFfmpeg() ?: return
+            val proc = ProcessBuilder(
+                ffmpeg, "-nostdin", "-v", "error",
+                "-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk",
+                "-f", "lavfi", "-i", "color=c=#C88264:s=64x64:d=0.04",
+                "-frames:v", "1",
+                "-vf", sdrVf,
+                "-pix_fmt", "bgra",
+                "-f", "rawvideo", "pipe:1",
+            ).start()
+            val bytes = proc.inputStream.readNBytes(64 * 64 * 4)
+            val err = proc.errorStream.bufferedReader().readText()
+            assertEquals("FFmpeg libplacebo Vulkan test failed: $err", 0, proc.waitFor())
+            assumeTrue("Vulkan libplacebo filter requires working Vulkan device on host", bytes.size == 64 * 64 * 4)
+
+            val centerIdx = ((32 * 64) + 32) * 4
+            val b = bytes[centerIdx].toInt() and 0xFF
+            val g = bytes[centerIdx + 1].toInt() and 0xFF
+            val r = bytes[centerIdx + 2].toInt() and 0xFF
+            assertTrue("Expected warm orange non-swapped RGB (r > g > b), got R=$r G=$g B=$b", r > g && g > b && (r - b) >= 60)
+        } finally {
+            player.release()
+        }
+    }
+
+    @Test
+    fun mkv10BitHevcCodecPrivateByte17_0xFA_DetectedWithoutTransferTag() {
+        // Construct MKV EBML Header + Tracks (0x1654AE6B) + CodecPrivate (0x63A2) with HEVC 10-bit byte16=0xFD, byte17=0xFA
+        val buf = ByteArray(128)
+        buf[0] = 0x1A; buf[1] = 0x45; buf[2] = 0xDF.toByte(); buf[3] = 0xA3.toByte()
+        buf[16] = 0x16; buf[17] = 0x54; buf[18] = 0xAE.toByte(); buf[19] = 0x6B
+        val cpHdr = 24
+        buf[cpHdr] = 0x63
+        buf[cpHdr + 1] = 0xA2.toByte()
+        buf[cpHdr + 2] = 0x40
+        buf[cpHdr + 3] = 0x40
+        val cp = cpHdr + 4
+        buf[cp] = 1 // configurationVersion
+        buf[cp + 16] = 0xFD.toByte()
+        buf[cp + 17] = 0xFA.toByte() // 5 reserved bits (11111) + bitDepthLumaMinus8 = 2 (10-bit)
+        buf[cp + 18] = 0xFA.toByte()
+        buf[cp + 22] = 1 // numOfArrays = 1
+        // Array: NAL type 39 (PREFIX_SEI_NUT), 1 NALU, payloadType=137 (MasteringDisplay)
+        buf[cp + 23] = 39
+        buf[cp + 24] = 0; buf[cp + 25] = 1
+        buf[cp + 26] = 0; buf[cp + 27] = 5
+        buf[cp + 28] = 0x4E; buf[cp + 29] = 0x01; buf[cp + 30] = 137.toByte()
+
+        assertTrue("MKV Tracks must be detected", DesktopExoPlayer.containsMkvTracksElement(buf, buf.size))
+        assertTrue("MKV 10-bit HEVC byte17=0xFA must not be misclassified as 8-bit SDR", DesktopExoPlayer.has10BitMkvWithoutTransferTag(buf, buf.size))
+        assertTrue("HDR PREFIX_SEI inside 0xFA CodecPrivate must be detected", DesktopExoPlayer.scanHdrOrWideGamutFromBytes(buf, buf.size))
+    }
+
+    @Test
+    fun concurrentMediaProxyServesParallelHttpRangesAndClearRoutesOnlyPreservesCache() {
+        val totalSize = 512 * 1024
+        val payload = ByteArray(totalSize) { idx -> ((idx * 31 + 7) and 0xFF).toByte() }
+        val upstreamHits = AtomicInteger(0)
+        val activeConns = AtomicInteger(0)
+        val peakConcurrent = AtomicInteger(0)
+        val connBarrier = CountDownLatch(2)
+        val srv = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
+        val running = AtomicInteger(1)
+        val acceptThread = thread(name = "test-concurrent-http", isDaemon = true) {
+            while (running.get() == 1 && !srv.isClosed) {
+                val sock = runCatching { srv.accept() }.getOrNull() ?: continue
+                thread(isDaemon = true) {
+                    sock.use { s ->
+                        val rawIn = s.getInputStream()
+                        fun readHeaderLine(): String? {
+                            val buf = java.io.ByteArrayOutputStream()
+                            while (true) {
+                                val b = rawIn.read()
+                                if (b == -1) return if (buf.size() == 0) null else buf.toString(Charsets.ISO_8859_1)
+                                if (b == '\n'.code) break
+                                if (b != '\r'.code) buf.write(b)
+                            }
+                            return buf.toString(Charsets.ISO_8859_1)
+                        }
+                        readHeaderLine() ?: return@use
+                        val headers = generateSequence { readHeaderLine()?.takeIf { it.isNotEmpty() } }
+                            .associate { it.substringBefore(':').trim().lowercase() to it.substringAfter(':').trim() }
+                        upstreamHits.incrementAndGet()
+                        val cur = activeConns.incrementAndGet()
+                        peakConcurrent.updateAndGet { prev -> maxOf(prev, cur) }
+                        try {
+                            connBarrier.countDown()
+                            connBarrier.await(2, TimeUnit.SECONDS)
+                            val parts = headers["range"]?.removePrefix("bytes=")?.split('-')
+                            val start = parts?.getOrNull(0)?.toIntOrNull() ?: 0
+                            val end = (parts?.getOrNull(1)?.toIntOrNull() ?: (totalSize - 1)).coerceAtMost(totalSize - 1)
+                            val len = end - start + 1
+                            val out = BufferedOutputStream(s.getOutputStream())
+                            out.write(
+                                (
+                                    "HTTP/1.1 206 Partial Content\r\n" +
+                                        "Content-Range: bytes $start-$end/$totalSize\r\n" +
+                                        "Content-Length: $len\r\n" +
+                                        "Accept-Ranges: bytes\r\nConnection: close\r\n\r\n"
+                                    ).toByteArray(),
+                            )
+                            out.write(payload, start, len)
+                            out.flush()
+                            runCatching { s.shutdownOutput() }
+                            runCatching {
+                                s.soTimeout = 1000
+                                val drain = ByteArray(256)
+                                while (rawIn.read(drain) >= 0) {
+                                }
+                            }
+                        } finally {
+                            activeConns.decrementAndGet()
+                        }
+                    }
+                }
+            }
+        }
+
+        val proxy = MediaProxy(DefaultHttpDataSource.Factory())
+        try {
+            val rawUrl = "http://127.0.0.1:${srv.localPort}/movie.mkv"
+            val proxyUrl1 = proxy.register(Uri.parse(rawUrl), "movie.mkv")
+
+            fun fetchRange(urlStr: String, start: Int, end: Int): ByteArray {
+                val conn = URL(urlStr).openConnection(Proxy.NO_PROXY) as HttpURLConnection
+                conn.connectTimeout = 4000
+                conn.readTimeout = 4000
+                conn.setRequestProperty("Range", "bytes=$start-$end")
+                assertEquals(206, conn.responseCode)
+                return conn.inputStream.use { it.readAllBytes() }
+            }
+
+            var b1: ByteArray? = null
+            var b2: ByteArray? = null
+            val t1 = thread { b1 = fetchRange(proxyUrl1, 0, 131_071) }
+            val t2 = thread { b2 = fetchRange(proxyUrl1, 262_144, 393_215) }
+            t1.join(5000)
+            t2.join(5000)
+            assertTrue("First concurrent range payload mismatch", payload.copyOfRange(0, 131_072).contentEquals(b1))
+            assertTrue("Second concurrent range payload mismatch", payload.copyOfRange(262_144, 393_216).contentEquals(b2))
+            assertTrue("HTTP upstream should handle concurrent range reads (peak=${peakConcurrent.get()})", peakConcurrent.get() >= 2)
+
+            val hitsBeforeCacheReuse = upstreamHits.get()
+            proxy.clearRoutesOnly()
+            val proxyUrl2 = proxy.register(Uri.parse(rawUrl), "movie.mkv")
+            val cached = fetchRange(proxyUrl2, 0, 65_535)
+            assertTrue("Cached block after clearRoutesOnly must match", payload.copyOfRange(0, 65_536).contentEquals(cached))
+            assertEquals("clearRoutesOnly must preserve cached RAM blocks without hitting upstream", hitsBeforeCacheReuse, upstreamHits.get())
+        } finally {
+            running.set(0)
+            runCatching { srv.close() }
+            proxy.close()
+            acceptThread.join(1000)
+        }
     }
 }

@@ -32,7 +32,9 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.nio.ByteBuffer
+import java.security.MessageDigest
 
 /**
  * 简单的图片加载：海报、网盘里的图片、TMDB 图片。
@@ -53,15 +55,60 @@ object ImageLoader {
         cache.get(key)?.let { return it }
         val failedAt = synchronized(failed) { failed[key] }
         if (failedAt != null && System.currentTimeMillis() - failedAt < RETRY_MS) return null
+        val cacheable = isPublicHttpImage(url)
         return gate.withPermit {
             cache.get(key) ?: withContext(Dispatchers.IO) {
+                val diskFile = if (cacheable) runCatching { diskFileFor(context, url) }.getOrNull() else null
+                if (diskFile != null && diskFile.isFile && diskFile.length() > 0L) {
+                    val cachedBmp = runCatching { decode(diskFile.readBytes(), maxSize) }.getOrNull()
+                    if (cachedBmp != null) {
+                        runCatching { diskFile.setLastModified(System.currentTimeMillis()) }
+                        return@withContext cachedBmp.asImageBitmap()
+                    }
+                    runCatching { diskFile.delete() }
+                }
                 runCatching {
-                    decode(RemoteFiles.read(context, url, MAX_BYTES), maxSize)
+                    val bytes = RemoteFiles.read(context, url, MAX_BYTES)
+                    val bmp = decode(bytes, maxSize) ?: return@runCatching null
+                    if (diskFile != null && bytes.isNotEmpty()) {
+                        runCatching {
+                            val tmp = File(diskFile.parentFile, "${diskFile.name}.tmp")
+                            tmp.writeBytes(bytes)
+                            if (!tmp.renameTo(diskFile)) {
+                                tmp.copyTo(diskFile, overwrite = true)
+                                tmp.delete()
+                            }
+                            diskFile.parentFile?.let(::pruneDiskCacheIfNeeded)
+                        }
+                    }
+                    bmp
                 }.getOrNull()?.asImageBitmap()
             }?.also { cache.put(key, it) } ?: run {
                 synchronized(failed) { failed[key] = System.currentTimeMillis() }
                 null
             }
+        }
+    }
+
+    private fun isPublicHttpImage(url: String): Boolean =
+        (url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)) &&
+            !com.aisub.player.remote.cloud.CloudRegistry.isCloud(url)
+
+    private fun diskFileFor(context: Context, url: String): File {
+        val dir = File(context.cacheDir, "net_images")
+        if (!dir.exists()) dir.mkdirs()
+        val digest = MessageDigest.getInstance("SHA-256").digest(url.toByteArray(Charsets.UTF_8))
+        val hex = digest.joinToString("") { "%02x".format(it) }
+        return File(dir, "$hex.img")
+    }
+
+    private fun pruneDiskCacheIfNeeded(dir: File) {
+        val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".img") } ?: return
+        if (files.size <= 260) return
+        files.sortBy { it.lastModified() }
+        val removeCount = files.size - 200
+        for (i in 0 until removeCount) {
+            files[i].delete()
         }
     }
 

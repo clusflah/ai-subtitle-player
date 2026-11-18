@@ -2,6 +2,14 @@ import com.android.build.api.variant.VariantOutputConfiguration.OutputType
 import java.net.URI
 import java.security.MessageDigest
 import java.util.zip.ZipFile
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.ConfigurableFileCollection
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.tasks.InputFiles
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -58,6 +66,44 @@ fun prepareTdlib(dir: File): File {
 
 val tdlibDir: File = prepareTdlib(rootProject.file(".gradle/tdlib/$tdlibTag"))
 
+abstract class ExtractMpvCxxTask : DefaultTask() {
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val aarFiles: ConfigurableFileCollection
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun extract() {
+        val outDir = outputDir.get().asFile
+        if (outDir.exists()) outDir.deleteRecursively()
+        outDir.mkdirs()
+        val aar = aarFiles.singleFile
+        ZipFile(aar).use { z ->
+            for (e in z.entries()) {
+                if (!e.isDirectory && e.name.startsWith("jni/") && e.name.endsWith("/libc++_shared.so")) {
+                    val rel = e.name.removePrefix("jni/")
+                    val dst = File(outDir, rel)
+                    dst.parentFile.mkdirs()
+                    z.getInputStream(e).use { input -> dst.outputStream().use { input.copyTo(it) } }
+                }
+            }
+        }
+    }
+}
+
+val mpvCxxAar by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+
+val extractMpvCxx = tasks.register<ExtractMpvCxxTask>("extractMpvCxx") {
+    aarFiles.from(mpvCxxAar)
+    outputDir.set(layout.buildDirectory.dir("generated/mpvCxxJniLibs"))
+}
+
 android {
     namespace = "com.aisub.player"
     compileSdk = 36
@@ -67,8 +113,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 23
         targetSdk = 36
-        versionCode = 170
-        versionName = "2.10.9"
+        versionCode = 171
+        versionName = "2.10.10"
 
         ndk {
             // 真机基本都是 arm64；armeabi-v7a 给 32 位老电视用；x86_64 给模拟器用
@@ -219,6 +265,7 @@ dependencies {
     // 解决杜比视界 Profile 5 (IPTPQc2) 紫绿偏色与冷门编码解码；放在 VLC/ass-media 前面保留更新的 libc++_shared.so。
     // 选用 0.5.1 避开 1.0.0 中 Mbed TLS 3.6.6 在老内核 Android TV 上读取 /dev/random 导致的 HTTPS 握手卡顿。
     implementation("dev.jdtech.mpv:libmpv:0.5.1")
+    mpvCxxAar("dev.jdtech.mpv:libmpv:0.5.1")
     // ISO（DVD / 蓝光镜像）以及单连接原生音频分流直播源使用 VLC 内核
     implementation("org.videolan.android:libvlc-all:3.7.7")
     // 视频自带的 ASS / SSA 字幕用 libass 渲染（位置、多行避让、特效和 Plex、VLC 一致；ExoPlayer 自带的只会把所有行堆在底部）
@@ -258,6 +305,11 @@ configurations.matching { it.name.contains("UnitTest") }.configureEach {
 }
 
 androidComponents {
+    // 优先注入 libmpv:0.5.1 的新版 libc++_shared.so（含 armeabi-v7a 的 to_chars 等 NDK r26+ 符号），
+    // 确保 pickFirsts 不会误选 libvlc-all:3.7.7 缺失符号的旧版 libc++_shared.so
+    onVariants { variant ->
+        variant.sources.jniLibs?.addGeneratedSourceDirectory(extractMpvCxx, ExtractMpvCxxTask::outputDir)
+    }
     // yt-dlp 要直接运行 so 里的 Python，原生库必须解压到磁盘；同时下载版不出通用包（太大且不发布）
     onVariants(selector().withFlavor("edition" to "ytdlp")) { variant ->
         variant.packaging.jniLibs.useLegacyPackaging.set(true)

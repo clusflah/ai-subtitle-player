@@ -1,6 +1,9 @@
 package com.aisub.player.meta
 
+import com.aisub.player.AppSettings
 import com.aisub.player.media.RemoteFiles
+import java.io.IOException
+import java.nio.file.Files
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -367,5 +370,96 @@ class DiscoverTest {
 
         val encoded = AiDiscoverStore.encodeHistoryJson(listOf("时间循环科幻片", "治愈系日剧"))
         assertEquals(listOf("时间循环科幻片", "治愈系日剧"), AiDiscoverStore.parseHistoryJson(encoded))
+    }
+
+    @Test
+    fun discoverHomePersistenceAutoRefreshOnFirstVisitAndOfflineFallback() {
+        val tempDir = Files.createTempDirectory("discover_persist_test").toFile()
+        val settings = AppSettings()
+        try {
+            DiscoverRepository.resetSessionForTest(clearInMemoryData = true)
+
+            val initialLoaded = DiscoverRepository.loadHomeSectionsInternal(
+                settings = settings,
+                forceRefresh = true,
+                storageDir = tempDir,
+            ) { chart, _ ->
+                if (chart.id == "tv_hot") {
+                    listOf(
+                        DiscoverItem(
+                            id = "douban:1001",
+                            kind = "tv",
+                            title = "旧版剧集榜首",
+                            year = 2025,
+                            posterUrl = "https://img1.doubanio.com/view/photo/l/public/old.jpg",
+                            genres = listOf("悬疑"),
+                            countries = listOf("中国大陆"),
+                            rating = 8.6,
+                            ratingLabel = "豆瓣",
+                            doubanId = "1001",
+                        ),
+                    )
+                } else {
+                    emptyList()
+                }
+            }
+            assertEquals(1, initialLoaded.size)
+            assertEquals("旧版剧集榜首", initialLoaded[0].items[0].title)
+            val cacheFile = java.io.File(tempDir, "discover_cache_v1.json")
+            assertTrue("Expected discover_cache_v1.json to be written", cacheFile.isFile && cacheFile.length() > 0L)
+
+            // 模拟杀掉进程后重新冷启动：内存清空，但磁盘持久化内容立即可见
+            DiscoverRepository.resetSessionForTest(clearInMemoryData = true)
+            val peeked = DiscoverRepository.peekHomeSectionsFromDir(settings, tempDir)
+            assertEquals(1, peeked.size)
+            assertEquals("旧版剧集榜首", peeked[0].items[0].title)
+
+            // 同一次会话首次进入触发自动刷新，第二次不再重复触发
+            assertTrue(DiscoverRepository.consumeFirstVisitAutoRefresh(settings))
+            assertFalse(DiscoverRepository.consumeFirstVisitAutoRefresh(settings))
+
+            // 网络不好/断网时自动刷新失败：不转圈空屏，回退显示以前的内容且不破坏磁盘文件
+            val offlineFallback = DiscoverRepository.loadHomeSectionsInternal(
+                settings = settings,
+                forceRefresh = true,
+                storageDir = tempDir,
+            ) { _, _ -> throw IOException("offline timeout") }
+            assertEquals(1, offlineFallback.size)
+            assertEquals("旧版剧集榜首", offlineFallback[0].items[0].title)
+            assertTrue(cacheFile.isFile && cacheFile.length() > 0L)
+
+            // 网络恢复后刷新成功：更新为新版内容并持久化给下次冷启动使用
+            val updated = DiscoverRepository.loadHomeSectionsInternal(
+                settings = settings,
+                forceRefresh = true,
+                storageDir = tempDir,
+            ) { chart, _ ->
+                if (chart.id == "tv_hot") {
+                    listOf(
+                        DiscoverItem(
+                            id = "douban:2002",
+                            kind = "tv",
+                            title = "新版更新剧集",
+                            year = 2026,
+                            rating = 9.1,
+                            ratingLabel = "豆瓣",
+                            doubanId = "2002",
+                        ),
+                    )
+                } else {
+                    emptyList()
+                }
+            }
+            assertEquals(1, updated.size)
+            assertEquals("新版更新剧集", updated[0].items[0].title)
+
+            DiscoverRepository.resetSessionForTest(clearInMemoryData = true)
+            val coldAfterUpdate = DiscoverRepository.peekHomeSectionsFromDir(settings, tempDir)
+            assertEquals(1, coldAfterUpdate.size)
+            assertEquals("新版更新剧集", coldAfterUpdate[0].items[0].title)
+        } finally {
+            DiscoverRepository.resetSessionForTest(clearInMemoryData = true)
+            tempDir.deleteRecursively()
+        }
     }
 }

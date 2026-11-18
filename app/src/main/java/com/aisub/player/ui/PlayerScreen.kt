@@ -396,9 +396,10 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     LaunchedEffect(Unit) { vm.extras.events.collect { indicator = null to it } }
     LaunchedEffect(gesturePreview) { gesturePreview?.let(vm.extras::requestThumbnail) ?: vm.extras.clearThumbnail() }
 
-    LaunchedEffect(controls, interactions, isPlaying, showMore, showTracks) {
-        if (controls && isPlaying && !showMore && !showTracks) {
-            delay(3500)
+    val controlHideDelayMs = if (LocalTv.current) 5000L else 3500L
+    LaunchedEffect(controls, interactions, isPlaying, showMore, showTracks, dialog) {
+        if (controls && isPlaying && !showMore && !showTracks && dialog == null) {
+            delay(controlHideDelayMs)
             controls = false
         }
     }
@@ -1324,7 +1325,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         label = "字幕与音轨",
                         modifier = Modifier.weight(1f),
                         iconSize = 22.dp,
-                        active = effectiveSlot == 0 && targetSlot != 3,
+                        active = if (tv) focusedSlot == 0 else (targetSlot == 0 && targetSlot != 3),
                         onFocusChange = { if (it) focusedSlot = 0 else if (focusedSlot == 0) focusedSlot = -1 },
                     ) {
                         targetSlot = 0; pulseTick++; tracksAi = false; showTracks = true; interactions++
@@ -1334,7 +1335,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         label = "AI 字幕",
                         modifier = Modifier.weight(1f),
                         iconSize = 22.dp,
-                        active = effectiveSlot == 1 && targetSlot != 3,
+                        active = if (tv) focusedSlot == 1 else (targetSlot == 1 && targetSlot != 3),
                         onFocusChange = { if (it) focusedSlot = 1 else if (focusedSlot == 1) focusedSlot = -1 },
                     ) {
                         targetSlot = 1; pulseTick++; tracksAi = true; showTracks = true; interactions++
@@ -1345,7 +1346,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         modifier = Modifier.weight(1f),
                         iconSize = 27.dp,
                         enabled = canSkip,
-                        active = effectiveSlot == 2 && targetSlot != 3,
+                        active = if (tv) focusedSlot == 2 else (targetSlot == 2 && targetSlot != 3),
                         onFocusChange = { if (it) focusedSlot = 2 else if (focusedSlot == 2) focusedSlot = -1 },
                     ) {
                         targetSlot = 2; pulseTick++; vm.skipInQueue(false, restartFirst = true); interactions++
@@ -1367,7 +1368,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         modifier = Modifier.weight(1f),
                         iconSize = 27.dp,
                         enabled = canSkip,
-                        active = effectiveSlot == 4 && targetSlot != 3,
+                        active = if (tv) focusedSlot == 4 else (targetSlot == 4 && targetSlot != 3),
                         onFocusChange = { if (it) focusedSlot = 4 else if (focusedSlot == 4) focusedSlot = -1 },
                     ) {
                         targetSlot = 4; pulseTick++; vm.skipInQueue(true); interactions++
@@ -1379,7 +1380,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             label = "倍速",
                             modifier = Modifier.weight(1f),
                             iconSize = 22.dp,
-                            active = effectiveSlot == 5 && targetSlot != 3,
+                            active = if (tv) focusedSlot == 5 else (targetSlot == 5 && targetSlot != 3),
                             onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
                         ) {
                             targetSlot = 5; pulseTick++; dialog = PlayerDialog.SPEED; interactions++
@@ -1390,7 +1391,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             label = "旋转屏幕",
                             modifier = Modifier.weight(1f),
                             iconSize = 21.dp,
-                            active = effectiveSlot == 5 && targetSlot != 3,
+                            active = if (tv) focusedSlot == 5 else (targetSlot == 5 && targetSlot != 3),
                             onFocusChange = { if (it) focusedSlot = 5 else if (focusedSlot == 5) focusedSlot = -1 },
                         ) {
                             targetSlot = 5; pulseTick++
@@ -1407,7 +1408,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         label = "更多",
                         modifier = Modifier.weight(1f),
                         iconSize = 25.dp,
-                        active = effectiveSlot == 6 && targetSlot != 3,
+                        active = if (tv) focusedSlot == 6 else (targetSlot == 6 && targetSlot != 3),
                         onFocusChange = { if (it) focusedSlot = 6 else if (focusedSlot == 6) focusedSlot = -1 },
                     ) {
                         targetSlot = 6; pulseTick++; showMore = true; interactions++
@@ -2252,7 +2253,12 @@ private fun MorePanel(activeKernel: com.aisub.player.PlayerKernel, state: UiStat
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
             quick.forEach { (action, icon, label) ->
                 Column(
-                    Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).clickable { onAction(action) }.padding(vertical = 10.dp),
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .tvFocusRing(RoundedCornerShape(10.dp), color = Orange, fillBackground = true)
+                        .clickable { onAction(action) }
+                        .padding(vertical = 10.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(26.dp))
@@ -2265,7 +2271,13 @@ private fun MorePanel(activeKernel: com.aisub.player.PlayerKernel, state: UiStat
             Text(title, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(start = 24.dp, top = 16.dp, bottom = 2.dp))
             items.forEach { (action, icon, label) ->
                 Row(
-                    Modifier.fillMaxWidth().clickable { onAction(action) }.heightIn(min = 50.dp).padding(horizontal = 24.dp),
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .tvFocusRing(RoundedCornerShape(12.dp), color = Orange, fillBackground = true)
+                        .clickable { onAction(action) }
+                        .heightIn(min = 50.dp)
+                        .padding(horizontal = 24.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp))
@@ -3067,7 +3079,7 @@ private fun KernelSwitchDialog(
                             .padding(horizontal = 10.dp, vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        RadioButton(selected = selected, onClick = { onSelectKernel(k) })
+                        RadioButton(selected = selected, onClick = null)
                         Spacer(Modifier.width(8.dp))
                         Column(Modifier.weight(1f)) {
                             Text(
@@ -3159,7 +3171,7 @@ private fun KernelSwitchDialog(
                     }
                     Switch(
                         checked = state.settings.autoDolbyMpv,
-                        onCheckedChange = { vm.updateSettings(state.settings.copy(autoDolbyMpv = it)) },
+                        onCheckedChange = null,
                     )
                 }
             }

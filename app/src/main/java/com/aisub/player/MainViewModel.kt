@@ -600,7 +600,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         "可以先停止识别再播放"
                     }
                 }
-            _state.update { it.copy(playbackError = describePlaybackError(error) + extra.orEmpty()) }
+            _state.update { it.copy(playbackError = describePlaybackError(error, activeKernel) + extra.orEmpty()) }
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -1061,11 +1061,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         when (target) {
             PlayerKernel.MPV -> {
+                val effectiveDolbyP5Hint = dolbyP5Hint ||
+                    isCurrentDolbyShunted ||
+                    DolbyVisionHelper.looksLikeProfile5Title(entry.title) ||
+                    exoPlayer.videoFormat?.let(DolbyVisionHelper::isProfile5) == true
                 playWithMpv(
                     entry = entry,
                     positionMs = resumePos,
                     entries = savedQueue,
-                    dolbyP5Hint = dolbyP5Hint,
+                    dolbyP5Hint = effectiveDolbyP5Hint,
                     playWhenReady = wasPlaying,
                     speed = curSpeed,
                     repeatMode = curRepeat,
@@ -3650,8 +3654,19 @@ internal fun renderersFactory(
 internal const val PLAYBACK_ERROR_DETAIL = "\n\u0001"
 
 /** 播放出错的说明：原因 + 怎么办；错误码和异常信息放在分隔符后面（点「详细信息」才显示）。 */
-internal fun describePlaybackError(e: PlaybackException): String {
-    val reason = when (e.errorCode) {
+internal fun describePlaybackError(
+    e: PlaybackException,
+    activeKernel: PlayerKernel = PlayerKernel.EXO,
+): String {
+    val explicitExternalReason = e.message?.takeIf {
+        activeKernel != PlayerKernel.EXO &&
+            it.isNotBlank() &&
+            e.errorCode in setOf(
+                PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+                PlaybackException.ERROR_CODE_UNSPECIFIED,
+            )
+    }
+    val reason = explicitExternalReason ?: when (e.errorCode) {
         PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
         PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> "连不上，网络断了或者太慢。检查网络后点「重试」；NAS 在家里的话，出门时要用外网地址"
         PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> {
@@ -3670,15 +3685,26 @@ internal fun describePlaybackError(e: PlaybackException): String {
         PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
         PlaybackException.ERROR_CODE_DECODING_FAILED,
         PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
-        PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES -> "硬件解码不支持这个视频的画面或色彩格式。点「MPV 内核播放」可软硬解并准确还原杜比色彩"
+        PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ->
+            if (activeKernel == PlayerKernel.EXO) {
+                "硬件解码不支持这个视频的画面或色彩格式。点「MPV 内核播放」可软硬解并准确还原杜比色彩"
+            } else {
+                "当前内核解码该视频失败。可点「重试」，或切换「默认内核 / VLC 内核」播放"
+            }
         PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
         PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED -> "声音输出失败，可能被别的应用占用了。点「重试」"
         else -> "播放出错了。点「重试」，或切换「MPV / VLC 内核」试试"
     }
-    val detail = generateSequence(e.cause) { it.cause }.mapNotNull { it.message }.firstOrNull()?.take(200)
+    val detailParts = buildList {
+        e.message?.takeIf { it.isNotBlank() && it != reason }?.let { add(it.take(200)) }
+        generateSequence(e.cause) { it.cause }
+            .mapNotNull { it.message?.takeIf(String::isNotBlank) }
+            .firstOrNull()
+            ?.let { add(it.take(200)) }
+    }
     return buildString {
         append(reason)
         append(PLAYBACK_ERROR_DETAIL).append("错误码：").append(e.errorCodeName)
-        if (!detail.isNullOrBlank()) append("\n").append(detail)
+        if (detailParts.isNotEmpty()) append("\n").append(detailParts.joinToString("\n"))
     }
 }

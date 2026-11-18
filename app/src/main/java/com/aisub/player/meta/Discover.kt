@@ -10,10 +10,13 @@ import com.aisub.player.remote.cloud.cloudHttp
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.io.IOException
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 
 /** 发现页条目：可来自豆瓣片单、TMDB 发现页 / 流媒体榜 / 搜索，点开后进入影视详情页。 */
 data class DiscoverItem(
@@ -252,12 +255,17 @@ object DiscoverCharts {
 object DiscoverRepository {
 
     private const val CACHE_TTL_MS = 15 * 60_000L
+    private const val HOME_CACHE_FILE = "discover_cache_v1.json"
     private const val DOUBAN_UA =
         "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
     private data class CacheEntry<T>(val value: T, val expiresAt: Long)
 
     private val listCache = ConcurrentHashMap<String, CacheEntry<List<DiscoverItem>>>()
+    private val diskLock = Any()
+
+    @Volatile
+    private var loadedDiskDirPath: String? = null
 
     @Volatile
     private var cachedHomeConfigKey: String? = null
@@ -265,8 +273,20 @@ object DiscoverRepository {
     @Volatile
     private var cachedHomeSections: List<DiscoverHomeSection> = emptyList()
 
+    private val persistedHomeByConfig = ConcurrentHashMap<String, List<DiscoverHomeSection>>()
+
+    @Volatile
+    private var persistedLastHomeSections: List<DiscoverHomeSection> = emptyList()
+
+    private val persistedChartPages = ConcurrentHashMap<String, DiscoverChartPage>()
+
     private val chartFirstPageCache = ConcurrentHashMap<String, DiscoverChartPage>()
     private val searchSnapshotCache = ConcurrentHashMap<String, List<DiscoverItem>>()
+    private val sessionInitialRefreshConsumed = ConcurrentHashMap.newKeySet<String>()
+
+    private val fetchPool = Executors.newFixedThreadPool(4) { r ->
+        Thread(r, "voxtitle-discover-fetch").apply { isDaemon = true }
+    }
 
     @Volatile
     var sessionSearchExpanded: Boolean = false
@@ -295,13 +315,50 @@ object DiscoverRepository {
     private fun searchSnapshotKey(settings: AppSettings, query: String): String =
         "${settings.tmdbKey.isNotBlank()}|${settings.doubanEnabled}|${query.trim()}"
 
-    /** 读取当前会话已加载过的发现页首页快照，从详情页/榜单页退回时不重复触发刷新转圈。 */
-    fun peekHomeSections(settings: AppSettings): List<DiscoverHomeSection> =
-        if (cachedHomeConfigKey == homeConfigKey(settings)) cachedHomeSections else emptyList()
+    /** 每个应用进程首次进入发现页时返回 true（用于触发一次后台自动刷新），同一次会话内后续返回不再重复刷新。 */
+    fun consumeFirstVisitAutoRefresh(settings: AppSettings): Boolean =
+        sessionInitialRefreshConsumed.add(homeConfigKey(settings))
 
-    /** 读取当前会话已加载过的单榜单首屏快照，从详情页退回时直接复用。 */
-    fun peekChartFirstPage(chart: DiscoverChartDef, settings: AppSettings): DiscoverChartPage? =
+    internal fun resetSessionForTest(clearInMemoryData: Boolean = false) {
+        sessionInitialRefreshConsumed.clear()
+        if (clearInMemoryData) {
+            listCache.clear()
+            cachedHomeConfigKey = null
+            cachedHomeSections = emptyList()
+            chartFirstPageCache.clear()
+            searchSnapshotCache.clear()
+            persistedHomeByConfig.clear()
+            persistedLastHomeSections = emptyList()
+            persistedChartPages.clear()
+            synchronized(diskLock) {
+                loadedDiskDirPath = null
+            }
+        }
+    }
+
+    /** 读取当前会话已加载过的或本地持久化保存的发现页首页快照，断网或冷启动时立即可见。 */
+    fun peekHomeSections(settings: AppSettings, context: Context? = null): List<DiscoverHomeSection> =
+        peekHomeSectionsFromDir(settings, context?.filesDir)
+
+    internal fun peekHomeSectionsFromDir(settings: AppSettings, storageDir: File?): List<DiscoverHomeSection> {
+        ensureDiskLoaded(storageDir)
+        val cfgKey = homeConfigKey(settings)
+        if (cachedHomeConfigKey == cfgKey && cachedHomeSections.isNotEmpty()) {
+            return cachedHomeSections
+        }
+        persistedHomeByConfig[cfgKey]?.takeIf { it.isNotEmpty() }?.let { return it }
+        return persistedLastHomeSections
+    }
+
+    /** 仅检查当前会话内存中的单榜单首屏快照。 */
+    fun peekInMemoryChartFirstPage(chart: DiscoverChartDef, settings: AppSettings): DiscoverChartPage? =
         chartFirstPageCache[chartFirstPageKey(chart, settings)]
+
+    /** 读取当前会话或持久化保存的单榜单首屏快照，从详情页退回或离线打开时直接复用。 */
+    fun peekChartFirstPage(chart: DiscoverChartDef, settings: AppSettings, context: Context? = null): DiscoverChartPage? {
+        ensureDiskLoaded(context?.filesDir)
+        return chartFirstPageCache[chartFirstPageKey(chart, settings)] ?: persistedChartPages[chart.id]
+    }
 
     /** 读取当前会话已搜索过的关键词结果快照，从详情页退回时免重复请求。 */
     fun peekSearchResults(settings: AppSettings, query: String): List<DiscoverItem>? {
@@ -324,6 +381,7 @@ object DiscoverRepository {
         "ES" to "西班牙", "IT" to "意大利", "TH" to "泰国", "IN" to "印度", "AU" to "澳大利亚",
     )
 
+    /** 清理瞬时内存请求缓存（保留已持久化榜单与搜索兜底以外的新请求资格，确保手动刷新失败时不清空已有内容）。 */
     fun clearCache() {
         listCache.clear()
         cachedHomeConfigKey = null
@@ -332,9 +390,26 @@ object DiscoverRepository {
         searchSnapshotCache.clear()
     }
 
-    /** 加载发现页首页的榜单行；优先展示豆瓣免 Key 榜单，TMDB Key 存在时追加趋势榜。 */
-    fun loadHomeSections(settings: AppSettings, forceRefresh: Boolean = false): List<DiscoverHomeSection> {
+    /** 加载发现页首页的榜单行；优先展示豆瓣免 Key 榜单，TMDB Key 存在时追加趋势榜；离线或失败时自动保留先前持久化内容。 */
+    fun loadHomeSections(
+        settings: AppSettings,
+        forceRefresh: Boolean = false,
+        context: Context? = null,
+    ): List<DiscoverHomeSection> = loadHomeSectionsInternal(
+        settings = settings,
+        forceRefresh = forceRefresh,
+        storageDir = context?.filesDir,
+    )
+
+    internal fun loadHomeSectionsInternal(
+        settings: AppSettings,
+        forceRefresh: Boolean,
+        storageDir: File?,
+        chartFetcher: ((DiscoverChartDef, Boolean) -> List<DiscoverItem>)? = null,
+    ): List<DiscoverHomeSection> {
+        ensureDiskLoaded(storageDir)
         val cfgKey = homeConfigKey(settings)
+        val previous = peekHomeSectionsFromDir(settings, storageDir)
         if (!forceRefresh && cachedHomeConfigKey == cfgKey && cachedHomeSections.isNotEmpty()) {
             return cachedHomeSections
         }
@@ -345,36 +420,272 @@ object DiscoverRepository {
                 DiscoverCharts.findChart("tmdb_trending_movie")?.let { add(it) }
             }
         }
-        val loaded = charts.mapNotNull { chart ->
-            val items = runCatching {
-                fetchDoubanOrTmdbChart(chart, settings, page = 1, count = 18, forceRefresh = forceRefresh).items
-            }.getOrDefault(emptyList())
-            if (items.isEmpty()) null else DiscoverHomeSection(chart, items)
+        val futures = charts.map { chart ->
+            chart.id to CompletableFuture.supplyAsync({
+                runCatching {
+                    chartFetcher?.invoke(chart, forceRefresh)
+                        ?: fetchDoubanOrTmdbChart(chart, settings, page = 1, count = 18, forceRefresh = forceRefresh).items
+                }.getOrDefault(emptyList())
+            }, fetchPool)
         }
-        if (loaded.isNotEmpty()) {
-            cachedHomeSections = loaded
+        val freshMap = LinkedHashMap<String, List<DiscoverItem>>()
+        for ((chartId, fut) in futures) {
+            val items = runCatching { fut.get() }.getOrDefault(emptyList())
+            if (items.isNotEmpty()) {
+                freshMap[chartId] = items
+            }
+        }
+        if (freshMap.isEmpty()) {
+            return previous
+        }
+        val merged = charts.mapNotNull { chart ->
+            val fresh = freshMap[chart.id]
+            if (!fresh.isNullOrEmpty()) {
+                DiscoverHomeSection(chart, fresh)
+            } else {
+                previous.firstOrNull { it.chart.id == chart.id }
+            }
+        }
+        if (merged.isNotEmpty()) {
+            cachedHomeSections = merged
             cachedHomeConfigKey = cfgKey
+            persistedHomeByConfig[cfgKey] = merged
+            persistedLastHomeSections = merged
+            for ((chartId, freshItems) in freshMap) {
+                DiscoverCharts.findChart(chartId)?.let { def ->
+                    persistedChartPages[chartId] = DiscoverChartPage(def, freshItems)
+                }
+            }
+            saveDiskCache(storageDir)
         }
-        return loaded
+        return merged
     }
 
-    /** 加载指定榜单页面；当 TMDB Key 缺失时自动回落到对应的豆瓣榜单。 */
+    /** 加载指定榜单页面；当 TMDB Key 缺失时自动回落到对应的豆瓣榜单；首屏失败或为空时回退持久化缓存。 */
     fun loadChartPage(
         chart: DiscoverChartDef,
         settings: AppSettings,
         page: Int = 1,
         count: Int = 24,
         forceRefresh: Boolean = false,
+        context: Context? = null,
     ): DiscoverChartPage {
+        ensureDiskLoaded(context?.filesDir)
         val key = chartFirstPageKey(chart, settings)
         if (page == 1 && !forceRefresh) {
             chartFirstPageCache[key]?.let { return it }
         }
-        return fetchDoubanOrTmdbChart(chart, settings, page, count, forceRefresh).also { res ->
+        val fetched = runCatching {
+            fetchDoubanOrTmdbChart(chart, settings, page, count, forceRefresh)
+        }.onSuccess { res ->
             if (page == 1 && res.items.isNotEmpty()) {
                 chartFirstPageCache[key] = res
+                persistedChartPages[chart.id] = res
+                saveDiskCache(context?.filesDir)
             }
         }
+        if (page == 1) {
+            val res = fetched.getOrNull()
+            if (res == null || res.items.isEmpty()) {
+                persistedChartPages[chart.id]?.takeIf { it.items.isNotEmpty() }?.let { return it }
+            }
+        }
+        return fetched.getOrThrow()
+    }
+
+    internal fun ensureDiskLoaded(storageDir: File?) {
+        if (storageDir == null) return
+        val path = storageDir.absolutePath
+        if (loadedDiskDirPath == path) return
+        synchronized(diskLock) {
+            if (loadedDiskDirPath == path) return
+            val file = File(storageDir, HOME_CACHE_FILE)
+            if (file.isFile && file.length() > 0L) {
+                runCatching {
+                    val root = JSONObject(file.readText(Charsets.UTF_8))
+                    root.optJSONArray("lastHome")?.let { arr ->
+                        val parsed = (0 until arr.length()).mapNotNull { idx ->
+                            arr.optJSONObject(idx)?.let(::decodeSectionJson)
+                        }
+                        if (parsed.isNotEmpty()) {
+                            persistedLastHomeSections = parsed
+                        }
+                    }
+                    root.optJSONObject("homeByConfig")?.let { obj ->
+                        val keys = obj.keys()
+                        while (keys.hasNext()) {
+                            val k = keys.next()
+                            val arr = obj.optJSONArray(k) ?: continue
+                            val parsed = (0 until arr.length()).mapNotNull { idx ->
+                                arr.optJSONObject(idx)?.let(::decodeSectionJson)
+                            }
+                            if (parsed.isNotEmpty()) {
+                                persistedHomeByConfig[k] = parsed
+                            }
+                        }
+                    }
+                    root.optJSONObject("charts")?.let { obj ->
+                        val keys = obj.keys()
+                        while (keys.hasNext()) {
+                            val chartId = keys.next()
+                            val pObj = obj.optJSONObject(chartId) ?: continue
+                            decodeChartPageJson(pObj)?.let { page ->
+                                persistedChartPages[chartId] = page
+                            }
+                        }
+                    }
+                }
+            }
+            loadedDiskDirPath = path
+        }
+    }
+
+    private fun saveDiskCache(storageDir: File?) {
+        if (storageDir == null) return
+        synchronized(diskLock) {
+            runCatching {
+                if (!storageDir.exists()) storageDir.mkdirs()
+                val root = JSONObject().apply {
+                    put("version", 1)
+                    put(
+                        "lastHome",
+                        JSONArray().apply {
+                            persistedLastHomeSections.forEach { put(encodeSectionJson(it)) }
+                        },
+                    )
+                    put(
+                        "homeByConfig",
+                        JSONObject().apply {
+                            persistedHomeByConfig.forEach { (cfgKey, list) ->
+                                put(cfgKey, JSONArray().apply { list.forEach { put(encodeSectionJson(it)) } })
+                            }
+                        },
+                    )
+                    put(
+                        "charts",
+                        JSONObject().apply {
+                            persistedChartPages.forEach { (chartId, page) ->
+                                put(chartId, encodeChartPageJson(page))
+                            }
+                        },
+                    )
+                }
+                val tmp = File(storageDir, "$HOME_CACHE_FILE.tmp")
+                val target = File(storageDir, HOME_CACHE_FILE)
+                tmp.writeText(root.toString(), Charsets.UTF_8)
+                if (!tmp.renameTo(target)) {
+                    tmp.copyTo(target, overwrite = true)
+                    tmp.delete()
+                }
+            }
+        }
+    }
+
+    private fun encodeSectionJson(section: DiscoverHomeSection): JSONObject = JSONObject().apply {
+        put("chartId", section.chart.id)
+        put("items", JSONArray().apply { section.items.forEach { put(encodeItemJson(it)) } })
+    }
+
+    private fun decodeSectionJson(obj: JSONObject): DiscoverHomeSection? {
+        val chartId = obj.optString("chartId").trim()
+        val chart = DiscoverCharts.findChart(chartId) ?: return null
+        val arr = obj.optJSONArray("items") ?: return null
+        val items = (0 until arr.length()).mapNotNull { idx -> arr.optJSONObject(idx)?.let(::decodeItemJson) }
+        return if (items.isEmpty()) null else DiscoverHomeSection(chart, items)
+    }
+
+    private fun encodeChartPageJson(page: DiscoverChartPage): JSONObject = JSONObject().apply {
+        put("chartId", page.chart.id)
+        put("items", JSONArray().apply { page.items.forEach { put(encodeItemJson(it)) } })
+        if (page.note != null) put("note", page.note)
+        put("usedFallback", page.usedFallback)
+    }
+
+    private fun decodeChartPageJson(obj: JSONObject): DiscoverChartPage? {
+        val chartId = obj.optString("chartId").trim()
+        val chart = DiscoverCharts.findChart(chartId) ?: return null
+        val arr = obj.optJSONArray("items") ?: return null
+        val items = (0 until arr.length()).mapNotNull { idx -> arr.optJSONObject(idx)?.let(::decodeItemJson) }
+        if (items.isEmpty()) return null
+        val note = if (obj.has("note") && !obj.isNull("note")) obj.optString("note").takeIf(String::isNotEmpty) else null
+        return DiscoverChartPage(chart, items, note, obj.optBoolean("usedFallback", false))
+    }
+
+    private fun encodeItemJson(item: DiscoverItem): JSONObject = JSONObject().apply {
+        put("id", item.id)
+        put("kind", item.kind)
+        put("title", item.title)
+        if (item.originalTitle.isNotEmpty()) put("originalTitle", item.originalTitle)
+        if (item.year != null) put("year", item.year)
+        if (item.overview.isNotEmpty()) put("overview", item.overview)
+        if (item.posterUrl != null) put("posterUrl", item.posterUrl)
+        if (item.backdropUrl != null) put("backdropUrl", item.backdropUrl)
+        if (item.genres.isNotEmpty()) put("genres", JSONArray(item.genres))
+        if (item.countries.isNotEmpty()) put("countries", JSONArray(item.countries))
+        if (item.rating != null) put("rating", item.rating)
+        if (item.ratingLabel != null) put("ratingLabel", item.ratingLabel)
+        if (item.voteCount != 0) put("voteCount", item.voteCount)
+        if (item.episodeInfo != null) put("episodeInfo", item.episodeInfo)
+        if (item.ongoing != null) put("ongoing", item.ongoing)
+        if (item.tmdbId != null) put("tmdbId", item.tmdbId)
+        if (item.doubanId != null) put("doubanId", item.doubanId)
+        if (item.imdbId != null) put("imdbId", item.imdbId)
+        if (item.platforms.isNotEmpty()) {
+            put(
+                "platforms",
+                JSONArray().apply {
+                    item.platforms.forEach { p ->
+                        put(JSONObject().apply {
+                            put("name", p.name)
+                            if (p.url != null) put("url", p.url)
+                        })
+                    }
+                },
+            )
+        }
+    }
+
+    private fun decodeItemJson(obj: JSONObject): DiscoverItem? {
+        val id = obj.optString("id").trim()
+        val kind = obj.optString("kind").trim()
+        val title = obj.optString("title").trim()
+        if (id.isEmpty() || kind.isEmpty() || title.isEmpty()) return null
+        fun optStr(k: String): String? =
+            if (obj.has(k) && !obj.isNull(k)) obj.optString(k).takeIf(String::isNotEmpty) else null
+        fun optIntOrNull(k: String): Int? =
+            if (obj.has(k) && !obj.isNull(k)) obj.optInt(k) else null
+        val genres = obj.optJSONArray("genres").strings()
+        val countries = obj.optJSONArray("countries").strings()
+        val platforms = obj.optJSONArray("platforms")?.let { arr ->
+            (0 until arr.length()).mapNotNull { idx ->
+                val pObj = arr.optJSONObject(idx) ?: return@mapNotNull null
+                val pName = pObj.optString("name").trim()
+                if (pName.isEmpty()) return@mapNotNull null
+                val pUrl = if (pObj.has("url") && !pObj.isNull("url")) pObj.optString("url").takeIf(String::isNotEmpty) else null
+                PlatformSource(pName, pUrl)
+            }
+        } ?: emptyList()
+        return DiscoverItem(
+            id = id,
+            kind = kind,
+            title = title,
+            originalTitle = optStr("originalTitle").orEmpty(),
+            year = optIntOrNull("year"),
+            overview = optStr("overview").orEmpty(),
+            posterUrl = optStr("posterUrl"),
+            backdropUrl = optStr("backdropUrl"),
+            genres = genres,
+            countries = countries,
+            rating = if (obj.has("rating") && !obj.isNull("rating")) obj.optDouble("rating").takeIf { !it.isNaN() } else null,
+            ratingLabel = optStr("ratingLabel"),
+            voteCount = obj.optInt("voteCount", 0),
+            episodeInfo = optStr("episodeInfo"),
+            ongoing = if (obj.has("ongoing") && !obj.isNull("ongoing")) obj.optBoolean("ongoing") else null,
+            tmdbId = optIntOrNull("tmdbId"),
+            doubanId = optStr("doubanId"),
+            imdbId = optStr("imdbId"),
+            platforms = platforms,
+        )
     }
 
     private fun fetchDoubanOrTmdbChart(

@@ -1,6 +1,7 @@
 #include <android/log.h>
 #include <dlfcn.h>
 #include <jni.h>
+#include <locale.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -85,6 +86,7 @@ typedef int (*fn_mpv_observe_property)(mpv_handle*, uint64_t, const char*, int);
 typedef int (*fn_mpv_request_log_messages)(mpv_handle*, const char*);
 typedef mpv_event* (*fn_mpv_wait_event)(mpv_handle*, double);
 typedef int (*fn_av_jni_set_java_vm)(void*, void*);
+typedef int (*fn_av_jni_set_android_app_ctx)(void*, void*);
 
 struct MpvApi {
     void* lib;
@@ -111,9 +113,33 @@ static JavaVM* g_vm = nullptr;
 static pthread_mutex_t g_api_lock = PTHREAD_MUTEX_INITIALIZER;
 static MpvApi g_api = {};
 static bool g_av_vm_initialized = false;
+static jobject g_app_ctx = nullptr;
+static bool g_av_app_ctx_initialized = false;
+
+static void* find_av_jni_symbol(const char* sym, void* mpv_lib) {
+    void* avcodec = dlopen("libavcodec.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!avcodec) avcodec = dlopen("libavcodec.so", RTLD_NOW | RTLD_LOCAL);
+    void* fn = avcodec ? dlsym(avcodec, sym) : nullptr;
+    if (!fn && mpv_lib) fn = dlsym(mpv_lib, sym);
+    return fn;
+}
+
+static void apply_av_app_ctx_locked(void* mpv_lib) {
+    if (g_av_app_ctx_initialized || g_app_ctx == nullptr) return;
+    fn_av_jni_set_android_app_ctx set_ctx =
+        reinterpret_cast<fn_av_jni_set_android_app_ctx>(find_av_jni_symbol("av_jni_set_android_app_ctx", mpv_lib));
+    if (set_ctx) {
+        int rc = set_ctx(g_app_ctx, nullptr);
+        LOGI("av_jni_set_android_app_ctx 初始化完成: rc=%d", rc);
+    }
+    g_av_app_ctx_initialized = true;
+}
 
 static bool ensure_mpv_api_locked() {
-    if (g_api.ready) return true;
+    if (g_api.ready) {
+        apply_av_app_ctx_locked(g_api.lib);
+        return true;
+    }
 
     void* lib = dlopen("libmpv.so", RTLD_NOW | RTLD_NOLOAD);
     if (!lib) {
@@ -125,21 +151,15 @@ static bool ensure_mpv_api_locked() {
     }
 
     if (!g_av_vm_initialized && g_vm != nullptr) {
-        fn_av_jni_set_java_vm set_vm = nullptr;
-        void* avcodec = dlopen("libavcodec.so", RTLD_NOW | RTLD_NOLOAD);
-        if (!avcodec) avcodec = dlopen("libavcodec.so", RTLD_NOW | RTLD_LOCAL);
-        if (avcodec) {
-            set_vm = reinterpret_cast<fn_av_jni_set_java_vm>(dlsym(avcodec, "av_jni_set_java_vm"));
-        }
-        if (!set_vm) {
-            set_vm = reinterpret_cast<fn_av_jni_set_java_vm>(dlsym(lib, "av_jni_set_java_vm"));
-        }
+        fn_av_jni_set_java_vm set_vm =
+            reinterpret_cast<fn_av_jni_set_java_vm>(find_av_jni_symbol("av_jni_set_java_vm", lib));
         if (set_vm) {
             int rc = set_vm(g_vm, nullptr);
             LOGI("av_jni_set_java_vm 初始化完成: rc=%d", rc);
         }
         g_av_vm_initialized = true;
     }
+    apply_av_app_ctx_locked(lib);
 
     g_api.lib = lib;
     g_api.create = reinterpret_cast<fn_mpv_create>(dlsym(lib, "mpv_create"));
@@ -297,6 +317,18 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     return JNI_VERSION_1_6;
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_aisub_player_media_MpvNativeBridge_nativeSetAppContext(JNIEnv* env, jclass clazz, jobject appCtx) {
+    (void)clazz;
+    if (!appCtx) return;
+    pthread_mutex_lock(&g_api_lock);
+    if (g_app_ctx == nullptr) {
+        g_app_ctx = env->NewGlobalRef(appCtx);
+    }
+    ensure_mpv_api_locked();
+    pthread_mutex_unlock(&g_api_lock);
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_aisub_player_media_MpvNativeBridge_nativeIsAvailable(JNIEnv* env, jclass clazz) {
     (void)env;
@@ -308,6 +340,7 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_com_aisub_player_media_MpvNativeBridge_nativeCreate(JNIEnv* env, jobject thiz) {
     if (!ensure_mpv_api()) return 0;
 
+    setlocale(LC_NUMERIC, "C");
     mpv_handle* mpv = g_api.create();
     if (!mpv) {
         LOGE("mpv_create() 返回空句柄");

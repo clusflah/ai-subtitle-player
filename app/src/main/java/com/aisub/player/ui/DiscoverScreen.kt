@@ -144,7 +144,7 @@ fun DiscoverTab(
     var sourcesVersion by remember { mutableIntStateOf(0) }
 
     val initialSections = remember(settings.tmdbKey, settings.doubanEnabled) {
-        DiscoverRepository.peekHomeSections(settings)
+        DiscoverRepository.peekHomeSections(settings, context)
     }
     var sections by remember(settings.tmdbKey, settings.doubanEnabled) {
         mutableStateOf(initialSections)
@@ -152,6 +152,7 @@ fun DiscoverTab(
     var homeLoading by remember(settings.tmdbKey, settings.doubanEnabled) {
         mutableStateOf(initialSections.isEmpty())
     }
+    var homeRefreshing by remember { mutableStateOf(false) }
     var homeError by remember { mutableStateOf<String?>(null) }
 
     val initialSearch = remember(appliedQuery, settings.tmdbKey, settings.doubanEnabled) {
@@ -189,29 +190,43 @@ fun DiscoverTab(
     }
 
     LaunchedEffect(settings.tmdbKey, settings.doubanEnabled, reloadNonce) {
-        // 首次加载完成后，进入详情页/榜单页再退回时不重复刷新，避免频繁转圈；仅在点「刷新」或修改配置时重新拉取
-        if (reloadNonce == 0) {
-            val cached = DiscoverRepository.peekHomeSections(settings)
-            if (cached.isNotEmpty()) {
-                if (sections != cached) sections = cached
-                homeLoading = false
-                homeError = null
-                return@LaunchedEffect
-            }
+        val cached = DiscoverRepository.peekHomeSections(settings, context)
+        if (cached.isNotEmpty() && sections.isEmpty()) {
+            sections = cached
+        }
+        val autoRefreshFirstVisit = reloadNonce == 0 && DiscoverRepository.consumeFirstVisitAutoRefresh(settings)
+        if (reloadNonce == 0 && !autoRefreshFirstVisit && cached.isNotEmpty()) {
+            if (sections != cached) sections = cached
+            homeLoading = false
+            homeRefreshing = false
+            homeError = null
+            return@LaunchedEffect
         }
         homeLoading = sections.isEmpty()
+        homeRefreshing = sections.isNotEmpty()
         homeError = null
         runCatching {
             withContext(Dispatchers.IO) {
-                DiscoverRepository.loadHomeSections(settings, forceRefresh = reloadNonce > 0)
+                DiscoverRepository.loadHomeSections(
+                    settings = settings,
+                    forceRefresh = autoRefreshFirstVisit || reloadNonce > 0,
+                    context = context,
+                )
             }
         }.onSuccess { loaded ->
-            sections = loaded
-            if (loaded.isEmpty()) homeError = "暂时未获取到榜单数据，请检查网络或代理设置后重试"
+            if (loaded.isNotEmpty()) {
+                sections = loaded
+                homeError = null
+            } else if (sections.isEmpty()) {
+                homeError = "暂时未获取到榜单数据，请检查网络或代理设置后重试"
+            }
         }.onFailure { e ->
-            homeError = e.message ?: "榜单加载失败"
+            if (sections.isEmpty()) {
+                homeError = e.message ?: "榜单加载失败"
+            }
         }
         homeLoading = false
+        homeRefreshing = false
     }
 
     LaunchedEffect(appliedQuery, settings.tmdbKey, settings.doubanEnabled) {
@@ -707,8 +722,10 @@ fun DiscoverTab(
                                     .clip(RoundedCornerShape(6.dp))
                                     .tvFocusRing(RoundedCornerShape(6.dp))
                                     .clickable {
-                                        DiscoverRepository.clearCache()
-                                        reloadNonce++
+                                        if (!homeRefreshing) {
+                                            DiscoverRepository.clearCache()
+                                            reloadNonce++
+                                        }
                                     }
                                     .padding(horizontal = 4.dp, vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -717,13 +734,13 @@ fun DiscoverTab(
                                 Icon(
                                     AppIcons.Refresh,
                                     contentDescription = "刷新榜单",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    tint = if (homeRefreshing) Orange else MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.size(13.dp),
                                 )
                                 Text(
-                                    "刷新",
+                                    if (homeRefreshing) "刷新中…" else "刷新",
                                     fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    color = if (homeRefreshing) Orange else MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                             Text(
@@ -1171,8 +1188,9 @@ fun DiscoverChartScreen(
     val chart = remember(selectedChartId) {
         DiscoverCharts.findChart(selectedChartId) ?: DiscoverCharts.allCharts.first()
     }
+    val context = LocalContext.current
     val cachedFirstPage = remember(selectedChartId, settings.tmdbKey, settings.doubanEnabled) {
-        DiscoverRepository.peekChartFirstPage(chart, settings)
+        DiscoverRepository.peekChartFirstPage(chart, settings, context)
     }
     var page by remember(selectedChartId) { mutableIntStateOf(1) }
     var items by remember(selectedChartId) { mutableStateOf(cachedFirstPage?.items.orEmpty()) }
@@ -1183,28 +1201,31 @@ fun DiscoverChartScreen(
     var endReached by remember(selectedChartId) { mutableStateOf(false) }
 
     LaunchedEffect(selectedChartId, page, settings.tmdbKey) {
-        if (page == 1 && items.isNotEmpty()) {
+        val inMemoryFirst = if (page == 1) DiscoverRepository.peekInMemoryChartFirstPage(chart, settings) else null
+        if (page == 1 && inMemoryFirst != null && items.isNotEmpty()) {
             loading = false
             return@LaunchedEffect
         }
-        if (page == 1) loading = true else loadingMore = true
+        if (page == 1) loading = items.isEmpty() else loadingMore = true
         error = null
         runCatching {
             withContext(Dispatchers.IO) {
-                DiscoverRepository.loadChartPage(chart, settings, page = page, count = 24)
+                DiscoverRepository.loadChartPage(chart, settings, page = page, count = 24, context = context)
             }
         }.onSuccess { res ->
             note = res.note
             if (page == 1) {
-                items = res.items
+                if (res.items.isNotEmpty() || items.isEmpty()) {
+                    items = res.items
+                }
             } else {
                 val merged = (items + res.items).distinctBy { it.id }
                 if (merged.size == items.size) endReached = true
                 items = merged
             }
-            if (res.items.isEmpty()) endReached = true
+            if (res.items.isEmpty() && (page > 1 || items.isEmpty())) endReached = true
         }.onFailure { e ->
-            error = e.message ?: "榜单加载失败"
+            if (items.isEmpty()) error = e.message ?: "榜单加载失败"
         }
         loading = false
         loadingMore = false

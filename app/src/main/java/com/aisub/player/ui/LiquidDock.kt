@@ -5,6 +5,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -234,10 +235,19 @@ internal fun DockButton(
             active && !isCenter -> Orange
             else -> Color.White
         }
+        val classicScale by animateFloatAsState(
+            targetValue = when {
+                isPressed -> 0.90f
+                focused -> 1.12f
+                else -> 1f
+            },
+            animationSpec = spring(dampingRatio = 0.55f, stiffness = 380f),
+            label = "classicDockScale",
+        )
         Box(
             modifier = modifier
                 .fillMaxHeight()
-                .onFocusChanged { focusedNode = it.isFocused }
+                .onFocusChanged { focusedNode = it.isFocused || it.hasFocus }
                 .clip(RoundedCornerShape(50))
                 .let {
                     if (enabled) {
@@ -250,22 +260,25 @@ internal fun DockButton(
                 },
             contentAlignment = Alignment.Center,
         ) {
-            if (isCenter) {
-                Box(
-                    Modifier
-                        .size(50.dp)
-                        .clip(CircleShape)
-                        .background(if (focused) Orange else Color(0x24FFFFFF)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = label,
-                        tint = classicColor,
-                        modifier = Modifier.size(iconSize),
+            Box(
+                Modifier
+                    .graphicsLayer {
+                        scaleX = classicScale
+                        scaleY = classicScale
+                    }
+                    .size(if (isCenter) 50.dp else if (tv) 46.dp else 42.dp)
+                    .clip(CircleShape)
+                    .background(
+                        when {
+                            focused -> Orange
+                            isCenter -> Color(0x24FFFFFF)
+                            active -> Orange.copy(alpha = 0.22f)
+                            else -> Color.Transparent
+                        },
                     )
-                }
-            } else {
+                    .then(if (focused) Modifier.border(2.dp, Color.White, CircleShape) else Modifier),
+                contentAlignment = Alignment.Center,
+            ) {
                 Icon(
                     imageVector = icon,
                     contentDescription = label,
@@ -320,7 +333,7 @@ internal fun DockButton(
     Box(
         modifier = modifier
             .fillMaxHeight()
-            .onFocusChanged { focusedNode = it.isFocused }
+            .onFocusChanged { focusedNode = it.isFocused || it.hasFocus }
             .graphicsLayer {
                 this.scaleX = scaleX
                 this.scaleY = scaleY
@@ -337,12 +350,25 @@ internal fun DockButton(
             },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = iconColor,
-            modifier = Modifier.size(iconSize),
-        )
+        Box(
+            Modifier
+                .size(if (isCenter) 50.dp else 46.dp)
+                .then(
+                    if (focused) {
+                        Modifier
+                            .background(Orange.copy(alpha = 0.30f), CircleShape)
+                            .border(2.dp, Color.White, CircleShape)
+                    } else Modifier,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = iconColor,
+                modifier = Modifier.size(iconSize),
+            )
+        }
     }
 }
 

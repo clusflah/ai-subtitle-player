@@ -1,5 +1,6 @@
 package com.aisub.player.media
 
+import android.content.Context
 import android.util.Log
 import android.view.Surface
 import androidx.annotation.Keep
@@ -185,6 +186,15 @@ class MpvNativeBridge(
         @Volatile
         private var available = false
 
+        @Volatile
+        var lastLoadError: String? = null
+            private set
+
+        fun bindAppContext(context: Context) {
+            if (!isAvailable()) return
+            runCatching { nativeSetAppContext(context.applicationContext) }
+        }
+
         /** 探测当前设备是否成功加载 `libmpv.so` 与 `libmpv_player_bridge.so`。 */
         fun isAvailable(): Boolean {
             if (checked) return available
@@ -196,19 +206,34 @@ class MpvNativeBridge(
                     "avutil",
                     "swresample",
                     "swscale",
+                    "postproc",
                     "avcodec",
                     "avformat",
                     "avfilter",
+                    "avdevice",
                     "mpv",
                 )
+                var mpvDepError: Throwable? = null
                 for (dep in deps) {
-                    runCatching { System.loadLibrary(dep) }
+                    runCatching { System.loadLibrary(dep) }.onFailure { err ->
+                        Log.w(TAG, "预加载 lib$dep.so 失败: ${err.message}", err)
+                        if (dep == "mpv" || dep == "c++_shared") {
+                            mpvDepError = err
+                        }
+                    }
                 }
                 available = runCatching {
                     System.loadLibrary("mpv_player_bridge")
-                    nativeIsAvailable()
-                }.onFailure {
-                    Log.w(TAG, "加载 MPV 原生引擎失败", it)
+                    val ok = nativeIsAvailable()
+                    if (ok) {
+                        lastLoadError = null
+                    } else {
+                        lastLoadError = mpvDepError?.message ?: "libmpv.so 未能完成初始化"
+                    }
+                    ok
+                }.onFailure { err ->
+                    lastLoadError = (mpvDepError?.message ?: err.message)?.take(180)
+                    Log.w(TAG, "加载 MPV 原生引擎失败", err)
                 }.getOrDefault(false)
                 checked = true
                 return available
@@ -217,5 +242,8 @@ class MpvNativeBridge(
 
         @JvmStatic
         private external fun nativeIsAvailable(): Boolean
+
+        @JvmStatic
+        private external fun nativeSetAppContext(appContext: Context)
     }
 }

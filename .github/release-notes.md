@@ -1,4 +1,20 @@
-## 本版更新（2.10.9）
+## 本版更新（2.10.10）
+
+- **修复 Windows 电脑端冷启动续播速率卡 0 与多连接媒体服务器抢流问题**：
+  - 为双端 `Endpoints.base` 增加按服务器粒度的并发互斥锁并将探测超时收敛至 `1.2s–1.8s`；`MediaProxy` 仅对严格单连接网盘与 Telegram 启用抢占，WebDAV / OpenList / Plex / Emby / Jellyfin 支持并发分段读取，新增 `clearRoutesOnly()` 在切集或重开时保留文件总长与首尾 8MB 缓存块
+  - 非直播远程点播统一经由 `MediaProxy` 复用池化连接并实时上报缓冲下载速率，后台 Vulkan 能力探测延后按需执行，修复冷启动音轨索引归一化导致的二次重启
+- **修复 Windows 电脑端 SDR / 杜比视界偏色与 4K 高帧率原盘卡顿花屏问题**：
+  - 修正 Windows 下 `vf_libplacebo` + Vulkan `hwdownload` 的 `RGBA` 回读格式（消除 `BGRA` 红蓝通道翻转造成的画面偏蓝/偏紫），并将流本身的 HDR/杜比属性与内核偏好解耦，普通 8-bit SDR 视频不再误套 HDR 色调映射
+  - 保持默认内核下的杜比视界色彩保护开关生效，修正 MKV 10-bit HEVC `CodecPrivate` 第 17 字节位掩码判定并增加文件尾部 `Tracks` 探测兜底（根治 10-bit HDR10 原盘误落软解引发的卡顿与灰屏花屏）；对 4K >48fps Vulkan 回读与 4K LibVLC 软解缓冲自适应限流至 `1280x720`，修复 Windows LibVLC 异步释放原生崩溃
+- **修复 Android TV 索尼电视切 MPV 内核报错无法播放及播放页底栏焦点缺失问题**：
+  - 构建期自动优先注入 `libmpv` 新版 `libc++_shared.so`，彻底解决 32 位 `armeabi-v7a` Android TV 因旧版运行时库缺失 `std::to_chars` 符号导致 `libmpv.so` 加载失败（无论选硬解还是软解均报错）的问题，同时使 `arm64-v8a` 安装包体积缩减约 8MB
+  - 补齐 `libavdevice` 拓扑预加载、`setlocale(LC_NUMERIC, "C")` 与 `av_jni_set_android_app_ctx` 初始化，统一 Android OpenGL ES 输出至标准 `BT.709 + sRGB` 色调映射并在电视端软解启用 `skiploopfilter=nonref` 提速，修正非默认内核报错提示文案
+  - 为电视端播放页底部「字幕与音轨」「AI 字幕」「上一集 / 下一集」「倍速」「更多」全部按钮及更多抽屉菜单补齐高对比品牌橙色焦点底色、白色描边与弹性缩放特效
+- **新增「发现」页内容与海报持久化存储及弱网兜底（Android / TV / Windows）**：
+  - 发现页首页榜单与单榜单首屏数据落盘持久保存（`discover_cache_v1.json`），公开海报图片同步增加本地磁盘缓存，并将多榜单串行拉取改为并发拉取
+  - 每次打开软件首次进入发现页时先即时展示本地已存内容并在后台无感自动刷新；若网络不佳或断网未刷新出新内容，自动保留显示以前的内容，告别弱网一直转圈无内容显示
+
+## 2.10.9 更新
 
 - **彻底解决 Windows 电脑端 MPV 内核 4K 高码率卡顿与音画不同步问题**：
   - 视频帧传输由本机回环 TCP 切换为 OS 匿名管道 `pipe:1` 并采用 `64KB` 分块读取，消除回环栈限速及 OpenJDK Windows JNI 大块管道读取触发的 `VirtualAlloc`/`VirtualFree` 页表抖动；`Plex / Emby / Jellyfin` 媒体服务器直连绕过本机中转，跑满 4K 杜比视界高码率原盘解码吞吐

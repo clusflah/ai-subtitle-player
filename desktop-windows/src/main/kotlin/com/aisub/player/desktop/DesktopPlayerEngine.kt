@@ -440,8 +440,9 @@ object DesktopPlayerEngine {
 
     internal fun probeVulkanPlaceboAsync() {
         if (vulkanPlaceboSupported != null || !vulkanProbeStarted.compareAndSet(false, true)) return
-        DesktopExoPlayer.ioPool.submit {
-            val ffmpeg = DesktopBinaryFinder.findFfmpeg() ?: return@submit
+        DesktopExoPlayer.watchdogPool.schedule({
+            if (vulkanPlaceboSupported != null || activePlayer != null) return@schedule
+            val ffmpeg = DesktopBinaryFinder.findFfmpeg() ?: return@schedule
             val ok = runCatching {
                 val proc = ProcessBuilder(
                     ffmpeg, "-v", "error",
@@ -449,7 +450,7 @@ object DesktopPlayerEngine {
                     "-filter_hw_device", "vk",
                     "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.04",
                     "-frames:v", "1",
-                    "-vf", "hwupload,libplacebo=w=64:h=64:format=bgra,hwdownload,format=bgra",
+                    "-vf", "hwupload,libplacebo=w=64:h=64:format=rgba,hwdownload,format=rgba",
                     "-pix_fmt", "bgra",
                     "-f", "null", "-",
                 ).redirectError(ProcessBuilder.Redirect.DISCARD).start()
@@ -460,9 +461,11 @@ object DesktopPlayerEngine {
                     proc.exitValue() == 0
                 }
             }.getOrDefault(false)
-            vulkanPlaceboSupported = ok
+            if (vulkanPlaceboSupported == null) {
+                vulkanPlaceboSupported = ok
+            }
             Log.i(TAG, "Vulkan libplacebo 预探测结果: supported=$ok")
-        }
+        }, 2500L, TimeUnit.MILLISECONDS)
     }
 
     /** 应用启动后在后台线程预热 VLC、Vulkan libplacebo 管线与双地址服务器探测，避免首次点击播放时阻塞等待 */
@@ -985,6 +988,8 @@ class DesktopExoPlayer(
     @Volatile
     private var vlcMp: EmbeddedMediaPlayer? = null
     @Volatile
+    private var vlcSurface: CallbackVideoSurface? = null
+    @Volatile
     private var vlcHasActiveMedia: Boolean = false
     @Volatile
     private var pendingVlcStart: Pair<String, Array<String>>? = null
@@ -1247,7 +1252,7 @@ class DesktopExoPlayer(
     override fun setMediaItems(mediaItems: List<MediaItem>, startIndex: Int, startPositionMs: Long) {
         mediaGeneration.incrementAndGet()
         releaseLiveRelay()
-        proxy?.clear()
+        proxy?.clearRoutesOnly()
         DesktopPlayerEngine.resetNetworkSpeed()
         stopInternalAsync()
         playlist.clear()
@@ -1286,7 +1291,7 @@ class DesktopExoPlayer(
     override fun clearMediaItems() {
         mediaGeneration.incrementAndGet()
         releaseLiveRelay()
-        proxy?.clear()
+        proxy?.clearRoutesOnly()
         DesktopPlayerEngine.resetNetworkSpeed()
         stopInternalAsync()
         playlist.clear()
@@ -1340,9 +1345,11 @@ class DesktopExoPlayer(
             proxy?.close()
             proxy = null
             val mp = vlcMp
+            val surf = vlcSurface
             vlcMp = null
+            vlcSurface = null
             if (mp != null) {
-                disposalPool.submit { runCatching { mp.release() } }
+                releaseVlcPlayerAsync(mp, surf)
             }
         }
         vlcExecutor.shutdown()
@@ -1676,18 +1683,19 @@ class DesktopExoPlayer(
     private fun applyTrackSelection(params: TrackSelectionParameters) {
         val gen = mediaGeneration.get()
         if (ffmpegRunning.get()) {
-            val meta = lastProbedMeta
+            val meta = lastProbedMeta ?: return
             val nextAudioSpec = resolveSelectedFfmpegAudioStreamSpec(params, meta)
-            val nextSubIdx = resolveSelectedFfmpegSubStreamIdx(params, meta?.subtitleStreams.orEmpty())
-            val nextBitmapSubIdx = meta?.subtitleStreams?.firstOrNull { it.streamIdx == nextSubIdx && it.imageBased }?.streamIdx ?: -1
-            val needRestartForAudio = nextAudioSpec != selectedFfmpegAudioStreamSpec
+            val nextSubIdx = resolveSelectedFfmpegSubStreamIdx(params, meta.subtitleStreams)
+            val nextBitmapSubIdx = meta.subtitleStreams.firstOrNull { it.streamIdx == nextSubIdx && it.imageBased }?.streamIdx ?: -1
+            val defaultAudioIdx = meta.audioStreams.firstOrNull()?.streamIdx
+            fun normalizeAudioSpec(spec: String): String =
+                if (spec == "0:a:0?" && defaultAudioIdx != null) "0:$defaultAudioIdx?" else spec
+            val needRestartForAudio = normalizeAudioSpec(nextAudioSpec) != normalizeAudioSpec(selectedFfmpegAudioStreamSpec)
             val needRestartForBitmap = nextBitmapSubIdx != selectedFfmpegBitmapSubIdx
             selectedFfmpegAudioStreamSpec = nextAudioSpec
             selectedFfmpegSubStreamIdx = nextSubIdx
             selectedFfmpegBitmapSubIdx = nextBitmapSubIdx
-            if (meta != null) {
-                rebuildFfmpegTracksAndNotify(meta)
-            }
+            rebuildFfmpegTracksAndNotify(meta)
             updateFfmpegRenderedSubtitle(currentPosition)
             if (needRestartForAudio || needRestartForBitmap) {
                 val resumePos = currentPosition
@@ -1702,6 +1710,14 @@ class DesktopExoPlayer(
             applyTrackSelectionOnVlc(params, mp)
             refreshVlcTracksOnExecutor(mp)
         }
+    }
+
+    private fun isStrictCloudNetdiskUri(uriStr: String?): Boolean {
+        if (uriStr.isNullOrBlank()) return false
+        if (Telegram.isTelegram(uriStr)) return true
+        if (!CloudRegistry.isCloud(uriStr)) return false
+        val srv = runCatching { Uri.parse(uriStr).host }.getOrNull()?.let(CloudRegistry.serverLookup)
+        return srv == null || !srv.type.isMediaServer
     }
 
     private fun hasCustomAuthHeaders(headers: Map<String, String>): Boolean =
@@ -1744,35 +1760,32 @@ class DesktopExoPlayer(
             return localFile.absolutePath to emptyMap()
         }
 
-        // Telegram 流必须走本机 MediaProxy 边下边播
-        if (Telegram.isTelegram(rawStr)) {
-            val dsFactory = dataSourceFactory
-            if (dsFactory != null) {
-                val p = proxy ?: MediaProxy(dsFactory).also { proxy = it }
-                return p.register(uri, name) to emptyMap()
-            }
+        // 直播流交由 DesktopLiveRelay 单连接中继处理，不进点播 MediaProxy
+        val isLiveItem = DesktopLiveRelay.shouldRelay(uri, item) ||
+            rawStr.contains(".m3u8", ignoreCase = true) ||
+            item.localConfiguration?.mimeType == MimeTypes.APPLICATION_M3U8
+        if (isLiveItem) {
+            val routed = Endpoints.rewrite(rawStr)
+            val headers = AuthRegistry.headersFor(routed) + LiveHeaders.headersFor(routed)
+            return routed to headers
         }
 
-        // Cloud（Plex / Emby / 网盘）：若直链不含 Cookie/Authorization 等自定义鉴权头（如 Plex URL Token），直接交给 VLC 直连以加速起播与跳转
+        // 所有非直播远端流（Telegram / 网盘 / Plex / Emby / WebDAV）统一经本机 MediaProxy 转发：
+        // - 复用 OkHttp 高吞吐连接池与 8MB 首尾元数据内存缓存，避免冷启动多次重复探测；
+        // - 实时统计所有探测、缓冲与播放字节率，彻底消除直连子进程导致的 0 KB/s 卡死假象。
+        val dsFactory = dataSourceFactory
+        if (dsFactory != null && (Telegram.isTelegram(rawStr) || CloudRegistry.isCloud(rawStr) || isDirectRemoteNetworkUrl(rawStr))) {
+            val p = proxy ?: MediaProxy(dsFactory).also { proxy = it }
+            return p.register(uri, name) to emptyMap()
+        }
+
         if (CloudRegistry.isCloud(rawStr)) {
             val link = runCatching { CloudRegistry.resolve(rawStr) }.getOrNull()
-            if (link != null && !hasCustomAuthHeaders(link.headers)) {
-                return link.url to link.headers
-            }
-            val dsFactory = dataSourceFactory
-            if (dsFactory != null) {
-                val p = proxy ?: MediaProxy(dsFactory).also { proxy = it }
-                return p.register(uri, name) to emptyMap()
-            }
             if (link != null) return link.url to link.headers
         }
 
         val routed = Endpoints.rewrite(rawStr)
         val headers = AuthRegistry.headersFor(routed) + LiveHeaders.headersFor(routed)
-        if (hasCustomAuthHeaders(headers) && dataSourceFactory != null) {
-            val p = proxy ?: MediaProxy(dataSourceFactory).also { proxy = it }
-            return p.register(uri, name) to emptyMap()
-        }
         return routed to headers
     }
 
@@ -2004,7 +2017,7 @@ class DesktopExoPlayer(
             when (hwdecPreference) {
                 true -> options.add(if (IS_WINDOWS_HOST) ":avcodec-hw=none" else ":avcodec-hw=any")
                 false -> options.add(":avcodec-hw=none")
-                null -> {}
+                null -> if (IS_WINDOWS_HOST) options.add(":avcodec-hw=none")
             }
             val lowerUrl = url.lowercase()
             if (lowerUrl.startsWith("http://127.0.0.1:") || lowerUrl.startsWith("http://localhost:")) {
@@ -2167,9 +2180,9 @@ class DesktopExoPlayer(
                     rawW == 2560 && rawH in 1440..1456 -> 1440
                     else -> rawH
                 }
-                // 按显示窗口尺寸与 1920x1080 封顶计算回调缓冲尺寸，宽度 16 像素对齐以加速 SIMD 与纹理上传
-                val maxW = DesktopPlayerEngine.displayWidthPx.coerceIn(1280, 1920)
-                val maxH = DesktopPlayerEngine.displayHeightPx.coerceIn(720, 1080)
+                // 按显示窗口尺寸计算回调缓冲尺寸；4K(>=2560) 10-bit 走 LibVLC CPU swscale 时封顶 1280x720 以减轻 CPU/PCIe 开销，宽度 16 像素对齐加速拷贝
+                val maxW = if (srcW >= 2560) 1280 else DesktopPlayerEngine.displayWidthPx.coerceIn(1280, 1920)
+                val maxH = if (srcW >= 2560) 720 else DesktopPlayerEngine.displayHeightPx.coerceIn(720, 1080)
                 val scale = minOf(1.0, maxW.toDouble() / srcW.toDouble(), maxH.toDouble() / srcH.toDouble())
                 val dstW = ((((srcW * scale).roundToInt() + 8) / 16) * 16).coerceAtLeast(16)
                 val dstH = (((srcH * scale).roundToInt() / 2) * 2).coerceAtLeast(2)
@@ -2225,6 +2238,7 @@ class DesktopExoPlayer(
             LinuxVideoSurfaceAdapter()
         }
         val surface = CallbackVideoSurface(bufferFormatCallback, renderCallback, true, adapter)
+        vlcSurface = surface
         mp.videoSurface().set(surface)
         runCatching { mp.videoSurface().attachVideoSurface() }
     }
@@ -2511,11 +2525,13 @@ class DesktopExoPlayer(
         probeMetaCache[url]?.let { return it }
 
         val ffprobe = DesktopBinaryFinder.findFfprobe() ?: return null
+        val strictNetdisk = isStrictCloudNetdiskUri(cacheKey)
+        val probeWindow = if (strictNetdisk) "500000" else "1500000"
         return runCatching {
             val cmd = mutableListOf(
                 ffprobe, "-v", "error",
-                "-probesize", "1500000",
-                "-analyzeduration", "1500000",
+                "-probesize", probeWindow,
+                "-analyzeduration", probeWindow,
                 "-show_entries", "format=duration:stream=index,codec_type,codec_name,codec_tag_string,color_space,color_transfer,color_primaries,width,height,avg_frame_rate,r_frame_rate:stream_tags=language,title:stream_disposition=forced:stream_side_data",
                 "-of", "json",
             )
@@ -2706,7 +2722,7 @@ class DesktopExoPlayer(
         val titleLooksDv = com.aisub.player.media.DolbyVisionHelper.looksLikeDolbyVisionTitle(titleHint ?: url)
         val titleLooksHdr = com.aisub.player.media.DolbyVisionHelper.looksLikeHdrOrDolbyTitle(titleHint ?: url)
         val isHttp = lowerUrl.startsWith("http://") || lowerUrl.startsWith("https://")
-        val isCloudStrict = CloudRegistry.isCloud(rawUriStr)
+        val isCloudStrict = isStrictCloudNetdiskUri(rawUriStr)
 
         // 1. 进程内零冲突 256KB 容器头 + MP4 精确 mdat->moov 跳转二进制嗅探（同时识别杜比视界与 HDR10/HLG/BT.2020）：
         val sniffed = if (!isHttp) {
@@ -2767,9 +2783,16 @@ class DesktopExoPlayer(
             val isMkv = (buf[0].toInt() and 0xFF) == 0x1A && (buf[1].toInt() and 0xFF) == 0x45 &&
                 (buf[2].toInt() and 0xFF) == 0xDF && (buf[3].toInt() and 0xFF) == 0xA3
             if (isMkv) {
-                val conclusiveSdr = DesktopExoPlayer.containsMkvTracksElement(buf, headRead) &&
-                    !DesktopExoPlayer.has10BitMkvWithoutTransferTag(buf, headRead)
-                return ColorPipelineProbe(null, false, conclusiveSdr)
+                if (DesktopExoPlayer.containsMkvTracksElement(buf, headRead)) {
+                    val conclusiveSdr = !DesktopExoPlayer.has10BitMkvWithoutTransferTag(buf, headRead)
+                    return ColorPipelineProbe(null, false, conclusiveSdr)
+                }
+                if (fileLen > chunkSize * 2L) {
+                    raf.seek(fileLen - chunkSize)
+                    val tailRead = raf.read(buf, 0, chunkSize)
+                    probeMkvTailChunk(buf, tailRead)?.let { return it }
+                }
+                return ColorPipelineProbe(null, false, false)
             }
             val isMp4 = buf[4] == 'f'.code.toByte() && buf[5] == 't'.code.toByte() &&
                 buf[6] == 'y'.code.toByte() && buf[7] == 'p'.code.toByte()
@@ -2832,9 +2855,17 @@ class DesktopExoPlayer(
         val isMkv = (headBuf[0].toInt() and 0xFF) == 0x1A && (headBuf[1].toInt() and 0xFF) == 0x45 &&
             (headBuf[2].toInt() and 0xFF) == 0xDF && (headBuf[3].toInt() and 0xFF) == 0xA3
         if (isMkv) {
-            val conclusiveSdr = DesktopExoPlayer.containsMkvTracksElement(headBuf, headLen) &&
-                !DesktopExoPlayer.has10BitMkvWithoutTransferTag(headBuf, headLen)
-            return ColorPipelineProbe(null, false, conclusiveSdr)
+            if (DesktopExoPlayer.containsMkvTracksElement(headBuf, headLen)) {
+                val conclusiveSdr = !DesktopExoPlayer.has10BitMkvWithoutTransferTag(headBuf, headLen)
+                return ColorPipelineProbe(null, false, conclusiveSdr)
+            }
+            if (totalSize > chunkSize * 2L) {
+                val tailResult = fetchBoundedHttpRange(url, headers, totalSize - chunkSize, totalSize - 1L, timeoutMs = 1500)
+                if (tailResult != null) {
+                    probeMkvTailChunk(tailResult.first, tailResult.second)?.let { return it }
+                }
+            }
+            return ColorPipelineProbe(null, false, false)
         }
         val isMp4 = headBuf[4] == 'f'.code.toByte() && headBuf[5] == 't'.code.toByte() &&
             headBuf[6] == 'y'.code.toByte() && headBuf[7] == 'p'.code.toByte()
@@ -2878,6 +2909,17 @@ class DesktopExoPlayer(
         }
         ColorPipelineProbe(null, false, false)
     }.getOrNull()
+
+    private fun probeMkvTailChunk(tBuf: ByteArray, tLen: Int): ColorPipelineProbe? {
+        if (tLen <= 16) return null
+        DesktopExoPlayer.scanDolbyVisionProfileFromBytes(tBuf, tLen)?.let { return ColorPipelineProbe(it, true, true) }
+        if (DesktopExoPlayer.scanHdrOrWideGamutFromBytes(tBuf, tLen)) return ColorPipelineProbe(null, true, true)
+        if (DesktopExoPlayer.containsMkvTracksElement(tBuf, tLen)) {
+            val conclusiveSdr = !DesktopExoPlayer.has10BitMkvWithoutTransferTag(tBuf, tLen)
+            return ColorPipelineProbe(null, false, conclusiveSdr)
+        }
+        return null
+    }
 
     private fun fetchBoundedHttpRange(
         url: String,
@@ -2988,15 +3030,20 @@ class DesktopExoPlayer(
         height: Int,
         mode: Int,
         sourceFps: Double = 24.0,
+        isHdrOrDv: Boolean = true,
     ): String {
         val targetFps = computeTargetRenderFps(sourceFps)
         // 对 120fps / 119.88fps 高帧率片源在上传 GPU 之前先执行整数倍抽帧（如 119.88 -> 59.94），直接减半 PCIe 上传、着色与读回带宽
         val fpsPrefix = if (sourceFps > 60.5) "fps=%.6f,".format(java.util.Locale.US, targetFps) else ""
         return when (mode) {
             // Mode 1: 高速单趟 Vulkan GPU libplacebo 色彩与动态色调映射：
-            // 显式通过 hwupload 上传解码帧（含杜比视界 RPU 与 HDR10 元数据）至 Vulkan 并在 GPU 缩放映射后 hwdownload,format=bgra 读回，
-            // 修复裸调 libplacebo 因缺少 AV_PIX_FMT_VULKAN 输入/输出转换导致滤镜协商失败退回纯 CPU 浮点 zscale 卡顿的问题。
-            1 -> "${fpsPrefix}hwupload,libplacebo=w=$width:h=$height:upscaler=bilinear:downscaler=bilinear:peak_detect=false:sigmoid=false:apply_filmgrain=false:dithering=ordered_fixed:tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=iec61966-2-1:apply_dolbyvision=true:format=bgra,hwdownload,format=bgra"
+            // 必须以 format=rgba,hwdownload,format=rgba 从 Vulkan 读回再由 -pix_fmt bgra 输出，避免 FFmpeg Vulkan/libplacebo format=bgra 的 R/B 通道互换偏色；
+            // 纯 SDR 片源关闭 tonemapping 与 IPTPQc2 映射以原汁原味保留 BT.709 伽马与肤色。
+            1 -> if (isHdrOrDv) {
+                "${fpsPrefix}hwupload,libplacebo=w=$width:h=$height:upscaler=bilinear:downscaler=bilinear:peak_detect=false:sigmoid=false:apply_filmgrain=false:dithering=ordered_fixed:tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=iec61966-2-1:apply_dolbyvision=true:format=rgba,hwdownload,format=rgba"
+            } else {
+                "${fpsPrefix}hwupload,libplacebo=w=$width:h=$height:upscaler=bilinear:downscaler=bilinear:peak_detect=false:sigmoid=false:apply_filmgrain=false:dithering=ordered_fixed:colorspace=bt709:color_primaries=bt709:color_trc=bt709:apply_dolbyvision=false:format=rgba,hwdownload,format=rgba"
+            }
             // Mode 2: 极少数无 Vulkan 驱动机器上的轻量 CPU zscale HDR 色调映射兜底
             2 -> "${fpsPrefix}zscale=w=$width:h=$height:t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=bt2390:desat=0,zscale=t=bt709:m=bt709:r=tv,format=bgra"
             // Mode 0: 标准 SDR 快速缩放管线
@@ -3015,21 +3062,13 @@ class DesktopExoPlayer(
         if (gen != mediaGeneration.get()) return
         ffmpegRunning.set(true)
 
-        // 仅对严格单连接非媒体服务器网盘（如 115 / 百度 / 阿里云盘）挂载 MediaProxy，Plex/Emby/Jellyfin 直接直连以跑满局域网与磁盘 Remux 带宽
         var effectiveUrl = url
         var effectiveHeaders = headers
         val dsFactory = dataSourceFactory
         if (!isCurrentMediaItemLive && isDirectRemoteNetworkUrl(url) && dsFactory != null) {
             val item = currentMediaItem
             val itemUri = item?.localConfiguration?.uri
-            val itemUriStr = itemUri?.toString().orEmpty()
-            val strictCloudNetdisk = if (CloudRegistry.isCloud(itemUriStr)) {
-                val srv = itemUri?.host?.let(CloudRegistry.serverLookup)
-                srv != null && !srv.type.isMediaServer
-            } else {
-                false
-            }
-            if (strictCloudNetdisk && itemUri != null) {
+            if (itemUri != null && isStrictCloudNetdiskUri(itemUri.toString())) {
                 val itemName = item.mediaMetadata.title?.toString() ?: itemUri.lastPathSegment ?: "video.mp4"
                 runCatching {
                     val p = proxy ?: MediaProxy(dsFactory).also { proxy = it }
@@ -3064,7 +3103,9 @@ class DesktopExoPlayer(
             val fps = probed?.fps ?: 24.0
             val dvProfile = probed?.dvProfile ?: detectedDolbyProfile
             if (dvProfile != null) detectedDolbyProfile = dvProfile
-            val isHdrOrDv = preferLibplacebo || (probed?.isHdrOrDv == true) || dvProfile != null
+            val rawUriStr = currentMediaItem?.localConfiguration?.uri?.toString().orEmpty()
+            val cachedColorHdr = colorSniffCache[rawUriStr]?.isHdrOrWideGamut == true
+            val streamIsHdrOrDv = (probed?.isHdrOrDv == true) || dvProfile != null || cachedColorHdr
 
             if (probed != null) {
                 lastProbedMeta = probed
@@ -3085,15 +3126,20 @@ class DesktopExoPlayer(
             }
 
             val vkKnownUnsupported = DesktopPlayerEngine.vulkanPlaceboSupported == false
-            val usePlacebo = (preferLibplacebo || isHdrOrDv) && !vkKnownUnsupported
+            val usePlacebo = (preferLibplacebo || streamIsHdrOrDv) && !vkKnownUnsupported
             val initialFilterMode = when {
                 usePlacebo -> 1
-                isHdrOrDv && dvProfile != 5 -> 2
+                streamIsHdrOrDv && dvProfile != 5 -> 2
                 else -> 0
             }
 
-            val maxW = if (initialFilterMode == 2) 1280 else DesktopPlayerEngine.displayWidthPx.coerceIn(1280, 1920)
-            val maxH = if (initialFilterMode == 2) 720 else DesktopPlayerEngine.displayHeightPx.coerceIn(720, 1080)
+            var maxW = if (initialFilterMode == 2) 1280 else DesktopPlayerEngine.displayWidthPx.coerceIn(1280, 1920)
+            var maxH = if (initialFilterMode == 2) 720 else DesktopPlayerEngine.displayHeightPx.coerceIn(720, 1080)
+            // 4K >48fps 高帧率（如 59.94fps/60fps《比利·林恩》）限制 Vulkan 读回分辨率，确保 PCIe 带宽充裕不掉帧
+            if (initialFilterMode == 1 && fps > 48.0 && srcWidth >= 2560) {
+                maxW = minOf(maxW, 1280)
+                maxH = minOf(maxH, 720)
+            }
             val scale = minOf(1.0, maxW.toDouble() / srcWidth.toDouble(), maxH.toDouble() / srcHeight.toDouble())
             // 16 字节行对齐以加速 Vulkan GPU 读回与 Skia 纹理拷贝
             val width = ((((srcWidth * scale).roundToInt() + 8) / 16) * 16).coerceAtLeast(16)
@@ -3103,6 +3149,7 @@ class DesktopExoPlayer(
             val hwLabel = if (wantD3d11Hwdec) "D3D11VA 硬解 + " else "FFmpeg 软解 + "
             activePipelineDescription = when {
                 initialFilterMode == 1 && dvProfile != null -> "${hwLabel}libplacebo Vulkan · 杜比视界 P$dvProfile → BT.709"
+                initialFilterMode == 1 && !streamIsHdrOrDv -> "${hwLabel}libplacebo Vulkan · SDR 精准色彩管线"
                 initialFilterMode == 1 -> "${hwLabel}libplacebo Vulkan · HDR 动态色调映射"
                 initialFilterMode == 2 -> "FFmpeg zscale CPU HDR 色调映射"
                 wantD3d11Hwdec -> "D3D11VA 硬件加速渲染管线"
@@ -3128,7 +3175,8 @@ class DesktopExoPlayer(
                         fps = fps,
                         filterMode = initialFilterMode,
                         useD3d11Hwdec = wantD3d11Hwdec,
-                        isHdrFallbackCandidate = isHdrOrDv && dvProfile != 5,
+                        isHdrOrDv = streamIsHdrOrDv,
+                        isHdrFallbackCandidate = streamIsHdrOrDv && dvProfile != 5,
                         subtitleStreams = subtitleStreams,
                     )
                 } else {
@@ -3143,6 +3191,7 @@ class DesktopExoPlayer(
                         fps = fps,
                         filterMode = initialFilterMode,
                         useD3d11Hwdec = wantD3d11Hwdec,
+                        isHdrOrDv = streamIsHdrOrDv,
                         subtitleStreams = subtitleStreams,
                     )
                 }
@@ -3381,6 +3430,7 @@ class DesktopExoPlayer(
         fps: Double,
         filterMode: Int = 0,
         useD3d11Hwdec: Boolean = false,
+        isHdrOrDv: Boolean = true,
         isHdrFallbackCandidate: Boolean = false,
         subtitleStreams: List<ProbedSubtitleStream> = emptyList(),
     ) {
@@ -3396,7 +3446,7 @@ class DesktopExoPlayer(
                 }
             }.getOrElse { e ->
                 Log.e(TAG, "FFmpeg 本地音频套接字创建失败，改用纯视频模式", e)
-                startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode, useD3d11Hwdec, subtitleStreams)
+                startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode, useD3d11Hwdec, isHdrOrDv, subtitleStreams)
                 return@submit
             }
             ffmpegVideoServer = null
@@ -3408,7 +3458,7 @@ class DesktopExoPlayer(
             val afStr = buildFfmpegAudioFilter(curSpeed)
             val hasLiveAudio = AtomicBoolean(true)
             val audioDoneLatch = CountDownLatch(1)
-            val vfStr = buildColorMappedVfFilter(width, height, filterMode, fps)
+            val vfStr = buildColorMappedVfFilter(width, height, filterMode, fps, isHdrOrDv = isHdrOrDv)
             val audioMapSpec = selectedFfmpegAudioStreamSpec.ifEmpty { "0:a:0?" }
             val cmd = buildFfmpegInputArgs(
                 ffmpeg = ffmpeg,
@@ -3539,6 +3589,7 @@ class DesktopExoPlayer(
                         fps = fps,
                         filterMode = filterMode,
                         useD3d11Hwdec = false,
+                        isHdrOrDv = isHdrOrDv,
                         isHdrFallbackCandidate = isHdrFallbackCandidate,
                         subtitleStreams = subtitleStreams,
                     )
@@ -3552,13 +3603,13 @@ class DesktopExoPlayer(
                     val fbH = if (fbW < width) (((height.toDouble() * fbW / width).roundToInt() / 2) * 2).coerceAtLeast(2) else height
                     Log.w(TAG, "当前显卡未启用 Vulkan libplacebo，自动切换至 CPU 色调映射管线 (mode=$nextMode, ${fbW}x${fbH})")
                     activePipelineDescription = if (nextMode == 2) "FFmpeg zscale CPU HDR 色调映射" else "FFmpeg 软解渲染管线"
-                    startFfmpegMuxedPlayback(gen, ffmpeg, url, headers, startPosMs, fbW, fbH, fps, filterMode = nextMode, useD3d11Hwdec = false, isHdrFallbackCandidate = false, subtitleStreams = subtitleStreams)
+                    startFfmpegMuxedPlayback(gen, ffmpeg, url, headers, startPosMs, fbW, fbH, fps, filterMode = nextMode, useD3d11Hwdec = false, isHdrOrDv = isHdrOrDv, isHdrFallbackCandidate = false, subtitleStreams = subtitleStreams)
                     return@submit
                 }
                 if (filterMode == 2) {
                     Log.w(TAG, "CPU HDR 色调映射管线未输出帧，回退至标准缩放管线")
                     activePipelineDescription = "FFmpeg 软解渲染管线"
-                    startFfmpegMuxedPlayback(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = 0, useD3d11Hwdec = false, isHdrFallbackCandidate = false, subtitleStreams = subtitleStreams)
+                    startFfmpegMuxedPlayback(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = 0, useD3d11Hwdec = false, isHdrOrDv = isHdrOrDv, isHdrFallbackCandidate = false, subtitleStreams = subtitleStreams)
                     return@submit
                 }
                 ffmpegRunning.set(false)
@@ -3949,6 +4000,7 @@ class DesktopExoPlayer(
         fps: Double,
         filterMode: Int = 0,
         useD3d11Hwdec: Boolean = false,
+        isHdrOrDv: Boolean = true,
         subtitleStreams: List<ProbedSubtitleStream> = emptyList(),
     ) {
         ioPool.submit {
@@ -3960,7 +4012,7 @@ class DesktopExoPlayer(
             try {
                 val safeFps = computeTargetRenderFps(fps)
                 val fpsStr = "%.6f".format(java.util.Locale.US, safeFps)
-                val vfStr = buildColorMappedVfFilter(width, height, filterMode, fps)
+                val vfStr = buildColorMappedVfFilter(width, height, filterMode, fps, isHdrOrDv = isHdrOrDv)
                 val cmd = buildFfmpegInputArgs(
                     ffmpeg = ffmpeg,
                     url = url,
@@ -4010,11 +4062,11 @@ class DesktopExoPlayer(
             }
             if (framesRead == 0L && ffmpegRunning.get() && gen == mediaGeneration.get()) {
                 if (useD3d11Hwdec) {
-                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = filterMode, useD3d11Hwdec = false, subtitleStreams = subtitleStreams)
+                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = filterMode, useD3d11Hwdec = false, isHdrOrDv = isHdrOrDv, subtitleStreams = subtitleStreams)
                     return@submit
                 }
                 if (filterMode == 1) {
-                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = 0, useD3d11Hwdec = false, subtitleStreams = subtitleStreams)
+                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = 0, useD3d11Hwdec = false, isHdrOrDv = isHdrOrDv, subtitleStreams = subtitleStreams)
                     return@submit
                 }
                 ffmpegRunning.set(false)
@@ -4162,6 +4214,25 @@ class DesktopExoPlayer(
         stopVlcWithTimeoutOnExecutor()
     }
 
+    private fun releaseVlcPlayerAsync(
+        mp: EmbeddedMediaPlayer,
+        surf: CallbackVideoSurface?,
+        waitStopFuture: java.util.concurrent.Future<*>? = null,
+    ) {
+        val pin = Pair(mp, surf)
+        liveDisposingRefs.add(pin)
+        disposalPool.submit {
+            try {
+                if (waitStopFuture != null) {
+                    runCatching { waitStopFuture.get(30, TimeUnit.SECONDS) }
+                }
+                runCatching { mp.release() }
+            } finally {
+                liveDisposingRefs.remove(pin)
+            }
+        }
+    }
+
     private fun stopVlcWithTimeoutOnExecutor() {
         val mp = vlcMp ?: return
         if (!vlcHasActiveMedia) return
@@ -4179,13 +4250,12 @@ class DesktopExoPlayer(
             }
         } catch (_: TimeoutException) {
             Log.w(TAG, "VLC stop 超过 400ms（网络流可能阻塞），分离旧 MediaPlayer 后台释放")
+            val surf = vlcSurface
             if (vlcMp === mp) {
                 vlcMp = null
+                vlcSurface = null
             }
-            disposalPool.submit {
-                runCatching { future.get(30, TimeUnit.SECONDS) }
-                runCatching { mp.release() }
-            }
+            releaseVlcPlayerAsync(mp, surf, future)
         } catch (_: Throwable) {
         }
     }
@@ -4195,6 +4265,7 @@ class DesktopExoPlayer(
     }
 
     companion object {
+        private val liveDisposingRefs = CopyOnWriteArraySet<Any>()
         /** Windows WASAPI 共享模式扬声器输出缓冲典型延迟补偿（毫秒），使 VLC / FFmpeg 播放时钟贴合人耳听到的采样时刻 */
         private const val VLC_SPEAKER_LATENCY_MS = 85L
         private const val FFMPEG_SPEAKER_LATENCY_MS = 25L
@@ -4397,7 +4468,7 @@ class DesktopExoPlayer(
                     if (vLen > 0 && cpStart + 23 <= n &&
                         (buf[cpStart].toInt() and 0xFF) == 1 &&
                         (buf[cpStart + 16].toInt() and 0xFC) == 0xFC &&
-                        (buf[cpStart + 17].toInt() and 0xFC) == 0xFC
+                        (buf[cpStart + 17].toInt() and 0xF8) == 0xF8
                     ) {
                         if (scanHevcConfigForHdrSei(buf, cpStart, n)) return true
                     }
@@ -4479,9 +4550,11 @@ class DesktopExoPlayer(
             while (i <= end) {
                 if (buf[i] == 'h'.code.toByte() && buf[i + 1] == 'v'.code.toByte() &&
                     buf[i + 2] == 'c'.code.toByte() && buf[i + 3] == 'C'.code.toByte() &&
-                    (buf[i + 4].toInt() and 0xFF) == 1
+                    (buf[i + 4].toInt() and 0xFF) == 1 &&
+                    (buf[i + 4 + 16].toInt() and 0xFC) == 0xFC &&
+                    (buf[i + 4 + 17].toInt() and 0xF8) == 0xF8
                 ) {
-                    val lumaMinus8 = buf[i + 4 + 17].toInt() and 0x03
+                    val lumaMinus8 = buf[i + 4 + 17].toInt() and 0x07
                     if (lumaMinus8 >= 2) return true
                 }
                 if (buf[i] == 'a'.code.toByte() && buf[i + 1] == 'v'.code.toByte() &&
@@ -4519,8 +4592,8 @@ class DesktopExoPlayer(
                     if (vLen > 0 && cp + 19 <= n &&
                         (buf[cp].toInt() and 0xFF) == 1 &&
                         (buf[cp + 16].toInt() and 0xFC) == 0xFC &&
-                        (buf[cp + 17].toInt() and 0xFC) == 0xFC &&
-                        (buf[cp + 17].toInt() and 0x03) >= 2
+                        (buf[cp + 17].toInt() and 0xF8) == 0xF8 &&
+                        (buf[cp + 17].toInt() and 0x07) >= 2
                     ) {
                         has10BitHevc = true
                     }
@@ -4645,7 +4718,7 @@ class DesktopExoPlayer(
             Thread(r, "Voxtitle-VlcDisposer").apply { isDaemon = true }
         }
 
-        private val watchdogPool = Executors.newSingleThreadScheduledExecutor { r ->
+        internal val watchdogPool = Executors.newSingleThreadScheduledExecutor { r ->
             Thread(r, "Voxtitle-PlayerWatchdog").apply { isDaemon = true }
         }
     }

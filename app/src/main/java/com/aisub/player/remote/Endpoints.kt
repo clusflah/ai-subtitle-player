@@ -13,11 +13,13 @@ import java.util.concurrent.TimeUnit
 object Endpoints {
     private val servers = ConcurrentHashMap<String, Server>()
     private val chosen = ConcurrentHashMap<String, String>()
+    private val locks = ConcurrentHashMap<String, Any>()
 
     /** 探测超时要短：在外面时内网地址连不上，不能让用户等太久 */
     private val probeHttp = com.aisub.player.net.AppProxy.builder()
-        .connectTimeout(2, TimeUnit.SECONDS)
-        .readTimeout(3, TimeUnit.SECONDS)
+        .connectTimeout(1200, TimeUnit.MILLISECONDS)
+        .readTimeout(1500, TimeUnit.MILLISECONDS)
+        .callTimeout(1800, TimeUnit.MILLISECONDS)
         .followRedirects(false)
         .followSslRedirects(false)
         .build()
@@ -32,6 +34,7 @@ object Endpoints {
     fun unregister(server: Server) {
         servers.remove(server.id)
         chosen.remove(server.id)
+        locks.remove(server.id)
     }
 
     /** 网络变了，之前的选择作废。 */
@@ -42,9 +45,13 @@ object Endpoints {
         val lan = server.normalizedLan
         if (lan.isEmpty()) return server.normalizedBase
         chosen[server.id]?.let { return it }
-        val pick = if (server.normalizedBase.isEmpty() || reachable(lan)) lan else server.normalizedBase
-        chosen[server.id] = pick
-        return pick
+        val lock = locks.computeIfAbsent(server.id) { Any() }
+        synchronized(lock) {
+            chosen[server.id]?.let { return it }
+            val pick = if (server.normalizedBase.isEmpty() || reachable(lan)) lan else server.normalizedBase
+            chosen[server.id] = pick
+            return pick
+        }
     }
 
     /** 属于某台双地址服务器的完整地址，换成当前该用的地址；其他地址原样返回。可能联网探测。 */
