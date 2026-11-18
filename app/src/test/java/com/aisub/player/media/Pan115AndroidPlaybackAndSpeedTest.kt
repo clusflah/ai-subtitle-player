@@ -402,6 +402,7 @@ class Pan115AndroidPlaybackAndSpeedTest {
                 rejected403Count.incrementAndGet()
                 out.write("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
                 out.flush()
+                drainClientClose(sock, ins)
                 return
             }
 
@@ -409,6 +410,7 @@ class Pan115AndroidPlaybackAndSpeedTest {
                 rejected403Count.incrementAndGet()
                 out.write("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
                 out.flush()
+                drainClientClose(sock, ins)
                 return
             }
 
@@ -466,13 +468,27 @@ class Pan115AndroidPlaybackAndSpeedTest {
                         }
                     }
                 }
-                runCatching { sock.shutdownOutput() }
             } catch (e: Exception) {
                 if (e !is java.net.SocketException && e !is java.io.InterruptedIOException) {
                     System.err.println("StrictSingleConn115Server error: $e")
                 }
             } finally {
                 activeCount.decrementAndGet()
+            }
+            drainClientClose(sock, ins)
+        }
+
+        private fun drainClientClose(sock: Socket, ins: java.io.Reader) {
+            if (sock.isClosed) return
+            runCatching {
+                sock.soTimeout = 1_000
+                val drain = CharArray(256)
+                while (ins.read(drain) >= 0) {
+                    // 等待客户端按 Content-Length 读完并关闭，避免 Windows 回环提前关闭触发 RST
+                }
+            }
+            if (!sock.isClosed) {
+                runCatching { sock.shutdownOutput() }
             }
         }
 

@@ -13,7 +13,7 @@ plugins {
 }
 
 group = "com.aisub.player"
-version = "2.10.7"
+version = "2.10.8"
 
 // 复用或准备 TDLib Java 源码与 sherpa-onnx Java 接口
 val tdlibTag = "tdlib-1.8.69-4c6377aa73"

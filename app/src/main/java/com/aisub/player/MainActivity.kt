@@ -472,8 +472,16 @@ class MainActivity : ComponentActivity() {
         }
         if (intent?.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
-        // 漫画压缩包、PDF、电子书（TXT、EPUB、MOBI）：打开后看是漫画还是文字书
         val name = mangaFileName(uri)
+        val lowerName = name?.lowercase().orEmpty()
+        if (main.state.value.videoUri != null &&
+            lowerName.substringAfterLast('.', "") in setOf("srt", "ass", "ssa", "vtt", "smi", "sami", "sub", "lrc")
+        ) {
+            main.importSubtitles(uri)
+            if (nav.current != Screen.Player) nav.push(Screen.Player)
+            return
+        }
+        // 漫画压缩包、PDF、电子书（TXT、EPUB、MOBI）：打开后看是漫画还是文字书
         val type = intent.type ?: contentResolver.getType(uri)
         if (com.aisub.player.manga.MangaArchive.isArchiveType(type) ||
             com.aisub.player.manga.MangaArchive.isArchiveName(name.orEmpty()) ||

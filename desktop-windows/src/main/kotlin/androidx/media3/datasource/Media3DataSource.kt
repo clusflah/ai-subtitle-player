@@ -11,6 +11,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import java.io.BufferedInputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -155,6 +156,10 @@ class DefaultHttpDataSource private constructor(
     @Volatile private var opening: Boolean = false
     @Volatile private var cancelledExternally: Boolean = false
 
+    init {
+        warmUp()
+    }
+
     override fun getResponseHeaders(): Map<String, List<String>> = responseHeadersMap
     override fun getUri(): Uri? = currentUri
 
@@ -233,7 +238,7 @@ class DefaultHttpDataSource private constructor(
             val host = resp.request.url.host.lowercase()
             isLoopbackHost = host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]"
             val body = resp.body ?: throw IOException("空 HTTP 响应体")
-            input = body.byteStream()
+            input = BufferedInputStream(body.byteStream(), 256 * 1024)
             val contentLen = body.contentLength()
             bytesRemaining = when {
                 dataSpec.length != C.LENGTH_UNSET.toLong() -> if (contentLen >= 0) minOf(dataSpec.length, contentLen) else dataSpec.length
@@ -293,13 +298,46 @@ class DefaultHttpDataSource private constructor(
     }
 
     companion object {
-        private val sharedHttpClient: OkHttpClient by lazy {
-            AppProxy.builder()
-                .connectTimeout(12, TimeUnit.SECONDS)
-                .readTimeout(25, TimeUnit.SECONDS)
-                .followRedirects(false)
-                .followSslRedirects(false)
-                .build()
+        private val highThroughputSocketFactory = object : javax.net.SocketFactory() {
+            private val delegate = getDefault()
+            private fun tune(s: java.net.Socket): java.net.Socket = s.apply {
+                runCatching {
+                    tcpNoDelay = true
+                    receiveBufferSize = 1024 * 1024
+                }
+            }
+            override fun createSocket(): java.net.Socket = tune(delegate.createSocket())
+            override fun createSocket(host: String?, port: Int): java.net.Socket = tune(delegate.createSocket(host, port))
+            override fun createSocket(host: String?, port: Int, localHost: java.net.InetAddress?, localPort: Int): java.net.Socket =
+                tune(delegate.createSocket(host, port, localHost, localPort))
+            override fun createSocket(host: java.net.InetAddress?, port: Int): java.net.Socket = tune(delegate.createSocket(host, port))
+            override fun createSocket(address: java.net.InetAddress?, port: Int, localAddress: java.net.InetAddress?, localPort: Int): java.net.Socket =
+                tune(delegate.createSocket(address, port, localAddress, localPort))
+        }
+
+        private val sharedHttpClient: OkHttpClient = AppProxy.builder()
+            .socketFactory(highThroughputSocketFactory)
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+
+        @Volatile
+        private var warmed = false
+
+        internal fun warmUp() {
+            if (warmed) return
+            warmed = true
+            runCatching {
+                val url = "http://127.0.0.1:1/warmup".toHttpUrlOrNull()
+                if (url != null) {
+                    val req = Request.Builder().url(url).header("Accept-Encoding", "identity").build()
+                    sharedHttpClient.newCall(req)
+                }
+                Class.forName("okhttp3.internal.connection.RealConnection")
+                Class.forName("okhttp3.internal.http1.Http1ExchangeCodec")
+            }
         }
     }
 }

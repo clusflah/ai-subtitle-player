@@ -1252,10 +1252,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val videoLanguage = store.loadAsrLanguage(uri)
         // 直播字幕的时间是那一次直播的时间轴，下次打开对不上（会一遍遍冒出旧字幕）：不读缓存，旧版存下的也清掉
         if (entry.isLive) store.deleteCues(uri)
-        // 旧版把俄语等非拉丁文字误判成「不用翻译」、两行外文误判成双语，或流媒体解复用存下了 0:00 的错位字幕，这里清掉或修正
+        // 旧版流媒体解复用可能存下所有条目全为 0:00 的错位字幕（正常外挂字幕允许片头有 1~2 条 0:00 标题轴，不可误删）
         val cached = if (entry.isLive) emptyList() else store.load(uri).let { cues ->
-            val remote = isRemote(entry)
-            if (cues.count { it.startMs == 0L } >= 2 || (remote && cues.any { it.startMs == 0L })) {
+            if (cues.size >= 3 && cues.all { it.startMs == 0L }) {
                 store.deleteCues(uri)
                 emptyList()
             } else {
@@ -1263,6 +1262,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val asrLanguage = videoLanguage ?: s.asrLanguage
                 cues.map { sanitizeEmbeddedCue(it, s.ttsLocale, asrLanguage) }
             }
+        }.ifEmpty {
+            loadLocalSidecarSubtitlesIfPresent(uri)
         }
         ttsReader.reset()
         _state.update {
@@ -2564,21 +2565,51 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (positionMs >= b) player.seekTo(a)
     }
 
-    /** 载入外挂字幕文件（SRT / VTT），替换当前字幕。 */
+    /** 载入外挂字幕文件（SRT / ASS / SSA / VTT / SMI / SUB / ZIP），替换当前字幕并立即在画面上启用显示。 */
     fun importSubtitles(file: Uri) {
-        val video = _state.value.videoUri ?: return
+        val video = _state.value.videoUri ?: _state.value.current?.uri?.let(Uri::parse) ?: return
         viewModelScope.launch {
             try {
                 val text = withContext(Dispatchers.IO) {
-                    getApplication<Application>().contentResolver.openInputStream(file)!!.use { it.readBytes() }
-                        .let { bytes -> decodeText(bytes) }
+                    val bytes = getApplication<Application>().contentResolver.openInputStream(file)?.use { it.readBytes() }
+                        ?: file.path?.let { java.io.File(it) }?.takeIf { it.isFile }?.readBytes()
+                        ?: throw IllegalArgumentException("无法读取所选字幕文件")
+                    OnlineSubtitles.decodeSubtitleBytes(bytes, file.lastPathSegment ?: file.toString())
                 }
-                applySubtitleText(video, text)
+                val count = applySubtitleText(video, text)
+                extras.emit("已载入本地字幕（${count} 句）")
             } catch (e: Exception) {
-                _state.update { it.copy(error = "载入字幕失败：${e.message}") }
+                val msg = "载入字幕失败：${e.message ?: "无法识别字幕格式"}"
+                _state.update { it.copy(error = msg) }
+                extras.emit(msg)
             }
         }
     }
+
+    /** 自动探测本地 file:// 视频同目录下的同名前缀外挂字幕。 */
+    private fun loadLocalSidecarSubtitlesIfPresent(videoUri: Uri): List<Cue> = runCatching {
+        if (videoUri.scheme != "file") return emptyList()
+        val videoFile = videoUri.path?.let { java.io.File(it) }?.takeIf { it.isFile } ?: return emptyList()
+        val dir = videoFile.parentFile?.takeIf { it.isDirectory } ?: return emptyList()
+        val stem = videoFile.nameWithoutExtension
+        if (stem.isBlank()) return emptyList()
+        val subExts = setOf("srt", "ass", "ssa", "vtt", "smi", "sami", "sub")
+        val candidates = dir.listFiles()?.filter { f ->
+            if (!f.isFile || f.length() <= 4L || f.length() > 32L * 1024 * 1024) return@filter false
+            val ext = f.extension.lowercase()
+            if (ext !in subExts) return@filter false
+            val fStem = f.nameWithoutExtension
+            fStem.equals(stem, ignoreCase = true) ||
+                (fStem.startsWith(stem, ignoreCase = true) && fStem.length > stem.length && fStem[stem.length] in charArrayOf('.', '_', '-', ' '))
+        }.orEmpty()
+        val best = candidates.maxByOrNull { OnlineSubtitles.scoreName(it.name) } ?: return emptyList()
+        val text = OnlineSubtitles.decodeSubtitleBytes(best.readBytes(), best.name)
+        val parsed = SubtitleParser.parse(text)
+        if (parsed.isNotEmpty()) {
+            store.save(videoUri, parsed)
+        }
+        parsed
+    }.getOrDefault(emptyList())
 
     /** 清理非目标语言的预填译文（例如把双语拆行或旧版误拆的韩/日文还原回原文并置空译文，确保大模型会翻译）。 */
     private fun sanitizeEmbeddedCue(c: Cue, targetLocale: String?, asrLanguage: String): Cue {
@@ -3148,7 +3179,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val cues = SubtitleParser.parse(text)
         if (cues.isEmpty()) throw IllegalArgumentException("文件里没有识别到字幕")
         cancelAll()
-        _state.update { it.copy(cues = cues, status = "已载入 ${cues.size} 句字幕", error = null, failedTask = null) }
+        val curSettings = _state.value.settings
+        val hasTrans = cues.any { !it.translation.isNullOrBlank() }
+        val needEnableAi = !curSettings.showAiSubtitles
+        val needShowTrans = hasTrans && !curSettings.showTranslation
+        val needShowOrig = !hasTrans && !curSettings.showOriginal && !curSettings.showTranslation
+        if (needEnableAi || needShowTrans || needShowOrig) {
+            updateSettings(
+                curSettings.copy(
+                    showAiSubtitles = true,
+                    showTranslation = if (needShowTrans) true else curSettings.showTranslation,
+                    showOriginal = if (needShowOrig) true else curSettings.showOriginal,
+                ),
+            )
+        }
+        _state.update {
+            it.copy(
+                cues = cues,
+                choosingEmbedded = false,
+                status = "已载入 ${cues.size} 句字幕",
+                error = null,
+                failedTask = null,
+            )
+        }
+        if (_state.value.settings.preferLoadedSubtitles) {
+            extras.disableTrackType(C.TRACK_TYPE_TEXT)
+        }
         dropCoverage(video)
         store.save(video, cues)
         return cues.size

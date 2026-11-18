@@ -1,4 +1,4 @@
-﻿package com.aisub.player.subtitle
+package com.aisub.player.subtitle
 
 import android.content.Context
 import android.net.Uri
@@ -261,7 +261,7 @@ class OnlineSubtitles(
         private const val ASSRT_BASE = "https://api.assrt.net/v1"
         private const val USER_AGENT = "Voxtitle v0.8"
         private val JSON = "application/json".toMediaType()
-        private val SUB_EXT = Regex("\\.(srt|ass|ssa|vtt)$", RegexOption.IGNORE_CASE)
+        private val SUB_EXT = Regex("\\.(srt|ass|ssa|vtt|smi|sami|sub|lrc)$", RegexOption.IGNORE_CASE)
 
         /** 压缩包内多个字幕时的偏好：简体/双语 > 繁体 > 其他；SRT 和 ASS 都能解析。 */
         internal fun scoreName(name: String): Int {
@@ -270,7 +270,7 @@ class OnlineSubtitles(
             if (Regex("chs|简|sc\\b|gb|zh-?cn|简体").containsMatchIn(n)) score += 4
             if (Regex("双语|chs&eng|chs_eng|中英|bilingual").containsMatchIn(n)) score += 3
             if (Regex("cht|繁|tc\\b|big5").containsMatchIn(n)) score += 1
-            if (n.endsWith(".srt")) score += 1
+            if (n.endsWith(".srt") || n.endsWith(".ass")) score += 1
             return score
         }
 
@@ -313,8 +313,8 @@ class OnlineSubtitles(
 
         private const val CHUNK = 65536
 
-        /** 下载结果可能是压缩包（zip）或各种编码的文本。 */
-        internal fun decodeSubtitleBytes(bytes: ByteArray, name: String): String {
+        /** 下载或导入的字节流可能是压缩包（zip）或各种编码的字幕文本。 */
+        fun decodeSubtitleBytes(bytes: ByteArray, name: String): String {
             if (bytes.size > 4 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()) {
                 ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
                     val entries = generateSequence { zip.nextEntry }
@@ -326,21 +326,99 @@ class OnlineSubtitles(
                 }
             }
             if (bytes.size > 4 && (String(bytes, 0, 4, Charsets.ISO_8859_1) == "Rar!" || bytes[0] == '7'.code.toByte() && bytes[1] == 'z'.code.toByte())) {
-                throw IllegalStateException("这条字幕是 RAR/7z 压缩包，暂不支持，请换一条")
+                throw IllegalStateException("这条字幕是 RAR/7z 压缩包，暂不支持，请先解压后再选择")
             }
             return decodeText(bytes)
         }
     }
 }
 
-/** 字幕文本解码：识别 BOM（UTF-8 / UTF-16），否则先试 UTF-8，乱码再按 GBK。 */
+/**
+ * 字幕文本智能编码识别：
+ * 1) 支持 UTF-32 / UTF-16 / UTF-8 BOM 及无 BOM 的 UTF-16LE / UTF-16BE（防止残留 NUL 字节导致正则匹配为空）；
+ * 2) UTF-8 若完全合法，或仅含极少数尾部/注释损坏字节时直接清理保留 UTF-8（避免整份 UTF-8 被误按 GBK 重解成乱码）；
+ * 3) 非 UTF-8 字节流对 GB18030 / Big5 / EUC-KR / Shift_JIS / Windows-1252 评分择优。
+ */
 fun decodeText(bytes: ByteArray): String {
+    if (bytes.isEmpty()) return ""
+    if (bytes.size >= 4) {
+        val b0 = bytes[0].toInt() and 0xFF
+        val b1 = bytes[1].toInt() and 0xFF
+        val b2 = bytes[2].toInt() and 0xFF
+        val b3 = bytes[3].toInt() and 0xFF
+        if (b0 == 0xFF && b1 == 0xFE && b2 == 0x00 && b3 == 0x00) {
+            return runCatching { String(bytes, 4, bytes.size - 4, charset("UTF-32LE")) }.getOrDefault("").replace("\u0000", "")
+        }
+        if (b0 == 0x00 && b1 == 0x00 && b2 == 0xFE && b3 == 0xFF) {
+            return runCatching { String(bytes, 4, bytes.size - 4, charset("UTF-32BE")) }.getOrDefault("").replace("\u0000", "")
+        }
+        if (b0 == 0xEF && b1 == 0xBB && b2 == 0xBF) {
+            return String(bytes, 3, bytes.size - 3, Charsets.UTF_8).replace("\uFFFD", "").replace("\u0000", "")
+        }
+    }
     if (bytes.size >= 2) {
         val b0 = bytes[0].toInt() and 0xFF
         val b1 = bytes[1].toInt() and 0xFF
-        if (b0 == 0xFF && b1 == 0xFE) return String(bytes, 2, bytes.size - 2, Charsets.UTF_16LE)
-        if (b0 == 0xFE && b1 == 0xFF) return String(bytes, 2, bytes.size - 2, Charsets.UTF_16BE)
+        if (b0 == 0xFF && b1 == 0xFE) return String(bytes, 2, bytes.size - 2, Charsets.UTF_16LE).replace("\u0000", "")
+        if (b0 == 0xFE && b1 == 0xFF) return String(bytes, 2, bytes.size - 2, Charsets.UTF_16BE).replace("\u0000", "")
     }
-    val utf8 = String(bytes, Charsets.UTF_8).removePrefix("﻿")
-    return if ('�' in utf8) runCatching { String(bytes, charset("GBK")) }.getOrDefault(utf8) else utf8
+
+    // 检测无 BOM 的 UTF-16LE / UTF-16BE（奇偶位 0x00 占比显著不对称）
+    val samplePairs = minOf(bytes.size / 2, 256)
+    if (samplePairs >= 8) {
+        var evenZero = 0
+        var oddZero = 0
+        for (p in 0 until samplePairs) {
+            if (bytes[p * 2].toInt() == 0) evenZero++
+            if (bytes[p * 2 + 1].toInt() == 0) oddZero++
+        }
+        if (oddZero >= samplePairs / 3 && evenZero <= samplePairs / 20) {
+            return String(bytes, Charsets.UTF_16LE).removePrefix("﻿").replace("\u0000", "")
+        }
+        if (evenZero >= samplePairs / 3 && oddZero <= samplePairs / 20) {
+            return String(bytes, Charsets.UTF_16BE).removePrefix("﻿").replace("\u0000", "")
+        }
+    }
+
+    val utf8 = String(bytes, Charsets.UTF_8).removePrefix("﻿").replace("\u0000", "")
+    val badUtf8 = utf8.count { it == '�' }
+    if (badUtf8 == 0) return utf8
+
+    val nonAsciiGood = utf8.count { it.code > 0x7F && it != '�' }
+    if (badUtf8 <= 8 && nonAsciiGood >= badUtf8 * 20) {
+        return utf8.replace("�", "")
+    }
+
+    val candidates = listOf("GB18030", "GBK", "Big5", "EUC-KR", "Shift_JIS", "windows-1252")
+    var bestText = utf8
+    var bestScore = Int.MIN_VALUE
+    for (enc in candidates) {
+        val decoded = runCatching { String(bytes, charset(enc)).removePrefix("﻿").replace("\u0000", "") }.getOrNull() ?: continue
+        val s = scoreDecodedSubtitle(decoded, enc)
+        if (s > bestScore) {
+            bestScore = s
+            bestText = decoded
+        }
+    }
+    return bestText
+}
+
+private fun scoreDecodedSubtitle(text: String, charsetName: String): Int {
+    var score = if (charsetName == "GB18030" || charsetName == "GBK") 10 else 0
+    val len = minOf(text.length, 8192)
+    var i = 0
+    while (i < len) {
+        val ch = text[i]
+        when {
+            ch == '�' -> score -= 80
+            ch.code in 1..8 || ch.code in 14..31 -> score -= 40
+            ch.code in 0xE000..0xF8FF -> score -= 25
+            ch in '一'..'鿿' -> score += 4
+            ch in '가'..'힣' -> score += 4
+            ch in '぀'..'ヿ' -> score += 3
+        }
+        i++
+    }
+    if ("-->" in text || "Dialogue:" in text || "<SYNC" in text || "<sync" in text) score += 30
+    return score
 }

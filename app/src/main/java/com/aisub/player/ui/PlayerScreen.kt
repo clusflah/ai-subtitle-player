@@ -1584,7 +1584,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         }
                         SubtitleAction.LIST -> { showTracks = false; showCues = true }
                         SubtitleAction.DELAY -> dialog = PlayerDialog.DELAY
-                        SubtitleAction.IMPORT -> importLauncher.launch(arrayOf("application/x-subrip", "text/*", "application/octet-stream"))
+                        SubtitleAction.IMPORT -> { showTracks = false; importLauncher.launch(arrayOf("application/x-subrip", "text/*", "application/octet-stream")) }
                         SubtitleAction.ONLINE -> { showTracks = false; showOnline = true }
                         SubtitleAction.EXPORT -> dialog = PlayerDialog.EXPORT
                         SubtitleAction.ERROR -> dialog = PlayerDialog.ERROR
@@ -2070,10 +2070,15 @@ private fun TaskChip(state: UiState, onClick: () -> Unit, modifier: Modifier = M
 @Composable
 private fun BoxScope.SubtitleOverlay(cue: Cue?, settings: AppSettings, bottomPadding: Dp, topPadding: Dp, below: Dp? = null) {
     if (cue == null || !settings.showAiSubtitles) return
-    // 原文已是目标语言时译文和原文相同，只显示一行
+    // 原文已是目标语言时译文和原文相同，只显示一行；若原文/译文开关均被关闭但存在有效字幕文本，兜底显示一行避免空白
     val lines = if (cue.translation == cue.text) listOf(cue.text to true) else buildList {
-        if (settings.showTranslation && cue.translation != null) add(cue.translation to true)
-        if (settings.showOriginal || cue.translation == null) add(cue.text to false)
+        if (settings.showTranslation && !cue.translation.isNullOrBlank()) add(cue.translation to true)
+        if (settings.showOriginal || cue.translation.isNullOrBlank()) {
+            if (cue.text.isNotBlank()) add(cue.text to false)
+        }
+    }.ifEmpty {
+        val fallback = cue.translation?.takeIf { it.isNotBlank() } ?: cue.text.takeIf { it.isNotBlank() } ?: return
+        listOf(fallback to !cue.translation.isNullOrBlank())
     }
     // 放在画面正下方时两行叠在一起（不再分上下）
     if (below != null) Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(top = below)) {
@@ -2489,13 +2494,34 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
         SheetHeader("字幕", embeddedOpen) { embeddedOpen = !embeddedOpen }
         if (embeddedOpen) {
             PanelHint("视频文件里的字幕轨，按字幕文件原样显示（ASS 的位置、字体、特效由文件决定）")
-            if (textGroups.isEmpty() && !usingVlc) {
-                TrackRow("这个视频没有自带字幕", false, enabled = false) {}
-            } else {
-                val textDisabled = remember(version, player) { C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes }
-                TrackRow("不显示", textDisabled || textGroups.none { it.isSelected }) {
+            val hasLoadedCues = state.cues.isNotEmpty()
+            val textDisabled = remember(version, player) { C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes }
+            if (hasLoadedCues) {
+                TrackRow("不显示", !state.settings.showAiSubtitles && (textDisabled || textGroups.none { it.isSelected })) {
                     vm.extras.disableTrackType(C.TRACK_TYPE_TEXT)
+                    if (state.settings.showAiSubtitles) {
+                        vm.updateSettings(state.settings.copy(showAiSubtitles = false))
+                    }
                     version++
+                }
+                TrackRow("已载入字幕（${state.cues.size} 句）", state.settings.showAiSubtitles) {
+                    if (!state.settings.showAiSubtitles) {
+                        vm.updateSettings(state.settings.copy(showAiSubtitles = true))
+                    }
+                    if (state.settings.preferLoadedSubtitles) {
+                        vm.extras.disableTrackType(C.TRACK_TYPE_TEXT)
+                    }
+                    version++
+                }
+            }
+            if (textGroups.isEmpty() && !usingVlc) {
+                if (!hasLoadedCues) TrackRow("这个视频没有自带字幕", false, enabled = false) {}
+            } else {
+                if (!hasLoadedCues) {
+                    TrackRow("不显示", textDisabled || textGroups.none { it.isSelected }) {
+                        vm.extras.disableTrackType(C.TRACK_TYPE_TEXT)
+                        version++
+                    }
                 }
                 // 同名的轨道（例如两条「Canadian」）后面加「第 n 条」，分得清
                 val names = textGroups.flatMapIndexed { gi, g -> (0 until g.length).map { subtitleTrackName(g.getTrackFormat(it), gi) } }
@@ -2528,7 +2554,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
                 ) { onSubtitleAction(SubtitleAction.EMBEDDED) }
             }
             GroupLabel("字幕文件")
-            ActionRow(AppIcons.File, "选择字幕文件", subtitle = "SRT / VTT / ASS，可以翻译、朗读") { onSubtitleAction(SubtitleAction.IMPORT) }
+            ActionRow(AppIcons.File, "选择字幕文件", subtitle = "SRT / ASS / VTT / SMI / ZIP，可以翻译、朗读") { onSubtitleAction(SubtitleAction.IMPORT) }
             ActionRow(AppIcons.Search, "在线下载字幕", subtitle = "射手网 / OpenSubtitles") { onSubtitleAction(SubtitleAction.ONLINE) }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

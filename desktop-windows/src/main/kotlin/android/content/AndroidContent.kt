@@ -389,6 +389,11 @@ class ContentResolver(private val context: Context) {
                 val id = uri.lastPathSegment?.toLongOrNull()
                 if (id != null) return fileForId(id)
             }
+            if (uri.scheme == "file" && !uri.authority.isNullOrBlank()) {
+                val uncPath = "\\\\${uri.authority}${(uri.path ?: "").replace('/', '\\')}"
+                val uncFile = File(uncPath)
+                if (uncFile.exists() || str.startsWith("file://")) return uncFile
+            }
             val p = uri.path
             if (!p.isNullOrBlank()) {
                 val f = File(p)

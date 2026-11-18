@@ -287,6 +287,20 @@ object DolbyVisionHelper {
         return Regex("""(?i)(?:(?<![a-z0-9])(?:dv|dovi|dolby[\s._-]*vision)(?![a-z0-9])|杜比视界)""").containsMatchIn(title)
     }
 
+    fun looksLikeHdrOrDolbyTitle(title: String?): Boolean {
+        if (title.isNullOrBlank()) return false
+        if (looksLikeDolbyVisionTitle(title)) return true
+        return Regex("""(?i)(?:(?<![a-z0-9])(?:hdr10\+?|hdr|hlg|pq|bt\.?2020|rec\.?2020)(?![a-z0-9])|高动态)""").containsMatchIn(title)
+    }
+
+    fun describeProfile(profile: Int?): String = when (profile) {
+        5 -> "Dolby Vision Profile 5 (IPTPQc2)"
+        7 -> "Dolby Vision Profile 7"
+        8 -> "Dolby Vision Profile 8"
+        null -> "Dolby Vision"
+        else -> "Dolby Vision Profile $profile"
+    }
+
     /** 根据文件名判断是否明确标注为无兼容底流的杜比视界 Profile 5（避免将 Profile 7/8 误判锁死软解）。 */
     fun looksLikeProfile5Title(title: String?): Boolean {
         if (title.isNullOrBlank()) return false

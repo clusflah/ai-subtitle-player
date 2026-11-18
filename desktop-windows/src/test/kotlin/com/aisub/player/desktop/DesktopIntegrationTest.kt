@@ -703,4 +703,77 @@ class DesktopIntegrationTest {
             scene.close()
         }
     }
+
+    @Test
+    fun test12_LibplaceboGpuFilter120FpsDecimationHdrMoovSniffAndUnthrottledMediaProxy() {
+        // 1. 119.88fps / 120fps 高帧率整数分频与 hwupload + libplacebo + hwdownload 滤镜链校验
+        val target119 = DesktopExoPlayer.computeTargetRenderFps(120000.0 / 1001.0)
+        assertEquals(60000.0 / 1001.0, target119, 0.001)
+        assertEquals(60.0, DesktopExoPlayer.computeTargetRenderFps(120.0), 0.001)
+        assertEquals(23.976, DesktopExoPlayer.computeTargetRenderFps(23.976), 0.001)
+
+        val player = DesktopExoPlayer(GlobalDesktopApp, null)
+        try {
+            val vf120 = player.buildColorMappedVfFilter(1920, 1080, mode = 1, sourceFps = 120000.0 / 1001.0)
+            assertTrue("120fps mode 1 must decimate fps before hwupload: $vf120", vf120.startsWith("fps=59.940060,hwupload,libplacebo="))
+            assertTrue("Mode 1 must end with hwdownload,format=bgra: $vf120", vf120.endsWith(",hwdownload,format=bgra"))
+        } finally {
+            player.release()
+        }
+
+        // 2. 64位超大 mdat (>4GB) 非 faststart MP4 精确定位尾部 moov 及 HDR10 colr(nclx) 识别
+        val fakeHead = ByteArray(128)
+        // ftyp box: 24 bytes
+        fakeHead[3] = 24
+        fakeHead[4] = 'f'.code.toByte(); fakeHead[5] = 't'.code.toByte(); fakeHead[6] = 'y'.code.toByte(); fakeHead[7] = 'p'.code.toByte()
+        // mdat box at offset 24 with 64-bit largesize == 1 -> size = 80_000_000_000L (~74.5 GB)
+        fakeHead[24] = 0; fakeHead[25] = 0; fakeHead[26] = 0; fakeHead[27] = 1
+        fakeHead[28] = 'm'.code.toByte(); fakeHead[29] = 'd'.code.toByte(); fakeHead[30] = 'a'.code.toByte(); fakeHead[31] = 't'.code.toByte()
+        val mdatLargeSize = 80_000_000_000L
+        for (b in 0 until 8) {
+            fakeHead[32 + b] = ((mdatLargeSize ushr ((7 - b) * 8)) and 0xFFL).toByte()
+        }
+        val totalMp4Size = 24L + mdatLargeSize + 12_500_000L
+        val moovOff = DesktopExoPlayer.findMp4MoovOffset(fakeHead, fakeHead.size, totalMp4Size)
+        assertEquals(24L + mdatLargeSize, moovOff)
+
+        // MP4 colr(nclx) BT.2020 (9) + PQ (16) + BT.2020nc (9)
+        val colrBuf = byteArrayOf(
+            0, 0, 0, 19,
+            'c'.code.toByte(), 'o'.code.toByte(), 'l'.code.toByte(), 'r'.code.toByte(),
+            'n'.code.toByte(), 'c'.code.toByte(), 'l'.code.toByte(), 'x'.code.toByte(),
+            0, 9, 0, 16, 0, 9, 0,
+        )
+        assertTrue("MP4 HDR10 colr box must be detected", DesktopExoPlayer.scanHdrOrWideGamutFromBytes(colrBuf, colrBuf.size))
+
+        // 3. 验证解除 LoopbackPacer 限速后 MediaProxy 回环吞吐远超旧版 7.9 MB/s 上限（实测应 > 40 MB/s）
+        val payload = File(tempHome, "high_bitrate_4k.bin").apply {
+            writeBytes(ByteArray(4 * 1024 * 1024) { (it and 0xFF).toByte() })
+        }
+        val proxy = MediaProxy(androidx.media3.datasource.FileDataSource.Factory())
+        try {
+            val proxyUrl = proxy.register(Uri.fromFile(payload), "high_bitrate_4k.bin")
+            val ds = androidx.media3.datasource.DefaultHttpDataSource.Factory().createDataSource()
+            val t0 = System.nanoTime()
+            var total = 0
+            try {
+                ds.open(androidx.media3.datasource.DataSpec.Builder().setUri(proxyUrl).build())
+                val readBuf = ByteArray(256 * 1024)
+                while (true) {
+                    val n = ds.read(readBuf, 0, readBuf.size)
+                    if (n < 0) break
+                    total += n
+                }
+            } finally {
+                ds.close()
+            }
+            val elapsedSec = ((System.nanoTime() - t0) / 1_000_000_000.0).coerceAtLeast(0.0001)
+            val mbPerSec = (total / (1024.0 * 1024.0)) / elapsedSec
+            println("MediaProxy 4MB loopback throughput: %.1f MB/s".format(java.util.Locale.US, mbPerSec))
+            assertEquals(payload.length().toInt(), total)
+            assertTrue("MediaProxy throughput must vastly exceed 15 MB/s (was capped at 7.9 MB/s), got $mbPerSec MB/s", mbPerSec > 20.0)
+        } finally {
+            proxy.close()
+        }
+    }
 }

@@ -22,13 +22,15 @@ import kotlin.concurrent.thread
 
 /**
  * 本机 HTTP 中转：把任意地址（content://、WebDAV、网盘 cloud://）转成 http://127.0.0.1 地址给 VLC / FFmpeg 内核用。
- * 读取走应用自己的 DataSource，所以网盘直链解析、鉴权头都和 ExoPlayer 播放时一致；支持 Range，VLC 可以拖动。
+ * 读取走应用自己的 DataSource，所以网盘直链解析、鉴权头都和 ExoPlayer 播放时一致；支持 Range，VLC / FFmpeg 可以自由拖动。
  * 只监听本机回环地址，地址里带随机 token，其他应用猜不到。
  *
- * 针对 115 等严格单连接限制的网盘：
+ * 高码率局域网（WebDAV / SMB / 4K 120fps Remux）与 115 单连接网盘双重优化：
+ * - 零人为限速（移除旧版每 16KB sleep 2ms 导致的 ~7.9MB/s 回环瓶颈），采用 256KB 流缓冲 + 1MB 套接字发送缓冲 +
+ *   标准半关闭排空（shutdownOutput + 短超时等待对端 EOF），既消除 Windows Winsock 提前 closesocket 触发 RST 截断，又跑满千兆/万兆内网吞吐；
  * - 同一文件在同一时刻仅保留一个活跃上游连接，新的拖动/Range 请求会先立即抢占关闭旧上游，再发起新请求；
- * - 内置轻量 64KB 分块内存缓存（优先保留文件头/尾元数据），重复读取 MKV SeekHead / Cues 时零网络请求、不断开当前播放流；
- * - 对瞬态 403 / 429 / 502 / 503 在发包前自动退避重试并在必要时刷新直链。
+ * - 内置 64KB 分块首尾元数据内存缓存（大文件仅缓存前 8MB 与后 8MB，避免 70GB+ 蓝光原盘播放中途频繁分配拷贝并冲刷掉 SeekHead/moov/Cues）；
+ * - 对瞬态 401 / 403 / 429 / 502 / 503 在发包前自动退避重试并在必要时刷新直链。
  */
 @UnstableApi
 class MediaProxy(private val factory: DataSource.Factory) {
@@ -37,7 +39,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
     private val uriStates = ConcurrentHashMap<String, UriStreamState>()
     private var server: ServerSocket? = null
 
-    /** 登记一个地址，返回可给 VLC 打开的本机地址。文件名附在末尾，方便 VLC 按扩展名识别格式。 */
+    /** 登记一个地址，返回可给 VLC / FFmpeg 打开的本机地址。文件名附在末尾，方便播放器按扩展名识别格式。 */
     @Synchronized
     fun register(uri: Uri, name: String): String {
         val socket = server ?: ServerSocket(0, 64, InetAddress.getByName("127.0.0.1")).also {
@@ -81,13 +83,23 @@ class MediaProxy(private val factory: DataSource.Factory) {
     }
 
     private fun serve(client: Socket) {
-        runCatching { client.tcpNoDelay = true }
-        val input = client.getInputStream().bufferedReader(Charsets.ISO_8859_1)
-        val requestLine = input.readLine() ?: return
-        val headers = generateSequence { input.readLine()?.takeIf { it.isNotEmpty() } }
-            .associate { it.substringBefore(':').trim().lowercase() to it.substringAfter(':').trim() }
+        runCatching {
+            client.tcpNoDelay = true
+            client.sendBufferSize = SOCKET_SEND_BUFFER_BYTES
+        }
+        val rawIn = client.getInputStream()
+        val requestLine = readAsciiHeaderLine(rawIn) ?: return
+        val headers = LinkedHashMap<String, String>()
+        while (true) {
+            val line = readAsciiHeaderLine(rawIn) ?: break
+            if (line.isEmpty()) break
+            val colon = line.indexOf(':')
+            if (colon > 0) {
+                headers[line.substring(0, colon).trim().lowercase()] = line.substring(colon + 1).trim()
+            }
+        }
         val (method, path) = requestLine.split(' ').let { (it.getOrNull(0) ?: "") to (it.getOrNull(1) ?: "") }
-        val out = BufferedOutputStream(client.getOutputStream(), 1 shl 16)
+        val out = BufferedOutputStream(client.getOutputStream(), IO_BUFFER_BYTES)
         val uri = routes[path.trimStart('/').substringBefore('/')]
         if (uri == null || (method != "GET" && method != "HEAD")) {
             out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
@@ -96,7 +108,6 @@ class MediaProxy(private val factory: DataSource.Factory) {
         }
 
         val state = uriStates.computeIfAbsent(uri.toString()) { UriStreamState(uri) }
-        val pacer = LoopbackPacer()
         val rawRange = headers["range"]?.trim()?.lowercase()?.removePrefix("bytes=")?.substringBefore(',')?.trim()
         val parsedRange = parseRange(rawRange, state.totalLength)
         val hasRange = rawRange != null
@@ -110,7 +121,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
         }
 
         val knownTotal = state.totalLength
-        // 1. 纯内存缓存命中（如 HEAD 或重复读取 MKV 文件头 / Cues 小块），直接返回且不打断正在播放的上游连接
+        // 1. 纯内存缓存命中（如 HEAD 或重复读取 MKV 文件头 / Cues / MP4 moov 小块），直接高速返回且不打断正在播放的上游连接
         if (knownTotal > 0L) {
             if (start >= knownTotal) {
                 out.write(
@@ -122,17 +133,17 @@ class MediaProxy(private val factory: DataSource.Factory) {
             }
             val knownEndExclusive = if (end != null) minOf(end + 1L, knownTotal) else knownTotal
             if (method == "HEAD") {
-                writeHeaders(out, hasRange, start, knownEndExclusive, knownTotal)
+                val hasLen = writeHeaders(out, hasRange, start, knownEndExclusive, knownTotal)
                 out.flush()
-                finishGracefully(client)
+                finishGracefully(client, hasLen)
                 return
             }
             val reqSpan = knownEndExclusive - start
             if (reqSpan in 1L..MAX_PURE_CACHE_READ_BYTES && state.contiguousCachedEnd(start, knownEndExclusive) >= knownEndExclusive) {
-                writeHeaders(out, hasRange, start, knownEndExclusive, knownTotal)
-                streamCachedRange(state, start, knownEndExclusive, out, pacer) { !client.isClosed }
+                val hasLen = writeHeaders(out, hasRange, start, knownEndExclusive, knownTotal)
+                streamCachedRange(state, start, knownEndExclusive, out) { !client.isClosed }
                 out.flush()
-                finishGracefully(client)
+                finishGracefully(client, hasLen)
                 return
             }
         }
@@ -143,12 +154,13 @@ class MediaProxy(private val factory: DataSource.Factory) {
         state.active?.preempt()
 
         var headersSent = false
+        var hasContentLength = false
         var completedCleanly = false
         var activeHandle: ActiveUpstream? = null
         try {
             val freshTotal = state.totalLength
             var streamStart = start
-            var knownEndExclusive: Long? = if (freshTotal > 0L) {
+            val knownEndExclusive: Long? = if (freshTotal > 0L) {
                 if (end != null) minOf(end + 1L, freshTotal) else freshTotal
             } else {
                 null
@@ -157,15 +169,15 @@ class MediaProxy(private val factory: DataSource.Factory) {
             if (freshTotal > 0L && knownEndExclusive != null && method == "GET") {
                 val cachedEnd = state.contiguousCachedEnd(start, knownEndExclusive)
                 if (cachedEnd > start) {
-                    writeHeaders(out, hasRange, start, knownEndExclusive, freshTotal)
+                    hasContentLength = writeHeaders(out, hasRange, start, knownEndExclusive, freshTotal)
                     headersSent = true
                     if (cachedEnd >= knownEndExclusive) {
-                        streamCachedRange(state, start, cachedEnd, out, pacer) { !client.isClosed }
+                        streamCachedRange(state, start, cachedEnd, out) { !client.isClosed }
                         out.flush()
                         completedCleanly = !client.isClosed
                         return
                     }
-                    val writtenEnd = streamCachedRange(state, start, cachedEnd, out, pacer) {
+                    val writtenEnd = streamCachedRange(state, start, cachedEnd, out) {
                         mySeq == state.requestSeq.get() && !client.isClosed
                     }
                     out.flush()
@@ -185,7 +197,8 @@ class MediaProxy(private val factory: DataSource.Factory) {
             }
             if (upstreamLen == 0L) {
                 if (!headersSent) {
-                    writeHeaders(out, hasRange, start, start, knownTotal.takeIf { it > 0L })
+                    hasContentLength = writeHeaders(out, hasRange, start, start, knownTotal.takeIf { it > 0L })
+                    headersSent = true
                 }
                 out.flush()
                 completedCleanly = true
@@ -207,22 +220,20 @@ class MediaProxy(private val factory: DataSource.Factory) {
             if (!headersSent) {
                 val respEndExclusive = knownEndExclusive ?: openedResult.endExclusive
                 val respTotal = state.totalLength.takeIf { it > 0L } ?: openedResult.resourceTotal
-                writeHeaders(out, hasRange && respEndExclusive != null, start, respEndExclusive, respTotal)
+                hasContentLength = writeHeaders(out, hasRange && respEndExclusive != null, start, respEndExclusive, respTotal)
                 headersSent = true
             }
 
             if (method == "GET") {
                 val staging = BlockStaging(streamStart, state)
-                val buf = ByteArray(1 shl 16)
+                val buf = ByteArray(IO_BUFFER_BYTES)
                 try {
-                    while (mySeq == state.requestSeq.get() && !activeHandle.preempted) {
+                    while (mySeq == state.requestSeq.get() && !activeHandle.preempted && !client.isClosed) {
                         val n = activeHandle.source.read(buf, 0, buf.size)
                         if (n == C.RESULT_END_OF_INPUT) break
                         if (n > 0) {
                             staging.feed(buf, 0, n)
-                            pacer.writeChunked(out, buf, 0, n) {
-                                mySeq == state.requestSeq.get() && activeHandle?.preempted != true && !client.isClosed
-                            }
+                            out.write(buf, 0, n)
                         }
                     }
                 } finally {
@@ -247,9 +258,21 @@ class MediaProxy(private val factory: DataSource.Factory) {
                 state.active = null
             }
             if (completedCleanly) {
-                finishGracefully(client)
+                finishGracefully(client, hasContentLength)
             }
         }
+    }
+
+    /** 逐字节读取请求行与请求头，避免 BufferedReader 预读吞掉后续对端关闭信号 */
+    private fun readAsciiHeaderLine(ins: java.io.InputStream): String? {
+        val sb = StringBuilder(128)
+        while (sb.length < 16_384) {
+            val b = ins.read()
+            if (b < 0) return if (sb.isEmpty()) null else sb.toString()
+            if (b == '\n'.code) break
+            if (b != '\r'.code) sb.append(b.toChar())
+        }
+        return sb.toString()
     }
 
     private fun openUpstreamSingleFlight(
@@ -373,7 +396,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
         start: Long,
         endExclusive: Long?,
         resourceTotal: Long?,
-    ) {
+    ): Boolean {
         val head = StringBuilder()
         if (isPartial && endExclusive != null && endExclusive > start) {
             head.append("HTTP/1.1 206 Partial Content\r\n")
@@ -381,17 +404,38 @@ class MediaProxy(private val factory: DataSource.Factory) {
         } else {
             head.append("HTTP/1.1 200 OK\r\n")
         }
-        if (endExclusive != null && endExclusive >= start) {
+        val hasLength = endExclusive != null && endExclusive >= start
+        if (hasLength) {
             head.append("Content-Length: ${endExclusive - start}\r\n")
         }
         head.append("Accept-Ranges: bytes\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n")
         out.write(head.toString().toByteArray())
         out.flush()
+        return hasLength
     }
 
-    private fun finishGracefully(client: Socket) {
+    /**
+     * 安全收尾：
+     * - 已知 Content-Length 时不提前发送服务端 FIN（避免 Windows WFP/TUN 过滤驱动在在途数据未排空时因半关闭触发 65535 截断或 RST），
+     *   而是等待客户端按 Content-Length 读完并因 Connection: close 主动关闭对端（< 1ms 返回 -1）；
+     * - 未知长度流则先 shutdownOutput 发送 FIN 通知客户端流结束，再排空对端关闭信号。
+     */
+    private fun finishGracefully(client: Socket, hasContentLength: Boolean) {
         if (client.isClosed) return
-        runCatching { client.shutdownOutput() }
+        if (!hasContentLength) {
+            runCatching { client.shutdownOutput() }
+        }
+        runCatching {
+            client.soTimeout = if (hasContentLength) 1_500 else 500
+            val drain = ByteArray(512)
+            val ins = client.getInputStream()
+            while (ins.read(drain) >= 0) {
+                // 正常本机回环客户端读完即关（< 1ms 返回 -1）
+            }
+        }
+        if (hasContentLength && !client.isClosed) {
+            runCatching { client.shutdownOutput() }
+        }
     }
 
     private fun streamCachedRange(
@@ -399,62 +443,18 @@ class MediaProxy(private val factory: DataSource.Factory) {
         start: Long,
         endExclusive: Long,
         out: BufferedOutputStream,
-        pacer: LoopbackPacer,
         shouldContinue: () -> Boolean,
     ): Long {
         var pos = start
-        val buf = ByteArray(1 shl 16)
+        val buf = ByteArray(UriStreamState.BLOCK_SIZE)
         while (pos < endExclusive && shouldContinue()) {
             val want = minOf(buf.size.toLong(), endExclusive - pos).toInt()
             val n = state.readCachedAt(pos, buf, want)
             if (n <= 0) break
-            pacer.writeChunked(out, buf, 0, n, shouldContinue)
-            if (!shouldContinue()) break
+            out.write(buf, 0, n)
             pos += n
         }
         return pos
-    }
-
-    /**
-     * Windows 本机回环流控节流器：
-     * 回环零延迟发送 >=64KB 后立刻 shutdownOutput/close 时，Windows Winsock / OkHttp 会出现 65,535 字节截断卡死。
-     * 以 16KB 为步长 flush，仅当本窗口 16KB 耗时低于 1.5ms（即纯内存/本地回环突发场景）时让出 2ms 给接收端排空；
-     * 正常外网下载几乎不会触发 sleep，本地缓存命中仍可维持约 8MB/s 平滑交付且避免回环截断。
-     */
-    private class LoopbackPacer {
-        private var windowStartNs = System.nanoTime()
-        private var windowBytes = 0
-
-        fun writeChunked(
-            out: BufferedOutputStream,
-            data: ByteArray,
-            offset: Int,
-            len: Int,
-            shouldContinue: () -> Boolean,
-        ) {
-            var pos = offset
-            val end = offset + len
-            while (pos < end && shouldContinue()) {
-                val step = minOf(16_384, end - pos)
-                out.write(data, pos, step)
-                out.flush()
-                pos += step
-                windowBytes += step
-                if (windowBytes >= 16_384) {
-                    val elapsedNs = System.nanoTime() - windowStartNs
-                    if (elapsedNs < 1_500_000L) {
-                        try {
-                            Thread.sleep(2L)
-                        } catch (_: InterruptedException) {
-                            Thread.currentThread().interrupt()
-                            return
-                        }
-                    }
-                    windowStartNs = System.nanoTime()
-                    windowBytes = 0
-                }
-            }
-        }
     }
 
     private data class UpstreamOpenResult(
@@ -488,12 +488,25 @@ class MediaProxy(private val factory: DataSource.Factory) {
         var totalLength: Long = C.LENGTH_UNSET.toLong()
 
         private val cacheLock = Any()
-        private val blocks = object : LinkedHashMap<Long, ByteArray>(64, 0.75f, true) {
+        private val blocks = object : LinkedHashMap<Long, ByteArray>(128, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, ByteArray>?): Boolean = size > MAX_BLOCKS
         }
 
+        /**
+         * 大文件（>16MB，如 77GB 4K Remux）仅缓存文件头 8MB 与文件尾 8MB 元数据区间（ftyp/moov/SeekHead/Cues），
+         * 正片中间数据零拷贝直通，既不产生百万次数组分配，也不会冲刷掉已缓存的首尾索引块。
+         */
+        fun shouldCacheBlock(blockIndex: Long): Boolean {
+            if (blockIndex < EDGE_CACHE_BLOCKS) return true
+            val total = totalLength
+            if (total <= 0L) return blockIndex < MAX_BLOCKS
+            if (total <= FULL_CACHE_FILE_THRESHOLD_BYTES) return true
+            val lastBlock = (total - 1L) / BLOCK_SIZE
+            return blockIndex >= (lastBlock - EDGE_CACHE_BLOCKS + 1L)
+        }
+
         fun putPrefixBlock(blockIndex: Long, src: ByteArray, len: Int) {
-            if (len <= 0) return
+            if (len <= 0 || !shouldCacheBlock(blockIndex)) return
             synchronized(cacheLock) {
                 val existing = blocks[blockIndex]
                 if (existing == null || existing.size < len) {
@@ -540,7 +553,9 @@ class MediaProxy(private val factory: DataSource.Factory) {
 
         companion object {
             const val BLOCK_SIZE = 65_536
-            private const val MAX_BLOCKS = 128
+            private const val EDGE_CACHE_BLOCKS = 128L // 首尾各 8MB
+            private const val MAX_BLOCKS = 256         // 单文件最多 16MB 块缓存
+            private const val FULL_CACHE_FILE_THRESHOLD_BYTES = 16L * 1024 * 1024
         }
     }
 
@@ -548,7 +563,10 @@ class MediaProxy(private val factory: DataSource.Factory) {
         private val buf = ByteArray(UriStreamState.BLOCK_SIZE)
         private var blockIndex = startPos / UriStreamState.BLOCK_SIZE
         private var offsetInBlock = (startPos % UriStreamState.BLOCK_SIZE).toInt()
-        private var validFromZero = if (offsetInBlock == 0) {
+        private var cacheThisBlock = state.shouldCacheBlock(blockIndex)
+        private var validFromZero = if (!cacheThisBlock) {
+            false
+        } else if (offsetInBlock == 0) {
             true
         } else {
             state.readCachedAt(blockIndex * UriStreamState.BLOCK_SIZE, buf, offsetInBlock) == offsetInBlock
@@ -560,31 +578,34 @@ class MediaProxy(private val factory: DataSource.Factory) {
             while (rem > 0) {
                 val space = UriStreamState.BLOCK_SIZE - offsetInBlock
                 val take = minOf(rem, space)
-                if (validFromZero) {
+                if (cacheThisBlock && validFromZero) {
                     System.arraycopy(data, srcPos, buf, offsetInBlock, take)
                 }
                 srcPos += take
                 rem -= take
                 offsetInBlock += take
                 if (offsetInBlock == UriStreamState.BLOCK_SIZE) {
-                    if (validFromZero) {
+                    if (cacheThisBlock && validFromZero) {
                         state.putPrefixBlock(blockIndex, buf, UriStreamState.BLOCK_SIZE)
                     }
                     blockIndex++
                     offsetInBlock = 0
-                    validFromZero = true
+                    cacheThisBlock = state.shouldCacheBlock(blockIndex)
+                    validFromZero = cacheThisBlock
                 }
             }
         }
 
         fun flushPartial() {
-            if (validFromZero && offsetInBlock > 0) {
+            if (cacheThisBlock && validFromZero && offsetInBlock > 0) {
                 state.putPrefixBlock(blockIndex, buf, offsetInBlock)
             }
         }
     }
 
     companion object {
+        private const val IO_BUFFER_BYTES = 256 * 1024
+        private const val SOCKET_SEND_BUFFER_BYTES = 1024 * 1024
         private const val PREEMPT_SETTLE_MS = 45L
         private const val MAX_PURE_CACHE_READ_BYTES = 4L * 1024 * 1024
         private const val MAX_CACHED_URIS = 3

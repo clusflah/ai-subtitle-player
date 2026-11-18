@@ -85,11 +85,29 @@ import javax.sound.sampled.AudioSystem
 import javax.sound.sampled.Clip
 import javax.sound.sampled.LineEvent
 import javax.sound.sampled.SourceDataLine
+import com.sun.jna.Library
+import com.sun.jna.Native
 import javax.swing.SwingUtilities
+import kotlin.math.ceil
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 private const val TAG = "DesktopPlayer"
+
+private interface DesktopWinMm : Library {
+    fun timeBeginPeriod(uPeriod: Int): Int
+    fun timeEndPeriod(uPeriod: Int): Int
+
+    companion object {
+        val INSTANCE: DesktopWinMm? = runCatching {
+            if (System.getProperty("os.name").orEmpty().lowercase().contains("win")) {
+                Native.load("winmm", DesktopWinMm::class.java)
+            } else {
+                null
+            }
+        }.getOrNull()
+    }
+}
 
 /**
  * 零分配三缓冲视频帧槽位：
@@ -372,11 +390,10 @@ object DesktopPlayerEngine {
                 MediaPlayerFactory(
                     "--avcodec-hw=none",
                     "--avcodec-threads=0",
-                    "--http-reconnect",
                     "--network-caching=2500",
                     "--file-caching=300",
-                    "--prefetch-buffer-size=16384",
-                    "--prefetch-read-size=65536",
+                    "--prefetch-buffer-size=65536",
+                    "--prefetch-read-size=1048576",
                     "--no-lua",
                     "--audio-time-stretch",
                     "--no-video-title-show",
@@ -393,11 +410,60 @@ object DesktopPlayerEngine {
         }
     }
 
-    /** 应用启动后在后台线程预热 VLC 与双地址服务器探测，避免首次点击播放时阻塞等待 */
+    private val highResTimerUsers = AtomicInteger(0)
+
+    internal fun acquireWindowsHighResTimer() {
+        if (highResTimerUsers.getAndIncrement() == 0) {
+            runCatching { DesktopWinMm.INSTANCE?.timeBeginPeriod(1) }
+        }
+    }
+
+    internal fun releaseWindowsHighResTimer() {
+        val rem = highResTimerUsers.decrementAndGet()
+        if (rem <= 0) {
+            if (rem < 0) highResTimerUsers.set(0)
+            runCatching { DesktopWinMm.INSTANCE?.timeEndPeriod(1) }
+        }
+    }
+
+    @Volatile
+    internal var vulkanPlaceboSupported: Boolean? = null
+
+    private val vulkanProbeStarted = AtomicBoolean(false)
+
+    internal fun probeVulkanPlaceboAsync() {
+        if (vulkanPlaceboSupported != null || !vulkanProbeStarted.compareAndSet(false, true)) return
+        DesktopExoPlayer.ioPool.submit {
+            val ffmpeg = DesktopBinaryFinder.findFfmpeg() ?: return@submit
+            val ok = runCatching {
+                val proc = ProcessBuilder(
+                    ffmpeg, "-v", "error",
+                    "-init_hw_device", "vulkan=vk",
+                    "-filter_hw_device", "vk",
+                    "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.04",
+                    "-frames:v", "1",
+                    "-vf", "hwupload,libplacebo=w=64:h=64:format=bgra,hwdownload,format=bgra",
+                    "-pix_fmt", "bgra",
+                    "-f", "null", "-",
+                ).redirectError(ProcessBuilder.Redirect.DISCARD).start()
+                if (!proc.waitFor(4, TimeUnit.SECONDS)) {
+                    proc.destroyForcibly()
+                    false
+                } else {
+                    proc.exitValue() == 0
+                }
+            }.getOrDefault(false)
+            vulkanPlaceboSupported = ok
+            Log.i(TAG, "Vulkan libplacebo 预探测结果: supported=$ok")
+        }
+    }
+
+    /** 应用启动后在后台线程预热 VLC、Vulkan libplacebo 管线与双地址服务器探测，避免首次点击播放时阻塞等待 */
     fun prewarm(context: Context? = null) {
         DesktopExoPlayer.ioPool.submit {
             runCatching { getSharedVlcFactory() }
         }
+        probeVulkanPlaceboAsync()
         if (context != null) {
             DesktopExoPlayer.ioPool.submit {
                 runCatching {
@@ -977,7 +1043,21 @@ class DesktopExoPlayer(
     @Volatile
     private var ffmpegVideoServer: ServerSocket? = null
     @Volatile
-    private var selectedFfmpegAudioStreamSpec: String = "0:a:0?" 
+    private var selectedFfmpegAudioStreamSpec: String = "0:a:0?"
+    private val ringBufferPoolLock = Any()
+    private var pooledRingFrameBytes: Int = 0
+    private var pooledRingBuffers: Array<ByteArray>? = null
+
+    private fun acquireRingBuffers(ringCap: Int, frameBytes: Int): Array<ByteArray> = synchronized(ringBufferPoolLock) {
+        val existing = pooledRingBuffers
+        if (existing != null && existing.size == ringCap && pooledRingFrameBytes == frameBytes) {
+            return existing
+        }
+        return Array(ringCap) { ByteArray(frameBytes) }.also {
+            pooledRingFrameBytes = frameBytes
+            pooledRingBuffers = it
+        }
+    }
 
     override fun addListener(listener: Player.Listener) {
         listeners.add(listener)
@@ -1472,20 +1552,25 @@ class DesktopExoPlayer(
                 releaseLiveRelay()
             }
 
-            // 2. 若指定了 MPV / libplacebo 内核，或开启了杜比防偏色且探测到杜比视界流（如 Profile 5 dvh1/dvhe），
-            //    主动绕过不支持 IPTPQc2 的 VLC 3.x（否则必出紫绿画面），直接走 libplacebo 色调映射管线
+            // 2. 若指定了 MPV / libplacebo 内核，或开启了防偏色且探测到杜比视界（IPTPQc2 / RPU）或 HDR10 / HLG / BT.2020 广色域流，
+            //    主动绕过不支持 vmem 回调色调映射与色域转换的 LibVLC 3.x（否则必出紫绿或灰白偏色），直连 GPU libplacebo 色彩映射管线
             val forceMpvPipeline = backendMode == DesktopBackendMode.MPV_LIBPLACEBO
-            val probeDvProfile = if (!forceMpvPipeline && backendMode == DesktopBackendMode.AUTO && autoDolbyProtection && !isCurrentItemAudioOnly) {
-                probeDolbyVisionProfileQuick(playableUrl, headers, item.mediaMetadata.title?.toString())
+            val colorRequirement = if (!forceMpvPipeline && backendMode == DesktopBackendMode.AUTO && autoDolbyProtection && !isCurrentItemAudioOnly) {
+                probeColorPipelineRequirementQuick(playableUrl, headers, item.mediaMetadata.title?.toString())
             } else {
                 null
             }
+            val probeDvProfile = colorRequirement?.dvProfile
+            val requiresColorMap = colorRequirement != null && (probeDvProfile != null || colorRequirement.isHdrOrWideGamut)
             if (probeDvProfile != null) {
                 detectedDolbyProfile = probeDvProfile
-                Log.i(TAG, "检测到杜比视界 Profile $probeDvProfile，绕过 VLC 3.x 改用 libplacebo 色调映射管线: $playableUrl")
+                Log.i(TAG, "检测到杜比视界 Profile $probeDvProfile，绕过 VLC vmem 改用 GPU libplacebo 色调映射管线: $playableUrl")
+            } else if (requiresColorMap) {
+                Log.i(TAG, "检测到 HDR10 / HLG / BT.2020 广色域流，绕过 VLC vmem 改用 GPU libplacebo 色调映射管线: $playableUrl")
             }
 
-            if (!forceMpvPipeline && probeDvProfile == null &&
+            val forceFfmpegForWindowsHwdec = IS_WINDOWS_HOST && hwdecPreference == true && backendMode == DesktopBackendMode.AUTO
+            if (!forceMpvPipeline && !requiresColorMap && !forceFfmpegForWindowsHwdec &&
                 DesktopPlayerEngine.vlcAvailable && startWithVlcjOnExecutor(gen, playableUrl, headers, startPosMs)
             ) {
                 activePipelineDescription = when (hwdecPreference) {
@@ -1496,13 +1581,13 @@ class DesktopExoPlayer(
                 return@execute
             }
 
-            // 3. 使用内置 MPV/libplacebo + FFmpeg 色彩映射渲染引擎
+            // 3. 使用内置 MPV/libplacebo + FFmpeg GPU 色彩映射渲染引擎
             startWithFfmpeg(
                 gen = gen,
                 url = playableUrl,
                 headers = headers,
                 startPosMs = startPosMs,
-                preferLibplacebo = forceMpvPipeline || probeDvProfile != null,
+                preferLibplacebo = forceMpvPipeline || requiresColorMap,
             )
         }
     }
@@ -1594,7 +1679,7 @@ class DesktopExoPlayer(
 
             val options = mutableListOf(":no-dvdnav-menu", ":no-bluray-menu")
             when (hwdecPreference) {
-                true -> options.add(":avcodec-hw=any")
+                true -> options.add(if (IS_WINDOWS_HOST) ":avcodec-hw=none" else ":avcodec-hw=any")
                 false -> options.add(":avcodec-hw=none")
                 null -> {}
             }
@@ -2040,7 +2125,7 @@ class DesktopExoPlayer(
         val den = parts[1].toDoubleOrNull() ?: return null
         if (den <= 0.0) return null
         val v = num / den
-        return if (v in 1.0..120.0) v else null
+        return if (v in 1.0..240.0) v else null
     }
 
     /**
@@ -2129,8 +2214,21 @@ class DesktopExoPlayer(
                         val w = s.optInt("width", 0)
                         val h = s.optInt("height", 0)
                         val trc = s.optString("color_transfer").lowercase()
-                        if (trc == "smpte2084" || trc == "arib-std-b67") {
+                        val prim = s.optString("color_primaries").lowercase()
+                        val cspace = s.optString("color_space").lowercase()
+                        if (trc == "smpte2084" || trc == "arib-std-b67" || trc == "smpte428" ||
+                            prim == "bt2020" || cspace.startsWith("bt2020") || "ipt" in cspace || "dolby" in cspace
+                        ) {
                             isHdr = true
+                        }
+                        val sideList = s.optJSONArray("side_data_list")
+                        if (sideList != null) {
+                            for (si in 0 until sideList.length()) {
+                                val sdType = sideList.getJSONObject(si).optString("side_data_type").lowercase()
+                                if ("mastering display" in sdType || "content light" in sdType || "hdr" in sdType || "dovi" in sdType) {
+                                    isHdr = true
+                                }
+                            }
                         }
                         if (w > 0 && h > 0) {
                             srcW = w
@@ -2193,96 +2291,202 @@ class DesktopExoPlayer(
         }.getOrNull()
     }
 
-    private fun probeDolbyVisionProfileQuick(url: String, headers: Map<String, String>, titleHint: String?): Int? {
+    internal data class ColorPipelineProbe(
+        val dvProfile: Int?,
+        val isHdrOrWideGamut: Boolean,
+        val parsedTrackHeader: Boolean = false,
+    )
+
+    private fun probeColorPipelineRequirementQuick(
+        url: String,
+        headers: Map<String, String>,
+        titleHint: String?,
+    ): ColorPipelineProbe? {
         if (isCurrentMediaItemLive) return null
         val lowerUrl = url.lowercase()
         if (lowerUrl.contains(".m3u8") || lowerUrl.contains("/live/")) return null
 
-        val cacheKey = currentMediaItem?.localConfiguration?.uri?.toString()?.ifBlank { url } ?: url
-        dvSniffCache[cacheKey]?.let { cached -> return if (cached > 0) cached else null }
+        val rawUriStr = currentMediaItem?.localConfiguration?.uri?.toString().orEmpty()
+        val cacheKey = rawUriStr.ifBlank { url }
+        colorSniffCache[cacheKey]?.let { return it }
         probeMetaCache[cacheKey]?.let { meta ->
-            val p = meta.dvProfile
-            dvSniffCache[cacheKey] = p ?: 0
-            return p
+            return ColorPipelineProbe(meta.dvProfile, meta.isHdrOrDv, true).also { colorSniffCache[cacheKey] = it }
         }
 
         val titleLooksDv = com.aisub.player.media.DolbyVisionHelper.looksLikeDolbyVisionTitle(titleHint ?: url)
+        val titleLooksHdr = com.aisub.player.media.DolbyVisionHelper.looksLikeHdrOrDolbyTitle(titleHint ?: url)
         val isHttp = lowerUrl.startsWith("http://") || lowerUrl.startsWith("https://")
+        val isCloudStrict = CloudRegistry.isCloud(rawUriStr)
 
-        // 1. 先执行进程内零冲突 192KB 容器头（必要时含 MP4 尾部 moov）快速二进制嗅探：
-        //    - 本地文件耗时 < 0.5ms；
-        //    - 远程 / 115 MediaProxy 使用定长闭合 Range (bytes=0-196607 + Connection: close)，读满自然结束关闭，
-        //      绝不触发 115 单连接并发 403，且 MediaProxy 内存块缓存可直接供紧随其后的播放器 0ms 复用！
+        // 1. 进程内零冲突 256KB 容器头 + MP4 精确 mdat->moov 跳转二进制嗅探（同时识别杜比视界与 HDR10/HLG/BT.2020）：
         val sniffed = if (!isHttp) {
-            sniffLocalFileDolbyProfile(url)
+            sniffLocalFileColorRequirement(url)
         } else {
-            sniffHttpDolbyProfileBounded(url, headers)
+            sniffHttpColorRequirementBounded(url, headers)
         }
-        if (sniffed != null) {
-            dvSniffCache[cacheKey] = sniffed
+        if (sniffed != null && (sniffed.dvProfile != null || sniffed.isHdrOrWideGamut)) {
+            dvSniffCache[cacheKey] = sniffed.dvProfile ?: 0
+            colorSniffCache[cacheKey] = sniffed
             return sniffed
         }
 
-        // 2. 若标题明确带有 DV / 杜比字样但前 192KB 未扫到（例如超大 SeekHead 的特殊封装），回退 ffprobe 深度确认
-        if (titleLooksDv || !isHttp) {
-            if (DesktopBinaryFinder.findFfprobe() == null && titleLooksDv) {
+        // 2. 本地文件、标题含 HDR/DV 提示、或非严格单连接网盘且容器头未解析出明确 SDR 轨道元数据时（如 TS/M2TS 封装），用 ffprobe 快速确认
+        val needFfprobe = !isHttp || titleLooksHdr || (!isCloudStrict && sniffed?.parsedTrackHeader != true)
+        if (needFfprobe) {
+            if (DesktopBinaryFinder.findFfprobe() == null && titleLooksHdr) {
                 DesktopBinaryFinder.ensureFfmpeg()
             }
-            if (!isHttp || titleLooksDv) {
-                val probed = probeMediaStreamsCached(url, headers, timeoutSec = if (isHttp) 4L else 3L)
-                val p = probed?.dvProfile ?: if (titleLooksDv) 5 else null
-                dvSniffCache[cacheKey] = p ?: 0
-                return p
+            val probed = probeMediaStreamsCached(url, headers, timeoutSec = if (isHttp) 4L else 3L)
+            if (probed != null) {
+                val res = ColorPipelineProbe(
+                    dvProfile = probed.dvProfile ?: if (titleLooksDv) 5 else null,
+                    isHdrOrWideGamut = probed.isHdrOrDv || titleLooksHdr,
+                    parsedTrackHeader = true,
+                )
+                dvSniffCache[cacheKey] = res.dvProfile ?: 0
+                colorSniffCache[cacheKey] = res
+                return res
+            } else if (titleLooksHdr) {
+                val res = ColorPipelineProbe(dvProfile = if (titleLooksDv) 5 else null, isHdrOrWideGamut = true)
+                colorSniffCache[cacheKey] = res
+                return res
             }
         }
 
+        val sdr = ColorPipelineProbe(null, false, sniffed?.parsedTrackHeader == true)
         dvSniffCache[cacheKey] = 0
-        return null
+        colorSniffCache[cacheKey] = sdr
+        return sdr
     }
 
-    private fun sniffLocalFileDolbyProfile(path: String): Int? = runCatching {
+    private fun sniffLocalFileColorRequirement(path: String): ColorPipelineProbe? = runCatching {
         val f = File(path)
         if (!f.isFile || f.length() < 32L) return null
-        val chunkSize = 196_608
+        val chunkSize = 262_144
         val buf = ByteArray(chunkSize)
         RandomAccessFile(f, "r").use { raf ->
-            val headRead = raf.read(buf, 0, minOf(chunkSize.toLong(), f.length()).toInt())
-            if (headRead > 16) {
-                DesktopExoPlayer.scanDolbyVisionProfileFromBytes(buf, headRead)?.let { return it }
-                val isMp4 = buf[4] == 'f'.code.toByte() && buf[5] == 't'.code.toByte() &&
-                    buf[6] == 'y'.code.toByte() && buf[7] == 'p'.code.toByte()
-                val hasMoov = DesktopExoPlayer.containsAsciiFourCc(buf, headRead, 'm', 'o', 'o', 'v')
-                if (isMp4 && !hasMoov && f.length() > chunkSize * 2L) {
-                    raf.seek(f.length() - chunkSize)
-                    val tailRead = raf.read(buf, 0, chunkSize)
-                    if (tailRead > 16) {
-                        DesktopExoPlayer.scanDolbyVisionProfileFromBytes(buf, tailRead)?.let { return it }
+            val fileLen = f.length()
+            val headRead = raf.read(buf, 0, minOf(chunkSize.toLong(), fileLen).toInt())
+            if (headRead <= 16) return null
+            DesktopExoPlayer.scanDolbyVisionProfileFromBytes(buf, headRead)?.let {
+                return ColorPipelineProbe(it, true, true)
+            }
+            if (DesktopExoPlayer.scanHdrOrWideGamutFromBytes(buf, headRead)) {
+                return ColorPipelineProbe(null, true, true)
+            }
+            val isMkv = (buf[0].toInt() and 0xFF) == 0x1A && (buf[1].toInt() and 0xFF) == 0x45 &&
+                (buf[2].toInt() and 0xFF) == 0xDF && (buf[3].toInt() and 0xFF) == 0xA3
+            if (isMkv) {
+                val conclusiveSdr = DesktopExoPlayer.containsMkvTracksElement(buf, headRead) &&
+                    !DesktopExoPlayer.has10BitMkvWithoutTransferTag(buf, headRead)
+                return ColorPipelineProbe(null, false, conclusiveSdr)
+            }
+            val isMp4 = buf[4] == 'f'.code.toByte() && buf[5] == 't'.code.toByte() &&
+                buf[6] == 'y'.code.toByte() && buf[7] == 'p'.code.toByte()
+            if (!isMp4) return ColorPipelineProbe(null, false, false)
+
+            val hasStsdInHead = DesktopExoPlayer.containsAsciiFourCc(buf, headRead, 's', 't', 's', 'd')
+            if (hasStsdInHead) {
+                val conclusiveSdr = !DesktopExoPlayer.has10BitCodecWithoutColrBox(buf, headRead)
+                return ColorPipelineProbe(null, false, conclusiveSdr)
+            }
+
+            // 非 faststart MP4（如 77.76GB 120fps 大文件，moov 长达数 MB~十几 MB 位于 mdat 之后）：
+            // 解析顶层 ftyp + mdat 64位长度直接定位到 moov 起始处读取 stsd，避免只读末尾 192KB 落在 co64 偏移表里漏检
+            val moovPos = DesktopExoPlayer.findMp4MoovOffset(buf, headRead, fileLen)
+            if (moovPos != null && moovPos in 16L until fileLen) {
+                raf.seek(moovPos)
+                val moovRead = raf.read(buf, 0, minOf(chunkSize.toLong(), fileLen - moovPos).toInt())
+                if (moovRead > 16) {
+                    DesktopExoPlayer.scanDolbyVisionProfileFromBytes(buf, moovRead)?.let { return ColorPipelineProbe(it, true, true) }
+                    if (DesktopExoPlayer.scanHdrOrWideGamutFromBytes(buf, moovRead)) return ColorPipelineProbe(null, true, true)
+                    // 若第 1 条 trak 为音轨且体积超过 256KB，继续跳到第 2 条 trak（视频轨）起始处读取 stsd
+                    val nextTrak = DesktopExoPlayer.findSecondMp4TrakOffsetIfNeeded(buf, moovRead, moovPos, fileLen)
+                    if (nextTrak != null) {
+                        raf.seek(nextTrak)
+                        val trakRead = raf.read(buf, 0, minOf(chunkSize.toLong(), fileLen - nextTrak).toInt())
+                        if (trakRead > 16) {
+                            DesktopExoPlayer.scanDolbyVisionProfileFromBytes(buf, trakRead)?.let { return ColorPipelineProbe(it, true, true) }
+                            if (DesktopExoPlayer.scanHdrOrWideGamutFromBytes(buf, trakRead)) return ColorPipelineProbe(null, true, true)
+                        }
+                    }
+                    if (DesktopExoPlayer.containsAsciiFourCc(buf, moovRead, 's', 't', 's', 'd')) {
+                        val conclusiveSdr = !DesktopExoPlayer.has10BitCodecWithoutColrBox(buf, moovRead)
+                        return ColorPipelineProbe(null, false, conclusiveSdr)
                     }
                 }
             }
+            if (fileLen > chunkSize * 2L) {
+                raf.seek(fileLen - chunkSize)
+                val tailRead = raf.read(buf, 0, chunkSize)
+                if (tailRead > 16) {
+                    DesktopExoPlayer.scanDolbyVisionProfileFromBytes(buf, tailRead)?.let { return ColorPipelineProbe(it, true, true) }
+                    if (DesktopExoPlayer.scanHdrOrWideGamutFromBytes(buf, tailRead)) return ColorPipelineProbe(null, true, true)
+                }
+            }
+            ColorPipelineProbe(null, false, false)
         }
-        null
     }.getOrNull()
 
-    private fun sniffHttpDolbyProfileBounded(url: String, headers: Map<String, String>): Int? = runCatching {
-        val chunkSize = 196_608
-        val headResult = fetchBoundedHttpRange(url, headers, 0L, chunkSize.toLong() - 1L, timeoutMs = 1500) ?: return null
+    private fun sniffHttpColorRequirementBounded(url: String, headers: Map<String, String>): ColorPipelineProbe? = runCatching {
+        val chunkSize = 262_144
+        val headResult = fetchBoundedHttpRange(url, headers, 0L, chunkSize.toLong() - 1L, timeoutMs = 1800) ?: return null
         val (headBuf, headLen, totalSize) = headResult
-        if (headLen > 16) {
-            DesktopExoPlayer.scanDolbyVisionProfileFromBytes(headBuf, headLen)?.let { return it }
-            val isMp4 = headBuf[4] == 'f'.code.toByte() && headBuf[5] == 't'.code.toByte() &&
-                headBuf[6] == 'y'.code.toByte() && headBuf[7] == 'p'.code.toByte()
-            val hasMoov = DesktopExoPlayer.containsAsciiFourCc(headBuf, headLen, 'm', 'o', 'o', 'v')
-            // 非 faststart 的 MP4（moov 在文件末尾）：仅做一次定长尾部闭合读取
-            if (isMp4 && !hasMoov && totalSize > chunkSize * 2L) {
+        if (headLen <= 16) return null
+        DesktopExoPlayer.scanDolbyVisionProfileFromBytes(headBuf, headLen)?.let {
+            return ColorPipelineProbe(it, true, true)
+        }
+        if (DesktopExoPlayer.scanHdrOrWideGamutFromBytes(headBuf, headLen)) {
+            return ColorPipelineProbe(null, true, true)
+        }
+        val isMkv = (headBuf[0].toInt() and 0xFF) == 0x1A && (headBuf[1].toInt() and 0xFF) == 0x45 &&
+            (headBuf[2].toInt() and 0xFF) == 0xDF && (headBuf[3].toInt() and 0xFF) == 0xA3
+        if (isMkv) {
+            val conclusiveSdr = DesktopExoPlayer.containsMkvTracksElement(headBuf, headLen) &&
+                !DesktopExoPlayer.has10BitMkvWithoutTransferTag(headBuf, headLen)
+            return ColorPipelineProbe(null, false, conclusiveSdr)
+        }
+        val isMp4 = headBuf[4] == 'f'.code.toByte() && headBuf[5] == 't'.code.toByte() &&
+            headBuf[6] == 'y'.code.toByte() && headBuf[7] == 'p'.code.toByte()
+        if (!isMp4) return ColorPipelineProbe(null, false, false)
+        if (DesktopExoPlayer.containsAsciiFourCc(headBuf, headLen, 's', 't', 's', 'd')) {
+            val conclusiveSdr = !DesktopExoPlayer.has10BitCodecWithoutColrBox(headBuf, headLen)
+            return ColorPipelineProbe(null, false, conclusiveSdr)
+        }
+
+        if (totalSize > chunkSize) {
+            val moovPos = DesktopExoPlayer.findMp4MoovOffset(headBuf, headLen, totalSize)
+            if (moovPos != null && moovPos in 16L until totalSize) {
+                val moovEnd = minOf(totalSize - 1L, moovPos + chunkSize - 1L)
+                val moovRes = fetchBoundedHttpRange(url, headers, moovPos, moovEnd, timeoutMs = 1500)
+                if (moovRes != null && moovRes.second > 16) {
+                    val (mBuf, mLen, _) = moovRes
+                    DesktopExoPlayer.scanDolbyVisionProfileFromBytes(mBuf, mLen)?.let { return ColorPipelineProbe(it, true, true) }
+                    if (DesktopExoPlayer.scanHdrOrWideGamutFromBytes(mBuf, mLen)) return ColorPipelineProbe(null, true, true)
+                    val nextTrak = DesktopExoPlayer.findSecondMp4TrakOffsetIfNeeded(mBuf, mLen, moovPos, totalSize)
+                    if (nextTrak != null) {
+                        val tEnd = minOf(totalSize - 1L, nextTrak + chunkSize - 1L)
+                        val trakRes = fetchBoundedHttpRange(url, headers, nextTrak, tEnd, timeoutMs = 1500)
+                        if (trakRes != null && trakRes.second > 16) {
+                            DesktopExoPlayer.scanDolbyVisionProfileFromBytes(trakRes.first, trakRes.second)?.let { return ColorPipelineProbe(it, true, true) }
+                            if (DesktopExoPlayer.scanHdrOrWideGamutFromBytes(trakRes.first, trakRes.second)) return ColorPipelineProbe(null, true, true)
+                        }
+                    }
+                    if (DesktopExoPlayer.containsAsciiFourCc(mBuf, mLen, 's', 't', 's', 'd')) {
+                        val conclusiveSdr = !DesktopExoPlayer.has10BitCodecWithoutColrBox(mBuf, mLen)
+                        return ColorPipelineProbe(null, false, conclusiveSdr)
+                    }
+                }
+            } else if (totalSize > chunkSize * 2L) {
                 val tailStart = totalSize - chunkSize
-                val tailResult = fetchBoundedHttpRange(url, headers, tailStart, totalSize - 1L, timeoutMs = 1200)
+                val tailResult = fetchBoundedHttpRange(url, headers, tailStart, totalSize - 1L, timeoutMs = 1500)
                 if (tailResult != null && tailResult.second > 16) {
-                    DesktopExoPlayer.scanDolbyVisionProfileFromBytes(tailResult.first, tailResult.second)?.let { return it }
+                    DesktopExoPlayer.scanDolbyVisionProfileFromBytes(tailResult.first, tailResult.second)?.let { return ColorPipelineProbe(it, true, true) }
+                    if (DesktopExoPlayer.scanHdrOrWideGamutFromBytes(tailResult.first, tailResult.second)) return ColorPipelineProbe(null, true, true)
                 }
             }
         }
-        null
+        ColorPipelineProbe(null, false, false)
     }.getOrNull()
 
     private fun fetchBoundedHttpRange(
@@ -2313,11 +2517,13 @@ class DesktopExoPlayer(
             val buf = ByteArray(expectedMax)
             var readTotal = 0
             conn.inputStream.use { input ->
-                // 仅当服务端遵守 206 Partial Content 时读满定长区间；若老旧服务端忽略 Range 返回 200 全量流则最多读 expectedMax 后关闭
                 while (readTotal < expectedMax) {
                     val n = input.read(buf, readTotal, expectedMax - readTotal)
                     if (n < 0) break
                     readTotal += n
+                    if (!isLoopback && n > 0) {
+                        DesktopPlayerEngine.recordNetworkBytes(n.toLong())
+                    }
                 }
             }
             Triple(buf, readTotal, totalSize)
@@ -2387,17 +2593,25 @@ class DesktopExoPlayer(
         return cmd
     }
 
-    private fun buildColorMappedVfFilter(
+    internal fun buildColorMappedVfFilter(
         width: Int,
         height: Int,
         mode: Int,
-    ): String = when (mode) {
-        // Mode 1: 高速单趟 Vulkan GPU libplacebo 动态色调映射（关闭多抽头重采样、动态峰值计算着色器与蓝噪点抖动开销，保留完整杜比视界 Profile 5 IPTPQc2 + RPU -> BT.709 映射）
-        1 -> "libplacebo=w=$width:h=$height:upscaler=bilinear:downscaler=bilinear:peak_detect=false:sigmoid=false:apply_filmgrain=false:dithering=none:tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=iec61966-2-1:apply_dolbyvision=true:format=bgra"
-        // Mode 2: 无 Vulkan 驱动时的 CPU zscale HDR 色调映射兜底（针对 HDR10 / Profile 7 / Profile 8）
-        2 -> "scale=$width:$height:flags=fast_bilinear,zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv"
-        // Mode 0: 标准 SDR 快速缩放管线
-        else -> "scale=$width:$height:flags=fast_bilinear"
+        sourceFps: Double = 24.0,
+    ): String {
+        val targetFps = computeTargetRenderFps(sourceFps)
+        // 对 120fps / 119.88fps 高帧率片源在上传 GPU 之前先执行整数倍抽帧（如 119.88 -> 59.94），直接减半 PCIe 上传、着色与读回带宽
+        val fpsPrefix = if (sourceFps > 60.5) "fps=%.6f,".format(java.util.Locale.US, targetFps) else ""
+        return when (mode) {
+            // Mode 1: 高速单趟 Vulkan GPU libplacebo 色彩与动态色调映射：
+            // 显式通过 hwupload 上传解码帧（含杜比视界 RPU 与 HDR10 元数据）至 Vulkan 并在 GPU 缩放映射后 hwdownload,format=bgra 读回，
+            // 修复裸调 libplacebo 因缺少 AV_PIX_FMT_VULKAN 输入/输出转换导致滤镜协商失败退回纯 CPU 浮点 zscale 卡顿的问题。
+            1 -> "${fpsPrefix}hwupload,libplacebo=w=$width:h=$height:upscaler=bilinear:downscaler=bilinear:peak_detect=false:sigmoid=false:apply_filmgrain=false:dithering=ordered_fixed:tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=iec61966-2-1:apply_dolbyvision=true:format=bgra,hwdownload,format=bgra"
+            // Mode 2: 极少数无 Vulkan 驱动机器上的轻量 CPU zscale HDR 色调映射兜底
+            2 -> "${fpsPrefix}zscale=w=$width:h=$height:t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=bt2390:desat=0,zscale=t=bt709:m=bt709:r=tv,format=bgra"
+            // Mode 0: 标准 SDR 快速缩放管线
+            else -> "${fpsPrefix}scale=$width:$height:flags=fast_bilinear"
+        }
     }
 
     @JvmOverloads
@@ -2410,7 +2624,32 @@ class DesktopExoPlayer(
     ) {
         if (gen != mediaGeneration.get()) return
         ffmpegRunning.set(true)
-        Log.i(TAG, "启动 FFmpeg/libplacebo 播放引擎: url=$url, startPosMs=$startPosMs, preferLibplacebo=$preferLibplacebo")
+
+        // 对非直播外网直链统一挂载零限速 MediaProxy，使外部 ffmpeg.exe 进程拉流也能实时统计缓冲下载速度并复用首尾块缓存
+        var effectiveUrl = url
+        var effectiveHeaders = headers
+        val dsFactory = dataSourceFactory
+        if (!isCurrentMediaItemLive && isDirectRemoteNetworkUrl(url) && dsFactory != null) {
+            val item = currentMediaItem
+            val itemUri = item?.localConfiguration?.uri
+            val itemName = item?.mediaMetadata?.title?.toString() ?: itemUri?.lastPathSegment ?: "video.mp4"
+            val proxyTargetUri = when {
+                itemUri != null && (CloudRegistry.isCloud(itemUri.toString()) ||
+                    itemUri.scheme.equals("http", ignoreCase = true) ||
+                    itemUri.scheme.equals("https", ignoreCase = true)) -> itemUri
+                headers.isEmpty() -> Uri.parse(url)
+                else -> null
+            }
+            if (proxyTargetUri != null) {
+                runCatching {
+                    val p = proxy ?: MediaProxy(dsFactory).also { proxy = it }
+                    effectiveUrl = p.register(proxyTargetUri, itemName)
+                    effectiveHeaders = emptyMap()
+                }
+            }
+        }
+
+        Log.i(TAG, "启动 FFmpeg/libplacebo 播放引擎: url=$effectiveUrl, startPosMs=$startPosMs, preferLibplacebo=$preferLibplacebo")
         ioPool.submit {
             if (gen != mediaGeneration.get() || !ffmpegRunning.get()) return@submit
             val ffmpeg = DesktopBinaryFinder.ensureFfmpeg()
@@ -2425,7 +2664,7 @@ class DesktopExoPlayer(
                 return@submit
             }
 
-            val probed = probeMediaStreamsCached(url, headers, timeoutSec = 8L)
+            val probed = probeMediaStreamsCached(effectiveUrl, effectiveHeaders, timeoutSec = 8L)
             if (gen != mediaGeneration.get() || !ffmpegRunning.get()) return@submit
 
             val srcWidth = probed?.srcWidth ?: 1280
@@ -2449,19 +2688,27 @@ class DesktopExoPlayer(
                 }
             }
 
-            val maxW = DesktopPlayerEngine.displayWidthPx.coerceIn(1280, 1920)
-            val maxH = DesktopPlayerEngine.displayHeightPx.coerceIn(720, 1080)
+            val vkKnownUnsupported = DesktopPlayerEngine.vulkanPlaceboSupported == false
+            val usePlacebo = (preferLibplacebo || isHdrOrDv) && !vkKnownUnsupported
+            val initialFilterMode = when {
+                usePlacebo -> 1
+                isHdrOrDv && dvProfile != 5 -> 2
+                else -> 0
+            }
+
+            val maxW = if (initialFilterMode == 2) 1280 else DesktopPlayerEngine.displayWidthPx.coerceIn(1280, 1920)
+            val maxH = if (initialFilterMode == 2) 720 else DesktopPlayerEngine.displayHeightPx.coerceIn(720, 1080)
             val scale = minOf(1.0, maxW.toDouble() / srcWidth.toDouble(), maxH.toDouble() / srcHeight.toDouble())
             // 16 字节行对齐以加速 Vulkan GPU 读回与 Skia 纹理拷贝
             val width = ((((srcWidth * scale).roundToInt() + 8) / 16) * 16).coerceAtLeast(16)
             val height = (((srcHeight * scale).roundToInt() / 2) * 2).coerceAtLeast(2)
 
-            val usePlacebo = preferLibplacebo || isHdrOrDv
             val wantD3d11Hwdec = IS_WINDOWS_HOST && (hwdecPreference != false)
             val hwLabel = if (wantD3d11Hwdec) "D3D11VA 硬解 + " else "FFmpeg 软解 + "
             activePipelineDescription = when {
-                dvProfile != null -> "${hwLabel}libplacebo Vulkan · 杜比视界 P$dvProfile → BT.709"
-                usePlacebo -> "${hwLabel}libplacebo Vulkan · HDR 动态色调映射"
+                initialFilterMode == 1 && dvProfile != null -> "${hwLabel}libplacebo Vulkan · 杜比视界 P$dvProfile → BT.709"
+                initialFilterMode == 1 -> "${hwLabel}libplacebo Vulkan · HDR 动态色调映射"
+                initialFilterMode == 2 -> "FFmpeg zscale CPU HDR 色调映射"
                 wantD3d11Hwdec -> "D3D11VA 硬件加速渲染管线"
                 else -> "FFmpeg 软解渲染管线"
             }
@@ -2476,13 +2723,13 @@ class DesktopExoPlayer(
                     startFfmpegMuxedPlayback(
                         gen = gen,
                         ffmpeg = ffmpeg,
-                        url = url,
-                        headers = headers,
+                        url = effectiveUrl,
+                        headers = effectiveHeaders,
                         startPosMs = startPosMs,
                         width = width,
                         height = height,
                         fps = fps,
-                        filterMode = if (usePlacebo) 1 else 0,
+                        filterMode = initialFilterMode,
                         useD3d11Hwdec = wantD3d11Hwdec,
                         isHdrFallbackCandidate = isHdrOrDv && dvProfile != 5,
                     )
@@ -2490,18 +2737,18 @@ class DesktopExoPlayer(
                     startFfmpegVideoThread(
                         gen = gen,
                         ffmpeg = ffmpeg,
-                        url = url,
-                        headers = headers,
+                        url = effectiveUrl,
+                        headers = effectiveHeaders,
                         startPosMs = startPosMs,
                         width = width,
                         height = height,
                         fps = fps,
-                        filterMode = if (usePlacebo) 1 else 0,
+                        filterMode = initialFilterMode,
                         useD3d11Hwdec = wantD3d11Hwdec,
                     )
                 }
             } else {
-                startFfmpegAudioThread(gen, ffmpeg, url, headers, startPosMs, markReadyWithoutVideo = true, endWhenDone = true)
+                startFfmpegAudioThread(gen, ffmpeg, effectiveUrl, effectiveHeaders, startPosMs, markReadyWithoutVideo = true, endWhenDone = true)
             }
         }
     }
@@ -2587,7 +2834,7 @@ class DesktopExoPlayer(
     ) {
         ioPool.submit {
             if (gen != mediaGeneration.get() || !ffmpegRunning.get()) return@submit
-            val safeFps = fps.coerceIn(12.0, 60.0)
+            val safeFps = computeTargetRenderFps(fps)
             val fpsStr = "%.6f".format(java.util.Locale.US, safeFps)
 
             val videoServer = runCatching {
@@ -2616,7 +2863,7 @@ class DesktopExoPlayer(
 
             val hasLiveAudio = AtomicBoolean(true)
             val audioDoneLatch = CountDownLatch(1)
-            val vfStr = buildColorMappedVfFilter(width, height, filterMode)
+            val vfStr = buildColorMappedVfFilter(width, height, filterMode, fps)
             val audioMapSpec = selectedFfmpegAudioStreamSpec.ifEmpty { "0:a:0?" }
             val cmd = buildFfmpegInputArgs(
                 ffmpeg = ffmpeg,
@@ -2629,9 +2876,16 @@ class DesktopExoPlayer(
                 addAll(
                     listOf(
                         "-threads", "0",
+                        "-filter_threads", "0",
                         "-map", "0:v:0", "-sn",
                         "-vf", vfStr,
-                        "-r", fpsStr,
+                    ),
+                )
+                if (fps <= 60.5) {
+                    addAll(listOf("-r", fpsStr))
+                }
+                addAll(
+                    listOf(
                         "-pix_fmt", "bgra",
                         "-f", "rawvideo", "tcp://127.0.0.1:${videoServer.localPort}?send_buffer_size=16777216&tcp_nodelay=1",
                         "-map", audioMapSpec, "-vn", "-sn",
@@ -2734,12 +2988,15 @@ class DesktopExoPlayer(
                     )
                     return@submit
                 }
-                // 2) 若当前电脑缺少 Vulkan ICD 导致 filterMode=1 未输出任何帧，自动降级至 CPU zscale / 标准滤镜续播
+                // 2) 若当前电脑缺少 Vulkan ICD 导致 filterMode=1 未输出任何帧，记录缓存并自动降级至轻量 720p CPU zscale / 标准滤镜续播
                 if (filterMode == 1) {
+                    DesktopPlayerEngine.vulkanPlaceboSupported = false
                     val nextMode = if (isHdrFallbackCandidate) 2 else 0
-                    Log.w(TAG, "当前显卡未启用 Vulkan libplacebo，自动切换至 CPU 色调映射管线 (mode=$nextMode)")
+                    val fbW = width.coerceAtMost(1280).let { ((it + 8) / 16) * 16 }.coerceAtLeast(16)
+                    val fbH = if (fbW < width) (((height.toDouble() * fbW / width).roundToInt() / 2) * 2).coerceAtLeast(2) else height
+                    Log.w(TAG, "当前显卡未启用 Vulkan libplacebo，自动切换至 CPU 色调映射管线 (mode=$nextMode, ${fbW}x${fbH})")
                     activePipelineDescription = if (nextMode == 2) "FFmpeg zscale CPU HDR 色调映射" else "FFmpeg 软解渲染管线"
-                    startFfmpegMuxedPlayback(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = nextMode, useD3d11Hwdec = false, isHdrFallbackCandidate = false)
+                    startFfmpegMuxedPlayback(gen, ffmpeg, url, headers, startPosMs, fbW, fbH, fps, filterMode = nextMode, useD3d11Hwdec = false, isHdrFallbackCandidate = false)
                     return@submit
                 }
                 if (filterMode == 2) {
@@ -2779,9 +3036,12 @@ class DesktopExoPlayer(
         safeFps: Double,
         useAudioClock: () -> Boolean,
     ): Long {
+        if (filterModeHintForVulkanMark(activePipelineDescription)) {
+            DesktopPlayerEngine.vulkanPlaceboSupported = true
+        }
         val frameBytes = width * height * 4
         val ringCap = 8
-        val ringBuffers = Array(ringCap) { ByteArray(frameBytes) }
+        val ringBuffers = acquireRingBuffers(ringCap, frameBytes)
         val ringPts = LongArray(ringCap)
         val ringLock = java.util.concurrent.locks.ReentrantLock()
         val notFull = ringLock.newCondition()
@@ -2847,6 +3107,7 @@ class DesktopExoPlayer(
         var wallClockAnchorMs = System.currentTimeMillis()
         var firstFramePresented = false
         var consecutiveDropped = 0
+        DesktopPlayerEngine.acquireWindowsHighResTimer()
         try {
             while (ffmpegRunning.get() && gen == mediaGeneration.get()) {
                 if (!playWhenReady) {
@@ -2880,7 +3141,7 @@ class DesktopExoPlayer(
                 }
 
                 val lagMs = refClockMs - framePtsMs
-                val dropFrame = audioActive && firstFramePresented && lagMs > 85L && remainingAfterPop > 0 && consecutiveDropped < 3
+                val dropFrame = audioActive && firstFramePresented && lagMs > 65L && consecutiveDropped < 4
                 if (!dropFrame) {
                     val aheadMs = framePtsMs - refClockMs
                     if (firstFramePresented && aheadMs > 3L) {
@@ -2928,6 +3189,7 @@ class DesktopExoPlayer(
                 }
             }
         } finally {
+            DesktopPlayerEngine.releaseWindowsHighResTimer()
             ringLock.lock()
             try {
                 notFull.signalAll()
@@ -2938,6 +3200,8 @@ class DesktopExoPlayer(
         }
         return totalFramesRead.get()
     }
+
+    private fun filterModeHintForVulkanMark(desc: String): Boolean = "libplacebo Vulkan" in desc
 
     private fun pumpPcmToAudioLine(
         gen: Int,
@@ -2989,7 +3253,12 @@ class DesktopExoPlayer(
                             i += 2
                         }
                     }
-                    line?.write(buf, 0, aligned)
+                    if (line != null) {
+                        line.write(buf, 0, aligned)
+                    } else {
+                        val pcmMs = ((aligned / 4L) * 1000L / 48_000L).coerceIn(1L, 50L)
+                        Thread.sleep(pcmMs)
+                    }
                     bytesPlayed += aligned
                     val playedFrames = line?.longFramePosition ?: (bytesPlayed / 4L)
                     val sampleRateLong = format.sampleRate.toLong().coerceAtLeast(8_000L)
@@ -3035,9 +3304,9 @@ class DesktopExoPlayer(
             val stderrTailRef = AtomicReference("")
             var procTail: AtomicReference<String>? = null
             runCatching {
-                val safeFps = fps.coerceIn(12.0, 60.0)
+                val safeFps = computeTargetRenderFps(fps)
                 val fpsStr = "%.6f".format(java.util.Locale.US, safeFps)
-                val vfStr = buildColorMappedVfFilter(width, height, filterMode)
+                val vfStr = buildColorMappedVfFilter(width, height, filterMode, fps)
                 val cmd = buildFfmpegInputArgs(
                     ffmpeg = ffmpeg,
                     url = url,
@@ -3049,9 +3318,16 @@ class DesktopExoPlayer(
                     addAll(
                         listOf(
                             "-threads", "0",
+                            "-filter_threads", "0",
                             "-an", "-sn",
                             "-vf", vfStr,
-                            "-r", fpsStr,
+                        ),
+                    )
+                    if (fps <= 60.5) {
+                        addAll(listOf("-r", fpsStr))
+                    }
+                    addAll(
+                        listOf(
                             "-pix_fmt", "bgra",
                             "-f", "rawvideo", "-",
                         ),
@@ -3264,6 +3540,20 @@ class DesktopExoPlayer(
 
         /** 缓存轻量字节头嗅探结果（>0 表示杜比视界 Profile，0 表示已确认为普通非杜比流，避免重复网络读取） */
         private val dvSniffCache = java.util.concurrent.ConcurrentHashMap<String, Int>()
+        private val colorSniffCache = java.util.concurrent.ConcurrentHashMap<String, ColorPipelineProbe>()
+
+        /**
+         * 计算目标渲染帧率：
+         * <=60.5fps 保持原始精确帧率（如 23.976 / 24 / 29.97 / 59.94 / 60）；
+         * >60.5fps（如《比利·林恩的中场战事》119.88fps / 120fps）按整数分频降为 59.94fps / 60fps，消除非整数倍抽帧抖动并减半 GPU 带宽。
+         */
+        internal fun computeTargetRenderFps(srcFps: Double): Double {
+            if (!srcFps.isFinite() || srcFps <= 0.0) return 24.0
+            if (srcFps < 12.0) return 12.0
+            if (srcFps <= 60.5) return srcFps
+            val divisor = ceil(srcFps / 60.5).toInt().coerceAtLeast(2)
+            return (srcFps / divisor.toDouble()).coerceIn(24.0, 60.5)
+        }
 
         /**
          * 从 MP4 / MKV 容器头部（或 MP4 尾部 moov）原始字节中零依赖快速识别杜比视界 Profile：
@@ -3316,9 +3606,10 @@ class DesktopExoPlayer(
                         // 2a) MP4 Box: [size(4)]['dvcC'(4)][major(1)][minor(1)][profile_level(2)][flags(1)]
                         parseDoviRecordAt(buf, n, i + 4)?.let { return it }
 
-                        // 2b) MKV BlockAdditionMapping: ['dvcC'(4)] 后紧跟 0x41 0xED (BlockAddIDExtraData) + EBML VINT 长度 + 24B 记录
-                        val mkvEnd = minOf(i + 16, n - 6)
-                        var k = i + 4
+                        // 2b) MKV BlockAdditionMapping: 0x41 0xED (BlockAddIDExtraData) 可能位于 'dvcC' 之后或之前（如 mkvmerge 不同版本）
+                        val mkvStart = (i - 48).coerceAtLeast(0)
+                        val mkvEnd = minOf(i + 32, n - 8)
+                        var k = mkvStart
                         while (k <= mkvEnd) {
                             if ((buf[k].toInt() and 0xFF) == 0x41 && (buf[k + 1].toInt() and 0xFF) == 0xED) {
                                 val vintByte = buf[k + 2].toInt() and 0xFF
@@ -3378,7 +3669,298 @@ class DesktopExoPlayer(
                 (buf[offset + 3].toInt() and 0xFF)
         }
 
-        private fun containsAsciiFourCc(buf: ByteArray, length: Int, c0: Char, c1: Char, c2: Char, c3: Char): Boolean {
+        /**
+         * 从 MP4/MOV `stsd`（`colr` nclx/nclc、`mdcv`、`clli`）或 MKV Matroska `Colour`（`0x55 0xB0`）原始字节中
+         * 零依赖识别 HDR10 (SMPTE ST 2084 PQ)、HLG (ARIB STD-B67)、BT.2020 广色域或 ICtCp 流。
+         */
+        internal fun scanHdrOrWideGamutFromBytes(buf: ByteArray, length: Int): Boolean {
+            val n = minOf(length, buf.size)
+            if (n < 16) return false
+            val isMkv = (buf[0].toInt() and 0xFF) == 0x1A && (buf[1].toInt() and 0xFF) == 0x45 &&
+                (buf[2].toInt() and 0xFF) == 0xDF && (buf[3].toInt() and 0xFF) == 0xA3
+
+            var i = 0
+            val end = n - 12
+            while (i <= end) {
+                val b0 = buf[i].toInt() and 0xFF
+                // 1) MP4 'colr' Box: [size(4)]['colr'(4)]['nclx'|'nclc'(4)][primaries(2)][transfer(2)][matrix(2)]
+                if (b0 == 'c'.code &&
+                    buf[i + 1] == 'o'.code.toByte() &&
+                    buf[i + 2] == 'l'.code.toByte() &&
+                    buf[i + 3] == 'r'.code.toByte() &&
+                    i >= 4 && i + 14 <= n
+                ) {
+                    val boxSize = readBeInt(buf, i - 4)
+                    val isNclx = buf[i + 4] == 'n'.code.toByte() && buf[i + 5] == 'c'.code.toByte() &&
+                        buf[i + 6] == 'l'.code.toByte() && (buf[i + 7] == 'x'.code.toByte() || buf[i + 7] == 'c'.code.toByte())
+                    if (boxSize in 18..64 && isNclx) {
+                        val primaries = ((buf[i + 8].toInt() and 0xFF) shl 8) or (buf[i + 9].toInt() and 0xFF)
+                        val transfer = ((buf[i + 10].toInt() and 0xFF) shl 8) or (buf[i + 11].toInt() and 0xFF)
+                        val matrix = ((buf[i + 12].toInt() and 0xFF) shl 8) or (buf[i + 13].toInt() and 0xFF)
+                        if (transfer == 16 || transfer == 18 || transfer == 17 || primaries == 9 || matrix in intArrayOf(9, 10, 14)) {
+                            return true
+                        }
+                    }
+                }
+                // 2) MP4 SMPTE ST 2086 'mdcv' (32B) 或 CEA-861.3 'clli' (12B) HDR 元数据盒
+                if (i >= 4 && (
+                        (b0 == 'm'.code && buf[i + 1] == 'd'.code.toByte() && buf[i + 2] == 'c'.code.toByte() && buf[i + 3] == 'v'.code.toByte() && readBeInt(buf, i - 4) == 32) ||
+                            (b0 == 'c'.code && buf[i + 1] == 'l'.code.toByte() && buf[i + 2] == 'l'.code.toByte() && buf[i + 3] == 'i'.code.toByte() && readBeInt(buf, i - 4) == 12)
+                        )
+                ) {
+                    return true
+                }
+                // 2b) MP4/MKV HEVC 'hvcC' 配置记录内嵌 PREFIX_SEI (nal_unit_type=39: payload 137=MasteringDisplay, 144=MaxCLL, 147=HLG)
+                if (b0 == 'h'.code &&
+                    buf[i + 1] == 'v'.code.toByte() &&
+                    buf[i + 2] == 'c'.code.toByte() &&
+                    buf[i + 3] == 'C'.code.toByte() &&
+                    i + 27 <= n && (buf[i + 4].toInt() and 0xFF) == 1
+                ) {
+                    if (scanHevcConfigForHdrSei(buf, i + 4, n)) return true
+                }
+                // 2c) MKV CodecPrivate (0x63 0xA2) 内嵌 HEVCDecoderConfigurationRecord 的 HDR PREFIX_SEI
+                if (isMkv && b0 == 0x63 && (buf[i + 1].toInt() and 0xFF) == 0xA2 && i + 28 <= n) {
+                    val vByte = buf[i + 2].toInt() and 0xFF
+                    val vLen = when {
+                        (vByte and 0x80) != 0 -> 1
+                        (vByte and 0x40) != 0 -> 2
+                        (vByte and 0x20) != 0 -> 3
+                        (vByte and 0x10) != 0 -> 4
+                        else -> 0
+                    }
+                    val cpStart = i + 2 + vLen
+                    if (vLen > 0 && cpStart + 23 <= n &&
+                        (buf[cpStart].toInt() and 0xFF) == 1 &&
+                        (buf[cpStart + 16].toInt() and 0xFC) == 0xFC &&
+                        (buf[cpStart + 17].toInt() and 0xFC) == 0xFC
+                    ) {
+                        if (scanHevcConfigForHdrSei(buf, cpStart, n)) return true
+                    }
+                }
+                // 3) Matroska EBML Colour Master Element: 0x55 0xB0
+                if (isMkv && b0 == 0x55 && (buf[i + 1].toInt() and 0xFF) == 0xB0) {
+                    val vintByte = buf[i + 2].toInt() and 0xFF
+                    val (vintLen, elemLen) = when {
+                        (vintByte and 0x80) != 0 -> 1 to (vintByte and 0x7F)
+                        (vintByte and 0x40) != 0 && i + 3 < n -> 2 to (((vintByte and 0x3F) shl 8) or (buf[i + 3].toInt() and 0xFF))
+                        else -> 0 to 0
+                    }
+                    if (vintLen > 0 && elemLen in 3..256) {
+                        val cStart = i + 2 + vintLen
+                        val cEnd = minOf(cStart + elemLen, n - 4)
+                        var k = cStart
+                        while (k <= cEnd) {
+                            if ((buf[k].toInt() and 0xFF) == 0x55) {
+                                val subId = buf[k + 1].toInt() and 0xFF
+                                val subLen = buf[k + 2].toInt() and 0xFF
+                                val subVal = buf[k + 3].toInt() and 0xFF
+                                // 0x55BA TransferCharacteristics (16=PQ, 18=HLG), 0x55BB Primaries (9=BT.2020), 0x55B1 Matrix (9,10=BT.2020, 14=ICtCp)
+                                if (subLen == 0x81) {
+                                    if ((subId == 0xBA && (subVal == 16 || subVal == 18)) ||
+                                        (subId == 0xBB && subVal == 9) ||
+                                        (subId == 0xB1 && subVal in intArrayOf(9, 10, 14))
+                                    ) {
+                                        return true
+                                    }
+                                }
+                                // 0x55D0 MasteringMetadata
+                                if (subId == 0xD0 && (subLen and 0x80) != 0 && (subLen and 0x7F) >= 10) {
+                                    return true
+                                }
+                            }
+                            k++
+                        }
+                    }
+                }
+                i++
+            }
+            return false
+        }
+
+        private fun scanHevcConfigForHdrSei(buf: ByteArray, hvccStart: Int, limit: Int): Boolean {
+            if (hvccStart + 23 > limit) return false
+            val numArrays = buf[hvccStart + 22].toInt() and 0xFF
+            var p = hvccStart + 23
+            var arrIdx = 0
+            while (arrIdx < numArrays && p + 3 <= limit) {
+                val nalType = buf[p].toInt() and 0x3F
+                val numNalus = ((buf[p + 1].toInt() and 0xFF) shl 8) or (buf[p + 2].toInt() and 0xFF)
+                p += 3
+                var nIdx = 0
+                while (nIdx < numNalus && p + 2 <= limit) {
+                    val nalLen = ((buf[p].toInt() and 0xFF) shl 8) or (buf[p + 1].toInt() and 0xFF)
+                    p += 2
+                    if (nalLen <= 0 || p + nalLen > limit) return false
+                    // HEVC PREFIX_SEI_NUT = 39: [2B NAL Header][payloadType...]
+                    if (nalType == 39 && nalLen >= 4) {
+                        val payloadType = buf[p + 2].toInt() and 0xFF
+                        if (payloadType == 137 || payloadType == 144 || payloadType == 147) {
+                            return true
+                        }
+                    }
+                    p += nalLen
+                    nIdx++
+                }
+                arrIdx++
+            }
+            return false
+        }
+
+        /** 若 MP4 stsd 含 10-bit HEVC/AV1 配置但缺少外层 colr 色彩盒（VUI 色域藏在压缩 SPS 内），标记为需进一步用 ffprobe 确认 */
+        internal fun has10BitCodecWithoutColrBox(buf: ByteArray, length: Int): Boolean {
+            if (containsAsciiFourCc(buf, length, 'c', 'o', 'l', 'r')) return false
+            val end = minOf(length, buf.size) - 24
+            var i = 0
+            while (i <= end) {
+                if (buf[i] == 'h'.code.toByte() && buf[i + 1] == 'v'.code.toByte() &&
+                    buf[i + 2] == 'c'.code.toByte() && buf[i + 3] == 'C'.code.toByte() &&
+                    (buf[i + 4].toInt() and 0xFF) == 1
+                ) {
+                    val lumaMinus8 = buf[i + 4 + 17].toInt() and 0x03
+                    if (lumaMinus8 >= 2) return true
+                }
+                if (buf[i] == 'a'.code.toByte() && buf[i + 1] == 'v'.code.toByte() &&
+                    buf[i + 2] == '1'.code.toByte() && buf[i + 3] == 'C'.code.toByte() &&
+                    (buf[i + 5].toInt() and 0x40) != 0
+                ) {
+                    return true
+                }
+                i++
+            }
+            return false
+        }
+
+        /** MKV 含 10-bit HEVC CodecPrivate 但外层未写入 0x55BA TransferCharacteristics 时标记为需用 ffprobe 读取 SPS VUI */
+        internal fun has10BitMkvWithoutTransferTag(buf: ByteArray, length: Int): Boolean {
+            val n = minOf(length, buf.size)
+            var hasExplicitTransfer = false
+            var has10BitHevc = false
+            var i = 0
+            while (i <= n - 6) {
+                val b0 = buf[i].toInt() and 0xFF
+                if (b0 == 0x55 && (buf[i + 1].toInt() and 0xFF) == 0xBA && (buf[i + 2].toInt() and 0xFF) == 0x81) {
+                    hasExplicitTransfer = true
+                }
+                if (b0 == 0x63 && (buf[i + 1].toInt() and 0xFF) == 0xA2 && i + 26 <= n) {
+                    val vByte = buf[i + 2].toInt() and 0xFF
+                    val vLen = when {
+                        (vByte and 0x80) != 0 -> 1
+                        (vByte and 0x40) != 0 -> 2
+                        (vByte and 0x20) != 0 -> 3
+                        (vByte and 0x10) != 0 -> 4
+                        else -> 0
+                    }
+                    val cp = i + 2 + vLen
+                    if (vLen > 0 && cp + 19 <= n &&
+                        (buf[cp].toInt() and 0xFF) == 1 &&
+                        (buf[cp + 16].toInt() and 0xFC) == 0xFC &&
+                        (buf[cp + 17].toInt() and 0xFC) == 0xFC &&
+                        (buf[cp + 17].toInt() and 0x03) >= 2
+                    ) {
+                        has10BitHevc = true
+                    }
+                }
+                i++
+            }
+            return has10BitHevc && !hasExplicitTransfer
+        }
+
+        internal fun containsMkvTracksElement(buf: ByteArray, length: Int): Boolean {
+            val end = minOf(length, buf.size) - 4
+            var i = 0
+            while (i <= end) {
+                if ((buf[i].toInt() and 0xFF) == 0x16 &&
+                    (buf[i + 1].toInt() and 0xFF) == 0x54 &&
+                    (buf[i + 2].toInt() and 0xFF) == 0xAE &&
+                    (buf[i + 3].toInt() and 0xFF) == 0x6B
+                ) return true
+                i++
+            }
+            return false
+        }
+
+        /**
+         * 解析非 faststart MP4 头部顶层 Box（支持 >4GB 64 位 largesize == 1 的超大 mdat），
+         * 直接计算出位于 mdat 之后的 moov 精确字节偏移量。
+         */
+        internal fun findMp4MoovOffset(headBuf: ByteArray, headLen: Int, totalFileSize: Long): Long? {
+            val n = minOf(headLen, headBuf.size)
+            var pos = 0L
+            var guard = 0
+            while (pos + 8L <= n.toLong() && guard++ < 16) {
+                val p = pos.toInt()
+                val size32 = readBeInt(headBuf, p).toUInt().toLong()
+                val t0 = headBuf[p + 4].toInt().toChar()
+                val t1 = headBuf[p + 5].toInt().toChar()
+                val t2 = headBuf[p + 6].toInt().toChar()
+                val t3 = headBuf[p + 7].toInt().toChar()
+                val boxSize = when {
+                    size32 == 1L -> {
+                        if (p + 16 > n) return null
+                        readBeLong(headBuf, p + 8)
+                    }
+                    size32 == 0L -> return null
+                    else -> size32
+                }
+                if (boxSize < 8L) return null
+                if (t0 == 'm' && t1 == 'o' && t2 == 'o' && t3 == 'v') {
+                    return pos
+                }
+                if (t0 == 'm' && t1 == 'd' && t2 == 'a' && t3 == 't') {
+                    val afterMdat = pos + boxSize
+                    return if (afterMdat in 16L until totalFileSize) afterMdat else null
+                }
+                pos += boxSize
+            }
+            return null
+        }
+
+        /** 若 moov 内的第一条 trak 体积大于当前读取块且不含视频 stsd（例如 2 小时音轨 stbl 在前、视频轨在后），返回第二条 trak 的文件偏移 */
+        internal fun findSecondMp4TrakOffsetIfNeeded(
+            moovBuf: ByteArray,
+            moovLen: Int,
+            moovFileOffset: Long,
+            totalFileSize: Long,
+        ): Long? {
+            val n = minOf(moovLen, moovBuf.size)
+            if (n < 32) return null
+            if (moovBuf[4] != 'm'.code.toByte() || moovBuf[5] != 'o'.code.toByte() ||
+                moovBuf[6] != 'o'.code.toByte() || moovBuf[7] != 'v'.code.toByte()
+            ) return null
+            val moovHeaderLen = if (readBeInt(moovBuf, 0) == 1) 16 else 8
+            var rel = moovHeaderLen.toLong()
+            var guard = 0
+            while (rel + 8L <= n.toLong() && guard++ < 12) {
+                val p = rel.toInt()
+                val sz32 = readBeInt(moovBuf, p).toUInt().toLong()
+                val boxSize = if (sz32 == 1L) {
+                    if (p + 16 > n) return null
+                    readBeLong(moovBuf, p + 8)
+                } else sz32
+                if (boxSize < 8L) return null
+                val isTrak = moovBuf[p + 4] == 't'.code.toByte() && moovBuf[p + 5] == 'r'.code.toByte() &&
+                    moovBuf[p + 6] == 'a'.code.toByte() && moovBuf[p + 7] == 'k'.code.toByte()
+                if (isTrak) {
+                    val nextRel = rel + boxSize
+                    if (nextRel > n.toLong() && moovFileOffset + nextRel < totalFileSize - 64L) {
+                        return moovFileOffset + nextRel
+                    }
+                    return null
+                }
+                rel += boxSize
+            }
+            return null
+        }
+
+        private fun readBeLong(buf: ByteArray, offset: Int): Long {
+            if (offset < 0 || offset + 8 > buf.size) return 0L
+            val hi = readBeInt(buf, offset).toUInt().toLong()
+            val lo = readBeInt(buf, offset + 4).toUInt().toLong()
+            return (hi shl 32) or lo
+        }
+
+        internal fun containsAsciiFourCc(buf: ByteArray, length: Int, c0: Char, c1: Char, c2: Char, c3: Char): Boolean {
             val b0 = c0.code.toByte(); val b1 = c1.code.toByte(); val b2 = c2.code.toByte(); val b3 = c3.code.toByte()
             val end = minOf(length, buf.size) - 4
             var i = 0

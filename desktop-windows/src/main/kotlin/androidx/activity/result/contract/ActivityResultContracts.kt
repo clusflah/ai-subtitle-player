@@ -1,6 +1,7 @@
 package androidx.activity.result.contract
 
 import android.app.Activity
+import android.content.ContentResolver
 import android.content.Intent
 import android.net.Uri
 import android.os.Handler
@@ -18,14 +19,48 @@ abstract class ActivityResultContract<I, O> {
 }
 
 object ActivityResultContracts {
+    @Volatile
+    var defaultInitialDirectory: String? = null
+
+    @Volatile
+    private var lastSubtitleDirectory: String? = null
+
+    private fun activeParentFrame(): Frame? =
+        Frame.getFrames().firstOrNull { it.isDisplayable && it.isVisible && it.isActive }
+            ?: Frame.getFrames().firstOrNull { it.isDisplayable && it.isVisible }
+
     class OpenDocument : ActivityResultContract<Array<String>, Uri?>() {
         override fun execute(input: Array<String>, onResult: (Uri?) -> Unit) {
+            val isSubtitlePicker = input.any {
+                it.contains("subrip", ignoreCase = true) ||
+                    it.contains("subtitle", ignoreCase = true) ||
+                    it.contains("vtt", ignoreCase = true) ||
+                    it.contains("ass", ignoreCase = true)
+            }
             SwingUtilities.invokeLater {
-                val dlg = FileDialog(null as Frame?, "选择文件", FileDialog.LOAD)
+                val dlgTitle = if (isSubtitlePicker) "选择字幕文件" else "选择文件"
+                val dlg = FileDialog(activeParentFrame(), dlgTitle, FileDialog.LOAD).apply {
+                    val initDir = (if (isSubtitlePicker) lastSubtitleDirectory ?: defaultInitialDirectory else defaultInitialDirectory)
+                        ?.takeIf { File(it).isDirectory }
+                    if (initDir != null) {
+                        directory = initDir
+                    }
+                    if (isSubtitlePicker) {
+                        file = "*.srt;*.ass;*.ssa;*.vtt;*.smi;*.sami;*.sub;*.lrc;*.zip"
+                    }
+                }
                 dlg.isVisible = true
                 val dir = dlg.directory
-                val file = dlg.file
-                val uri = if (dir != null && file != null) Uri.fromFile(File(dir, file)) else null
+                val picked = dlg.file
+                val targetFile = if (dir != null && picked != null && !picked.contains('*') && !picked.contains(';')) {
+                    File(dir, picked).takeIf { it.exists() && it.isFile }
+                } else {
+                    null
+                }
+                if (targetFile != null && isSubtitlePicker) {
+                    lastSubtitleDirectory = targetFile.parentFile?.absolutePath
+                }
+                val uri = targetFile?.let { Uri.fromFile(it) }
                 Handler(Looper.getMainLooper()).post { onResult(uri) }
             }
         }
@@ -34,11 +69,12 @@ object ActivityResultContracts {
     class OpenMultipleDocuments : ActivityResultContract<Array<String>, List<Uri>>() {
         override fun execute(input: Array<String>, onResult: (List<Uri>) -> Unit) {
             SwingUtilities.invokeLater {
-                val dlg = FileDialog(null as Frame?, "选择文件", FileDialog.LOAD).apply {
+                val dlg = FileDialog(activeParentFrame(), "选择文件", FileDialog.LOAD).apply {
                     isMultipleMode = true
+                    defaultInitialDirectory?.takeIf { File(it).isDirectory }?.let { directory = it }
                 }
                 dlg.isVisible = true
-                val uris = dlg.files?.map { Uri.fromFile(it) }.orEmpty()
+                val uris = dlg.files?.filter { it.exists() && it.isFile }?.map { Uri.fromFile(it) }.orEmpty()
                 Handler(Looper.getMainLooper()).post { onResult(uris) }
             }
         }
@@ -47,7 +83,8 @@ object ActivityResultContracts {
     class CreateDocument(private val mimeType: String = "*/*") : ActivityResultContract<String, Uri?>() {
         override fun execute(input: String, onResult: (Uri?) -> Unit) {
             SwingUtilities.invokeLater {
-                val dlg = FileDialog(null as Frame?, "保存文件", FileDialog.SAVE).apply {
+                val dlg = FileDialog(activeParentFrame(), "保存文件", FileDialog.SAVE).apply {
+                    defaultInitialDirectory?.takeIf { File(it).isDirectory }?.let { directory = it }
                     file = input
                 }
                 dlg.isVisible = true
@@ -71,8 +108,9 @@ object ActivityResultContracts {
                     dialogTitle = "选择文件夹"
                     fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
                     isAcceptAllFileFilterUsed = false
+                    input?.let { ContentResolver.resolveFile(it) }?.takeIf { it.isDirectory }?.let { currentDirectory = it }
                 }
-                val res = chooser.showOpenDialog(null)
+                val res = chooser.showOpenDialog(activeParentFrame())
                 val uri = if (res == JFileChooser.APPROVE_OPTION && chooser.selectedFile != null) {
                     Uri.fromFile(chooser.selectedFile)
                 } else null
