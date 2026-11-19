@@ -1192,22 +1192,14 @@ object CustomMediaLibraryStore {
     }
 
     private suspend fun lookupOnlineMeta(settings: AppSettings, q: MetaQuery, tv: Boolean): MediaInfo? {
-        var info: MediaInfo? = null
-        if (settings.tmdbKey.isNotBlank()) {
-            info = runCatching { MetaRepository.tmdb(settings, q) }.getOrNull()
-        }
-        if (settings.doubanEnabled && (info == null || info.doubanRating == null || info.posterUrl == null || info.overview.isBlank())) {
-            val db = runCatching { MetaRepository.douban(q, info) }.getOrNull()
-            if (db != null) {
-                val dbInfo = db.info?.copy(doubanRating = db.rating, doubanVotes = db.votes, doubanId = db.id)
-                info = when {
-                    info != null && dbInfo != null -> info.fillFrom(dbInfo)
-                    info != null -> info.copy(doubanRating = db.rating, doubanVotes = db.votes, doubanId = db.id)
-                    else -> dbInfo
-                }
-            }
-            delay(80L)
-        }
+        val effectiveQ = if (q.kind == null) q.copy(kind = if (tv) "tv" else "movie") else q
+        val (info, _) = MetaRepository.lookupWithFailover(
+            settings = settings,
+            q = effectiveQ,
+            requireBackdrop = false,
+            includeBangumi = true,
+        )
+        if (settings.doubanEnabled) delay(80L)
         return info
     }
 

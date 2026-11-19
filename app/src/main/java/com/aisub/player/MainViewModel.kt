@@ -159,6 +159,10 @@ data class UiState(
     val liveHint: String? = null,
     /** 正在边播边翻译直播自带的隐藏式字幕（见 [MainViewModel.startLiveCaptions]）；这时画面上不再原样显示自带字幕 */
     val liveCaptions: Boolean = false,
+    /** 是否存在当前视频的原有字幕备份（用于识别或翻译后一键恢复） */
+    val hasOriginalSubtitleBackup: Boolean = false,
+    /** 当前视频/直播实际生效的内核选项（AUTO / MEDIA3 / MPV / VLC） */
+    val selectedKernel: PlayerKernel = PlayerKernel.AUTO,
 ) {
     /** 当前视频识别时用的设置：语音语言换成这个视频单独选的 */
     val asrSettings: AppSettings get() = videoAsrLanguage?.let { settings.copy(asrLanguage = it) } ?: settings
@@ -192,9 +196,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile
     private var pendingExoUri: String? = null
 
+    private fun isExplicitMedia3Locked(uri: String? = pendingExoUri ?: _state.value.current?.uri): Boolean {
+        val chosen = uri?.let { manualEntryKernel[it] } ?: _state.value.settings.preferredKernel
+        return chosen == PlayerKernel.MEDIA3
+    }
+
     private fun isManualExoLockedForCurrent(): Boolean {
-        val uri = pendingExoUri ?: _state.value.current?.uri
-        return (uri != null && manualEntryKernel[uri] == PlayerKernel.EXO) || !_state.value.settings.autoDolbyMpv
+        return isExplicitMedia3Locked() || !_state.value.settings.autoDolbyMpv
     }
 
     /** 默认播放内核 */
@@ -250,7 +258,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         get() = when {
             mpvPlayer != null && player === mpvPlayer -> PlayerKernel.MPV
             vlcPlayer != null && player === vlcPlayer -> PlayerKernel.VLC
-            else -> PlayerKernel.EXO
+            else -> PlayerKernel.MEDIA3
         }
     val usingMpv: Boolean get() = activeKernel == PlayerKernel.MPV
     val usingVlc: Boolean get() = activeKernel == PlayerKernel.VLC
@@ -538,10 +546,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
-            // 默认内核下检测到需要色彩保护的杜比视界（如无兼容底流的 Profile 5），在首帧上屏前无感切换至 MPV 内核动态映射色彩
+            // 默认自动调度下检测到需要色彩保护的杜比视界（如无兼容底流的 Profile 5），在首帧上屏前无感切换至 MPV 内核动态映射色彩
             val cur = _state.value.current
             if (cur != null && cur.isVideo && !cur.isLive && !usingExternalKernel &&
-                _state.value.settings.autoDolbyMpv && manualEntryKernel[cur.uri] != PlayerKernel.EXO
+                _state.value.settings.autoDolbyMpv && !isExplicitMedia3Locked(cur.uri)
             ) {
                 val dvFormat = tracks.groups
                     .asSequence()
@@ -836,7 +844,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun autoSwitchVideoToMpv(error: PlaybackException): Boolean {
         val entry = _state.value.current?.takeIf { it.isVideo && !it.isLive } ?: return false
         val forcedSw = _state.value.settings.decodeMode == DecodeMode.SW
-        if (usingExternalKernel || (manualEntryKernel[entry.uri] == PlayerKernel.EXO && !forcedSw)) return false
+        if (usingExternalKernel || (isExplicitMedia3Locked(entry.uri) && !forcedSw)) return false
         val decodeOrContainer = error.errorCode in setOf(
             PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
             PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
@@ -867,7 +875,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun autoSwitchLiveToVlc(error: PlaybackException): Boolean {
         val entry = _state.value.current?.takeIf { it.isLive } ?: return false
-        if (usingExternalKernel || manualEntryKernel[entry.uri] == PlayerKernel.EXO || !vlcAutoTried.add(entry.uri)) return false
+        if (usingExternalKernel || isExplicitMedia3Locked(entry.uri) || !vlcAutoTried.add(entry.uri)) return false
         if (error.errorCode in setOf(
                 PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
                 PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
@@ -935,7 +943,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (sameEntry) extras.onKernelSwitched(entry) else onEntryChanged(entry)
         v.playWhenReady = playWhenReady
         v.prepare()
-        if (playWhenReady) v.play()
         startPlaybackService()
         if (entry.isLive) watchVlcLive(entry)
     }
@@ -965,8 +972,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 这次打开后已经从兼容模式退回过默认内核的频道 */
     private val vlcFallbackTried = HashSet<String>()
 
+    private fun resolveAutoKernel(entry: MediaEntry): PlayerKernel = when {
+        VlcPlayer.needsVlc(entry.title) -> PlayerKernel.VLC
+        entry.isLive -> when {
+            entry.uri in vlcChannels -> PlayerKernel.VLC
+            entry.uri in mpvChannels -> PlayerKernel.MPV
+            else -> PlayerKernel.MEDIA3
+        }
+        else -> PlayerKernel.MEDIA3
+    }
+
     /**
-     * 播放页一键无缝切换播放内核（默认 ExoPlayer / MPV 内核 / VLC 内核）：
+     * 播放页一键无缝切换播放内核（自动 / Media3 / MPV 内核 / VLC 内核）：
      * - 点播视频：精确继承当前毫秒进度、播放/暂停状态、倍速、循环模式，且**不中断已生成的 AI 字幕与后台识别/翻译任务**；
      * - 直播频道：按频道记忆所选内核，若正在实时语音识别字幕则在新内核音频源上自动无缝续跑。
      */
@@ -977,16 +994,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         reasonBanner: String? = null,
     ) {
         val entry = _state.value.current ?: return
-        if (VlcPlayer.needsVlc(entry.title) && target != PlayerKernel.VLC) {
+        val resolvedTarget = if (target == PlayerKernel.AUTO) resolveAutoKernel(entry) else target
+        if (VlcPlayer.needsVlc(entry.title) && resolvedTarget != PlayerKernel.VLC) {
             extras.emit("光盘镜像（ISO）仅支持 VLC 内核播放")
             return
         }
-        if (target == activeKernel && _state.value.playbackError == null && _state.value.videoProblem == null) {
-            reasonBanner?.let(extras::emit)
-            return
-        }
         if (manual) {
-            manualEntryKernel[entry.uri] = target
+            if (target == PlayerKernel.AUTO) manualEntryKernel.remove(entry.uri) else manualEntryKernel[entry.uri] = target
+            _state.update { it.copy(selectedKernel = target) }
+        }
+        if (resolvedTarget == activeKernel && _state.value.playbackError == null && _state.value.videoProblem == null) {
+            val msg = reasonBanner ?: if (manual && target == PlayerKernel.AUTO) "已切换为自动调度（当前：${activeKernel.shortLabel}）" else null
+            msg?.let(extras::emit)
+            return
         }
 
         val savedQueue = queue.takeIf { it.isNotEmpty() } ?: listOf(entry)
@@ -1000,10 +1020,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         sawFirstFrame = false
 
         if (entry.isLive) {
-            when (target) {
+            when (resolvedTarget) {
                 PlayerKernel.VLC -> rememberVlcChannel(entry.uri)
                 PlayerKernel.MPV -> rememberMpvChannel(entry.uri)
-                PlayerKernel.EXO -> {
+                PlayerKernel.MEDIA3, PlayerKernel.AUTO -> {
                     forgetVlcChannel(entry.uri)
                     forgetMpvChannel(entry.uri)
                 }
@@ -1027,10 +1047,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     status = "",
                 )
             }
-            when (target) {
+            when (resolvedTarget) {
                 PlayerKernel.MPV -> playWithMpv(entry, 0L, savedQueue, dolbyP5Hint = false, playWhenReady = true, speed = curSpeed, repeatMode = curRepeat)
                 PlayerKernel.VLC -> playWithVlc(entry, 0L, savedQueue, playWhenReady = true, speed = curSpeed)
-                PlayerKernel.EXO -> {
+                PlayerKernel.MEDIA3, PlayerKernel.AUTO -> {
                     mpvPlayer?.deactivateForKernelSwitch()
                     vlcPlayer?.deactivateForKernelSwitch()
                     isCurrentDolbyShunted = false
@@ -1059,7 +1079,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (captionJob?.isActive == true) captionJob?.cancel()
         _state.update { it.copy(playbackError = null, videoProblem = null) }
 
-        when (target) {
+        when (resolvedTarget) {
             PlayerKernel.MPV -> {
                 val effectiveDolbyP5Hint = dolbyP5Hint ||
                     isCurrentDolbyShunted ||
@@ -1088,10 +1108,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     speed = curSpeed,
                 )
                 if (manual && wasDolbyP5 && reasonBanner == null) {
-                    extras.emit("提示：VLC 3.x 暂不支持杜比 Profile 5 色彩还原，若画面偏紫请切回「默认」或「MPV」内核")
+                    extras.emit("提示：VLC 3.x 暂不支持杜比 Profile 5 色彩还原，若画面偏紫请切回「自动」或「MPV」内核")
                 }
             }
-            PlayerKernel.EXO -> {
+            PlayerKernel.MEDIA3, PlayerKernel.AUTO -> {
                 mpvPlayer?.deactivateForKernelSwitch()
                 vlcPlayer?.deactivateForKernelSwitch()
                 isCurrentDolbyShunted = false
@@ -1114,13 +1134,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 兼容旧调用入口 */
-    fun setLiveKernel(useVlc: Boolean) = switchKernel(if (useVlc) PlayerKernel.VLC else PlayerKernel.EXO, manual = true)
+    fun setLiveKernel(useVlc: Boolean) = switchKernel(if (useVlc) PlayerKernel.VLC else PlayerKernel.MEDIA3, manual = true)
 
     fun toggleLiveKernel() {
         val next = when (activeKernel) {
-            PlayerKernel.EXO -> PlayerKernel.MPV
+            PlayerKernel.AUTO, PlayerKernel.MEDIA3 -> PlayerKernel.MPV
             PlayerKernel.MPV -> PlayerKernel.VLC
-            PlayerKernel.VLC -> PlayerKernel.EXO
+            PlayerKernel.VLC -> PlayerKernel.MEDIA3
         }
         switchKernel(next, manual = true)
     }
@@ -1161,10 +1181,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         val manualKernel = manualEntryKernel[start.uri]
         if (start.isLive) {
-            val targetLiveKernel = manualKernel ?: when {
-                start.uri in vlcChannels -> PlayerKernel.VLC
-                start.uri in mpvChannels -> PlayerKernel.MPV
-                else -> _state.value.settings.preferredKernel
+            val chosen = manualKernel ?: _state.value.settings.preferredKernel
+            val targetLiveKernel = when (chosen) {
+                PlayerKernel.AUTO -> when {
+                    start.uri in vlcChannels -> PlayerKernel.VLC
+                    start.uri in mpvChannels -> PlayerKernel.MPV
+                    else -> PlayerKernel.MEDIA3
+                }
+                else -> chosen
             }
             when (targetLiveKernel) {
                 PlayerKernel.VLC -> {
@@ -1175,10 +1199,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     playWithMpv(start, 0L, entries)
                     return
                 }
-                PlayerKernel.EXO -> {}
+                PlayerKernel.MEDIA3, PlayerKernel.AUTO -> {}
             }
         } else if (start.isVideo) {
-            val targetVideoKernel = manualKernel ?: _state.value.settings.preferredKernel
+            val chosen = manualKernel ?: _state.value.settings.preferredKernel
+            val targetVideoKernel = if (chosen == PlayerKernel.AUTO) PlayerKernel.MEDIA3 else chosen
             when (targetVideoKernel) {
                 PlayerKernel.MPV -> {
                     playWithMpv(start, resume, entries, dolbyP5Hint = DolbyVisionHelper.looksLikeProfile5Title(start.title))
@@ -1188,7 +1213,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     playWithVlc(start, resume, entries)
                     return
                 }
-                PlayerKernel.EXO -> {}
+                PlayerKernel.MEDIA3, PlayerKernel.AUTO -> {}
             }
         }
 
@@ -1261,24 +1286,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // 直播字幕的时间是那一次直播的时间轴，下次打开对不上（会一遍遍冒出旧字幕）：不读缓存，旧版存下的也清掉
         if (entry.isLive) store.deleteCues(uri)
         // 旧版流媒体解复用可能存下所有条目全为 0:00 的错位字幕（正常外挂字幕允许片头有 1~2 条 0:00 标题轴，不可误删）
+        // 保留已缓存的原有字幕文本与结构，不再通过 sanitizeEmbeddedCue 拼接改写
         val cached = if (entry.isLive) emptyList() else store.load(uri).let { cues ->
             if (cues.size >= 3 && cues.all { it.startMs == 0L }) {
                 store.deleteCues(uri)
                 emptyList()
             } else {
-                val s = _state.value.settings
-                val asrLanguage = videoLanguage ?: s.asrLanguage
-                cues.map { sanitizeEmbeddedCue(it, s.ttsLocale, asrLanguage) }
+                cues
             }
         }.ifEmpty {
             loadLocalSidecarSubtitlesIfPresent(uri)
         }
+        val hasBackup = !entry.isLive && store.hasOriginalBackup(uri)
+        val kernelPolicy = manualEntryKernel[entry.uri] ?: _state.value.settings.preferredKernel
         ttsReader.reset()
         _state.update {
             it.copy(
                 current = entry,
                 videoUri = uri,
                 cues = cached,
+                hasOriginalSubtitleBackup = hasBackup,
+                selectedKernel = kernelPolicy,
                 // 直播频道用这个台上次调好的延迟；从直播切回普通视频时不带着直播的延迟
                 subtitleDelayMs = when {
                     entry.isLive -> extras.liveSubtitleDelay(entry)
@@ -1357,9 +1385,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun reloadSettings() {
         val loaded = settingsRepo.load()
         val old = _state.value.settings
-        _state.update { it.copy(settings = loaded) }
-        if (old.proxyType != loaded.proxyType || old.proxyHost != loaded.proxyHost || old.proxyPort != loaded.proxyPort) {
-            com.aisub.player.net.AppProxy.apply(getApplication(), loaded.proxyType, loaded.proxyHost, loaded.proxyPort)
+        _state.update { s ->
+            val curUri = s.current?.uri
+            val policy = if (curUri != null && manualEntryKernel[curUri] != null) manualEntryKernel[curUri]!! else loaded.preferredKernel
+            s.copy(settings = loaded, selectedKernel = policy)
+        }
+        if (old.proxyType != loaded.proxyType || old.proxyHost != loaded.proxyHost || old.proxyPort != loaded.proxyPort || old.proxyBypassCn != loaded.proxyBypassCn) {
+            com.aisub.player.net.AppProxy.apply(getApplication(), loaded.proxyType, loaded.proxyHost, loaded.proxyPort, loaded.proxyBypassCn)
         }
     }
 
@@ -1373,13 +1405,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun updateSettings(s: AppSettings) {
         val old = _state.value.settings
         settingsRepo.save(s)
-        _state.update { it.copy(settings = s) }
+        _state.update { st ->
+            val curUri = st.current?.uri
+            val policy = if (curUri != null && manualEntryKernel[curUri] != null) manualEntryKernel[curUri]!! else s.preferredKernel
+            st.copy(settings = s, selectedKernel = policy)
+        }
         if (old.ttsEngine != s.ttsEngine || old.ttsVoices != s.ttsVoices || old.ttsAzure() != s.ttsAzure() || old.targetLanguage != s.targetLanguage) {
             ttsReader.reset()
         }
         if (s.ttsEnabled) ttsReader.start() else ttsReader.stop()
-        if (old.proxyType != s.proxyType || old.proxyHost != s.proxyHost || old.proxyPort != s.proxyPort) {
-            com.aisub.player.net.AppProxy.apply(getApplication(), s.proxyType, s.proxyHost, s.proxyPort)
+        if (old.proxyType != s.proxyType || old.proxyHost != s.proxyHost || old.proxyPort != s.proxyPort || old.proxyBypassCn != s.proxyBypassCn) {
+            com.aisub.player.net.AppProxy.apply(getApplication(), s.proxyType, s.proxyHost, s.proxyPort, s.proxyBypassCn)
         }
         if (old.preferredAudioLanguages != s.preferredAudioLanguages || old.preferredSubtitleLanguages != s.preferredSubtitleLanguages) {
             extras.applyTrackDefaults()
@@ -1392,7 +1428,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun applyDecodeModeLive(mode: DecodeMode) {
         val cur = _state.value.current
         // 若此前因杜比 Profile 5 自动分流至 MPV 软解，用户手动切为「硬解」时：
-        // 由于安卓 MediaCodec 在 MPV 内会剥离 RPU 造成偏紫，自动切回默认 Exo 杜比硬解着色器管线，兼顾 4K 硬解流畅度与正常色彩
+        // 由于安卓 MediaCodec 在 MPV 内会剥离 RPU 造成偏紫，自动切回 Media3 杜比硬解着色器管线，兼顾 4K 硬解流畅度与正常色彩
         if (mode == DecodeMode.HW &&
             cur != null &&
             !cur.isLive &&
@@ -1404,19 +1440,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             mpvPlayer?.setHwdecPreference(mode.forceHwdecFlag)
             vlcPlayer?.setHwdecPreference(mode.forceHwdecFlag)
             switchKernel(
-                target = PlayerKernel.EXO,
+                target = PlayerKernel.MEDIA3,
                 manual = false,
-                reasonBanner = "已切换至默认内核杜比硬解着色管线，兼顾硬解流畅度与正常色彩",
+                reasonBanner = "已切换至 Media3 杜比硬解着色管线，兼顾硬解流畅度与正常色彩",
             )
             return
         }
-        // 反之若在默认 Exo 杜比硬解管线下用户手动选了「软解」（且设备支持 GLES 3.0+），无缝切至 MPV 多核软解 + libplacebo
+        // 反之若在 Media3 杜比硬解管线下用户手动选了「软解」（且设备支持 GLES 3.0+），无缝切至 MPV 多核软解 + libplacebo
         if (mode == DecodeMode.SW &&
             cur != null &&
             !cur.isLive &&
             !usingExternalKernel &&
             LegacyDolbyExoBridge.shaderModeFlow.value == LegacyExoShaderMode.PROFILE_5_IPTPQC2 &&
-            manualEntryKernel[cur.uri] != PlayerKernel.EXO &&
+            !isExplicitMedia3Locked(cur.uri) &&
             DolbyVisionHelper.supportsOpenGlEs3(getApplication())
         ) {
             mpvPlayer?.setHwdecPreference(mode.forceHwdecFlag)
@@ -1506,12 +1542,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         else -> "Hello, this is a voice preview."
     }
 
+    /** 创建支持故障回退的翻译器，并在发生切换时弹出明确提示。 */
+    private fun buildTranslator(settings: AppSettings, notifyFallback: Boolean = true): Translator? =
+        settings.createTranslator { from, to, _ ->
+            val msg = "${from.label}不可用，已自动回退到 ${to.label}"
+            android.util.Log.w("Voxtitle", msg)
+            if (notifyFallback) extras.emit(msg)
+        }
+
     /** 用翻译服务的大模型识别每句台词的角色，并按性别自动分配语音。 */
     fun detectRoles() {
         val uri = _state.value.videoUri ?: return
         if (roleJob?.isActive == true) return
         val settings = _state.value.settings
-        val translator = settings.createTranslator() ?: run {
+        val translator = buildTranslator(settings) ?: run {
             _state.update { it.copy(error = settings.translatorProblem() ?: "翻译服务配置不完整") }
             return
         }
@@ -1596,6 +1640,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         translateJob?.cancel()
         // 手动改用语音识别：停掉直播自带字幕的翻译
         captionJob?.cancel()
+        // 语音识别前先为原有字幕留底备份，确保随时可以恢复原字幕
+        if (!live && _state.value.cues.isNotEmpty()) {
+            store.saveOriginalBackupIfAbsent(uri, _state.value.cues)
+            _state.update { it.copy(hasOriginalSubtitleBackup = store.hasOriginalBackup(uri)) }
+        }
         if (!keep || live) {
             coverage.clear()
             coverageActive = !live
@@ -1613,36 +1662,68 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.value.current?.takeIf { VlcPlayer.needsVlc(it.title) }?.let {
                     throw IllegalStateException("光盘镜像（ISO）暂不支持 AI 识别字幕，可以用「在线下载字幕」或选择字幕文件")
                 }
-                val settings = _state.value.asrSettings
-                settings.asrProblem()?.let { throw IllegalStateException(it) }
-                val localModel = ModelCatalog.byId(settings.localModel)
-                if (settings.asrEngine == AsrEngine.LOCAL && !models.isReady(localModel)) {
-                    models.ensure(localModel, settings.modelBaseUrl) { msg, p ->
-                        _state.update { it.copy(status = msg, progress = p) }
-                    }
+                val baseSettings = _state.value.asrSettings
+                val candidates = baseSettings.candidateAsrEngines()
+                if (candidates.isEmpty()) {
+                    throw IllegalStateException(baseSettings.asrProblem() ?: "没有可用的语音识别引擎")
                 }
-                val streaming = useStreaming(settings)
-                val engineName = (if (settings.asrEngine == AsrEngine.LOCAL) localModel.label else settings.asrEngine.label) +
-                    if (streaming) " 流式" else ""
-                // 播放页顶部显示用的是哪家、哪个模型（流式识别的模型由引擎自己定，不写）
-                val asrModel = settings.asrValue(settings.asrEngine, "model").takeIf { !streaming && settings.asrEngine != AsrEngine.LOCAL && it.isNotEmpty() }
-                val asrInfo = "识别：$engineName" + (asrModel?.let { " · $it" } ?: "")
-                // Gemini 流式：先说清字幕时间是估的
-                val note = if (streaming && settings.asrEngine == AsrEngine.GEMINI) "；$GEMINI_STREAMING_NOTE" else ""
-                _state.update { it.copy(status = "正在识别语音（$engineName）…$note", progress = 0f, streamingAsr = streaming) }
-                val cuesBefore = _state.value.cues.size
-                asrInfoWatch = launch {
-                    _state.map { it.cues.size }.first { it > cuesBefore }
-                    _state.update { it.copy(asrInfo = asrInfo) }
-                }
-                val translate = (settings.autoTranslate || alsoTranslate) && settings.createTranslator() != null
-                if ((settings.autoTranslate || alsoTranslate) && !translate) {
+                val translate = (baseSettings.autoTranslate || alsoTranslate) && baseSettings.createTranslator() != null
+                if ((baseSettings.autoTranslate || alsoTranslate) && !translate) {
                     // 要翻译但翻译服务没设置好：说出来，不要只出原文让人以为翻译坏了
-                    _state.update { it.copy(error = "字幕不会翻译：${settings.translatorProblem() ?: "翻译服务没有设置好"}。到「设置 → 字幕翻译」改好后，点「翻译」补上", failedTask = Task.TRANSLATE) }
+                    _state.update { it.copy(error = "字幕不会翻译：${baseSettings.translatorProblem() ?: "翻译服务没有设置好"}。到「设置 → 字幕翻译」改好后，点「翻译」补上", failedTask = Task.TRANSLATE) }
                 }
                 inlineTranslate = translate
                 if (translate) startTranslation()
-                if (live) runLive(settings) else runOnDemand(settings, uri)
+
+                var lastError: Exception? = null
+                for ((idx, engineChoice) in candidates.withIndex()) {
+                    ensureActive()
+                    val candidateSettings = if (engineChoice == baseSettings.asrEngine) baseSettings else baseSettings.copy(asrEngine = engineChoice)
+                    if (idx > 0) {
+                        val prev = candidates[idx - 1].label
+                        val notice = "${prev} 识别失败，已自动回退到 ${engineChoice.label}"
+                        android.util.Log.w("Voxtitle", notice, lastError)
+                        extras.emit(notice)
+                    } else if (engineChoice != baseSettings.asrEngine) {
+                        val notice = "${baseSettings.asrEngine.label} 未配置，已自动回退到 ${engineChoice.label}"
+                        extras.emit(notice)
+                    }
+                    try {
+                        val localModel = ModelCatalog.byId(candidateSettings.localModel)
+                        if (candidateSettings.asrEngine == AsrEngine.LOCAL && !models.isReady(localModel)) {
+                            models.ensure(localModel, candidateSettings.modelBaseUrl) { msg, p ->
+                                _state.update { it.copy(status = msg, progress = p) }
+                            }
+                        }
+                        val streaming = useStreaming(candidateSettings)
+                        val engineName = (if (candidateSettings.asrEngine == AsrEngine.LOCAL) localModel.label else candidateSettings.asrEngine.label) +
+                            if (streaming) " 流式" else ""
+                        // 播放页顶部显示用的是哪家、哪个模型（流式识别的模型由引擎自己定，不写）
+                        val asrModel = candidateSettings.asrValue(candidateSettings.asrEngine, "model").takeIf { !streaming && candidateSettings.asrEngine != AsrEngine.LOCAL && it.isNotEmpty() }
+                        val asrInfo = "识别：$engineName" + (asrModel?.let { " · $it" } ?: "")
+                        // Gemini 流式：先说清字幕时间是估的
+                        val note = if (streaming && candidateSettings.asrEngine == AsrEngine.GEMINI) "；$GEMINI_STREAMING_NOTE" else ""
+                        _state.update { it.copy(status = "正在识别语音（$engineName）…$note", progress = 0f, streamingAsr = streaming) }
+                        asrInfoWatch?.cancel()
+                        val cuesBefore = _state.value.cues.size
+                        asrInfoWatch = launch {
+                            _state.map { it.cues.size }.first { it > cuesBefore }
+                            _state.update { it.copy(asrInfo = asrInfo) }
+                        }
+                        if (live) runLive(candidateSettings) else runOnDemand(candidateSettings, uri)
+                        break
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: com.aisub.player.asr.SourceReadException) {
+                        // 读取媒体音频源本身出错时，切换识别引擎也无法读源，直接抛给外层提示
+                        throw e
+                    } catch (e: Exception) {
+                        if (!isActive) throw CancellationException("cancelled")
+                        lastError = e
+                        android.util.Log.w("Voxtitle", "语音识别引擎 ${engineChoice.label} 失败", e)
+                        if (idx == candidates.lastIndex) throw e
+                    }
+                }
                 ensureActive()
                 if (!live) {
                     val count = _state.value.cues.size
@@ -2278,10 +2359,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             updateSettings(curSettings.copy(showAiSubtitles = true, showTranslation = true))
         }
         val settings = _state.value.settings
-        val translator = settings.createTranslator()
+        val translator = buildTranslator(settings)
         if (translator == null) {
             _state.update { it.copy(error = settings.translatorProblem() ?: "翻译服务配置不完整", failedTask = Task.TRANSLATE) }
             return
+        }
+        // 翻译前先保留一份原字幕快照，确保不会覆盖/破坏用户原有字幕
+        val curUri = _state.value.videoUri
+        val curCues = _state.value.cues
+        if (curUri != null && _state.value.current?.isLive != true && curCues.isNotEmpty()) {
+            store.saveOriginalBackupIfAbsent(curUri, curCues)
+            _state.update { it.copy(hasOriginalSubtitleBackup = true) }
         }
         // 真的有句子翻出来了才在播放页顶部显示（例如中文直播一句都不用翻，就不显示翻译服务）
         pendingTranslateInfo = translateInfoOf(settings)
@@ -2486,7 +2574,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 重新翻译某一句（带前后文）。 */
     fun retranslate(cueId: Int) {
         val settings = _state.value.settings
-        val translator = settings.createTranslator() ?: run {
+        val translator = buildTranslator(settings) ?: run {
             _state.update { it.copy(error = settings.translatorProblem(), failedTask = Task.TRANSLATE) }
             return
         }
@@ -2638,11 +2726,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             fStem.equals(stem, ignoreCase = true) ||
                 (fStem.startsWith(stem, ignoreCase = true) && fStem.length > stem.length && fStem[stem.length] in charArrayOf('.', '_', '-', ' '))
         }.orEmpty()
-        val best = candidates.maxByOrNull { OnlineSubtitles.scoreName(it.name) } ?: return emptyList()
+        val best = candidates.maxByOrNull { f ->
+            (if (f.name.endsWith(".voxtitle.srt", ignoreCase = true)) -10_000 else 0) + OnlineSubtitles.scoreName(f.name)
+        } ?: return emptyList()
         val text = OnlineSubtitles.decodeSubtitleBytes(best.readBytes(), best.name)
         val parsed = SubtitleParser.parse(text)
         if (parsed.isNotEmpty()) {
             store.save(videoUri, parsed)
+            if (!best.name.endsWith(".voxtitle.srt", ignoreCase = true)) {
+                store.saveOriginalBackupIfAbsent(videoUri, parsed)
+            }
         }
         parsed
     }.getOrDefault(emptyList())
@@ -3225,6 +3318,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         dropCoverage(video)
+        if (_state.value.current?.isLive != true) {
+            store.overwriteOriginalBackup(video, finalCues)
+            _state.update { it.copy(hasOriginalSubtitleBackup = store.hasOriginalBackup(video)) }
+        }
         if (_state.value.current?.let(::isRemote) != true) {
             store.save(video, finalCues)
         }
@@ -3258,9 +3355,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 ),
             )
         }
+        val liveNow = _state.value.current?.isLive == true
+        if (!liveNow) {
+            store.overwriteOriginalBackup(video, cues)
+        }
         _state.update {
             it.copy(
                 cues = cues,
+                hasOriginalSubtitleBackup = !liveNow && store.hasOriginalBackup(video),
                 choosingEmbedded = false,
                 status = "已载入 ${cues.size} 句字幕",
                 error = null,
@@ -3322,6 +3424,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // 换成了下载的字幕，不再按识别范围续识别（正在放的是别的视频，只清它存着的）
             store.clearCoverage(video)
             store.save(video, cues)
+            store.overwriteOriginalBackup(video, cues)
         }
         return cues.size
     }
@@ -3435,9 +3538,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 设置页的"测试连接"：翻译一句英文。 */
+    /** 设置页的"测试连接"：直接测试当前选中的单一翻译服务。 */
     suspend fun testTranslator(settings: AppSettings): String {
-        val translator = settings.createTranslator() ?: return settings.translatorProblem() ?: "配置不完整"
+        val translator = settings.createSingleTranslator(settings.provider) ?: return settings.translatorProblem() ?: "配置不完整"
         return try {
             val r = translator.translate(listOf("Hello, nice to meet you."), emptyList(), settings.targetLanguage).firstOrNull()
             if (r != null) "连接成功：$r" else "连接成功，但没有返回译文"
@@ -3464,8 +3567,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearTranslations() {
         translateJob?.cancel()
-        _state.update { s -> s.copy(cues = s.cues.map { it.copy(translation = null) }) }
+        _state.update { s ->
+            s.copy(
+                cues = s.cues.map { it.copy(translation = null) },
+                status = "已清除译文，保留原有字幕",
+            )
+        }
         _state.value.videoUri?.let { persistCues(it) }
+        ttsReader.reset()
+    }
+
+    /** 一键恢复语音识别或翻译前备份的原有字幕（不破坏原有字幕内容）。 */
+    fun restoreOriginalSubtitles() {
+        val uri = _state.value.videoUri ?: return
+        val orig = store.loadOriginalBackup(uri)
+        if (orig.isEmpty()) {
+            extras.emit("当前视频没有可恢复的原有字幕备份")
+            return
+        }
+        cancelAll()
+        dropCoverage(uri)
+        store.save(uri, orig)
+        _state.update {
+            it.copy(
+                cues = orig,
+                status = "已恢复原有字幕（${orig.size} 句）",
+                translating = false,
+                transcribing = false,
+                error = null,
+                failedTask = null,
+                hasOriginalSubtitleBackup = true,
+            )
+        }
+        ttsReader.reset()
+        extras.emit("已恢复原有字幕（${orig.size} 句）")
     }
 
     fun exportSrt(target: Uri, mode: SrtMode) {
@@ -3656,10 +3791,10 @@ internal const val PLAYBACK_ERROR_DETAIL = "\n\u0001"
 /** 播放出错的说明：原因 + 怎么办；错误码和异常信息放在分隔符后面（点「详细信息」才显示）。 */
 internal fun describePlaybackError(
     e: PlaybackException,
-    activeKernel: PlayerKernel = PlayerKernel.EXO,
+    activeKernel: PlayerKernel = PlayerKernel.MEDIA3,
 ): String {
     val explicitExternalReason = e.message?.takeIf {
-        activeKernel != PlayerKernel.EXO &&
+        activeKernel != PlayerKernel.MEDIA3 &&
             it.isNotBlank() &&
             e.errorCode in setOf(
                 PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
@@ -3686,10 +3821,10 @@ internal fun describePlaybackError(
         PlaybackException.ERROR_CODE_DECODING_FAILED,
         PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
         PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ->
-            if (activeKernel == PlayerKernel.EXO) {
+            if (activeKernel == PlayerKernel.MEDIA3) {
                 "硬件解码不支持这个视频的画面或色彩格式。点「MPV 内核播放」可软硬解并准确还原杜比色彩"
             } else {
-                "当前内核解码该视频失败。可点「重试」，或切换「默认内核 / VLC 内核」播放"
+                "当前内核解码该视频失败。可点「重试」，或切换「Media3 / VLC 内核」播放"
             }
         PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
         PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED -> "声音输出失败，可能被别的应用占用了。点「重试」"

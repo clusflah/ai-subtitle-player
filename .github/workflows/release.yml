@@ -30,6 +30,8 @@ jobs:
           java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-home-cache-strict-match: true
 
       - name: Decode release keystore
         env:
@@ -53,7 +55,7 @@ jobs:
           mkdir -p dist
 
           # 分步构建标准版与下载版（内置 yt-dlp，不出通用包），错开双变体并发打包与签名的内存/磁盘峰值
-          ./gradlew assembleStandardRelease --stacktrace --no-daemon
+          ./gradlew assembleStandardRelease --stacktrace --no-daemon || ./gradlew assembleStandardRelease --refresh-dependencies --stacktrace --no-daemon
           for abi in arm64-v8a armeabi-v7a x86_64 universal; do
             mv "app/build/outputs/apk/standard/release/app-standard-$abi-release.apk" "dist/Voxtitle-$VERSION-$abi.apk"
           done
@@ -61,7 +63,7 @@ jobs:
                  app/build/intermediates/merged_native_libs/standardRelease \
                  app/build/intermediates/stripped_native_libs/standardRelease
 
-          ./gradlew assembleYtdlpRelease --stacktrace --no-daemon
+          ./gradlew assembleYtdlpRelease --stacktrace --no-daemon || ./gradlew assembleYtdlpRelease --refresh-dependencies --stacktrace --no-daemon
           for abi in arm64-v8a armeabi-v7a x86_64; do
             mv "app/build/outputs/apk/ytdlp/release/app-ytdlp-$abi-release.apk" "dist/Voxtitle-dl-$VERSION-$abi.apk"
           done
@@ -89,6 +91,8 @@ jobs:
           java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-home-cache-strict-match: true
 
       - name: Cache Windows TDLib Native (tdjni.dll)
         uses: actions/cache@v4
@@ -268,8 +272,11 @@ jobs:
         run: |
           # 推送 tag 触发时用该 tag；手动运行时按 versionName 在当前提交上新建 tag
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then TAG="$GITHUB_REF_NAME"; else TAG="v$VERSION"; fi
+          EXTRA_FLAGS=""
+          if [[ "$TAG" == *-* ]]; then EXTRA_FLAGS="--prerelease"; fi
           gh release create "$TAG" dist/* \
             --target "$GITHUB_SHA" \
             --title "译幕 Voxtitle $TAG" \
-            --notes-file .github/release-notes.md || \
+            --notes-file .github/release-notes.md \
+            ${EXTRA_FLAGS:+$EXTRA_FLAGS} || \
           gh release upload "$TAG" dist/* --clobber

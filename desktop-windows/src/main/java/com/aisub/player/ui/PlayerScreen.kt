@@ -899,6 +899,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     TextButton(onClick = { vm.togglePlay() }) { Text("重试", color = Orange) }
                     if (!vm.usingMpv) TextButton(onClick = { vm.switchToMpv() }) { Text("MPV 内核播放", color = Orange) }
                     if (!vm.usingVlc) TextButton(onClick = { vm.switchToVlc() }) { Text("VLC 内核", color = Orange) }
+                    if (vm.usingExternalKernel) {
+                        TextButton(onClick = { vm.switchKernel(com.aisub.player.PlayerKernel.MEDIA3) }) {
+                            Text("Media3 内核", color = Color(0xFFCCCCCC))
+                        }
+                    }
                 }
             }
         }
@@ -978,6 +983,11 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         } else {
                             ""
                         }
+                        val kernelText = if (state.selectedKernel == com.aisub.player.PlayerKernel.AUTO) {
+                            "自动 · ${activeKernel.shortLabel}$decodeSuffix"
+                        } else {
+                            "内核: ${activeKernel.shortLabel}$decodeSuffix"
+                        }
                         TextButton(
                             onClick = { dialog = PlayerDialog.KERNEL; interactions++ },
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
@@ -986,7 +996,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                                 .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = GlassTokens.DarkControlTint),
                         ) {
                             Text(
-                                "内核: ${activeKernel.shortLabel}$decodeSuffix",
+                                kernelText,
                                 color = Color.White,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
@@ -2004,9 +2014,15 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             state = state,
             activeKernel = activeKernel,
             onSelectKernel = { target ->
-                val changed = target != activeKernel
+                val changed = target != state.selectedKernel
                 vm.switchKernel(target, manual = true)
-                if (changed) indicator = null to "已切换至${target.shortLabel}内核"
+                if (changed) {
+                    indicator = null to if (target == com.aisub.player.PlayerKernel.AUTO) {
+                        "已切换为自动调度（当前：${vm.activeKernel.shortLabel}）"
+                    } else {
+                        "已切换至${target.shortLabel}内核"
+                    }
+                }
                 dialog = null
             },
             onSelectDecodeMode = { mode ->
@@ -2370,7 +2386,7 @@ private fun MorePanel(
     state: UiState,
     audioOnly: Boolean,
     repeatMode: Int,
-    activeKernel: com.aisub.player.PlayerKernel = com.aisub.player.PlayerKernel.EXO,
+    activeKernel: com.aisub.player.PlayerKernel = com.aisub.player.PlayerKernel.MEDIA3,
     showSyncDiag: Boolean = false,
     onClose: () -> Unit = {},
     onAction: (MoreAction) -> Unit,
@@ -2382,9 +2398,10 @@ private fun MorePanel(
         Triple(MoreAction.PIP, AppIcons.Pip, "悬浮窗"),
         Triple(MoreAction.SLEEP, AppIcons.Timer, if (state.sleepAt != null) "定时中" else "定时关闭"),
     )
+    val kernelSummary = if (state.selectedKernel == com.aisub.player.PlayerKernel.AUTO) "自动 · ${activeKernel.shortLabel}" else activeKernel.shortLabel
     val groups = listOf(
         "播放" to buildList {
-            add(Triple(MoreAction.SWITCH_KERNEL, AppIcons.PlayArrow, "播放内核：${activeKernel.shortLabel} · ${state.settings.decodeMode.shortLabel}（点此切换）"))
+            add(Triple(MoreAction.SWITCH_KERNEL, AppIcons.PlayArrow, "播放内核：$kernelSummary · ${state.settings.decodeMode.shortLabel}（点此切换）"))
             if (state.current?.isLive == true) {
                 val recording = com.aisub.player.live.LiveRecorder.state.value.recording
                 add(Triple(MoreAction.RECORD_LIVE, if (recording) AppIcons.StopSquare else AppIcons.RecordDot, if (recording) "停止直播录屏并保存" else "开始直播录屏"))
@@ -2678,6 +2695,12 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
                 onSubtitleAction(SubtitleAction.LIST)
             }
             ActionRow(AppIcons.Download, "导出字幕", subtitle = "双语 / 仅译文 / 仅原文 SRT", enabled = state.cues.isNotEmpty()) { onSubtitleAction(SubtitleAction.EXPORT) }
+            if (state.cues.any { !it.translation.isNullOrBlank() }) {
+                ActionRow(AppIcons.Translate, "清除译文（仅留原文）", subtitle = "清空 AI 译文，完整保留原有字幕文本") { vm.clearTranslations() }
+            }
+            if (!live && state.hasOriginalSubtitleBackup) {
+                ActionRow(AppIcons.History, "恢复原有字幕", subtitle = "还原语音识别或翻译前备份的原始字幕") { vm.restoreOriginalSubtitles() }
+            }
             return@Column
         }
 
@@ -2717,6 +2740,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
                 // 同名的轨道（例如两条「Canadian」）后面加「第 n 条」，分得清
                 val names = textGroups.flatMapIndexed { gi, g -> (0 until g.length).map { subtitleTrackName(g.getTrackFormat(it), gi) } }
                 val seen = HashMap<String, Int>()
+                val nativeCoveredByAi = hasLoadedCues && state.settings.showAiSubtitles && state.settings.preferLoadedSubtitles
                 textGroups.forEachIndexed { gi, group ->
                     for (i in 0 until group.length) {
                         val f = group.getTrackFormat(i)
@@ -2724,7 +2748,10 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
                         val n = (seen[base] ?: 0) + 1
                         seen[base] = n
                         val name = if (names.count { it == base } > 1) "$base（第 $n 条）" else base
-                        TrackRow(name, !textDisabled && group.isTrackSelected(i)) {
+                        TrackRow(name, !textDisabled && !nativeCoveredByAi && group.isTrackSelected(i)) {
+                            if (hasLoadedCues && state.settings.showAiSubtitles) {
+                                vm.updateSettings(state.settings.copy(showAiSubtitles = false))
+                            }
                             vm.extras.selectTrack(C.TRACK_TYPE_TEXT, group, i)
                             version++
                         }
@@ -2743,6 +2770,9 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
                     subtitle = if (live) "提前读出自带字幕翻译成${state.settings.targetLanguage}，和画面对齐（画面会延后几秒，比语音识别准）"
                     else "读出自带字幕的文字，翻译成${state.settings.targetLanguage}，也能朗读、导出（比语音识别准）",
                 ) { onSubtitleAction(SubtitleAction.EMBEDDED) }
+            }
+            if (!live && state.hasOriginalSubtitleBackup) {
+                ActionRow(AppIcons.History, "恢复原有字幕", subtitle = "还原语音识别或翻译前备份的原始字幕") { vm.restoreOriginalSubtitles() }
             }
             GroupLabel("字幕文件")
             ActionRow(AppIcons.File, "选择字幕文件", subtitle = "SRT / ASS / VTT / SMI / ZIP，可以翻译、朗读") { onSubtitleAction(SubtitleAction.IMPORT) }
@@ -3242,7 +3272,7 @@ private fun DesktopKernelSwitchDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 com.aisub.player.PlayerKernel.entries.forEach { k ->
-                    val selected = activeKernel == k
+                    val selected = state.selectedKernel == k
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -3257,7 +3287,7 @@ private fun DesktopKernelSwitchDialog(
                         Spacer(Modifier.width(8.dp))
                         Column(Modifier.weight(1f)) {
                             Text(
-                                k.label,
+                                if (k == com.aisub.player.PlayerKernel.AUTO) "${k.label}（当前：${activeKernel.shortLabel}）" else k.label,
                                 fontSize = 15.sp,
                                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                             )
@@ -3337,11 +3367,12 @@ private fun DesktopKernelSwitchDialog(
             }
         },
         dismissButton = {
-            if (state.settings.preferredKernel != activeKernel) {
+            val chosen = state.selectedKernel
+            if (state.settings.preferredKernel != chosen) {
                 TextButton(onClick = {
-                    vm.updateSettings(state.settings.copy(preferredKernel = activeKernel))
+                    vm.updateSettings(state.settings.copy(preferredKernel = chosen))
                 }) {
-                    Text("设为默认(${activeKernel.shortLabel})")
+                    Text("设为默认(${chosen.shortLabel})")
                 }
             }
         },
@@ -3360,7 +3391,7 @@ private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     val rows = listOfNotNull(
         "文件" to (entry?.title ?: ""),
         "时长" to formatClock(p.duration.coerceAtLeast(0)),
-        "播放内核" to vm.activeKernel.label,
+        "播放内核" to if (vm.state.value.selectedKernel == com.aisub.player.PlayerKernel.AUTO) "自动（当前：${vm.activeKernel.label}）" else vm.activeKernel.label,
         "解码方式" to vm.state.value.settings.decodeMode.label,
         vm.mpvPipelineLabel?.let { "色彩与渲染管线" to it },
         if (exo == null && p.videoSize.width > 0) "画面" to "${p.videoSize.width}×${p.videoSize.height}" else null,

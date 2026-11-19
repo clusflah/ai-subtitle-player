@@ -364,8 +364,8 @@ fun FileDetailScreen(
                 Spacer(Modifier.height(12.dp))
                 SurfaceCard {
                     ListRow(
-                        title = "显示背景图和更完整的信息",
-                        subtitle = "在设置里填写 TMDB API Key（免费申请），也可以换主数据源",
+                        title = "填 TMDB Key 可获取高清横版背景图（可选）",
+                        subtitle = "当前默认使用豆瓣数据源（免 Key）；在设置里填写 TMDB API Key 可补全背景横图与故障回退",
                         icon = AppIcons.Info,
                         trailing = { TextButton(onClick = openSettings) { Text("去设置") } },
                         onClick = openSettings,

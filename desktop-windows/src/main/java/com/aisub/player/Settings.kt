@@ -9,9 +9,11 @@ import com.aisub.player.tts.ttsLocaleFor
 import com.aisub.player.translate.AzureTranslator
 import com.aisub.player.translate.ChatCompletionsTranslator
 import com.aisub.player.translate.ClaudeTranslator
+import com.aisub.player.translate.FailoverTranslator
 import com.aisub.player.translate.OfflineTranslator
 import com.aisub.player.translate.PromptStyle
 import com.aisub.player.translate.Translator
+import com.aisub.player.ui.isTvDevice
 import org.json.JSONObject
 
 /**
@@ -65,9 +67,22 @@ data class ProviderConfig(val apiKey: String = "", val model: String = "", val b
 
 /** 视频与直播播放内核选择 */
 enum class PlayerKernel(val label: String, val shortLabel: String, val description: String) {
-    EXO("默认内核（智能混合）", "默认", "常规视频硬件加速优先；遇到杜比视界 Profile 5 自动切 MPV/libplacebo 防紫绿偏色"),
+    AUTO("自动选择（推荐）", "自动", "常规视频智能硬件加速优先；遇到杜比视界 Profile 5 自动切 MPV/libplacebo 防紫绿偏色，特殊直播与光盘自动匹配最佳内核"),
+    MEDIA3("Media3 内核（标准混合）", "Media3", "固定使用桌面标准 Media3 / FFmpeg 混合播放管线，不做自动切 MPV/VLC 分流（ISO 光盘除外）"),
     MPV("MPV 内核（杜比映射）", "MPV", "启用 libplacebo 着色器动态色调映射管线，准确还原杜比视界与 HDR 至标准色彩"),
     VLC("VLC 内核（兼容/光盘）", "VLC", "强制使用 LibVLC 引擎，适合蓝光/DVD ISO 光盘镜像与特定直播流"),
+    ;
+
+    companion object {
+        /** 兼容旧版持久化的 "EXO"，迁移为 "AUTO" */
+        fun fromStored(raw: String?, default: PlayerKernel = AUTO): PlayerKernel = when (raw?.trim()) {
+            null, "", "AUTO", "EXO" -> AUTO
+            "MEDIA3" -> MEDIA3
+            "MPV" -> MPV
+            "VLC" -> VLC
+            else -> entries.firstOrNull { it.name == raw.trim() } ?: default
+        }
+    }
 }
 
 /** 统一视频软硬解策略（默认内核、MPV 内核、VLC 内核全局生效） */
@@ -129,8 +144,8 @@ enum class AppBackground(
 }
 
 data class AppSettings(
-    // 识别和翻译默认都在本地：字幕不出手机、不花钱（本地模型要先选好模型，没设置好时会提示）
-    val provider: Provider = Provider.LOCAL,
+    // 手机与桌面端默认语音识别为本地离线模型、翻译为 Index-Translate；电视端在 SettingsRepository 中默认火山豆包
+    val provider: Provider = Provider.INDEX_TRANSLATE,
     val providerConfigs: Map<Provider, ProviderConfig> = emptyMap(),
     val targetLanguage: String = "简体中文",
     val asrEngine: AsrEngine = AsrEngine.LOCAL,
@@ -191,6 +206,8 @@ data class AppSettings(
     val proxyType: com.aisub.player.net.ProxyType = com.aisub.player.net.ProxyType.OFF,
     val proxyHost: String = "",
     val proxyPort: Int = 7890,
+    /** 开启代理时绕过中国大陆 IP 与主流国内网站 */
+    val proxyBypassCn: Boolean = true,
     val ttsEngine: TtsEngineType = TtsEngineType.AZURE,
     /** Azure 朗读的 Key、区域、接口地址；Key 留空时沿用语音识别里的 Azure 配置 */
     val ttsAzureKey: String = "",
@@ -217,8 +234,8 @@ data class AppSettings(
     val tmdbImageBase: String = "",
     /** 详情页查询豆瓣评分 */
     val doubanEnabled: Boolean = true,
-    /** 主数据源：MetaSource 的名字（TMDB / DOUBAN / BANGUMI / TVDB），其余来源补全缺的字段 */
-    val metaPrimary: String = "TMDB",
+    /** 主数据源：MetaSource 的名字（DOUBAN / TMDB / BANGUMI / TVDB），其余来源补全缺的字段 */
+    val metaPrimary: String = "DOUBAN",
     /** 动画查 Bangumi 评分和分集标题 */
     val bangumiEnabled: Boolean = true,
     /** TheTVDB v4 的 API Key 和订阅 PIN */
@@ -230,7 +247,7 @@ data class AppSettings(
     val appBackground: AppBackground = AppBackground.AURORA_GRAY_WHITE_GRADIENT,
     val appDarkMode: AppDarkMode = AppDarkMode.SYSTEM,
     val liquidGlass: Boolean = false,
-    val preferredKernel: PlayerKernel = PlayerKernel.EXO,
+    val preferredKernel: PlayerKernel = PlayerKernel.AUTO,
     val decodeMode: DecodeMode = DecodeMode.AUTO,
     val autoDolbyMpv: Boolean = true,
     /** AI 影视推荐专用服务商（为空时自动选用已配置的对话大模型，不覆盖字幕翻译用的离线/专用翻译模型） */
@@ -267,26 +284,32 @@ data class AppSettings(
 
     fun withConfig(p: Provider, c: ProviderConfig) = copy(providerConfigs = providerConfigs + (p to c))
 
-    /** 当前服务商缺少必填项时返回提示，否则返回 null。 */
-    fun translatorProblem(): String? {
-        val c = configOf(provider)
-        if (provider == Provider.OFFLINE_TRANSLATOR) {
-            return if (OfflineTranslator.isInstalled(VoxtitleApp.instance)) null
+    /** 指定服务商缺少必填项时返回提示，否则返回 null。 */
+    fun translatorProblemFor(p: Provider): String? {
+        val c = configOf(p)
+        if (p == Provider.OFFLINE_TRANSLATOR) {
+            val ctx = runCatching { VoxtitleApp.instance }.getOrNull()
+                ?: return "没有安装 Offline Translator（离线翻译 App）"
+            return if (OfflineTranslator.isInstalled(ctx)) null
             else "没有安装 Offline Translator（离线翻译 App）"
         }
         return when {
-            provider.needsApiKey && c.apiKey.isEmpty() -> "请先在设置里填写 ${provider.label} 的 API Key"
-            c.model.isEmpty() && provider == Provider.LOCAL -> "请先在设置里选择本地模型（点模型一栏右边的箭头列出已装的模型）"
-            c.model.isEmpty() -> "请先在设置里填写 ${provider.label} 的模型名"
-            c.baseUrl.isEmpty() && provider != Provider.CLAUDE -> "请先在设置里填写 Base URL"
+            p.needsApiKey && c.apiKey.isEmpty() -> "请先在设置里填写 ${p.label} 的 API Key"
+            c.model.isEmpty() && p == Provider.LOCAL -> "请先在设置里选择本地模型（点模型一栏右边的箭头列出已装的模型）"
+            c.model.isEmpty() -> "请先在设置里填写 ${p.label} 的模型名"
+            c.baseUrl.isEmpty() && p != Provider.CLAUDE -> "请先在设置里填写 Base URL"
             else -> null
         }
     }
 
-    fun createTranslator(): Translator? {
-        if (translatorProblem() != null) return null
-        val c = configOf(provider)
-        return when (provider) {
+    /** 当前服务商缺少必填项时返回提示，否则返回 null。 */
+    fun translatorProblem(): String? = translatorProblemFor(provider)
+
+    /** 仅针对单个指定服务商构建翻译器（用于设置页「测试连接」等不回退场景）。 */
+    fun createSingleTranslator(p: Provider = provider): Translator? {
+        if (translatorProblemFor(p) != null) return null
+        val c = configOf(p)
+        return when (p) {
             Provider.CLAUDE -> ClaudeTranslator(c.apiKey, c.model)
             // DeepSeek 支持 JSON 模式，能保证输出可解析
             Provider.DEEPSEEK -> ChatCompletionsTranslator(
@@ -326,8 +349,62 @@ data class AppSettings(
                 temperature = 0.1,
                 extraBody = mapOf("chat_template_kwargs" to JSONObject().put("enable_thinking", false)),
             )
-            Provider.OFFLINE_TRANSLATOR -> OfflineTranslator(VoxtitleApp.instance, asrLanguage)
+            Provider.OFFLINE_TRANSLATOR -> {
+                val ctx = runCatching { VoxtitleApp.instance }.getOrNull() ?: return null
+                OfflineTranslator(ctx, asrLanguage)
+            }
             Provider.OPENAI_COMPAT -> ChatCompletionsTranslator(c.baseUrl, c.apiKey, c.model)
+        }
+    }
+
+    /** 构建按优先级排列的可用翻译器候选列表（主选服务优先，后续作为故障回退备选）。 */
+    fun candidateTranslators(): List<Pair<Provider, Translator>> {
+        val fallbackOrder = listOf(
+            Provider.INDEX_TRANSLATE,
+            Provider.OFFLINE_TRANSLATOR,
+            Provider.LOCAL,
+            Provider.VOLC,
+            Provider.ALIYUN,
+            Provider.DEEPSEEK,
+            Provider.GEMINI,
+            Provider.CLAUDE,
+            Provider.AZURE_TRANSLATOR,
+            Provider.OPENAI_COMPAT,
+        )
+        val out = ArrayList<Pair<Provider, Translator>>()
+        val added = HashSet<Provider>()
+        fun tryAdd(p: Provider, isPrimary: Boolean) {
+            if (!added.add(p)) return
+            if (!isPrimary && p == Provider.OPENAI_COMPAT) {
+                val raw = providerConfigs[p]
+                val configuredExplicitly = raw != null && (raw.apiKey.isNotBlank() || raw.baseUrl.isNotBlank()) && raw.model.isNotBlank()
+                if (!configuredExplicitly) return
+            }
+            createSingleTranslator(p)?.let { out += p to it }
+        }
+        tryAdd(provider, isPrimary = true)
+        for (p in fallbackOrder) {
+            tryAdd(p, isPrimary = false)
+        }
+        return out
+    }
+
+    /**
+     * 创建支持故障回退的翻译器。
+     * 主选服务不可用时自动按优先级尝试备选翻译器，并可通过 [onFallback] 通知调用方。
+     */
+    fun createTranslator(onFallback: ((from: Provider, to: Provider, error: Throwable) -> Unit)? = null): Translator? {
+        val candidates = candidateTranslators()
+        return when {
+            candidates.isEmpty() -> null
+            candidates.size == 1 -> {
+                val single = candidates[0]
+                if (single.first != provider) {
+                    onFallback?.invoke(provider, single.first, IllegalStateException(translatorProblem() ?: "${provider.label} 未配置"))
+                }
+                single.second
+            }
+            else -> FailoverTranslator(candidates, onFallback)
         }
     }
 }
@@ -336,21 +413,20 @@ typealias SettingsStore = SettingsRepository
 
 class SettingsRepository(context: Context) {
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+    private val isTv = runCatching { isTvDevice(context) }.getOrDefault(false)
 
-    /**
-     * 没改过设置的老用户（从 2.8.1 以前升级上来）一直用的是默认的 Index-Translate；默认改成本地模型后，
-     * 他们不该突然变成没设置好的本地模型。新安装才用新的默认值。
-     */
-    private val legacyDefaultProvider: Provider? = runCatching {
-        val info = context.packageManager.getPackageInfo(context.packageName, 0)
-        if (info.firstInstallTime < info.lastUpdateTime) Provider.INDEX_TRANSLATE else null
-    }.getOrNull()
-
-    /** 存着的翻译服务；第一次读时按新装 / 升级定下来并存好，以后再升级也不会变 */
+    /** 存着的翻译服务；未设置过时默认 Index-Translate */
     private fun provider(default: Provider): Provider {
         prefs.getString("provider", null)?.let { name -> runCatching { Provider.valueOf(name) }.getOrNull()?.let { return it } }
-        val chosen = legacyDefaultProvider ?: default
-        prefs.edit().putString("provider", chosen.name).apply()
+        prefs.edit().putString("provider", default.name).apply()
+        return default
+    }
+
+    /** 存着的语音识别引擎；未设置过时电视端默认火山豆包，手机/桌面端默认离线模型 */
+    private fun asrEngine(default: AsrEngine): AsrEngine {
+        prefs.getString("asrEngine", null)?.let { name -> runCatching { AsrEngine.valueOf(name) }.getOrNull()?.let { return it } }
+        val chosen = if (isTv) AsrEngine.VOLC else default
+        prefs.edit().putString("asrEngine", chosen.name).apply()
         return chosen
     }
 
@@ -367,7 +443,7 @@ class SettingsRepository(context: Context) {
             provider = provider(d.provider),
             providerConfigs = configs,
             targetLanguage = prefs.getString("targetLanguage", d.targetLanguage)!!,
-            asrEngine = runCatching { AsrEngine.valueOf(prefs.getString("asrEngine", d.asrEngine.name)!!) }.getOrDefault(d.asrEngine),
+            asrEngine = asrEngine(d.asrEngine),
             asrLanguage = prefs.getString("asrLanguage", d.asrLanguage)!!,
             localModel = prefs.getString("localModel", d.localModel)!!,
             modelBaseUrl = prefs.getString("modelBaseUrl", d.modelBaseUrl)!!,
@@ -402,6 +478,7 @@ class SettingsRepository(context: Context) {
             proxyType = runCatching { com.aisub.player.net.ProxyType.valueOf(prefs.getString("proxyType", d.proxyType.name)!!) }.getOrDefault(d.proxyType),
             proxyHost = prefs.getString("proxyHost", d.proxyHost)!!,
             proxyPort = prefs.getInt("proxyPort", d.proxyPort),
+            proxyBypassCn = prefs.getBoolean("proxyBypassCn", d.proxyBypassCn),
             ttsEngine = runCatching { TtsEngineType.valueOf(prefs.getString("ttsEngine", d.ttsEngine.name)!!) }.getOrDefault(d.ttsEngine),
             ttsAzureKey = prefs.getString("ttsAzureKey", "")!!,
             ttsAzureRegion = prefs.getString("ttsAzureRegion", "")!!,
@@ -437,8 +514,7 @@ class SettingsRepository(context: Context) {
                 }
             },
             liquidGlass = prefs.getBoolean("liquidGlass", d.liquidGlass),
-            preferredKernel = runCatching { PlayerKernel.valueOf(prefs.getString("preferredKernel", d.preferredKernel.name)!!) }
-                .getOrDefault(d.preferredKernel),
+            preferredKernel = PlayerKernel.fromStored(prefs.getString("preferredKernel", null), d.preferredKernel),
             decodeMode = runCatching { DecodeMode.valueOf(prefs.getString("decodeMode", d.decodeMode.name)!!) }
                 .getOrDefault(d.decodeMode),
             autoDolbyMpv = prefs.getBoolean("autoDolbyMpv", d.autoDolbyMpv),
@@ -485,6 +561,7 @@ class SettingsRepository(context: Context) {
             .putString("proxyType", s.proxyType.name)
             .putString("proxyHost", s.proxyHost)
             .putInt("proxyPort", s.proxyPort)
+            .putBoolean("proxyBypassCn", s.proxyBypassCn)
             .putString("ttsEngine", s.ttsEngine.name)
             .putString("ttsAzureKey", s.ttsAzureKey)
             .putString("ttsAzureRegion", s.ttsAzureRegion)

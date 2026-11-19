@@ -616,7 +616,7 @@ fun main(args: Array<String>) {
                 runCatching { activeActivity.dispatchOnStop() }
                 androidx.lifecycle.DesktopViewModelStore.clearAll()
                 com.aisub.player.SettingsRepository(voxApp).load().let {
-                    com.aisub.player.net.AppProxy.apply(voxApp, it.proxyType, it.proxyHost, it.proxyPort)
+                    com.aisub.player.net.AppProxy.apply(voxApp, it.proxyType, it.proxyHost, it.proxyPort, it.proxyBypassCn)
                 }
                 val store = com.aisub.player.media.AppStore(voxApp)
                 com.aisub.player.remote.cloud.CloudRegistry.serverLookup = { id -> store.servers().firstOrNull { it.id == id } }

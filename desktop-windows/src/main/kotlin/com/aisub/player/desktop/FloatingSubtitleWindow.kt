@@ -65,9 +65,10 @@ import com.aisub.player.asr.Transcriber
 import com.aisub.player.asr.cloud.ChunkedCloudEngine
 import com.aisub.player.asr.cloud.StreamingCloudEngine
 import com.aisub.player.asrProblem
-import com.aisub.player.createCloudEngine
-import com.aisub.player.createStreamingEngine
-import com.aisub.player.streamingAvailable
+import com.aisub.player.candidateAsrEngines
+import com.aisub.player.createCloudEngineFor
+import com.aisub.player.createStreamingEngineFor
+import com.aisub.player.streamingAvailableFor
 import com.aisub.player.subtitle.Cue
 import com.aisub.player.translate.ChatCompletionsTranslator
 import com.aisub.player.translate.ChineseScript
@@ -146,16 +147,22 @@ class DesktopLiveTranscriber(private val app: Application) {
 
     fun start(settings: AppSettings) {
         if (recognizeJob?.isActive == true) return
-        settings.asrProblem()?.let { problem ->
-            _state.update { it.copy(status = problem, running = false) }
+        val candidates = settings.candidateAsrEngines()
+        if (candidates.isEmpty()) {
+            _state.update { it.copy(status = settings.asrProblem() ?: "没有可用的语音识别服务", running = false) }
             return
         }
+        var candidateIdx = 0
         audioQueue.clear()
         _state.update {
             it.copy(
                 running = true,
                 partialText = null,
-                status = "正在启动 Windows 系统声音捕获…",
+                status = if (candidates[0] != settings.asrEngine) {
+                    "${settings.asrEngine.label} 未配置，已自动切换 ${candidates[0].label}…"
+                } else {
+                    "正在启动 Windows 系统声音捕获…"
+                },
             )
         }
 
@@ -240,22 +247,23 @@ class DesktopLiveTranscriber(private val app: Application) {
             }
 
             try {
-                if (settings.asrEngine == AsrEngine.LOCAL) {
-                    val model = ModelCatalog.byId(settings.localModel)
-                    if (!models.isReady(model)) {
-                        models.ensure(model, settings.modelBaseUrl) { msg, p ->
-                            _state.update {
-                                it.copy(status = if (p >= 0f) "$msg ${(p * 100).toInt()}%" else msg)
+                while (isActive) {
+                    val curEngineType = candidates[candidateIdx]
+                    if (curEngineType == AsrEngine.LOCAL) {
+                        val model = ModelCatalog.byId(settings.localModel)
+                        if (!models.isReady(model)) {
+                            models.ensure(model, settings.modelBaseUrl) { msg, p ->
+                                _state.update {
+                                    it.copy(status = if (p >= 0f) "$msg ${(p * 100).toInt()}%" else msg)
+                                }
                             }
                         }
                     }
-                }
 
-                while (isActive) {
                     sessionProducedOutput.set(false)
                     lastSignalOutMs.set(System.currentTimeMillis())
                     try {
-                        val currentEngine = createEngine(settings, onPartial)
+                        val currentEngine = createEngine(curEngineType, settings, onPartial)
                         engine = currentEngine
                         _state.update { st ->
                             st.copy(status = if (st.currentCue == null && st.partialText == null) "正在监听系统声音…（播放任意视频或音频即出字幕）" else null)
@@ -379,6 +387,15 @@ class DesktopLiveTranscriber(private val app: Application) {
                         runCatching { engine?.close() }
                         engine = null
                         val msg = e.message.orEmpty()
+                        val failedEngine = candidates[candidateIdx]
+                        if (candidateIdx + 1 < candidates.size) {
+                            candidateIdx++
+                            val nextEngine = candidates[candidateIdx]
+                            android.util.Log.w("Voxtitle-LiveSub", "${failedEngine.label} 识别失败（$msg），自动回退至 ${nextEngine.label}")
+                            _state.update { it.copy(status = "${failedEngine.label} 异常，已自动回退至 ${nextEngine.label}…") }
+                            delay(300)
+                            continue
+                        }
                         val isFatal = !sessionProducedOutput.get() && (
                             msg.contains("鉴权失败") || msg.contains("未填写") || msg.contains("没开通")
                         )
@@ -547,9 +564,9 @@ class DesktopLiveTranscriber(private val app: Application) {
         }
     }
 
-    private fun createEngine(s: AppSettings, onPartial: (String) -> Unit): SpeechEngine {
-        if (s.streamingAvailable) {
-            s.createStreamingEngine()?.let { streaming ->
+    private fun createEngine(engineType: AsrEngine, s: AppSettings, onPartial: (String) -> Unit): SpeechEngine {
+        if (s.streamingAvailableFor(engineType)) {
+            s.createStreamingEngineFor(engineType)?.let { streaming ->
                 (streaming as? StreamingCloudEngine)?.apply {
                     liveStream = true
                     this.onPartial = onPartial
@@ -557,7 +574,7 @@ class DesktopLiveTranscriber(private val app: Application) {
                 return streaming
             }
         }
-        return if (s.asrEngine == AsrEngine.LOCAL) {
+        return if (engineType == AsrEngine.LOCAL) {
             val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
             Transcriber(
                 model = ModelCatalog.byId(s.localModel),
@@ -568,7 +585,7 @@ class DesktopLiveTranscriber(private val app: Application) {
                 minSilenceSeconds = 0.25f,
             )
         } else {
-            s.createCloudEngine().also {
+            s.createCloudEngineFor(engineType).also {
                 (it as? ChunkedCloudEngine)?.apply {
                     useChunks(2, 3)
                     useLiveTimeout(25)

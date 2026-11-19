@@ -106,9 +106,9 @@ object MetaPipeline {
             emit(snapshot(true))
         }
 
-        // 1. 主数据源 + 其余来源依次补全，信息齐了就停
-        val primary = runCatching { MetaSource.valueOf(settings.metaPrimary) }.getOrDefault(MetaSource.TMDB)
-        val order = (listOf(primary) + listOf(MetaSource.TMDB, MetaSource.DOUBAN, MetaSource.TVDB)).distinct().filter { available(settings, it) }
+        // 1. 主数据源（默认豆瓣） + 其余可用来源依次故障回退并补全缺字段，信息齐了就停
+        val primary = runCatching { MetaSource.valueOf(settings.metaPrimary) }.getOrDefault(MetaSource.DOUBAN)
+        val order = (listOf(primary) + listOf(MetaSource.DOUBAN, MetaSource.TMDB, MetaSource.TVDB, MetaSource.BANGUMI)).distinct().filter { available(settings, it) }
         for (src in order) {
             if (complete(info)) break
             tryFetch(src)

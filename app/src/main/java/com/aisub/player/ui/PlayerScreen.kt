@@ -871,8 +871,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         }
                     }
                     if (usingExternalKernel) {
-                        TextButton(onClick = { vm.switchKernel(com.aisub.player.PlayerKernel.EXO) }) {
-                            Text("默认内核", color = Color(0xFFCCCCCC))
+                        TextButton(onClick = { vm.switchKernel(com.aisub.player.PlayerKernel.MEDIA3) }) {
+                            Text("Media3 内核", color = Color(0xFFCCCCCC))
                         }
                     }
                 }
@@ -955,7 +955,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         val dolbyActive = exoDolbyActive ||
                             (usingMpv && (vm.isCurrentDolbyShunted || (player as? com.aisub.player.media.MpvPlayer)?.detectedDolbyProfile != null))
                         KernelBadgeButton(
-                            kernel = activeKernel,
+                            selectedKernel = state.selectedKernel,
+                            activeKernel = activeKernel,
                             decodeMode = state.settings.decodeMode,
                             dolbyActive = dolbyActive,
                             exoDolbyBadge = legacyExoShaderMode.badgeSuffix.takeIf { exoDolbyActive },
@@ -1220,13 +1221,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                                 LiveRecordPillButton()
                                 Spacer(Modifier.weight(1f))
                                 LiveKernelSwitch(
+                                    selectedKernel = state.selectedKernel,
                                     activeKernel = activeKernel,
                                     decodeMode = state.settings.decodeMode,
                                     tv = tv,
                                     onSelect = { target ->
-                                        if (target != activeKernel) {
+                                        if (target != state.selectedKernel) {
                                             vm.switchKernel(target)
-                                            indicator = null to "已切换至${target.shortLabel}内核"
+                                            indicator = null to if (target == com.aisub.player.PlayerKernel.AUTO) "已切换为自动调度" else "已切换至${target.shortLabel}内核"
                                         }
                                         interactions++
                                     },
@@ -1246,13 +1248,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium)
                             Spacer(Modifier.width(10.dp))
                             LiveKernelSwitch(
+                                selectedKernel = state.selectedKernel,
                                 activeKernel = activeKernel,
                                 decodeMode = state.settings.decodeMode,
                                 tv = tv,
                                 onSelect = { target ->
-                                    if (target != activeKernel) {
+                                    if (target != state.selectedKernel) {
                                         vm.switchKernel(target)
-                                        indicator = null to "已切换至${target.shortLabel}内核"
+                                        indicator = null to if (target == com.aisub.player.PlayerKernel.AUTO) "已切换为自动调度" else "已切换至${target.shortLabel}内核"
                                     }
                                     interactions++
                                 },
@@ -1884,9 +1887,15 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             activeKernel = activeKernel,
             tv = tv,
             onSelectKernel = { target ->
-                val changed = target != activeKernel
+                val changed = target != state.selectedKernel
                 vm.switchKernel(target, manual = true)
-                if (changed) indicator = null to "已切换至${target.shortLabel}内核"
+                if (changed) {
+                    indicator = null to if (target == com.aisub.player.PlayerKernel.AUTO) {
+                        "已切换为自动调度（当前：${vm.activeKernel.shortLabel}）"
+                    } else {
+                        "已切换至${target.shortLabel}内核"
+                    }
+                }
                 dialog = null
             },
             onSelectDecodeMode = { mode ->
@@ -2247,7 +2256,8 @@ private fun MorePanel(activeKernel: com.aisub.player.PlayerKernel, state: UiStat
     )
     val groups = listOf(
         "播放" to buildList {
-            add(Triple(MoreAction.SWITCH_KERNEL, AppIcons.PlayArrow, "播放内核：${activeKernel.shortLabel} · ${state.settings.decodeMode.shortLabel}（点此切换）"))
+            val kernelSummary = if (state.selectedKernel == com.aisub.player.PlayerKernel.AUTO) "自动 · ${activeKernel.shortLabel}" else activeKernel.shortLabel
+            add(Triple(MoreAction.SWITCH_KERNEL, AppIcons.PlayArrow, "播放内核：$kernelSummary · ${state.settings.decodeMode.shortLabel}（点此切换）"))
             if (state.current?.isLive == true) {
                 val recording = com.aisub.player.live.LiveRecorder.state.value.recording
                 add(Triple(MoreAction.RECORD_LIVE, if (recording) AppIcons.StopSquare else AppIcons.RecordDot, if (recording) "停止直播录屏并保存" else "开始直播录屏"))
@@ -2377,7 +2387,7 @@ private fun EqualizerDialog(vm: MainViewModel, onDismiss: () -> Unit) {
         },
         text = {
             if (eq == null || range == null || bands == 0) {
-                Text(if (usingExternal) "${vm.activeKernel.shortLabel} 内核下暂不支持应用内均衡器，可尝试系统均衡器或切回默认内核" else "这台设备不支持应用内均衡器，可以试试系统均衡器")
+                Text(if (usingExternal) "${vm.activeKernel.shortLabel} 内核下暂不支持应用内均衡器，可尝试系统均衡器或切回 Media3 内核" else "这台设备不支持应用内均衡器，可以试试系统均衡器")
             } else Column(Modifier.verticalScroll(rememberScrollState())) {
                 if (presets.isNotEmpty()) {
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2543,6 +2553,12 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
                 onSubtitleAction(SubtitleAction.LIST)
             }
             ActionRow(AppIcons.Download, "导出字幕", subtitle = "双语 / 仅译文 / 仅原文 SRT", enabled = state.cues.isNotEmpty()) { onSubtitleAction(SubtitleAction.EXPORT) }
+            if (state.cues.any { !it.translation.isNullOrBlank() }) {
+                ActionRow(AppIcons.Translate, "清除译文（仅留原文）", subtitle = "清空 AI 译文，完整保留原有字幕文本") { vm.clearTranslations() }
+            }
+            if (!live && state.hasOriginalSubtitleBackup) {
+                ActionRow(AppIcons.History, "恢复原有字幕", subtitle = "还原语音识别或翻译前备份的原始字幕") { vm.restoreOriginalSubtitles() }
+            }
             return@Column
         }
 
@@ -2582,6 +2598,7 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
                 // 同名的轨道（例如两条「Canadian」）后面加「第 n 条」，分得清
                 val names = textGroups.flatMapIndexed { gi, g -> (0 until g.length).map { subtitleTrackName(g.getTrackFormat(it), gi) } }
                 val seen = HashMap<String, Int>()
+                val nativeCoveredByAi = hasLoadedCues && state.settings.showAiSubtitles && state.settings.preferLoadedSubtitles
                 textGroups.forEachIndexed { gi, group ->
                     for (i in 0 until group.length) {
                         val f = group.getTrackFormat(i)
@@ -2589,7 +2606,10 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
                         val n = (seen[base] ?: 0) + 1
                         seen[base] = n
                         val name = if (names.count { it == base } > 1) "$base（第 $n 条）" else base
-                        TrackRow(name, !textDisabled && group.isTrackSelected(i)) {
+                        TrackRow(name, !textDisabled && !nativeCoveredByAi && group.isTrackSelected(i)) {
+                            if (hasLoadedCues && state.settings.showAiSubtitles) {
+                                vm.updateSettings(state.settings.copy(showAiSubtitles = false))
+                            }
                             vm.extras.selectTrack(C.TRACK_TYPE_TEXT, group, i)
                             version++
                         }
@@ -2608,6 +2628,9 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
                     subtitle = if (live) "提前读出自带字幕翻译成${state.settings.targetLanguage}，和画面对齐（画面会延后几秒，比语音识别准）"
                     else "读出自带字幕的文字，翻译成${state.settings.targetLanguage}，也能朗读、导出（比语音识别准）",
                 ) { onSubtitleAction(SubtitleAction.EMBEDDED) }
+            }
+            if (!live && state.hasOriginalSubtitleBackup) {
+                ActionRow(AppIcons.History, "恢复原有字幕", subtitle = "还原语音识别或翻译前备份的原始字幕") { vm.restoreOriginalSubtitles() }
             }
             GroupLabel("字幕文件")
             ActionRow(AppIcons.File, "选择字幕文件", subtitle = "SRT / ASS / VTT / SMI / ZIP，可以翻译、朗读") { onSubtitleAction(SubtitleAction.IMPORT) }
@@ -3024,7 +3047,8 @@ private fun DelayDialog(delayMs: Long, onChange: (Long) -> Unit, onDismiss: () -
 
 @Composable
 private fun KernelBadgeButton(
-    kernel: com.aisub.player.PlayerKernel,
+    selectedKernel: com.aisub.player.PlayerKernel,
+    activeKernel: com.aisub.player.PlayerKernel,
     decodeMode: com.aisub.player.DecodeMode,
     dolbyActive: Boolean,
     exoDolbyBadge: String? = null,
@@ -3037,17 +3061,19 @@ private fun KernelBadgeButton(
     val pillShape = RoundedCornerShape(50)
     val decodeSuffix = if (decodeMode != com.aisub.player.DecodeMode.AUTO) " · ${decodeMode.shortLabel}" else ""
     val badgeText = when {
-        kernel == com.aisub.player.PlayerKernel.EXO && !exoDolbyBadge.isNullOrBlank() ->
-            "默认 · $exoDolbyBadge$decodeSuffix"
-        kernel == com.aisub.player.PlayerKernel.MPV && dolbyActive ->
-            "MPV · 杜比$decodeSuffix"
+        activeKernel == com.aisub.player.PlayerKernel.MEDIA3 && !exoDolbyBadge.isNullOrBlank() ->
+            "${if (selectedKernel == com.aisub.player.PlayerKernel.AUTO) "自动·Media3" else "Media3"} · $exoDolbyBadge$decodeSuffix"
+        activeKernel == com.aisub.player.PlayerKernel.MPV && dolbyActive ->
+            "${if (selectedKernel == com.aisub.player.PlayerKernel.AUTO) "自动·MPV" else "MPV"} · 杜比$decodeSuffix"
+        selectedKernel == com.aisub.player.PlayerKernel.AUTO ->
+            "自动 · ${activeKernel.shortLabel}$decodeSuffix"
         else ->
-            "内核: ${kernel.shortLabel}$decodeSuffix"
+            "内核: ${activeKernel.shortLabel}$decodeSuffix"
     }
     val pillTint = when {
         highlight -> Color(0xFFFFB74D)
         dolbyActive -> Color(0xCCF28C00)
-        kernel != com.aisub.player.PlayerKernel.EXO -> Color(0x883949AB)
+        activeKernel != com.aisub.player.PlayerKernel.MEDIA3 -> Color(0x883949AB)
         else -> GlassTokens.DarkControlTint
     }
     Row(
@@ -3096,7 +3122,7 @@ private fun KernelSwitchDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 com.aisub.player.PlayerKernel.entries.forEach { k ->
-                    val selected = activeKernel == k
+                    val selected = state.selectedKernel == k
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -3111,7 +3137,7 @@ private fun KernelSwitchDialog(
                         Spacer(Modifier.width(8.dp))
                         Column(Modifier.weight(1f)) {
                             Text(
-                                k.label,
+                                if (k == com.aisub.player.PlayerKernel.AUTO) "${k.label}（当前：${activeKernel.shortLabel}）" else k.label,
                                 fontSize = 15.sp,
                                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                             )
@@ -3205,11 +3231,12 @@ private fun KernelSwitchDialog(
             }
         },
         dismissButton = {
-            if (state.settings.preferredKernel != activeKernel) {
+            val chosen = state.selectedKernel
+            if (state.settings.preferredKernel != chosen) {
                 TextButton(onClick = {
-                    vm.updateSettings(state.settings.copy(preferredKernel = activeKernel))
+                    vm.updateSettings(state.settings.copy(preferredKernel = chosen))
                 }) {
-                    Text("设为默认(${activeKernel.shortLabel})")
+                    Text("设为默认(${chosen.shortLabel})")
                 }
             }
         },
@@ -3219,6 +3246,7 @@ private fun KernelSwitchDialog(
 
 @Composable
 private fun LiveKernelSwitch(
+    selectedKernel: com.aisub.player.PlayerKernel,
     activeKernel: com.aisub.player.PlayerKernel,
     decodeMode: com.aisub.player.DecodeMode,
     tv: Boolean,
@@ -3235,7 +3263,7 @@ private fun LiveKernelSwitch(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         com.aisub.player.PlayerKernel.entries.forEach { option ->
-            val selected = activeKernel == option
+            val selected = selectedKernel == option
             var focused by remember { mutableStateOf(false) }
             val highlight = tv && focused
             val pillShape = RoundedCornerShape(50)
@@ -3256,7 +3284,7 @@ private fun LiveKernelSwitch(
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = option.shortLabel,
+                    text = if (option == com.aisub.player.PlayerKernel.AUTO && selected) "自动·${activeKernel.shortLabel}" else option.shortLabel,
                     color = when {
                         highlight || selected -> Color(0xFF1F1100)
                         else -> Color(0xFFD5DCE6)
@@ -3316,9 +3344,9 @@ private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     val rows = listOfNotNull(
         "文件" to (entry?.title ?: ""),
         "时长" to formatClock(p.duration.coerceAtLeast(0)),
-        "播放内核" to kernel.label,
+        "播放内核" to if (vm.state.value.selectedKernel == com.aisub.player.PlayerKernel.AUTO) "自动（当前：${kernel.label}）" else kernel.label,
         "解码方式" to vm.state.value.settings.decodeMode.label,
-        if (kernel == com.aisub.player.PlayerKernel.EXO) vm.exoDolbyPipelineLabel?.let { "色彩与渲染管线" to it } else null,
+        if (kernel == com.aisub.player.PlayerKernel.MEDIA3) vm.exoDolbyPipelineLabel?.let { "色彩与渲染管线" to it } else null,
         if (kernel == com.aisub.player.PlayerKernel.MPV) vm.mpvPipelineLabel?.let { "渲染与色彩管线" to it } else null,
         if (kernel == com.aisub.player.PlayerKernel.VLC) vm.vlcDecodeLabel?.let { "VLC 解码管线" to it } else null,
         if (kernel == com.aisub.player.PlayerKernel.VLC) vm.vlcAudioBackendLabel?.let { "音频输出" to it } else null,

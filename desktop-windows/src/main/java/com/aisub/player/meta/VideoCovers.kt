@@ -32,16 +32,12 @@ object VideoCovers {
         if (!entry.isVideo || entry.isLive) return null
         if (!MetaRepository.onlineAllowed(context, settings, entry.uri)) return null
         saved(context, entry.uri)?.let { return it.ifEmpty { null } }
-        if (settings.tmdbKey.isBlank() && !settings.doubanEnabled) return null
+        if (MetaRepository.sourceOrder(settings).isEmpty()) return null
         val query = MetaRepository.override(context, entry.uri)?.let { (t, y) -> MetaQuery.manual(t, y) }
             ?: MetaQuery.manual(entry.title, null)
-        val url = try {
-            val info = MetaRepository.tmdb(settings, query)
-            info?.backdropUrl ?: info?.posterUrl
-                ?: if (settings.doubanEnabled) MetaRepository.douban(query, info)?.info?.posterUrl else null
-        } catch (e: Exception) {
-            return null
-        }
+        val (info, anySuccess) = MetaRepository.lookupWithFailover(settings, query, requireBackdrop = true)
+        if (!anySuccess && info == null) return null
+        val url = info?.backdropUrl ?: info?.posterUrl
         prefs(context).edit().putString(entry.uri, url.orEmpty()).apply()
         return url
     }

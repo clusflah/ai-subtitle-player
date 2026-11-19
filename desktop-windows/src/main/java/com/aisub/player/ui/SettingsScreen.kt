@@ -78,6 +78,7 @@ import com.aisub.player.translate.OfflineTranslator
 import com.aisub.player.tts.TtsEngineType
 import com.aisub.player.tts.TtsReader
 import com.aisub.player.asrProblem
+import com.aisub.player.candidateAsrEngines
 import com.aisub.player.streamingAvailable
 import com.aisub.player.supportsStreaming
 import com.aisub.player.withAsrValue
@@ -246,8 +247,8 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             CollapsibleCard(
                 "语音识别",
                 s.asrEngine.label + " · 视频语言：" + AsrLanguages.label(s.asrLanguage) +
-                    (asrProblem?.let { " · $it" } ?: ""),
-                warn = asrProblem != null,
+                    (asrProblem?.let { " · $it（未填时自动回退可用模型）" } ?: ""),
+                warn = asrProblem != null && s.candidateAsrEngines().isEmpty(),
             ) {
                 AsrEngine.entries.forEachIndexed { i, engine ->
                     if (i > 0) CardDivider(inset = 64.dp)
@@ -363,8 +364,8 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             CollapsibleCard(
                 "字幕翻译",
                 "翻译成${s.targetLanguage} · ${s.provider.label}" + (if (s.autoTranslate) " · 识别时自动翻译" else "") +
-                    (trProblem?.let { " · $it" } ?: ""),
-                warn = trProblem != null,
+                    (trProblem?.let { " · $it（未填时自动回退可用服务）" } ?: ""),
+                warn = trProblem != null && s.candidateTranslators().isEmpty(),
             ) {
                 Column(Modifier.padding(16.dp)) {
                     OutlinedTextField(
@@ -796,7 +797,8 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
             // ---------------- 网络代理 ----------------
             CollapsibleCard(
                 "网络代理",
-                if (s.proxyType == ProxyType.OFF || s.proxyHost.isBlank()) "不使用" else "${s.proxyType.label} · ${s.proxyHost}:${s.proxyPort}",
+                if (s.proxyType == ProxyType.OFF || s.proxyHost.isBlank()) "不使用"
+                else "${s.proxyType.label} · ${s.proxyHost}:${s.proxyPort}" + if (s.proxyBypassCn) " · 国内直连" else "",
             ) {
                 ProxySettings(s) { s = it }
             }
@@ -866,6 +868,12 @@ private fun ProxySettings(s: AppSettings, onChange: (AppSettings) -> Unit) {
                     if (s.proxyPort > 0) s.proxyPort.toString() else "",
                     { v -> onChange(s.copy(proxyPort = v.filter(Char::isDigit).take(5).toIntOrNull() ?: 0)) },
                     "端口", "例如 7890",
+                )
+                ListRow(
+                    title = "中国大陆 IP 与国内网站直连",
+                    subtitle = "开启后，.cn 域名、中国大陆 IP 及豆瓣、B站、火山、阿里、115 等国内服务不走代理，访问更快更稳",
+                    trailing = { Switch(checked = s.proxyBypassCn, onCheckedChange = { onChange(s.copy(proxyBypassCn = it)) }) },
+                    onClick = { onChange(s.copy(proxyBypassCn = !s.proxyBypassCn)) },
                 )
                 Text(
                     "本机和局域网地址始终直连；代理连不上时自动直连。离开设置页后生效，内置浏览器也走代理",

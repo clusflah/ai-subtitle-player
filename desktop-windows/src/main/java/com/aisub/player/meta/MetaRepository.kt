@@ -105,13 +105,107 @@ object MetaRepository {
 
     private val posterGate = kotlinx.coroutines.sync.Semaphore(2)
 
+    /** 按主数据源配置排序可用的影视元数据来源（默认豆瓣优先，其余按故障回退与字段补全依次排列）。 */
+    fun sourceOrder(settings: AppSettings, includeBangumi: Boolean = true): List<MetaSource> {
+        val primary = runCatching { MetaSource.valueOf(settings.metaPrimary) }.getOrDefault(MetaSource.DOUBAN)
+        val all = buildList {
+            add(primary)
+            add(MetaSource.DOUBAN)
+            add(MetaSource.TMDB)
+            add(MetaSource.TVDB)
+            if (includeBangumi) add(MetaSource.BANGUMI)
+        }.distinct()
+        return all.filter { src ->
+            when (src) {
+                MetaSource.DOUBAN -> settings.doubanEnabled
+                MetaSource.TMDB -> settings.tmdbKey.isNotBlank()
+                MetaSource.TVDB -> settings.tvdbKey.isNotBlank()
+                MetaSource.BANGUMI -> settings.bangumiEnabled
+            }
+        }
+    }
+
+    /**
+     * 可复用的多数据源故障回退与字段合并辅助函数。
+     * 返回 Pair(合并后的 MediaInfo, 是否至少有一个数据源成功响应或查过无网络异常)。
+     */
+    internal suspend fun lookupWithSources(
+        sources: List<MetaSource>,
+        requireBackdrop: Boolean = false,
+        fetchSource: suspend (MetaSource, MediaInfo?) -> MediaInfo?,
+    ): Pair<MediaInfo?, Boolean> {
+        var info: MediaInfo? = null
+        var anySuccess = false
+        for (src in sources) {
+            val done = info != null &&
+                info.overview.isNotBlank() &&
+                info.posterUrl != null &&
+                (!requireBackdrop || info.backdropUrl != null)
+            if (done) break
+            try {
+                val res = fetchSource(src, info)
+                anySuccess = true
+                if (res != null) {
+                    info = info?.fillFrom(res) ?: res
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("Voxtitle", "数据源 ${src.label} 查询异常，尝试故障回退下一来源：${e.message}")
+            }
+        }
+        return info to anySuccess
+    }
+
+    /** 按主备顺序查询并自动故障回退补全字段；返回值 second 表示是否至少有一个数据源无异常响应。 */
+    suspend fun lookupWithFailover(
+        settings: AppSettings,
+        q: MetaQuery,
+        requireBackdrop: Boolean = false,
+        includeBangumi: Boolean = true,
+    ): Pair<MediaInfo?, Boolean> {
+        val order = sourceOrder(settings, includeBangumi = includeBangumi)
+        if (order.isEmpty()) return null to true
+        return lookupWithSources(order, requireBackdrop = requireBackdrop) { src, cur ->
+            when (src) {
+                MetaSource.DOUBAN -> {
+                    val d = douban(q, cur) ?: return@lookupWithSources null
+                    d.info?.copy(
+                        doubanRating = d.rating ?: d.info.doubanRating,
+                        doubanVotes = d.votes ?: d.info.doubanVotes,
+                        doubanId = d.id,
+                    )
+                }
+                MetaSource.TMDB -> {
+                    val mergedQ = if (cur == null) q else q.copy(
+                        titles = (listOfNotNull(cur.title.ifEmpty { null }, cur.originalTitle.ifEmpty { null }) + q.titles).distinct(),
+                        kind = q.kind ?: cur.kind,
+                        tmdbId = q.tmdbId ?: cur.tmdbId.takeIf { it > 0 }?.toString(),
+                        imdbId = q.imdbId ?: cur.imdbId,
+                    )
+                    tmdb(settings, mergedQ)
+                }
+                MetaSource.TVDB -> tvdb(settings, q, cur)
+                MetaSource.BANGUMI -> bangumi(q, cur)?.info
+            }
+        }
+    }
+
     suspend fun poster(settings: AppSettings, item: RemoteItem): String? {
         val kind = item.meta?.kind
         if (!settings.metaOnline || kind == "episode" || item.meta?.title == null) return null
         return posterGate.withPermit {
             val q = MetaQuery.of(item)
-            runCatching { tmdb(settings, q)?.posterUrl }.getOrNull()
-                ?: if (settings.doubanEnabled) runCatching { douban(q, null)?.info?.posterUrl }.getOrNull() else null
+            for (src in sourceOrder(settings, includeBangumi = false)) {
+                val url = when (src) {
+                    MetaSource.DOUBAN -> runCatching { douban(q, null)?.info?.posterUrl }.getOrNull()
+                    MetaSource.TMDB -> runCatching { tmdb(settings, q)?.posterUrl }.getOrNull()
+                    MetaSource.TVDB -> runCatching { tvdb(settings, q, null)?.posterUrl }.getOrNull()
+                    MetaSource.BANGUMI -> null
+                }
+                if (!url.isNullOrBlank()) return@withPermit url
+            }
+            null
         }
     }
 

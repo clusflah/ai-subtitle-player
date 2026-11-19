@@ -116,18 +116,49 @@ fun AppSettings.withAsrValue(engine: AsrEngine, key: String, value: String): App
     return copy(asrConfigs = asrConfigs + (engine to current + (key to value)))
 }
 
-/** 当前识别引擎缺少必填项时返回提示，否则返回 null。 */
-fun AppSettings.asrProblem(): String? {
-    val missing = asrEngine.fields.firstOrNull { it.required && asrValue(asrEngine, it.key).isEmpty() } ?: return null
-    return "请先在设置里填写 ${asrEngine.label} 的「${missing.label}」"
+/** 指定识别引擎缺少必填项时返回提示，否则返回 null。 */
+fun AppSettings.asrProblemFor(engine: AsrEngine): String? {
+    val missing = engine.fields.firstOrNull { it.required && asrValue(engine, it.key).isEmpty() } ?: return null
+    return "请先在设置里填写 ${engine.label} 的「${missing.label}」"
 }
 
-/** 创建云端识别引擎（本地引擎由 ViewModel 创建，需要模型文件）。 */
-fun AppSettings.createCloudEngine(): SpeechEngine {
-    val v = { key: String -> asrValue(asrEngine, key) }
+/** 当前识别引擎缺少必填项时返回提示，否则返回 null。 */
+fun AppSettings.asrProblem(): String? = asrProblemFor(asrEngine)
+
+/**
+ * 语音识别故障回退候选顺序（去重）：
+ * 1) 若主选引擎已完整配置，排在首位；
+ * 2) 其他已填好必填 Key 的云端引擎（优先国内直连）；
+ * 3) 本机离线识别 [AsrEngine.LOCAL] 始终作为保底兜底（比如电视端默认火山豆包未填 Key 或网络故障时自动回退）。
+ */
+fun AppSettings.candidateAsrEngines(): List<AsrEngine> {
+    val fallbackPriority = listOf(
+        AsrEngine.VOLC,
+        AsrEngine.ALIYUN,
+        AsrEngine.AZURE,
+        AsrEngine.OPENAI,
+        AsrEngine.DEEPGRAM,
+        AsrEngine.ELEVENLABS,
+        AsrEngine.GEMINI,
+        AsrEngine.XFYUN,
+        AsrEngine.LOCAL,
+    )
+    return buildList {
+        if (asrProblemFor(asrEngine) == null) add(asrEngine)
+        for (engine in fallbackPriority) {
+            if (engine !in this && asrProblemFor(engine) == null) {
+                add(engine)
+            }
+        }
+    }
+}
+
+/** 创建指定云端识别引擎（本地引擎由 ViewModel 创建，需要模型文件）。 */
+fun AppSettings.createCloudEngineFor(engine: AsrEngine): SpeechEngine {
+    val v = { key: String -> asrValue(engine, key) }
     // 大多数接口只认语言代码；Azure 要 locale，Deepgram 认得带地区的写法（pt-BR、es-419）
     val lang = AsrLanguages.primary(asrLanguage)
-    val engine = when (asrEngine) {
+    val built = when (engine) {
         AsrEngine.LOCAL -> error("本地引擎不在这里创建")
         AsrEngine.AZURE -> AzureTranscriber(
             v("endpoint").ifEmpty { AzureTranscriber.defaultEndpoint(v("region")) }, v("key"), AzureTranscriber.localesFor(asrLanguage),
@@ -143,9 +174,12 @@ fun AppSettings.createCloudEngine(): SpeechEngine {
         AsrEngine.DEEPGRAM -> DeepgramTranscriber(v("apiKey"), v("model"), asrLanguage)
         AsrEngine.OPENAI -> OpenAiTranscriber(v("apiKey"), v("baseUrl"), v("model"), lang)
     }
-    (engine as? ChunkedCloudEngine)?.useParallel(v("parallel").toIntOrNull() ?: 3)
-    return engine
+    (built as? ChunkedCloudEngine)?.useParallel(v("parallel").toIntOrNull() ?: 3)
+    return built
 }
+
+/** 创建云端识别引擎（本地引擎由 ViewModel 创建，需要模型文件）。 */
+fun AppSettings.createCloudEngine(): SpeechEngine = createCloudEngineFor(asrEngine)
 
 /** 支持流式识别的引擎 */
 val AsrEngine.supportsStreaming: Boolean
@@ -154,16 +188,20 @@ val AsrEngine.supportsStreaming: Boolean
 /** Gemini 流式用 live 模型，转写不带每句的准确时间 */
 const val GEMINI_STREAMING_NOTE = "live 模型识别出来的文字不带每句的准确时间，字幕时间只能按到达的先后来估计"
 
+/** 指定引擎在当前语言下能否使用流式识别 */
+fun AppSettings.streamingAvailableFor(engine: AsrEngine): Boolean =
+    engine.supportsStreaming && (engine != AsrEngine.AZURE || AsrLanguages.azureLocale(asrLanguage) != null)
+
 /** 当前设置能用流式识别（Azure 流式必须选定视频语言，选「自动」时照用分段识别） */
 val AppSettings.streamingAvailable: Boolean
-    get() = asrEngine.supportsStreaming && (asrEngine != AsrEngine.AZURE || AsrLanguages.azureLocale(asrLanguage) != null)
+    get() = streamingAvailableFor(asrEngine)
 
 /**
- * 流式识别引擎；当前引擎不支持流式、或者条件不够（Azure 流式要选定视频语言）时返回 null，照用分段识别。
+ * 为指定引擎创建流式识别实例；不支持流式或条件不够（Azure 流式要选定视频语言）时返回 null，照用分段识别。
  */
-fun AppSettings.createStreamingEngine(): SpeechEngine? {
-    val v = { key: String -> asrValue(asrEngine, key) }
-    return when (asrEngine) {
+fun AppSettings.createStreamingEngineFor(engine: AsrEngine): SpeechEngine? {
+    val v = { key: String -> asrValue(engine, key) }
+    return when (engine) {
         AsrEngine.AZURE -> {
             val locale = AsrLanguages.azureLocale(asrLanguage) ?: return null
             // 中国区的自定义地址形如 https://chinanorth3.api.cognitive.azure.cn，区域取第一段
@@ -181,6 +219,11 @@ fun AppSettings.createStreamingEngine(): SpeechEngine? {
         else -> null
     }
 }
+
+/**
+ * 流式识别引擎；当前引擎不支持流式、或者条件不够（Azure 流式要选定视频语言）时返回 null，照用分段识别。
+ */
+fun AppSettings.createStreamingEngine(): SpeechEngine? = createStreamingEngineFor(asrEngine)
 
 /**
  * 当前引擎明显不支持所选语言时给出提示（仍会尝试识别，通常按自动检测处理，准确率会很低）。

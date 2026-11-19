@@ -19,7 +19,7 @@ class VoxtitleApp : Application() {
         }
         // 应用内代理 + Android 6/7 Conscrypt TLS 1.3 / 现代根证书：在任何网络客户端创建之前装好
         AppProxy.install(this)
-        SettingsRepository(this).load().let { AppProxy.apply(this, it.proxyType, it.proxyHost, it.proxyPort) }
+        SettingsRepository(this).load().let { AppProxy.apply(this, it.proxyType, it.proxyHost, it.proxyPort, it.proxyBypassCn) }
         // 网盘客户端刷新 token 后写回存储；播放器按 ID 找账号
         val store = AppStore(this)
         CloudRegistry.serverLookup = { id -> store.servers().firstOrNull { it.id == id } }

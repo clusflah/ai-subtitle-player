@@ -78,7 +78,12 @@ class MediaPlayer(libVLC: LibVLC) {
     private var eventListener: EventListener? = null
 
     val vlcVout: IVLCVout = object : IVLCVout {}
+    private var mediaDirty = false
     var media: Media? = null
+        set(value) {
+            field = value
+            if (value != null) mediaDirty = true
+        }
     val isPlaying: Boolean get() = engine.isPlaying
     val length: Long get() = engine.duration
     val time: Long get() = engine.currentPosition
@@ -177,7 +182,8 @@ class MediaPlayer(libVLC: LibVLC) {
 
     fun play() {
         val m = media ?: return
-        if (engine.playbackState == Player.STATE_IDLE || engine.playbackState == Player.STATE_ENDED) {
+        if (mediaDirty || engine.playbackState == Player.STATE_IDLE || engine.playbackState == Player.STATE_ENDED) {
+            mediaDirty = false
             var startMs = 0L
             for (opt in m.options) {
                 if (opt.startsWith(":start-time=")) {

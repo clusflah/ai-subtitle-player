@@ -12,9 +12,10 @@ import com.aisub.player.asr.RangeSet
 import com.aisub.player.asr.SpeechEngine
 import com.aisub.player.asr.Transcriber
 import com.aisub.player.asrProblem
-import com.aisub.player.createCloudEngine
-import com.aisub.player.createStreamingEngine
-import com.aisub.player.streamingAvailable
+import com.aisub.player.candidateAsrEngines
+import com.aisub.player.createCloudEngineFor
+import com.aisub.player.createStreamingEngineFor
+import com.aisub.player.streamingAvailableFor
 import com.aisub.player.subtitle.Cue
 import com.aisub.player.translate.ChineseScript
 import com.aisub.player.translate.LanguageCheck
@@ -139,17 +140,23 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
 
     fun start(settings: AppSettings) {
         if (job?.isActive == true) return
-        settings.asrProblem()?.let { p ->
-            _state.update { it.copy(status = p) }
+        val candidates = settings.candidateAsrEngines()
+        if (candidates.isEmpty()) {
+            _state.update { it.copy(status = settings.asrProblem() ?: "没有可用的语音识别服务") }
             return
         }
         enabled = true
         aheadNoted = false
         session = Session()
-        _state.update { it.copy(running = true, status = "播放网页里的视频后开始识别…", directUrl = null) }
+        val initialHint = if (candidates[0] != settings.asrEngine) {
+            "${settings.asrEngine.label} 未配置，已自动切换 ${candidates[0].label}；播放网页里的视频后开始识别…"
+        } else {
+            "播放网页里的视频后开始识别…"
+        }
+        _state.update { it.copy(running = true, status = initialHint, directUrl = null) }
         job = scope.launch {
             try {
-                run(settings)
+                run(settings, candidates)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -169,7 +176,9 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
     private fun startTranslation(settings: AppSettings) {
         translateJob?.cancel()
         translateJob = null
-        val t = settings.createTranslator() ?: return
+        val t = settings.createTranslator { from, to, _ ->
+            log("翻译服务 ${from.label} 异常，已自动回退至 ${to.label}")
+        } ?: return
         if (settings.autoTranslate) translateJob = scope.launch { translateLoop(t, settings) }
     }
 
@@ -227,9 +236,8 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
         }
     }
 
-    private suspend fun run(settings: AppSettings) = withContext(Dispatchers.Default) {
-        val local = settings.asrEngine == AsrEngine.LOCAL
-        if (local) {
+    private suspend fun ensureEngineReady(engineType: AsrEngine, settings: AppSettings) {
+        if (engineType == AsrEngine.LOCAL) {
             val model = ModelCatalog.byId(settings.localModel)
             if (!models.isReady(model)) {
                 models.ensure(model, settings.modelBaseUrl) { msg, p ->
@@ -237,6 +245,11 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
                 }
             }
         }
+    }
+
+    private suspend fun run(settings: AppSettings, candidates: List<AsrEngine>) = withContext(Dispatchers.Default) {
+        var candidateIdx = 0
+        ensureEngineReady(candidates[candidateIdx], settings)
         // 引擎等第一段声音来了再建：提前送来的声音（网页缓冲、直接读地址）用分段识别，能比播放快很多；
         // 边播边读的声音用流式识别（引擎支持时），一两秒出字。流式识别按实时速度发送，提前送来的声音会被它拖回和播放同步
         var engine: SpeechEngine? = null
@@ -255,80 +268,100 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
             var droppedStale = false
             var current: Session? = null
             while (isActive) {
-                    val s = session
-                    val chunk = s.chunks.poll(200, TimeUnit.MILLISECONDS) ?: continue
-                    // 刚被取消（换语言了）：这段是新一次识别的，放回去
-                    if (!isActive) {
-                        s.chunks.offerFirst(chunk)
-                        break
-                    }
-                    // 换了网页：引擎里没识别完的是旧网页的声音，不要了
-                    if (s !== current) {
-                        engine?.close()
-                        engine = null
-                        current = s
-                        audioMs = 0L
-                        fedSource = null
-                    }
-                    // 识别跟不上、或者拖动过进度：已经播过去的声音不用识别了
-                    val playing = videoTimeNow()
-                    val chunkEnd = chunk.videoMs + chunk.samples.size * 1000.0 / Transcriber.SAMPLE_RATE * chunk.rate
-                    if (playing != null && chunk.source == clock?.source && chunkEnd < playing - STALE_MS) { log("跳过过时的声音 ${chunk.videoMs.toLong()}（播放到 $playing）"); droppedStale = true; continue }
-                    if (!heard) {
-                        heard = true
-                        _state.update { it.copy(status = if (it.cues.isEmpty()) "正在识别…（第一句要等几秒）" else null) }
-                    }
-                    val lenMs = chunk.samples.size * 1000L / Transcriber.SAMPLE_RATE
-                    val start = chunk.videoMs.toLong()
-                    val end = start + (lenMs * chunk.rate).toLong()
-                    val skip = synchronized(s.anchors) {
-                        val done = s.covered.getOrPut(chunk.source) { RangeSet() }
-                        if (done.contains(start) && done.contains(end - 1)) true else {
-                            s.anchors.add(Anchor(audioMs, chunk.videoMs, chunk.rate, chunk.source))
-                            if (s.anchors.size > 2000) s.anchors.subList(0, 500).clear()
-                            done.add(start, end)
-                            false
-                        }
-                    }
-                    if (skip) { log("跳过已识别 $start-$end"); continue }
-                    // 声音接不上（拖了进度、换了一路）：先把引擎里还没出结果的那段识别完，再从新位置开始，
-                    // 不然拖动前后的声音会被当成一句话，出来一条横跨几分钟的字幕
-                    // 自己丢掉过时声音留下的往后的空档不重建引擎：本地模型重建要好几秒，
-                    // 重建期间排队的声音又过时被丢，再接不上又重建，慢一点的手机就一句也出不来
-                    val selfGap = droppedStale && chunk.source == fedSource && start > fedEnd
-                    droppedStale = false
-                    if (engine != null && !selfGap && (chunk.source != fedSource || kotlin.math.abs(start - fedEnd) > GAP_MS)) {
-                        log("声音接不上（$fedSource $fedEnd → ${chunk.source} $start），重新开始识别")
-                        val base = engineBase
-                        engine?.finish { c -> publish(c.copy(startMs = c.startMs + base, endMs = c.endMs + base), s) }
-                        engine?.close()
-                        engine = null
-                    }
-                    fedSource = chunk.source
-                    fedEnd = end
-                    if (engine == null || engineAhead != chunk.ahead) {
-                        engine?.close()
-                        engine = createEngine(settings, chunk.ahead)
-                        engineAhead = chunk.ahead
-                        engineBase = audioMs
-                    }
-                    val base = engineBase
-                    audioMs += lenMs
-                    engine!!.accept(chunk.samples) { c -> publish(c.copy(startMs = c.startMs + base, endMs = c.endMs + base), s) }
+                val s = session
+                val chunk = s.chunks.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                // 刚被取消（换语言了）：这段是新一次识别的，放回去
+                if (!isActive) {
+                    s.chunks.offerFirst(chunk)
+                    break
                 }
-            } finally {
-                cancelHandle.dispose()
-                engine?.close()
+                // 换了网页：引擎里没识别完的是旧网页的声音，不要了
+                if (s !== current) {
+                    engine?.close()
+                    engine = null
+                    current = s
+                    audioMs = 0L
+                    fedSource = null
+                }
+                // 识别跟不上、或者拖动过进度：已经播过去的声音不用识别了
+                val playing = videoTimeNow()
+                val chunkEnd = chunk.videoMs + chunk.samples.size * 1000.0 / Transcriber.SAMPLE_RATE * chunk.rate
+                if (playing != null && chunk.source == clock?.source && chunkEnd < playing - STALE_MS) { log("跳过过时的声音 ${chunk.videoMs.toLong()}（播放到 $playing）"); droppedStale = true; continue }
+                if (!heard) {
+                    heard = true
+                    _state.update { it.copy(status = if (it.cues.isEmpty()) "正在识别…（第一句要等几秒）" else null) }
+                }
+                val lenMs = chunk.samples.size * 1000L / Transcriber.SAMPLE_RATE
+                val start = chunk.videoMs.toLong()
+                val end = start + (lenMs * chunk.rate).toLong()
+                val skip = synchronized(s.anchors) {
+                    val done = s.covered.getOrPut(chunk.source) { RangeSet() }
+                    if (done.contains(start) && done.contains(end - 1)) true else {
+                        s.anchors.add(Anchor(audioMs, chunk.videoMs, chunk.rate, chunk.source))
+                        if (s.anchors.size > 2000) s.anchors.subList(0, 500).clear()
+                        done.add(start, end)
+                        false
+                    }
+                }
+                if (skip) { log("跳过已识别 $start-$end"); continue }
+                val selfGap = droppedStale && chunk.source == fedSource && start > fedEnd
+                droppedStale = false
+                if (engine != null && !selfGap && (chunk.source != fedSource || kotlin.math.abs(start - fedEnd) > GAP_MS)) {
+                    log("声音接不上（$fedSource $fedEnd → ${chunk.source} $start），重新开始识别")
+                    val base = engineBase
+                    runCatching {
+                        engine?.finish { c -> publish(c.copy(startMs = c.startMs + base, endMs = c.endMs + base), s) }
+                    }
+                    runCatching { engine?.close() }
+                    engine = null
+                }
+                fedSource = chunk.source
+                fedEnd = end
+                val curEngineType = candidates[candidateIdx]
+                if (engine == null || engineAhead != chunk.ahead) {
+                    runCatching { engine?.close() }
+                    engine = createEngine(curEngineType, settings, chunk.ahead)
+                    engineAhead = chunk.ahead
+                    engineBase = audioMs
+                }
+                val base = engineBase
+                audioMs += lenMs
+                try {
+                    engine!!.accept(chunk.samples) { c -> publish(c.copy(startMs = c.startMs + base, endMs = c.endMs + base), s) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    runCatching { engine?.close() }
+                    engine = null
+                    if (candidateIdx + 1 < candidates.size) {
+                        val failed = candidates[candidateIdx]
+                        candidateIdx++
+                        val next = candidates[candidateIdx]
+                        log("${failed.label} 识别失败（${e.message}），自动回退至 ${next.label}")
+                        _state.update { it.copy(status = "${failed.label} 异常，已自动回退至 ${next.label}…") }
+                        ensureEngineReady(next, settings)
+                        engine = createEngine(next, settings, chunk.ahead)
+                        engineAhead = chunk.ahead
+                        engineBase = audioMs - lenMs
+                        engine!!.accept(chunk.samples) { c -> publish(c.copy(startMs = c.startMs + engineBase, endMs = c.endMs + engineBase), s) }
+                    } else {
+                        throw e
+                    }
+                }
             }
+        } finally {
+            cancelHandle.dispose()
+            runCatching { engine?.close() }
+        }
     }
 
-    private fun createEngine(s: AppSettings, ahead: Boolean): SpeechEngine {
-        if (!ahead && s.streamingAvailable) s.createStreamingEngine()?.let { return it }
-        return if (s.asrEngine == AsrEngine.LOCAL) {
+    private fun createEngine(engineType: AsrEngine, s: AppSettings, ahead: Boolean): SpeechEngine {
+        if (!ahead && s.streamingAvailableFor(engineType)) s.createStreamingEngineFor(engineType)?.let { return it }
+        return if (engineType == AsrEngine.LOCAL) {
             val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
             // 本地模型要等一段话说完才出字：边播边读时一段最长 4 秒，不然字幕会晚十几秒
             Transcriber(ModelCatalog.byId(s.localModel), models, AsrLanguages.primary(s.asrLanguage), threads, if (ahead) 12f else 4f)
-        } else s.createCloudEngine().also {
+        } else s.createCloudEngineFor(engineType).also {
             // 提前送来的声音不急，按直播的分段；边播边读时分段再短一点，字幕出得快
             (it as? com.aisub.player.asr.cloud.ChunkedCloudEngine)?.useChunks(if (ahead) 4 else 2, if (ahead) 6 else 3)
         }

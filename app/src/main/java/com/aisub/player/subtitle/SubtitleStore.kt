@@ -21,8 +21,7 @@ class SubtitleStore(context: Context) {
         return File(dir, "$name.json")
     }
 
-    fun load(video: Uri): List<Cue> {
-        val file = fileFor(video)
+    private fun readCueFile(file: File): List<Cue> {
         if (!file.exists()) return emptyList()
         return try {
             val arr = JSONObject(file.readText()).getJSONArray("cues")
@@ -42,7 +41,7 @@ class SubtitleStore(context: Context) {
         }
     }
 
-    fun save(video: Uri, cues: List<Cue>) {
+    private fun writeCueFile(file: File, cues: List<Cue>) {
         val arr = JSONArray()
         for (c in cues) {
             arr.put(JSONObject().apply {
@@ -54,10 +53,40 @@ class SubtitleStore(context: Context) {
                 c.speaker?.let { put("speaker", it) }
             })
         }
-        val file = fileFor(video)
         val tmp = File(file.path + ".tmp")
         tmp.writeText(JSONObject().put("version", 1).put("cues", arr).toString())
-        tmp.renameTo(file)
+        if (!tmp.renameTo(file)) {
+            file.writeText(tmp.readText())
+            tmp.delete()
+        }
+    }
+
+    fun load(video: Uri): List<Cue> = readCueFile(fileFor(video))
+
+    fun save(video: Uri, cues: List<Cue>) = writeCueFile(fileFor(video), cues)
+
+    private fun originalBackupFile(video: Uri) = File(fileFor(video).path.removeSuffix(".json") + ".orig.json")
+
+    /** 是否已备份过该视频的原有字幕（用于语音识别/翻译后随时恢复） */
+    fun hasOriginalBackup(video: Uri): Boolean = originalBackupFile(video).exists()
+
+    /** 仅在尚无备份时写入一份原有字幕快照，防止后续 AI 识别或多次翻译破坏原字幕 */
+    fun saveOriginalBackupIfAbsent(video: Uri, cues: List<Cue>) {
+        if (cues.isEmpty()) return
+        val f = originalBackupFile(video)
+        if (!f.exists()) writeCueFile(f, cues)
+    }
+
+    /** 导入外挂/在线/提取内嵌原字幕时，同步更新原始字幕快照 */
+    fun overwriteOriginalBackup(video: Uri, cues: List<Cue>) {
+        if (cues.isEmpty()) return
+        writeCueFile(originalBackupFile(video), cues)
+    }
+
+    fun loadOriginalBackup(video: Uri): List<Cue> = readCueFile(originalBackupFile(video))
+
+    fun clearOriginalBackup(video: Uri) {
+        originalBackupFile(video).delete()
     }
 
     /** 只删字幕，留着单独选的语音语言和角色表（直播用：字幕不留，语言要记住） */
@@ -68,6 +97,7 @@ class SubtitleStore(context: Context) {
 
     fun delete(video: Uri) {
         fileFor(video).delete()
+        originalBackupFile(video).delete()
         rolesFile(video).delete()
         languageFile(video).delete()
         clearCoverage(video)

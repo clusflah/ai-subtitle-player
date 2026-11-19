@@ -1,5 +1,7 @@
 package com.aisub.player.translate
 
+import com.aisub.player.Provider
+import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -12,6 +14,94 @@ interface Translator {
 }
 
 class TranslationException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+/**
+ * 带自动故障回退的组合翻译器：
+ * 按优先级依次尝试 [candidates]；当主模型报错或返回全空结果时无缝切到下一个可用服务，
+ * 并在会话内记住最近可用的备选索引以减少后续批次超时等待（协程取消异常直接穿透，不被吞掉）。
+ */
+class FailoverTranslator(
+    private val candidates: List<Pair<Provider, Translator>>,
+    private val onFallback: ((from: Provider, to: Provider, error: Throwable) -> Unit)? = null,
+) : Translator {
+
+    init {
+        require(candidates.isNotEmpty()) { "FailoverTranslator 至少需要一个候选翻译器" }
+    }
+
+    @Volatile
+    private var preferredIndex = 0
+
+    @Volatile
+    private var lastNotifiedTarget: Provider? = null
+
+    private fun orderedIndices(): List<Int> {
+        val cur = preferredIndex.coerceIn(0, candidates.lastIndex)
+        return buildList(candidates.size) {
+            add(cur)
+            for (i in candidates.indices) {
+                if (i != cur) add(i)
+            }
+        }
+    }
+
+    override suspend fun translate(lines: List<String>, context: List<String>, targetLanguage: String): List<String?> {
+        if (lines.isEmpty()) return emptyList()
+        val hasContent = lines.any { it.isNotBlank() }
+        val primaryProvider = candidates[0].first
+        var firstError: Throwable? = null
+        var lastError: Throwable? = null
+        for (idx in orderedIndices()) {
+            val (provider, delegate) = candidates[idx]
+            try {
+                val res = delegate.translate(lines, context, targetLanguage)
+                if (hasContent && res.all { it.isNullOrBlank() }) {
+                    throw TranslationException("${provider.label} 未返回有效译文")
+                }
+                if (idx != preferredIndex) {
+                    preferredIndex = idx
+                }
+                if (idx != 0 && provider != primaryProvider && lastNotifiedTarget != provider) {
+                    lastNotifiedTarget = provider
+                    onFallback?.invoke(primaryProvider, provider, firstError ?: TranslationException("${primaryProvider.label} 不可用"))
+                }
+                return res
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                if (firstError == null) firstError = t
+                lastError = t
+            }
+        }
+        throw (firstError ?: lastError ?: TranslationException("所有翻译服务均不可用"))
+    }
+
+    override suspend fun chat(system: String, user: String): String {
+        val primaryProvider = candidates[0].first
+        var firstError: Throwable? = null
+        var lastError: Throwable? = null
+        for (idx in orderedIndices()) {
+            val (provider, delegate) = candidates[idx]
+            try {
+                val reply = delegate.chat(system, user)
+                if (idx != preferredIndex) {
+                    preferredIndex = idx
+                }
+                if (idx != 0 && provider != primaryProvider && lastNotifiedTarget != provider) {
+                    lastNotifiedTarget = provider
+                    onFallback?.invoke(primaryProvider, provider, firstError ?: TranslationException("${primaryProvider.label} 不可用"))
+                }
+                return reply
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                if (firstError == null) firstError = t
+                lastError = t
+            }
+        }
+        throw (firstError ?: lastError ?: TranslationException("所有对话服务均不可用"))
+    }
+}
 
 /** 各家 LLM 共用的提示词和结果解析。 */
 internal object TranslationPrompt {

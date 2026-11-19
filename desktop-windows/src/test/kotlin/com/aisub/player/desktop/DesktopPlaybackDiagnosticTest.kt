@@ -123,7 +123,7 @@ class DesktopPlaybackDiagnosticTest {
         return outMkv
     }
 
-    @Test
+    @Test(timeout = 60_000L)
     fun mpvLibplaceboRendersFramesAndLiveSrtSubtitles() {
         val mkv = createSyntheticDualSrtMkv()
         val player = DesktopExoPlayer(
@@ -200,7 +200,7 @@ class DesktopPlaybackDiagnosticTest {
         }
     }
 
-    @Test
+    @Test(timeout = 60_000L)
     fun vlcOnlyExposesAudioAndSubtitleTracksAndSelectsCanadianSub() {
         val mkv = createSyntheticDualSrtMkv()
         val proxy = MediaProxy(DefaultDataSource.Factory(GlobalDesktopApp))
@@ -404,13 +404,13 @@ class DesktopPlaybackDiagnosticTest {
                             )
                             out.write(payload, start, len)
                             out.flush()
-                            runCatching { s.shutdownOutput() }
                             runCatching {
-                                s.soTimeout = 1000
+                                s.soTimeout = 1500
                                 val drain = ByteArray(256)
                                 while (rawIn.read(drain) >= 0) {
                                 }
                             }
+                            runCatching { s.shutdownOutput() }
                         } finally {
                             activeConns.decrementAndGet()
                         }

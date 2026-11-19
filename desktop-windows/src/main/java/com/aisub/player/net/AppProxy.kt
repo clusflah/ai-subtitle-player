@@ -31,15 +31,20 @@ enum class ProxyType(val label: String) { OFF("不使用"), HTTP("HTTP"), SOCKS(
  */
 object AppProxy {
     @Volatile private var proxy: Proxy = Proxy.NO_PROXY
+    @Volatile private var bypassCn: Boolean = true
     private val system: ProxySelector? = ProxySelector.getDefault()
 
     val selector: ProxySelector = object : ProxySelector() {
         override fun select(uri: URI?): List<Proxy> {
+            val host = uri?.host
             // 本机与局域网地址始终直连，不受应用内代理或系统代理影响
-            if (isLocal(uri?.host)) return listOf(Proxy.NO_PROXY)
+            if (isLocal(host)) return listOf(Proxy.NO_PROXY)
             val p = proxy
             // 代理连不上（电脑关了、代理软件没开局域网连接）时接着直连，免得什么都打不开
-            if (p != Proxy.NO_PROXY) return listOf(p, Proxy.NO_PROXY)
+            if (p != Proxy.NO_PROXY) {
+                if (bypassCn && CnNetworkBypass.shouldBypass(host)) return listOf(Proxy.NO_PROXY)
+                return listOf(p, Proxy.NO_PROXY)
+            }
             return system?.select(uri) ?: listOf(Proxy.NO_PROXY)
         }
 
@@ -72,9 +77,10 @@ object AppProxy {
         }, IntentFilter(android.net.Proxy.PROXY_CHANGE_ACTION), ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
-    fun apply(context: Context, type: ProxyType, host: String, port: Int) {
+    fun apply(context: Context, type: ProxyType, host: String, port: Int, bypassCn: Boolean = true) {
         val h = host.trim()
         val on = type != ProxyType.OFF && h.isNotEmpty() && port in 1..65535
+        this.bypassCn = bypassCn
         proxy = if (!on) Proxy.NO_PROXY else Proxy(
             if (type == ProxyType.SOCKS) Proxy.Type.SOCKS else Proxy.Type.HTTP,
             InetSocketAddress.createUnresolved(h, port),
@@ -85,10 +91,15 @@ object AppProxy {
             runCatching {
                 if (on) {
                     val scheme = if (type == ProxyType.SOCKS) "socks5" else "http"
-                    val cfg = ProxyConfig.Builder().addProxyRule("$scheme://$h:$port").bypassSimpleHostnames()
+                    val builder = ProxyConfig.Builder().addProxyRule("$scheme://$h:$port").bypassSimpleHostnames()
                         .addBypassRule("127.0.0.1").addBypassRule("localhost")
-                        .addBypassRule("10.*").addBypassRule("192.168.*").addBypassRule("172.16.*").build()
-                    ProxyController.getInstance().setProxyOverride(cfg, exec) {}
+                        .addBypassRule("10.*").addBypassRule("192.168.*").addBypassRule("172.16.*")
+                    if (bypassCn) {
+                        for (rule in CnNetworkBypass.webViewBypassRules) {
+                            builder.addBypassRule(rule)
+                        }
+                    }
+                    ProxyController.getInstance().setProxyOverride(builder.build(), exec) {}
                 } else {
                     ProxyController.getInstance().clearProxyOverride(exec) {}
                 }

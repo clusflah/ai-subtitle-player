@@ -20,23 +20,45 @@ object Douban {
 
     private const val UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36"
 
-    private fun fetch(url: String, referer: String): String? {
+    private fun fetchStrict(url: String, referer: String): String {
         val req = Request.Builder().url(url).header("User-Agent", UA).header("Referer", referer).build()
-        return cloudHttp.newCall(req).execute().use { if (it.isSuccessful) it.body?.string() else null }
+        return cloudHttp.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw java.io.IOException("豆瓣 HTTP ${resp.code}")
+            resp.body?.string().orEmpty()
+        }
     }
 
     /** 阻塞调用。imdbId / doubanId 能精确匹配；否则按片名 + 年份 + 季挑最像的一条。tv 决定详情接口先试哪个。 */
     fun lookup(titles: List<String>, year: Int?, season: Int?, imdbId: String?, tv: Boolean = season != null, doubanId: String? = null): DoubanRating? {
+        var lastError: Throwable? = null
+        var anySearchSucceeded = false
+
+        fun trySuggest(q: String): List<Triple<String, String, Int?>> =
+            runCatching { suggest(q).also { anySearchSucceeded = true } }
+                .onFailure { if (lastError == null) lastError = it }
+                .getOrDefault(emptyList())
+
+        fun trySearch(q: String): List<Triple<String, String, Int?>> {
+            val s = trySuggest(q)
+            if (s.isNotEmpty()) return s
+            return runCatching { mobileSearch(q).also { anySearchSucceeded = true } }
+                .onFailure { if (lastError == null) lastError = it }
+                .getOrDefault(emptyList())
+        }
+
         val id = doubanId
-            ?: imdbId?.let { suggest(it).firstOrNull()?.first }
+            ?: imdbId?.let { trySuggest(it).firstOrNull()?.first }
             ?: titles.firstNotNullOfOrNull { title ->
                 val query = if (season != null && season > 1) "$title 第${NameParser.toCn(season)}季" else title
-                pick(search(query), year, season) ?: if (query != title) pick(search(title), year, season) else null
+                pick(trySearch(query), year, season) ?: if (query != title) pick(trySearch(title), year, season) else null
             }
-            ?: return null
+        if (id == null) {
+            if (!anySearchSucceeded && lastError != null) throw lastError!!
+            return null
+        }
         val detail = detail(id, tv)
         if (detail == null) {
-            // 移动端接口被限流时退回网页，拿评分、IMDb 与播放源平台
+            // 移动端接口被限流时退回网页，拿评分、海报、简介、IMDb 与播放源平台
             val pageData = parseSubjectPage(id, titles.firstOrNull().orEmpty(), tv)
             return DoubanRating(id, pageData.title, pageData.rating, pageData.votes, pageData.info)
         }
@@ -50,13 +72,12 @@ object Douban {
         )
     }
 
-    /** 候选条目：id、片名、年份。 */
-    private fun search(q: String): List<Triple<String, String, Int?>> = suggest(q).ifEmpty { mobileSearch(q) }
-
     private fun suggest(q: String): List<Triple<String, String, Int?>> {
         val url = "https://movie.douban.com/j/subject_suggest".toHttpUrl().newBuilder().addQueryParameter("q", q).build().toString()
-        val text = runCatching { fetch(url, "https://movie.douban.com/") }.getOrNull() ?: return emptyList()
-        val arr = runCatching { JSONArray(text) }.getOrNull() ?: return emptyList()
+        val text = fetchStrict(url, "https://movie.douban.com/")
+        val trimmed = text.trim()
+        if (!trimmed.startsWith("[")) throw java.io.IOException("豆瓣联想接口返回异常")
+        val arr = JSONArray(trimmed)
         return arr.objects().filter { it.optString("type") == "movie" && it.optString("id").isNotEmpty() }
             .map { Triple(it.optString("id"), it.optString("title"), it.optString("year").toIntOrNull()) }
     }
@@ -65,8 +86,9 @@ object Douban {
     private fun mobileSearch(q: String): List<Triple<String, String, Int?>> {
         val url = "https://m.douban.com/rexxar/api/v2/search/movie".toHttpUrl().newBuilder()
             .addQueryParameter("q", q).addQueryParameter("count", "20").build().toString()
-        val text = runCatching { fetch(url, "https://m.douban.com/") }.getOrNull() ?: return emptyList()
-        val items = runCatching { JSONObject(text).optJSONArray("items") }.getOrNull()
+        val text = fetchStrict(url, "https://m.douban.com/")
+        val obj = JSONObject(text)
+        val items = obj.optJSONArray("items") ?: return emptyList()
         return items.objects().filter { it.optString("target_type") in setOf("movie", "tv") }.mapNotNull { o ->
             val t = o.optJSONObject("target") ?: return@mapNotNull null
             Triple(t.optString("id").ifEmpty { return@mapNotNull null }, t.optString("title"), t.optString("year").toIntOrNull())
@@ -87,7 +109,7 @@ object Douban {
     /** 移动端详情：电影和剧集是两个接口，先试预期的那个。 */
     private fun detail(id: String, tv: Boolean): JSONObject? {
         for (kind in if (tv) listOf("tv", "movie") else listOf("movie", "tv")) {
-            val text = runCatching { fetch("https://m.douban.com/rexxar/api/v2/$kind/$id?ck=&for_mobile=1", "https://m.douban.com/movie/subject/$id/") }
+            val text = runCatching { fetchStrict("https://m.douban.com/rexxar/api/v2/$kind/$id?ck=&for_mobile=1", "https://m.douban.com/movie/subject/$id/") }
                 .getOrNull() ?: continue
             val j = runCatching { JSONObject(text) }.getOrNull() ?: continue
             if (j.has("title")) return j
@@ -164,8 +186,18 @@ object Douban {
     )
 
     private fun parseSubjectPage(id: String, fallbackTitle: String, tv: Boolean): SubjectPageResult {
-        val html = runCatching { fetch("https://movie.douban.com/subject/$id/", "https://movie.douban.com/") }.getOrNull()
-            ?: return SubjectPageResult(fallbackTitle, null, null, null)
+        val html = fetchStrict("https://movie.douban.com/subject/$id/", "https://movie.douban.com/")
+        val parsedTitle = Regex("""property="v:itemreviewed">([^<]+)<""").find(html)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() } ?: fallbackTitle
+        val year = Regex("""<span class="year">\((\d{4})\)</span>""").find(html)?.groupValues?.get(1).orEmpty()
+        val poster = Regex("""id="mainpic"[\s\S]*?<img[^>]+src="([^"]+)"""").find(html)?.groupValues?.get(1)?.trim()
+            ?.takeIf { it.startsWith("http") }
+            ?: Regex("""property="og:image"\s+content="([^"]+)"""").find(html)?.groupValues?.get(1)?.trim()
+                ?.takeIf { it.startsWith("http") }
+        val overview = Regex("""property="v:summary"[^>]*>([\s\S]*?)</span>""").find(html)?.groupValues?.get(1)
+            ?.replace(Regex("""<[^>]+>"""), "")
+            ?.replace(Regex("""\s+"""), " ")
+            ?.trim()
+            .orEmpty()
         val value = Regex("""property="v:average">\s*([0-9.]+)\s*<""").find(html)?.groupValues?.get(1)?.toDoubleOrNull()
         val votes = Regex("""property="v:votes">\s*(\d+)\s*<""").find(html)?.groupValues?.get(1)?.toIntOrNull()
         val imdb = Regex("""IMDb:</span>\s*(tt\d{7,})""").find(html)?.groupValues?.get(1)
@@ -179,32 +211,33 @@ object Douban {
                     url = rawHref.takeIf { it.startsWith("http://") || it.startsWith("https://") },
                 )
             }.toList()
-        val info = if (imdb != null || playSources.isNotEmpty()) {
-            MediaInfo(
-                kind = if (tv) "tv" else "movie",
-                tmdbId = 0,
-                imdbId = imdb,
-                title = fallbackTitle,
-                originalTitle = "",
-                year = "",
-                overview = "",
-                posterUrl = null,
-                backdropUrl = null,
-                genres = emptyList(),
-                length = "",
-                rating = value ?: 0.0,
-                voteCount = votes ?: 0,
-                directors = emptyList(),
-                cast = emptyList(),
-                countries = emptyList(),
-                ratingLabel = "豆瓣",
-                source = "豆瓣",
-                doubanRating = value,
-                doubanVotes = votes,
-                doubanId = id,
-                platforms = PlatformCatalog.merge(playSources),
-            )
-        } else null
-        return SubjectPageResult(fallbackTitle, value, votes, info)
+        if (value == null && poster == null && overview.isEmpty() && imdb == null && playSources.isEmpty()) {
+            throw java.io.IOException("豆瓣条目页未返回有效数据")
+        }
+        val info = MediaInfo(
+            kind = if (tv) "tv" else "movie",
+            tmdbId = 0,
+            imdbId = imdb,
+            title = parsedTitle,
+            originalTitle = "",
+            year = year,
+            overview = overview,
+            posterUrl = poster,
+            backdropUrl = null,
+            genres = emptyList(),
+            length = "",
+            rating = value ?: 0.0,
+            voteCount = votes ?: 0,
+            directors = emptyList(),
+            cast = emptyList(),
+            countries = emptyList(),
+            ratingLabel = "豆瓣",
+            source = "豆瓣",
+            doubanRating = value,
+            doubanVotes = votes,
+            doubanId = id,
+            platforms = PlatformCatalog.merge(playSources),
+        )
+        return SubjectPageResult(parsedTitle, value, votes, info)
     }
 }
