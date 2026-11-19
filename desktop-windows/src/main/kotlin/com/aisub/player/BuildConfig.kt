@@ -4,6 +4,6 @@ object BuildConfig {
     const val DEBUG: Boolean = false
     const val APPLICATION_ID: String = "com.aisub.player"
     const val BUILD_TYPE: String = "release"
-    const val VERSION_CODE: Int = 174
-    const val VERSION_NAME: String = "2.10.12"
+    const val VERSION_CODE: Int = 176
+    const val VERSION_NAME: String = "2.10.13"
 }

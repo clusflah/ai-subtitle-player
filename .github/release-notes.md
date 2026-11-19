@@ -1,4 +1,12 @@
-## 本版更新（2.10.12）
+## 本版更新（2.10.13）
+
+- **修复双地址内网 HTTPS 证书校验与系统代理旁路问题（Windows / Android / TV）**：
+  - 新增 `LanTlsSupport` 与 `Endpoints` 配对主机校验：当服务器同时配置外网域名与内网 HTTPS 地址时，内网连接自动支持外网配对域名证书（如 Let's Encrypt）及已登记私网 NAS 自签名证书（对一切公网域名与未登记主机保持严格默认 TLS 校验），解决局域网探测失败后误回退外网导致无法播放的问题。
+  - 修复 `AppProxy` 在应用内代理设为「不使用」时，中国大陆网站/IP 直连规则（`CnNetworkBypass`）未绕过操作系统全局代理（如本机 7890 端口）的问题，并补齐 `.lan`、`.home.arpa` 及 IPv6 私网/链路本地地址直连识别。
+- **修复 Windows 桌面端网络 / 鉴权失败被误报为「无法解码」的问题**：
+  - `MediaProxy` 记录真实上游 HTTP 状态码与 TLS/网络异常；`DesktopPlayerEngine`、`LibVlcCompat` 与桌面端 `VlcPlayer` 在打开失败时优先识别并透传 `ERROR_CODE_IO_BAD_HTTP_STATUS` / `ERROR_CODE_IO_NETWORK_CONNECTION_FAILED`，不再触发无效的解码器回退，也不再误关 `vulkanPlaceboSupported` 状态。
+
+## 2.10.12 更新
 
 - **默认模型与多服务自动故障回退（ASR + 翻译）**：
   - 手机与 Windows 桌面端默认离线语音识别（`sense-voice`），Android TV 默认火山豆包（`Volc`）；多端翻译默认服务统一为 `Index-Translate`。
