@@ -77,6 +77,10 @@ class MediaPlayer(libVLC: LibVLC) {
     )
     private var eventListener: EventListener? = null
 
+    @Volatile
+    var lastError: PlaybackException? = null
+        private set
+
     val vlcVout: IVLCVout = object : IVLCVout {}
     private var mediaDirty = false
     var media: Media? = null
@@ -160,6 +164,7 @@ class MediaPlayer(libVLC: LibVLC) {
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                lastError = error
                 eventListener?.onEvent(Event(Event.EncounteredError))
             }
         })
@@ -182,6 +187,7 @@ class MediaPlayer(libVLC: LibVLC) {
 
     fun play() {
         val m = media ?: return
+        lastError = null
         if (mediaDirty || engine.playbackState == Player.STATE_IDLE || engine.playbackState == Player.STATE_ENDED) {
             mediaDirty = false
             var startMs = 0L

@@ -33,30 +33,56 @@ object AppProxy {
     @Volatile private var proxy: Proxy = Proxy.NO_PROXY
     @Volatile private var bypassCn: Boolean = true
     private val system: ProxySelector? = ProxySelector.getDefault()
+    internal var systemSelectorForTest: ProxySelector? = null
 
     val selector: ProxySelector = object : ProxySelector() {
         override fun select(uri: URI?): List<Proxy> {
             val host = uri?.host
             // 本机与局域网地址始终直连，不受应用内代理或系统代理影响
             if (isLocal(host)) return listOf(Proxy.NO_PROXY)
+            // 国内站点与大陆 IP 按设置直连：即使应用代理未开启，也不应回落到系统代理（如 Clash 7890）
+            if (bypassCn && CnNetworkBypass.shouldBypass(host)) return listOf(Proxy.NO_PROXY)
             val p = proxy
             // 代理连不上（电脑关了、代理软件没开局域网连接）时接着直连，免得什么都打不开
             if (p != Proxy.NO_PROXY) {
-                if (bypassCn && CnNetworkBypass.shouldBypass(host)) return listOf(Proxy.NO_PROXY)
                 return listOf(p, Proxy.NO_PROXY)
             }
-            return system?.select(uri) ?: listOf(Proxy.NO_PROXY)
+            return (systemSelectorForTest ?: system)?.select(uri) ?: listOf(Proxy.NO_PROXY)
         }
 
         override fun connectFailed(uri: URI?, sa: SocketAddress?, ioe: IOException?) {
-            system?.connectFailed(uri, sa, ioe)
+            (systemSelectorForTest ?: system)?.connectFailed(uri, sa, ioe)
+        }
+    }
+
+    @Volatile
+    private var defaultLanSslPair: Pair<javax.net.ssl.SSLSocketFactory, javax.net.ssl.X509TrustManager>? = null
+
+    private fun lanSslPair(): Pair<javax.net.ssl.SSLSocketFactory, javax.net.ssl.X509TrustManager>? {
+        defaultLanSslPair?.let { return it }
+        return synchronized(this) {
+            defaultLanSslPair ?: runCatching {
+                LanTlsSupport.sslPair()
+            }.getOrNull()?.also { defaultLanSslPair = it }
         }
     }
 
     /** 应用里的 OkHttp 都从这里建：直接用 [selector]，不受系统改默认 ProxySelector 的影响 */
-    fun builder(): OkHttpClient.Builder = OkHttpClient.Builder().proxySelector(selector)
+    fun builder(): OkHttpClient.Builder {
+        val b = OkHttpClient.Builder()
+            .proxySelector(selector)
+            .hostnameVerifier(LanTlsSupport.hostnameVerifier())
+        lanSslPair()?.let { (sf, tm) -> b.sslSocketFactory(sf, tm) }
+        return b
+    }
 
     fun install(context: Context) {
+        lanSslPair()?.let { (sf, _) ->
+            javax.net.ssl.HttpsURLConnection.setDefaultSSLSocketFactory(sf)
+        }
+        javax.net.ssl.HttpsURLConnection.setDefaultHostnameVerifier(
+            LanTlsSupport.hostnameVerifier(javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier()),
+        )
         ProxySelector.setDefault(selector)
         // 网络切换（WiFi ↔ 移动数据）、系统代理变化时，系统会把每个进程的默认 ProxySelector 换回它自己的
         // （android.net.Proxy.setHttpProxyConfiguration），之后新建的连接就不走这里的代理了。收到变化后装回来；
@@ -138,9 +164,19 @@ object AppProxy {
             "（${failed.first().second.exceptionOrNull()?.message ?: "未知错误"}）。检查代理类型（HTTP / SOCKS5）是否选对、代理软件里的节点是否可用"
     }
 
+    internal fun isPrivateOrLocalHost(host: String?): Boolean = isLocal(host)
+
     private fun isLocal(host: String?): Boolean {
-        val h = host?.lowercase()?.trim('[', ']') ?: return true
-        if (h == "localhost" || h.endsWith(".local") || h == "::1" || (!h.contains('.') && !h.contains(':'))) return true
+        val h = host?.lowercase()?.trim('[', ']')?.substringBefore('%') ?: return true
+        if (h == "localhost" || h.endsWith(".local") || h.endsWith(".lan") || h.endsWith(".home.arpa") ||
+            h == "::1" || (!h.contains('.') && !h.contains(':'))
+        ) return true
+        if (':' in h) {
+            val firstHextet = h.substringBefore(':')
+            if (firstHextet.length == 4 &&
+                (firstHextet.startsWith("fc") || firstHextet.startsWith("fd") || firstHextet in "fe80".."febf")
+            ) return true
+        }
         // Plex 的「192-168-1-5.<编号>.plex.direct」就是局域网地址
         if (h.endsWith(".plex.direct")) h.substringBefore('.').takeIf { Regex("""\d+(-\d+){3}""").matches(it) }?.let { return isLocal(it.replace('-', '.')) }
         val p = h.split('.').mapNotNull { it.toIntOrNull() }

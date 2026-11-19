@@ -88,10 +88,13 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
             }
             MediaPlayer.Event.EncounteredError -> {
                 hasEnteredPlaying = false
-                error = PlaybackException(
-                    "VLC 无法打开这个文件（可能是加密的蓝光、损坏的镜像或网络中断）",
-                    null, PlaybackException.ERROR_CODE_UNSPECIFIED,
-                )
+                val rawUri = items.firstOrNull()?.localConfiguration?.uri?.toString()
+                error = mp.lastError
+                    ?: com.aisub.player.desktop.DesktopPlayerEngine.classifyMediaOpenFailure(rawUri, rawUri)
+                    ?: PlaybackException(
+                        "VLC 无法打开这个文件（可能是加密的蓝光、损坏的镜像或网络中断）",
+                        null, PlaybackException.ERROR_CODE_UNSPECIFIED,
+                    )
                 vlcPlaybackState = Player.STATE_IDLE
             }
             MediaPlayer.Event.LengthChanged -> durationMs = e.lengthChanged.takeIf { it > 0 } ?: C.TIME_UNSET

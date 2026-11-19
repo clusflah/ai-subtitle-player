@@ -25,6 +25,8 @@ import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -683,6 +685,113 @@ object DesktopPlayerEngine {
 
     fun applyEqualizer(enabled: Boolean, bandLevels: ShortArray) {
         activePlayer?.applyEqualizer(enabled, bandLevels)
+    }
+
+    private val ffmpegHttpStatusRegex = Regex("""(?i)(?:Server returned|HTTP error)\s+(\d{3})""")
+
+    private val ffmpegNetIoKeywords = listOf(
+        "connection refused",
+        "connection timed out",
+        "timed out",
+        "connection reset",
+        "handshake",
+        "ssl",
+        "tls",
+        "certificate",
+        "failed to resolve hostname",
+        "name or service not known",
+        "network is unreachable",
+        "no route to host",
+        "broken pipe",
+        "input/output error",
+        "i/o error",
+        "immediate exit requested",
+    )
+
+    @OptIn(androidx.media3.common.util.UnstableApi::class)
+    internal fun classifyMediaOpenFailure(
+        url: String?,
+        rawItemUri: String? = null,
+        stderrText: String? = null,
+    ): PlaybackException? {
+        val upstreamErr = MediaProxy.findRecentUpstreamError(url)
+            ?: MediaProxy.findRecentUpstreamError(rawItemUri)
+        if (upstreamErr != null) {
+            return if (upstreamErr.httpStatusCode != null) {
+                PlaybackException(
+                    "服务器返回 HTTP ${upstreamErr.httpStatusCode}: ${upstreamErr.message}",
+                    upstreamErr.cause,
+                    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+                )
+            } else {
+                PlaybackException(
+                    "网络连接失败: ${upstreamErr.message}",
+                    upstreamErr.cause,
+                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+                )
+            }
+        }
+
+        val err = stderrText?.trim().orEmpty()
+        if (err.isEmpty()) return null
+
+        val lowerErr = err.lowercase()
+        val isLoopbackProxy = url?.let {
+            it.startsWith("http://127.0.0.1:", ignoreCase = true) ||
+                it.startsWith("http://localhost:", ignoreCase = true)
+        } == true
+        val isNetOrProxy = isLoopbackProxy ||
+            url?.let {
+                it.startsWith("http://", true) || it.startsWith("https://", true) ||
+                    it.startsWith("rtsp://", true) || it.startsWith("rtmp://", true)
+            } == true ||
+            rawItemUri?.let {
+                it.startsWith("http://", true) || it.startsWith("https://", true) ||
+                    it.startsWith("cloud://", true) || it.startsWith("tg://", true) ||
+                    it.startsWith("rtsp://", true) || it.startsWith("rtmp://", true)
+            } == true
+
+        val matchedCode = ffmpegHttpStatusRegex.find(err)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: when {
+                "502 bad gateway" in lowerErr -> 502
+                "401 unauthorized" in lowerErr -> 401
+                "403 forbidden" in lowerErr -> 403
+                "404 not found" in lowerErr -> 404
+                else -> null
+            }
+        if (matchedCode != null) {
+            // 本机 MediaProxy 在上游 TLS/网络失败时固定返回 502，应归类为网络连接失败而非误判无法解码
+            if (isLoopbackProxy && matchedCode == 502) {
+                return PlaybackException(
+                    "网络连接或代理读取失败 ($err)",
+                    java.io.IOException(err),
+                    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+                )
+            }
+            val causeUri = runCatching { Uri.parse(rawItemUri ?: url ?: "http://localhost") }.getOrElse { Uri.EMPTY }
+            val cause = HttpDataSource.InvalidResponseCodeException(
+                matchedCode,
+                null,
+                java.io.IOException(err),
+                emptyMap(),
+                DataSpec(causeUri),
+                ByteArray(0),
+            )
+            return PlaybackException(
+                "服务器返回 HTTP $matchedCode ($err)",
+                cause,
+                PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+            )
+        }
+
+        if (isNetOrProxy && (ffmpegNetIoKeywords.any { it in lowerErr } || "end of file" in lowerErr)) {
+            return PlaybackException(
+                "网络连接失败 ($err)",
+                java.io.IOException(err),
+                PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+            )
+        }
+        return null
     }
 }
 
@@ -2243,16 +2352,22 @@ class DesktopExoPlayer(
         startVlcNetworkStatsSampler(gen, url)
         // 25 秒打开超时守护：若仍在有效下载缓冲则宽限 20 秒，否则自动切换 FFmpeg 兜底
         watchdogPool.schedule({
-            if (gen == mediaGeneration.get() && playWhenReady && !vlcPlayedCurrentItem && !renderedFirstFrame.get() && !ffmpegRunning.get()) {
+            if (gen == mediaGeneration.get() && vlcHasActiveMedia && playbackState != Player.STATE_IDLE &&
+                playWhenReady && !vlcPlayedCurrentItem && !renderedFirstFrame.get() && !ffmpegRunning.get()
+            ) {
                 val activeDownload = lastVlcCachePercent > 0f || DesktopPlayerEngine.currentDownloadSpeedBytesPerSec() > 0L
                 if (activeDownload) {
                     val speedStr = DesktopPlayerEngine.formatNetworkSpeed(DesktopPlayerEngine.currentDownloadSpeedBytesPerSec())
                     Log.i(TAG, "VLC 仍在下载缓冲 (${lastVlcCachePercent.toInt()}%, $speedStr)，继续等待最多 20s: ${redactUrlForLog(url)}")
                     watchdogPool.schedule({
-                        if (gen == mediaGeneration.get() && playWhenReady && !vlcPlayedCurrentItem && !renderedFirstFrame.get() && !ffmpegRunning.get()) {
+                        if (gen == mediaGeneration.get() && vlcHasActiveMedia && playbackState != Player.STATE_IDLE &&
+                            playWhenReady && !vlcPlayedCurrentItem && !renderedFirstFrame.get() && !ffmpegRunning.get()
+                        ) {
                             Log.w(TAG, "VLC 打开媒体超过 45s 仍未起播，自动切换 FFmpeg 兜底: ${redactUrlForLog(url)}")
                             vlcExecutor.execute {
-                                if (gen == mediaGeneration.get() && !vlcPlayedCurrentItem && !renderedFirstFrame.get() && !ffmpegRunning.get()) {
+                                if (gen == mediaGeneration.get() && vlcHasActiveMedia && playbackState != Player.STATE_IDLE &&
+                                    !vlcPlayedCurrentItem && !renderedFirstFrame.get() && !ffmpegRunning.get()
+                                ) {
                                     stopVlcWithTimeoutOnExecutor()
                                     startWithFfmpeg(gen, url, lastHeaders, positionMsInternal)
                                 }
@@ -2262,7 +2377,9 @@ class DesktopExoPlayer(
                 } else {
                     Log.w(TAG, "VLC 打开媒体超过 25s 无响应，自动切换 FFmpeg 兜底: ${redactUrlForLog(url)}")
                     vlcExecutor.execute {
-                        if (gen == mediaGeneration.get() && !vlcPlayedCurrentItem && !renderedFirstFrame.get() && !ffmpegRunning.get()) {
+                        if (gen == mediaGeneration.get() && vlcHasActiveMedia && playbackState != Player.STATE_IDLE &&
+                            !vlcPlayedCurrentItem && !renderedFirstFrame.get() && !ffmpegRunning.get()
+                        ) {
                             stopVlcWithTimeoutOnExecutor()
                             startWithFfmpeg(gen, url, lastHeaders, positionMsInternal)
                         }
@@ -2511,7 +2628,13 @@ class DesktopExoPlayer(
                 vlcStatsFuture = null
                 val gen = mediaGeneration.get()
                 val fallbackUrl = lastPlayableUrl
+                val rawUriStr = currentMediaItem?.localConfiguration?.uri?.toString()
                 Log.w(TAG, "VLC 播放报错: played=$vlcPlayedCurrentItem, url=${redactUrlForLog(fallbackUrl)}")
+                val confirmedIoErr = DesktopPlayerEngine.classifyMediaOpenFailure(fallbackUrl, rawUriStr)
+                if (confirmedIoErr != null) {
+                    onError(confirmedIoErr)
+                    return
+                }
                 if (!vlcPlayedCurrentItem && fallbackUrl != null && !ffmpegRunning.get()) {
                     vlcExecutor.execute {
                         if (gen == mediaGeneration.get() && !ffmpegRunning.get()) {
@@ -3222,6 +3345,16 @@ class DesktopExoPlayer(
             val probed = probeMediaStreamsCached(effectiveUrl, effectiveHeaders, timeoutSec = 8L)
             if (gen != mediaGeneration.get() || !ffmpegRunning.get()) return@submit
 
+            val rawUriStr = currentMediaItem?.localConfiguration?.uri?.toString().orEmpty()
+            if (probed == null) {
+                val ioErr = DesktopPlayerEngine.classifyMediaOpenFailure(effectiveUrl, rawUriStr)
+                if (ioErr != null) {
+                    ffmpegRunning.set(false)
+                    onError(ioErr)
+                    return@submit
+                }
+            }
+
             val srcWidth = probed?.srcWidth ?: 1280
             val srcHeight = probed?.srcHeight ?: 720
             val hasVideo = probed?.hasVideo ?: true
@@ -3229,7 +3362,6 @@ class DesktopExoPlayer(
             val fps = probed?.fps ?: 24.0
             val dvProfile = probed?.dvProfile ?: detectedDolbyProfile
             if (dvProfile != null) detectedDolbyProfile = dvProfile
-            val rawUriStr = currentMediaItem?.localConfiguration?.uri?.toString().orEmpty()
             val cachedColorHdr = colorSniffCache[rawUriStr]?.isHdrOrWideGamut == true
             val streamIsHdrOrDv = (probed?.isHdrOrDv == true) || dvProfile != null || cachedColorHdr
 
@@ -3697,6 +3829,16 @@ class DesktopExoPlayer(
             }
 
             if (framesRead == 0L && ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                val ioErr = DesktopPlayerEngine.classifyMediaOpenFailure(
+                    url = url,
+                    rawItemUri = currentMediaItem?.localConfiguration?.uri?.toString(),
+                    stderrText = stderrTailRef.get(),
+                )
+                if (ioErr != null) {
+                    ffmpegRunning.set(false)
+                    onError(ioErr)
+                    return@submit
+                }
                 // 1) 若 D3D11VA 硬解初始化失败（如老显卡不支持 HEVC Main10 硬解），优先降级为多线程软解 + Vulkan libplacebo（保持杜比视界正常色彩）
                 if (useD3d11Hwdec) {
                     Log.w(TAG, "当前显卡不支持 D3D11VA 硬解该流，自动回退至多线程解码 + libplacebo 色彩管线")
@@ -4187,6 +4329,16 @@ class DesktopExoPlayer(
                 }
             }
             if (framesRead == 0L && ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                val ioErr = DesktopPlayerEngine.classifyMediaOpenFailure(
+                    url = url,
+                    rawItemUri = currentMediaItem?.localConfiguration?.uri?.toString(),
+                    stderrText = stderrTailRef.get(),
+                )
+                if (ioErr != null) {
+                    ffmpegRunning.set(false)
+                    onError(ioErr)
+                    return@submit
+                }
                 if (useD3d11Hwdec) {
                     startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = filterMode, useD3d11Hwdec = false, isHdrOrDv = isHdrOrDv, subtitleStreams = subtitleStreams)
                     return@submit
@@ -4236,9 +4388,8 @@ class DesktopExoPlayer(
                         ),
                     )
                 }
-                val proc = ProcessBuilder(cmd)
-                    .redirectError(ProcessBuilder.Redirect.DISCARD)
-                    .start()
+                val proc = ProcessBuilder(cmd).start()
+                val procTail = captureProcessStderrTail(proc)
                 ffmpegAudioProc = proc
                 val bytesPlayed = pumpPcmToAudioLine(
                     gen = gen,
@@ -4249,6 +4400,18 @@ class DesktopExoPlayer(
                     playbackSpeed = curSpeed,
                 )
                 proc.destroy()
+                if (bytesPlayed == 0L && ffmpegRunning.get() && gen == mediaGeneration.get()) {
+                    val ioErr = DesktopPlayerEngine.classifyMediaOpenFailure(
+                        url = url,
+                        rawItemUri = currentMediaItem?.localConfiguration?.uri?.toString(),
+                        stderrText = procTail.get(),
+                    )
+                    if (ioErr != null) {
+                        ffmpegRunning.set(false)
+                        onError(ioErr)
+                        return@submit
+                    }
+                }
                 if (endWhenDone && ffmpegRunning.get() && gen == mediaGeneration.get() && bytesPlayed > 0L) {
                     onItemEnded()
                 }

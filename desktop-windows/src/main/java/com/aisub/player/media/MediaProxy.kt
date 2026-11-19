@@ -50,6 +50,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
         }
         val token = UUID.randomUUID().toString().replace("-", "")
         val uriKey = uri.toString()
+        clearUpstreamError(null, uriKey)
         routes[token] = uri
         uriStates.computeIfAbsent(uriKey) { UriStreamState(uri) }
         if (uriStates.size > MAX_CACHED_URIS) {
@@ -107,7 +108,8 @@ class MediaProxy(private val factory: DataSource.Factory) {
         }
         val (method, path) = requestLine.split(' ').let { (it.getOrNull(0) ?: "") to (it.getOrNull(1) ?: "") }
         val out = BufferedOutputStream(client.getOutputStream(), IO_BUFFER_BYTES)
-        val uri = routes[path.trimStart('/').substringBefore('/')]
+        val token = path.trimStart('/').substringBefore('/')
+        val uri = routes[token]
         if (uri == null || (method != "GET" && method != "HEAD")) {
             out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
             out.flush()
@@ -224,6 +226,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
                     state.active = null
                     openUpstreamImpl(
                         state = state,
+                        token = token,
                         uri = uri,
                         singleFlight = true,
                         mySeq = mySeq,
@@ -238,6 +241,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
             } else {
                 openUpstreamImpl(
                     state = state,
+                    token = token,
                     uri = uri,
                     singleFlight = false,
                     mySeq = mySeq,
@@ -277,8 +281,28 @@ class MediaProxy(private val factory: DataSource.Factory) {
             out.flush()
             completedCleanly = stillValid() && !activeHandle.preempted
         } catch (e: Exception) {
-            if (stillValid() && e !is InterruptedIOException) {
+            val isTimeout = e is java.net.SocketTimeoutException
+            val isSuperseded = !stillValid() || activeHandle?.preempted == true ||
+                (e is InterruptedIOException && !isTimeout)
+            if (!isSuperseded) {
                 Log.d("Voxtitle", "中转连接结束：${e.message}")
+                if (!headersSent) {
+                    val httpCode = (e as? HttpDataSource.InvalidResponseCodeException)?.responseCode
+                        ?: HTTP_STATUS_IN_MSG.find(e.message.orEmpty())?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    val ioCause = e as? java.io.IOException
+                        ?: java.io.IOException(e.message ?: e.javaClass.simpleName, e)
+                    recordUpstreamError(
+                        token = token,
+                        targetUri = uri.toString(),
+                        error = UpstreamError(
+                            targetUri = uri.toString(),
+                            httpStatusCode = httpCode,
+                            causeClass = e.javaClass.name,
+                            message = e.message ?: e.javaClass.simpleName,
+                            cause = ioCause,
+                        ),
+                    )
+                }
             }
             if (!headersSent) {
                 runCatching {
@@ -324,6 +348,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
 
     private fun openUpstreamImpl(
         state: UriStreamState,
+        token: String,
         uri: Uri,
         singleFlight: Boolean,
         mySeq: Long,
@@ -369,6 +394,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
                     detachHandle()
                     throw InterruptedIOException("Superseded while opening upstream")
                 }
+                clearUpstreamError(token, uri.toString())
                 val endExclusive = if (opened == C.LENGTH_UNSET.toLong()) null else start + opened
                 val upstreamTotal = src.getResponseHeaders().entries
                     .firstOrNull { it.key.equals("Content-Range", ignoreCase = true) }
@@ -409,6 +435,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
         if (code != null) {
             return code == 401 || code == 403 || code == 429 || code == 500 || code == 502 || code == 503 || code == 504
         }
+        if (e is java.net.SocketException) return true
         val msg = e.message.orEmpty()
         return msg.contains("HTTP 401") || msg.contains("HTTP 403") || msg.contains("HTTP 429") || msg.contains("HTTP 502") || msg.contains("HTTP 503")
     }
@@ -678,11 +705,57 @@ class MediaProxy(private val factory: DataSource.Factory) {
         }
     }
 
+    data class UpstreamError(
+        val targetUri: String,
+        val httpStatusCode: Int?,
+        val causeClass: String,
+        val message: String,
+        val cause: java.io.IOException,
+        val timestampMs: Long = System.currentTimeMillis(),
+    )
+
     companion object {
         private const val IO_BUFFER_BYTES = 256 * 1024
         private const val SOCKET_SEND_BUFFER_BYTES = 1024 * 1024
         private const val PREEMPT_SETTLE_MS = 45L
         private const val MAX_PURE_CACHE_READ_BYTES = 4L * 1024 * 1024
         private const val MAX_CACHED_URIS = 3
+        private const val UPSTREAM_ERROR_TTL_MS = 60_000L
+        private val HTTP_STATUS_IN_MSG = Regex("""HTTP\s+(\d{3})""")
+        private val recentUpstreamErrors = ConcurrentHashMap<String, UpstreamError>()
+
+        private fun extractTokenFromProxyUrl(url: String?): String? {
+            if (url.isNullOrBlank()) return null
+            if (!url.startsWith("http://127.0.0.1:", ignoreCase = true) &&
+                !url.startsWith("http://localhost:", ignoreCase = true)
+            ) return null
+            return runCatching {
+                java.net.URI(url).rawPath?.trimStart('/')?.substringBefore('/')?.takeIf { it.isNotEmpty() }
+            }.getOrNull()
+        }
+
+        internal fun recordUpstreamError(token: String?, targetUri: String, error: UpstreamError) {
+            if (recentUpstreamErrors.size > 64) {
+                val cutoff = System.currentTimeMillis() - UPSTREAM_ERROR_TTL_MS
+                recentUpstreamErrors.entries.removeIf { it.value.timestampMs < cutoff }
+            }
+            recentUpstreamErrors[targetUri] = error
+            if (!token.isNullOrEmpty()) recentUpstreamErrors[token] = error
+        }
+
+        internal fun clearUpstreamError(token: String?, targetUri: String) {
+            if (!token.isNullOrEmpty()) recentUpstreamErrors.remove(token)
+            recentUpstreamErrors.remove(targetUri)
+        }
+
+        fun findRecentUpstreamError(urlOrUri: String?, maxAgeMs: Long = UPSTREAM_ERROR_TTL_MS): UpstreamError? {
+            if (urlOrUri.isNullOrBlank()) return null
+            val hit = extractTokenFromProxyUrl(urlOrUri)?.let { recentUpstreamErrors[it] }
+                ?: recentUpstreamErrors[urlOrUri]
+                ?: return null
+            return hit.takeIf { System.currentTimeMillis() - it.timestampMs <= maxAgeMs }
+        }
+
+        internal fun clearRecentErrorsForTest() = recentUpstreamErrors.clear()
     }
 }
