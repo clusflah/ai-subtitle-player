@@ -100,6 +100,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -239,6 +240,16 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
     // ---- 播放状态轮询 ----
     var positionMs by remember { mutableLongStateOf(0L) }
+    var seekHoldPosMs by remember(player) { mutableLongStateOf(-1L) }
+    var seekHoldUntilMs by remember(player) { mutableLongStateOf(0L) }
+    fun performSeek(targetMs: Long) {
+        val dur = player.duration.takeIf { it > 0 }
+        val clamped = targetMs.coerceIn(0L, dur ?: Long.MAX_VALUE)
+        player.seekTo(clamped)
+        positionMs = clamped
+        seekHoldPosMs = clamped
+        seekHoldUntilMs = System.currentTimeMillis() + 550L
+    }
     var isPlaying by remember { mutableStateOf(player.isPlaying) }
     // 按钮图标跟随"想要播放"，缓冲时也显示暂停，避免看起来像没反应
     var wantsPlay by remember { mutableStateOf(player.playWhenReady) }
@@ -247,7 +258,14 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     var lastSpeedSampleMs by remember { mutableLongStateOf(0L) }
     LaunchedEffect(player) {
         while (true) {
-            positionMs = player.currentPosition
+            val rawPos = player.currentPosition
+            val nowMs = System.currentTimeMillis()
+            if (seekHoldPosMs >= 0L && nowMs < seekHoldUntilMs && kotlin.math.abs(rawPos - seekHoldPosMs) > 1_500L) {
+                positionMs = seekHoldPosMs
+            } else {
+                if (seekHoldPosMs >= 0L) seekHoldPosMs = -1L
+                positionMs = rawPos
+            }
             isPlaying = player.isPlaying
             wantsPlay = player.playWhenReady && player.playbackState != Player.STATE_IDLE && player.playbackState != Player.STATE_ENDED
             val isBuf = player.playbackState == Player.STATE_BUFFERING
@@ -516,8 +534,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
         val duration = player.duration.takeIf { it > 0 }
         if (!isLive || (!player.isCurrentMediaItemLive && duration != null)) {
             val target = (player.currentPosition + delta).coerceIn(0L, duration ?: Long.MAX_VALUE)
-            player.seekTo(target)
-            positionMs = target
+            performSeek(target)
             indicator = (if (delta > 0) AppIcons.FastForward else AppIcons.FastRewind) to
                 "${formatClock(target)} / ${formatClock(duration ?: 0L)}"
         }
@@ -816,6 +833,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
             onSeekPreview = { gesturePreview = it },
             speed = { speed },
             player = player,
+            onSeek = ::performSeek,
             onTogglePlay = vm::togglePlay,
         )
 
@@ -1259,7 +1277,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                     }
                 }
                 // 真正的直播流没有时长、不能拖；有些"直播源"其实是点播流，仍然显示进度条
-                val seekable = !isLive || (!player.isCurrentMediaItemLive && duration > 0)
+                val seekable = duration > 0 && (!isLive || !player.isCurrentMediaItemLive)
                 val fraction = if (duration > 0) ((dragging ?: positionMs.toFloat()) / duration).coerceIn(0f, 1f) else 0f
                 dragging?.let { ms ->
                     SeekPreview(
@@ -1300,7 +1318,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                                 bookmarks = extras.bookmarks.map { it.positionMs },
                                 isDragging = dragging != null,
                                 onDrag = { f -> dragging = f * duration; vm.extras.requestThumbnail((f * duration).toLong()); interactions++ },
-                                onDragEnd = { dragging?.let { player.seekTo(it.toLong()) }; dragging = null; vm.extras.clearThumbnail() },
+                                onDragEnd = { dragging?.let { performSeek(it.toLong()) }; dragging = null; vm.extras.clearThumbnail() },
                             )
                         }
                         Text(
@@ -2106,12 +2124,19 @@ private fun GestureLayer(
     onSeekPreview: (Long?) -> Unit,
     speed: () -> Float,
     player: Player,
+    onSeek: (Long) -> Unit = { player.seekTo(it) },
     onTogglePlay: () -> Unit,
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
     val audio = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     val maxVolume = remember { audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC) }
+    val currentOnTap by rememberUpdatedState(onTap)
+    val currentOnIndicator by rememberUpdatedState(onIndicator)
+    val currentOnSeekPreview by rememberUpdatedState(onSeekPreview)
+    val currentSpeed by rememberUpdatedState(speed)
+    val currentOnSeek by rememberUpdatedState(onSeek)
+    val currentOnTogglePlay by rememberUpdatedState(onTogglePlay)
     var dragMode by remember { mutableStateOf(DragMode.NONE) }
     var seekTarget by remember { mutableLongStateOf(0L) }
     var brightness by remember { mutableFloatStateOf(0.5f) }
@@ -2120,34 +2145,34 @@ private fun GestureLayer(
 
     Box(
         Modifier.fillMaxSize()
-            .pointerInput(locked) {
+            .pointerInput(locked, player) {
                 detectTapGestures(
-                    onTap = { onTap() },
+                    onTap = { currentOnTap() },
                     onDoubleTap = { offset ->
                         if (locked) return@detectTapGestures
                         val third = size.width / 3f
                         when {
-                            offset.x < third -> { player.seekTo((player.currentPosition - 10_000).coerceAtLeast(0)); onIndicator(null to "« 10 秒") }
-                            offset.x > third * 2 -> { player.seekTo(player.currentPosition + 10_000); onIndicator(null to "10 秒 »") }
-                            else -> onTogglePlay()
+                            offset.x < third -> { currentOnSeek((player.currentPosition - 10_000).coerceAtLeast(0)); currentOnIndicator(null to "« 10 秒") }
+                            offset.x > third * 2 -> { currentOnSeek(player.currentPosition + 10_000); currentOnIndicator(null to "10 秒 »") }
+                            else -> currentOnTogglePlay()
                         }
                     },
                     onLongPress = {
                         if (locked || !player.isPlaying) return@detectTapGestures
                         longPressing = true
                         player.setPlaybackSpeed(2f)
-                        onIndicator(null to "2 倍速播放中")
+                        currentOnIndicator(null to "2 倍速播放中")
                     },
                     onPress = {
                         tryAwaitRelease()
                         if (longPressing) {
                             longPressing = false
-                            player.setPlaybackSpeed(speed())
+                            player.setPlaybackSpeed(currentSpeed())
                         }
                     },
                 )
             }
-            .pointerInput(locked) {
+            .pointerInput(locked, player) {
                 if (locked) return@pointerInput
                 var accX = 0f
                 var accY = 0f
@@ -2162,11 +2187,13 @@ private fun GestureLayer(
                         volumeF = audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
                     },
                     onDragEnd = {
-                        if (dragMode == DragMode.SEEK) player.seekTo(seekTarget)
+                        if (dragMode == DragMode.SEEK && (player.duration > 0 || player.isCurrentMediaItemSeekable)) {
+                            currentOnSeek(seekTarget)
+                        }
                         dragMode = DragMode.NONE
-                        onSeekPreview(null)
+                        currentOnSeekPreview(null)
                     },
-                    onDragCancel = { dragMode = DragMode.NONE; onSeekPreview(null) },
+                    onDragCancel = { dragMode = DragMode.NONE; currentOnSeekPreview(null) },
                     onDrag = { change, delta ->
                         change.consume()
                         accX += delta.x
@@ -2180,21 +2207,22 @@ private fun GestureLayer(
                         }
                         when (dragMode) {
                             DragMode.SEEK -> {
+                                if (player.duration <= 0 && !player.isCurrentMediaItemSeekable) return@detectDragGestures
                                 val duration = player.duration.takeIf { it > 0 } ?: Long.MAX_VALUE
                                 seekTarget = (seekTarget + (delta.x / size.width * 120_000).toLong()).coerceIn(0, duration)
                                 val diff = seekTarget - player.currentPosition
-                                onIndicator(null to "${if (diff >= 0) "+" else "-"}${formatDuration(abs(diff).coerceAtLeast(1000))}  ${formatClock(seekTarget)}")
-                                onSeekPreview(seekTarget)
+                                currentOnIndicator(null to "${if (diff >= 0) "+" else "-"}${formatDuration(abs(diff).coerceAtLeast(1000))}  ${formatClock(seekTarget)}")
+                                currentOnSeekPreview(seekTarget)
                             }
                             DragMode.BRIGHTNESS -> {
                                 brightness = (brightness - delta.y / size.height).coerceIn(0.01f, 1f)
                                 activity?.window?.let { w -> w.attributes = w.attributes.apply { screenBrightness = brightness } }
-                                onIndicator(AppIcons.Brightness to "${(brightness * 100).roundToInt()}%")
+                                currentOnIndicator(AppIcons.Brightness to "${(brightness * 100).roundToInt()}%")
                             }
                             DragMode.VOLUME -> {
                                 volumeF = (volumeF - delta.y / size.height * maxVolume * 1.5f).coerceIn(0f, maxVolume.toFloat())
                                 audio.setStreamVolume(AudioManager.STREAM_MUSIC, volumeF.roundToInt(), 0)
-                                onIndicator(AppIcons.Volume to "${(volumeF / maxVolume * 100).roundToInt()}%")
+                                currentOnIndicator(AppIcons.Volume to "${(volumeF / maxVolume * 100).roundToInt()}%")
                             }
                             DragMode.NONE -> {}
                         }

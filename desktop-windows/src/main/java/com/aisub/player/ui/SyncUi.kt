@@ -1,10 +1,15 @@
 package com.aisub.player.ui
 
 import android.text.format.DateUtils
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -12,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -28,6 +34,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,6 +42,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -65,12 +73,50 @@ fun MultiDeviceSyncCard(
     var cfg by remember { mutableStateOf(MultiDeviceSync.loadConfig(context)) }
     var testing by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<String?>(null) }
+    var subdirs by remember { mutableStateOf<List<String>>(emptyList()) }
+    var loadingSubdirs by remember { mutableStateOf(false) }
+    var subdirError by remember { mutableStateOf<String?>(null) }
     var lanHostOpen by remember { mutableStateOf(false) }
     var lanClientOpen by remember { mutableStateOf(false) }
+
+    fun isRootWebDavUrl(raw: String): Boolean {
+        val clean = raw.trim().trimEnd('/')
+        if (!clean.startsWith("http://", ignoreCase = true) && !clean.startsWith("https://", ignoreCase = true)) return false
+        return runCatching { java.net.URI(clean).path.orEmpty().trim('/').isEmpty() }.getOrDefault(false)
+    }
+
+    val isRootUrl = isRootWebDavUrl(cfg.webdavUrl)
+    var guideUserToggled by remember { mutableStateOf(false) }
+    var guideExpanded by remember {
+        mutableStateOf(isRootWebDavUrl(cfg.webdavUrl) || runtimeState.error != null)
+    }
+    LaunchedEffect(isRootUrl, runtimeState.error, testResult) {
+        if (!guideUserToggled && (isRootUrl || runtimeState.error != null || testResult?.startsWith("连接失败") == true)) {
+            guideExpanded = true
+        }
+    }
 
     fun updateCfg(next: SyncConfig) {
         cfg = next
         MultiDeviceSync.saveConfig(context, next)
+    }
+
+    fun probeSubdirs(url: String, user: String, pass: String) {
+        if (loadingSubdirs || url.isBlank()) return
+        loadingSubdirs = true
+        subdirError = null
+        scope.launch {
+            MultiDeviceSync.listWebDavSubdirs(url, user, pass)
+                .onSuccess { list ->
+                    subdirs = list
+                    if (list.isEmpty()) subdirError = "当前路径下未找到可用子文件夹"
+                }
+                .onFailure { e ->
+                    subdirs = emptyList()
+                    subdirError = e.message ?: "读取子目录失败"
+                }
+            loadingSubdirs = false
+        }
     }
 
     val webdavCandidates = remember(existingServers) {
@@ -112,24 +158,104 @@ fun MultiDeviceSyncCard(
             Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("WebDAV 云端多端同步", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "支持坚果云、群晖 NAS、OpenList/AList（/dav）、Nextcloud 等任意 WebDAV 服务；自动在启动与退出播放时双向合并最新进度与海报墙。",
+                    "支持坚果云、群晖/飞牛 NAS、OpenList/AList、Nextcloud 等 WebDAV 服务；自动在启动与退出播放时双向合并最新进度与海报墙。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
+                val guideShape = RoundedCornerShape(12.dp)
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(guideShape)
+                        .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), guideShape),
+                ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                guideUserToggled = true
+                                guideExpanded = !guideExpanded
+                            }
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(AppIcons.Info, null, tint = Orange, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "查看各网盘 / NAS 地址填写规范",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Icon(
+                            if (guideExpanded) AppIcons.ArrowDropUp else AppIcons.ArrowDropDown,
+                            contentDescription = if (guideExpanded) "收起" else "展开",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                    AnimatedVisibility(guideExpanded) {
+                        Column(
+                            Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            Text(
+                                "• 群晖 / 飞牛 / 威联通 NAS：不能只填根端口（如 https://域名:5006），必须在末尾加上已开启读写权限的共享文件夹名，例如 https://域名:5006/home 或 https://域名:5006/video（根目录下直接同步会报 HTTP 405）。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                "• OpenList / AList：地址必须带 /dav/ 前缀并指向具体可写挂载目录，例如 http://IP:5244/dav/本地存储，并在后台为该用户开启「WebDAV 管理 / 写入」权限。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                "• 坚果云：地址填 https://dav.jianguoyun.com/dav/，「密码」栏必须填写坚果云网页端「账户信息 → 安全选项 → 第三方应用管理」中生成的应用密码。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                "• Nextcloud / ownCloud：地址填 https://域名/remote.php/dav/files/你的用户名/",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+
                 if (webdavCandidates.isNotEmpty()) {
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         webdavCandidates.forEach { srv ->
+                            val cleanSrvBase = srv.baseUrl.trim().trimEnd('/')
+                            val curUrlClean = cfg.webdavUrl.trim().trimEnd('/')
+                            val isSelected = cfg.webdavUser == srv.username &&
+                                (curUrlClean.equals(cleanSrvBase, ignoreCase = true) ||
+                                    curUrlClean.startsWith("$cleanSrvBase/", ignoreCase = true))
                             FilterChip(
-                                selected = cfg.webdavUrl == srv.baseUrl && cfg.webdavUser == srv.username,
+                                selected = isSelected,
                                 onClick = {
+                                    val rootPart = srv.rootPath.trim().trim('/')
+                                    val targetUrl = if (rootPart.isNotEmpty() && !cleanSrvBase.endsWith("/$rootPart", ignoreCase = true)) {
+                                        "$cleanSrvBase/$rootPart"
+                                    } else {
+                                        cleanSrvBase
+                                    }
+                                    testResult = null
+                                    subdirError = null
+                                    subdirs = emptyList()
+                                    MultiDeviceSync.clearMessages()
                                     updateCfg(
                                         cfg.copy(
-                                            webdavUrl = srv.baseUrl,
+                                            webdavUrl = targetUrl,
                                             webdavUser = srv.username,
                                             webdavPass = srv.password,
                                         ),
                                     )
+                                    if (isRootWebDavUrl(targetUrl) && srv.username.isNotBlank()) {
+                                        probeSubdirs(targetUrl, srv.username, srv.password)
+                                    }
                                 },
                                 label = { Text("复用「${srv.name}」", fontSize = 12.sp) },
                             )
@@ -139,9 +265,15 @@ fun MultiDeviceSyncCard(
 
                 OutlinedTextField(
                     value = cfg.webdavUrl,
-                    onValueChange = { updateCfg(cfg.copy(webdavUrl = it)) },
-                    label = { Text("WebDAV 地址") },
-                    placeholder = { Text("例如 https://dav.jianguoyun.com/dav/") },
+                    onValueChange = {
+                        testResult = null
+                        subdirError = null
+                        subdirs = emptyList()
+                        MultiDeviceSync.clearMessages()
+                        updateCfg(cfg.copy(webdavUrl = it))
+                    },
+                    label = { Text("WebDAV 地址（需包含可写共享文件夹路径）") },
+                    placeholder = { Text("例如 https://域名:5006/home 或 https://dav.jianguoyun.com/dav/") },
                     singleLine = true,
                     phoneInput = true,
                     phoneLabel = "WebDAV 地址",
@@ -151,7 +283,12 @@ fun MultiDeviceSyncCard(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = cfg.webdavUser,
-                        onValueChange = { updateCfg(cfg.copy(webdavUser = it)) },
+                        onValueChange = {
+                            testResult = null
+                            subdirError = null
+                            MultiDeviceSync.clearMessages()
+                            updateCfg(cfg.copy(webdavUser = it))
+                        },
                         label = { Text("用户名") },
                         singleLine = true,
                         phoneInput = true,
@@ -161,7 +298,12 @@ fun MultiDeviceSyncCard(
                     )
                     OutlinedTextField(
                         value = cfg.webdavPass,
-                        onValueChange = { updateCfg(cfg.copy(webdavPass = it)) },
+                        onValueChange = {
+                            testResult = null
+                            subdirError = null
+                            MultiDeviceSync.clearMessages()
+                            updateCfg(cfg.copy(webdavPass = it))
+                        },
                         label = { Text("密码 / 应用密码") },
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
@@ -170,6 +312,68 @@ fun MultiDeviceSyncCard(
                         colors = appFieldColors(),
                         modifier = Modifier.weight(1f),
                     )
+                }
+
+                if (isRootUrl) {
+                    val tipShape = RoundedCornerShape(10.dp)
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(tipShape)
+                            .background(Color(0x18FF9800))
+                            .border(1.dp, Orange.copy(alpha = 0.4f), tipShape)
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            "当前填的是根目录，群晖等 NAS 禁止直接写入根目录，请补充共享文件夹路径（如 /home）。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(
+                            enabled = !loadingSubdirs,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            onClick = { probeSubdirs(cfg.webdavUrl, cfg.webdavUser, cfg.webdavPass) },
+                        ) {
+                            if (loadingSubdirs) {
+                                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(5.dp))
+                            }
+                            Text(if (loadingSubdirs) "读取中…" else "加载共享文件夹", fontSize = 12.sp)
+                        }
+                    }
+                }
+
+                if (subdirs.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            "点击选择一个共享文件夹 / 子目录作为同步路径：",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            subdirs.forEach { dir ->
+                                FilterChip(
+                                    selected = false,
+                                    onClick = {
+                                        val base = cfg.webdavUrl.trim().trimEnd('/')
+                                        testResult = null
+                                        subdirError = null
+                                        subdirs = emptyList()
+                                        MultiDeviceSync.clearMessages()
+                                        updateCfg(cfg.copy(webdavUrl = "$base/$dir"))
+                                    },
+                                    label = { Text("/$dir", fontSize = 12.sp) },
+                                )
+                            }
+                        }
+                    }
+                }
+
+                subdirError?.let { err ->
+                    Text(err, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
 
                 Row(
@@ -181,6 +385,7 @@ fun MultiDeviceSyncCard(
                         onClick = {
                             testing = true
                             testResult = null
+                            MultiDeviceSync.clearMessages()
                             scope.launch {
                                 testResult = MultiDeviceSync.testWebDavConnection(cfg.webdavUrl, cfg.webdavUser, cfg.webdavPass)
                                 testing = false
@@ -199,6 +404,7 @@ fun MultiDeviceSyncCard(
                         colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
                         onClick = {
                             flush()
+                            testResult = null
                             scope.launch {
                                 runCatching { MultiDeviceSync.syncWithWebDav(context) }
                                 cfg = MultiDeviceSync.loadConfig(context)
@@ -210,6 +416,15 @@ fun MultiDeviceSyncCard(
                             Spacer(Modifier.width(6.dp))
                         }
                         Text(if (runtimeState.syncing) "同步中…" else "立即云同步")
+                    }
+
+                    if (!isRootUrl && cfg.hasWebDavConfigured) {
+                        TextButton(
+                            enabled = !loadingSubdirs,
+                            onClick = { probeSubdirs(cfg.webdavUrl, cfg.webdavUser, cfg.webdavPass) },
+                        ) {
+                            Text(if (loadingSubdirs) "读取中…" else "选择子目录")
+                        }
                     }
                 }
 

@@ -5,7 +5,6 @@ import android.content.SharedPreferences
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
-import android.util.Base64
 import com.aisub.player.backup.PrefsCodec
 import com.aisub.player.media.CustomMediaLibraryStore
 import com.aisub.player.net.AppProxy
@@ -173,7 +172,35 @@ object MultiDeviceSync {
         }
     }
 
-    /** 测试 WebDAV 同步连接及目录可写性 */
+    fun clearMessages() {
+        _state.update { it.copy(error = null, statusMessage = null) }
+    }
+
+    /** 列出 WebDAV 路径下的一级子目录名称（供根目录补全共享文件夹提示使用） */
+    suspend fun listWebDavSubdirs(url: String, user: String, pass: String): Result<List<String>> = withContext(Dispatchers.IO) {
+        val cleanBase = url.trim().trimEnd('/')
+        if (!cleanBase.startsWith("http://") && !cleanBase.startsWith("https://")) {
+            return@withContext Result.failure(IOException("请填写以 http:// 或 https:// 开头的 WebDAV 地址"))
+        }
+        val auth = basicAuth(user.trim(), pass)
+        runCatching {
+            val req = Request.Builder()
+                .url("$cleanBase/")
+                .method("PROPFIND", PROPFIND_MIN.toRequestBody("application/xml; charset=utf-8".toMediaType()))
+                .header("Depth", "1")
+                .apply { if (auth != null) header("Authorization", auth) }
+                .build()
+            http.newCall(req).execute().use { resp ->
+                if (resp.code == 401 || resp.code == 403 || (resp.code !in 200..299 && resp.code != 207)) {
+                    throw IOException(explainWebDavError(cleanBase, resp.code, "读取目录"))
+                }
+                val xml = resp.body?.string().orEmpty()
+                parseWebDavChildDirs(xml, cleanBase)
+            }
+        }
+    }
+
+    /** 测试 WebDAV 同步连接及目录可写性（依次验证：PROPFIND 连通性 -> 创建/确认同步目录 -> PUT 写入测试文件 -> DELETE 清理） */
     suspend fun testWebDavConnection(url: String, user: String, pass: String): String = withContext(Dispatchers.IO) {
         val cleanBase = url.trim().trimEnd('/')
         if (!cleanBase.startsWith("http://") && !cleanBase.startsWith("https://")) {
@@ -181,22 +208,40 @@ object MultiDeviceSync {
         }
         val auth = basicAuth(user.trim(), pass)
         runCatching {
-            val dirUrl = "$cleanBase/$REMOTE_DIR/"
-            // 先试 PROPFIND 根目录
+            // 1. PROPFIND Depth:1 验证账号连通性，同时解析一级子目录以便在报错时给出精确路径建议
             val propReq = Request.Builder()
                 .url("$cleanBase/")
                 .method("PROPFIND", PROPFIND_MIN.toRequestBody("application/xml; charset=utf-8".toMediaType()))
-                .header("Depth", "0")
+                .header("Depth", "1")
                 .apply { if (auth != null) header("Authorization", auth) }
                 .build()
-            http.newCall(propReq).execute().use { resp ->
-                if (resp.code == 401) throw IOException("用户名或应用密码错误 (HTTP 401)")
-                if (resp.code == 403) throw IOException("无访问权限 (HTTP 403)")
-                if (resp.code !in 200..299 && resp.code != 207) throw IOException("服务器返回 HTTP ${resp.code}")
+            val childDirs = http.newCall(propReq).execute().use { resp ->
+                if (resp.code == 401 || resp.code == 403 || (resp.code !in 200..299 && resp.code != 207)) {
+                    throw IOException(explainWebDavError(cleanBase, resp.code, "连接服务器"))
+                }
+                parseWebDavChildDirs(resp.body?.string().orEmpty(), cleanBase)
             }
-            // 确保同步目录存在
-            ensureRemoteDir(cleanBase, auth)
-            "连接成功，WebDAV 读写正常"
+            // 2. 确认同步目录存在或真实创建成功
+            ensureRemoteDir(cleanBase, auth, childDirs)
+            // 3. 写入并清理小文件，真实验证 PUT/DELETE 权限（避免根目录只读出现假阳性）
+            val checkUrl = "$cleanBase/$REMOTE_DIR/.voxtitle_write_check"
+            val putReq = Request.Builder()
+                .url(checkUrl)
+                .put("ok".toByteArray(Charsets.UTF_8).toRequestBody("text/plain; charset=utf-8".toMediaType()))
+                .apply { if (auth != null) header("Authorization", auth) }
+                .build()
+            http.newCall(putReq).execute().use { resp ->
+                if (!resp.isSuccessful && resp.code != 201 && resp.code != 204) {
+                    throw IOException(explainWebDavError(cleanBase, resp.code, "写入测试文件", childDirs))
+                }
+            }
+            val delReq = Request.Builder()
+                .url(checkUrl)
+                .delete()
+                .apply { if (auth != null) header("Authorization", auth) }
+                .build()
+            runCatching { http.newCall(delReq).execute().close() }
+            "连接成功，已验证可读写（同步路径：$cleanBase/$REMOTE_DIR/）"
         }.getOrElse { e ->
             "连接失败：${e.message ?: e.javaClass.simpleName}"
         }
@@ -226,8 +271,8 @@ object MultiDeviceSync {
                 val remoteJson: JSONObject? = http.newCall(getReq).execute().use { resp ->
                     when {
                         resp.code == 404 -> null
-                        resp.code == 401 -> throw IOException("WebDAV 账号或密码错误 (HTTP 401)")
-                        !resp.isSuccessful -> throw IOException("拉取云端同步文件失败 HTTP ${resp.code}")
+                        resp.code == 401 -> throw IOException(explainWebDavError(base, 401, "拉取同步文件"))
+                        !resp.isSuccessful -> throw IOException(explainWebDavError(base, resp.code, "拉取云端同步文件"))
                         else -> resp.body?.string()?.takeIf { it.isNotBlank() }?.let { JSONObject(it) }
                     }
                 }
@@ -247,7 +292,8 @@ object MultiDeviceSync {
                     .build()
                 http.newCall(putReq).execute().use { resp ->
                     if (!resp.isSuccessful && resp.code != 201 && resp.code != 204) {
-                        throw IOException("上传同步文件失败 HTTP ${resp.code}")
+                        val dirs = if (resp.code == 403 || resp.code == 405) fetchChildDirsQuietly(base, auth) else emptyList()
+                        throw IOException(explainWebDavError(base, resp.code, "上传同步文件", dirs))
                     }
                 }
 
@@ -269,19 +315,138 @@ object MultiDeviceSync {
         }
     }
 
-    private fun ensureRemoteDir(base: String, auth: String?) {
+    private fun dirExists(dirUrl: String, auth: String?): Boolean {
+        val propReq = Request.Builder()
+            .url(dirUrl)
+            .method("PROPFIND", PROPFIND_MIN.toRequestBody("application/xml; charset=utf-8".toMediaType()))
+            .header("Depth", "0")
+            .apply { if (auth != null) header("Authorization", auth) }
+            .build()
+        return runCatching {
+            http.newCall(propReq).execute().use { resp ->
+                if (resp.code == 401) throw IOException(explainWebDavError(dirUrl, 401, "检查同步目录"))
+                resp.code in 200..299 || resp.code == 207
+            }
+        }.getOrElse { e ->
+            if (e is IOException && e.message?.contains("401") == true) throw e
+            false
+        }
+    }
+
+    private fun fetchChildDirsQuietly(base: String, auth: String?): List<String> = runCatching {
         val req = Request.Builder()
-            .url("$base/$REMOTE_DIR/")
+            .url("$base/")
+            .method("PROPFIND", PROPFIND_MIN.toRequestBody("application/xml; charset=utf-8".toMediaType()))
+            .header("Depth", "1")
+            .apply { if (auth != null) header("Authorization", auth) }
+            .build()
+        http.newCall(req).execute().use { resp ->
+            if (resp.code in 200..299 || resp.code == 207) {
+                parseWebDavChildDirs(resp.body?.string().orEmpty(), base)
+            } else {
+                emptyList()
+            }
+        }
+    }.getOrDefault(emptyList())
+
+    private fun ensureRemoteDir(base: String, auth: String?, suggestedDirs: List<String> = emptyList()) {
+        val dirUrl = "$base/$REMOTE_DIR/"
+        if (dirExists(dirUrl, auth)) return
+        val mkcolReq = Request.Builder()
+            .url(dirUrl)
             .method("MKCOL", null)
             .apply { if (auth != null) header("Authorization", auth) }
             .build()
-        runCatching { http.newCall(req).execute().close() }
+        http.newCall(mkcolReq).execute().use { resp ->
+            if (resp.code in 200..299) return
+            if (resp.code == 405 && dirExists(dirUrl, auth)) return
+            val dirs = if (suggestedDirs.isEmpty() && (resp.code == 403 || resp.code == 405)) {
+                fetchChildDirsQuietly(base, auth)
+            } else {
+                suggestedDirs
+            }
+            throw IOException(explainWebDavError(base, resp.code, "创建同步目录", dirs))
+        }
     }
+
+    internal fun explainWebDavError(
+        baseUrl: String,
+        code: Int,
+        stage: String,
+        suggestedDirs: List<String> = emptyList(),
+    ): String {
+        val cleanBase = baseUrl.trim().trimEnd('/')
+        val isRootPath = runCatching {
+            java.net.URI(cleanBase).path.orEmpty().trim('/').isEmpty()
+        }.getOrDefault(false)
+        val exampleDir = suggestedDirs.firstOrNull { it.equals("home", ignoreCase = true) }
+            ?: suggestedDirs.firstOrNull { it.equals("homes", ignoreCase = true) }
+            ?: suggestedDirs.firstOrNull()
+            ?: "home"
+        return when (code) {
+            401 -> "用户名或密码/应用密码错误 (HTTP 401)。若使用坚果云/Nextcloud，请确认填写的是「应用专用密码」而非登录密码"
+            403 -> if (isRootPath) {
+                "当前填写的是根目录且无写入权限 (HTTP 403)。请在地址末尾加上有读写权限的共享文件夹，例如：$cleanBase/$exampleDir"
+            } else {
+                "当前目录无写入权限 (HTTP 403)，请确认该 WebDAV 账号对目标文件夹拥有「读写」权限"
+            }
+            405 -> if (isRootPath) {
+                "当前填写的是 WebDAV 根目录，群晖/飞牛/威联通等 NAS 根目录仅用于列出共享文件夹，不允许直接创建同步目录或上传文件 (HTTP 405)。请在地址末尾加上有读写权限的共享文件夹，例如：$cleanBase/$exampleDir（若是 OpenList/AList 请加上 /dav/挂载目录）"
+            } else {
+                "服务器拒绝在当前路径写入同步文件 (HTTP 405)。请检查：1) OpenList/AList 地址是否带 /dav 前缀且精确到可写挂载目录；2) NAS 共享文件夹是否为只读；3) 反向代理（Nginx/Lucky）是否放行了 MKCOL、PUT、DELETE 方法"
+            }
+            409 -> "上级目录不存在 (HTTP 409)，请先在网盘或 NAS 中创建对应文件夹，或检查路径拼写"
+            else -> "${stage}失败 (HTTP $code)"
+        }
+    }
+
+    internal fun parseWebDavChildDirs(xml: String, baseUrl: String): List<String> {
+        if (xml.isBlank()) return emptyList()
+        val baseRawPath = runCatching { java.net.URI(baseUrl.trim().trimEnd('/') + "/").rawPath }.getOrNull().orEmpty()
+        val baseDecoded = decodeWebDavPath(baseRawPath).trimEnd('/')
+        val out = LinkedHashSet<String>()
+        for (match in WEBDAV_RESPONSE_REGEX.findAll(xml)) {
+            val block = match.groupValues[1]
+            if (!WEBDAV_COLLECTION_REGEX.containsMatchIn(block)) continue
+            val rawHref = WEBDAV_HREF_REGEX.find(block)?.groupValues?.getOrNull(1)?.trim()
+                ?.replace("&amp;", "&")
+                .orEmpty()
+            if (rawHref.isEmpty()) continue
+            val hrefPath = if (rawHref.startsWith("http://", ignoreCase = true) || rawHref.startsWith("https://", ignoreCase = true)) {
+                runCatching { java.net.URI(rawHref).rawPath.orEmpty() }.getOrDefault("")
+            } else {
+                rawHref.substringBefore('?')
+            }
+            val decoded = decodeWebDavPath(hrefPath).trimEnd('/')
+            if (decoded == baseDecoded) continue
+            val rel = when {
+                baseDecoded.isEmpty() -> decoded.trimStart('/')
+                decoded.startsWith("$baseDecoded/") -> decoded.removePrefix("$baseDecoded/")
+                else -> continue
+            }
+            if (rel.isEmpty() || '/' in rel) continue
+            if (rel == "." || rel == ".." || rel == "@eaDir" || rel == "#recycle" || rel == REMOTE_DIR) continue
+            out += rel
+        }
+        return out.sortedBy { it.lowercase() }
+    }
+
+    private fun decodeWebDavPath(raw: String): String =
+        runCatching { java.net.URLDecoder.decode(raw.replace("+", "%2B"), "UTF-8") }.getOrDefault(raw)
+
+    private val WEBDAV_RESPONSE_REGEX = Regex(
+        "<(?:[A-Za-z0-9_]+:)?response\\b[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?response>",
+        setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
+    )
+    private val WEBDAV_HREF_REGEX = Regex(
+        "<(?:[A-Za-z0-9_]+:)?href\\b[^>]*>(.*?)</(?:[A-Za-z0-9_]+:)?href>",
+        setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
+    )
+    private val WEBDAV_COLLECTION_REGEX = Regex("<(?:[A-Za-z0-9_]+:)?collection\\b", RegexOption.IGNORE_CASE)
 
     private fun basicAuth(user: String, pass: String): String? {
         if (user.isEmpty() && pass.isEmpty()) return null
-        val raw = "$user:$pass".toByteArray(Charsets.UTF_8)
-        return "Basic " + Base64.encodeToString(raw, Base64.NO_WRAP)
+        return okhttp3.Credentials.basic(user, pass, Charsets.UTF_8)
     }
 
     /** 构造本机当前同步快照 JSON */

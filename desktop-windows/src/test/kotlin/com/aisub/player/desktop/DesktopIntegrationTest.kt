@@ -430,14 +430,31 @@ class DesktopIntegrationTest {
 
     @Test
     fun test7_TelegramWithoutDllDoesNotCrash() {
-        Telegram.init(GlobalDesktopApp)
-        Telegram.setCredentials(12345, "0123456789abcdef0123456789abcdef")
-        val state = Telegram.auth.value
-        println("Telegram auth state on Windows (tdlibLoaded=${DesktopTdlibLoader.isLoaded()}): $state")
-        if (DesktopTdlibLoader.isLoaded()) {
-            assertTrue(state is TgAuth.Starting || state is TgAuth.WaitPhone || state is TgAuth.Unsupported)
-        } else {
-            assertTrue(state is TgAuth.Unsupported)
+        val clientField = Telegram::class.java.getDeclaredField("client").apply { isAccessible = true }
+        try {
+            Telegram.init(GlobalDesktopApp)
+            Telegram.setCredentials(12345, "0123456789abcdef0123456789abcdef")
+            val initDeadline = System.currentTimeMillis() + 3_000L
+            while (Telegram.auth.value == TgAuth.Starting && System.currentTimeMillis() < initDeadline) {
+                Thread.sleep(50)
+            }
+            val state = Telegram.auth.value
+            println("Telegram auth state on Windows (tdlibLoaded=${DesktopTdlibLoader.isLoaded()}): $state")
+            if (DesktopTdlibLoader.isLoaded()) {
+                assertTrue(state is TgAuth.Starting || state is TgAuth.WaitPhone || state is TgAuth.Unsupported)
+            } else {
+                assertTrue(state is TgAuth.Unsupported)
+            }
+        } finally {
+            GlobalDesktopApp.getSharedPreferences("telegram", Context.MODE_PRIVATE).edit().clear().commit()
+            val cl = clientField.get(Telegram) as? org.drinkless.tdlib.Client
+            if (cl != null) {
+                runCatching { cl.send(org.drinkless.tdlib.TdApi.Close()) {} }
+                val closeDeadline = System.currentTimeMillis() + 5_000L
+                while (clientField.get(Telegram) != null && System.currentTimeMillis() < closeDeadline) {
+                    Thread.sleep(25)
+                }
+            }
         }
     }
 
@@ -716,7 +733,7 @@ class DesktopIntegrationTest {
         try {
             val vf120 = player.buildColorMappedVfFilter(1920, 1080, mode = 1, sourceFps = 120000.0 / 1001.0)
             assertTrue("120fps mode 1 must decimate fps before hwupload: $vf120", vf120.startsWith("fps=59.940060,hwupload,libplacebo="))
-            assertTrue("Mode 1 must end with hwdownload,format=bgra: $vf120", vf120.endsWith(",hwdownload,format=bgra"))
+            assertTrue("Mode 1 must end with hwdownload,format=rgba: $vf120", vf120.endsWith(",hwdownload,format=rgba"))
         } finally {
             player.release()
         }

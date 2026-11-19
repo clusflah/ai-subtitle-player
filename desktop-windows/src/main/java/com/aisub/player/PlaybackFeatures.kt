@@ -260,7 +260,7 @@ class PlaybackFeatures(
 
     private fun grabber(): FrameGrabber? {
         val e = entry ?: return null
-        if (VlcPlayer.needsVlc(e.title) || com.aisub.player.remote.cloud.CloudRegistry.isCloud(e.uri)) return null
+        if (VlcPlayer.needsVlc(e.title) || com.aisub.player.remote.cloud.CloudRegistry.isCloud(e.uri) || com.aisub.player.telegram.Telegram.isTelegram(e.uri)) return null
         return grabber ?: FrameGrabber(app, e.uri).also { grabber = it }
     }
 

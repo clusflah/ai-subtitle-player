@@ -373,6 +373,8 @@ internal fun ThinSeekBar(
     markers: (@Composable BoxScope.() -> Unit)? = null,
 ) {
     val clamped = fraction.coerceIn(0f, 1f)
+    val currentOnDrag by rememberUpdatedState(onDrag)
+    val currentOnDragEnd by rememberUpdatedState(onDragEnd)
     var widthPx by remember { mutableFloatStateOf(1f) }
     val thumbScale by animateFloatAsState(
         targetValue = if (isDragging) 1.18f else 1f,
@@ -387,14 +389,14 @@ internal fun ThinSeekBar(
             .height(32.dp)
             .onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
             .pointerInput(Unit) {
-                detectTapGestures { o -> onDrag((o.x / widthPx).coerceIn(0f, 1f)); onDragEnd() }
+                detectTapGestures { o -> currentOnDrag((o.x / widthPx).coerceIn(0f, 1f)); currentOnDragEnd() }
             }
             .pointerInput(Unit) {
                 detectHorizontalDragGestures(
-                    onDragStart = { o -> onDrag((o.x / widthPx).coerceIn(0f, 1f)) },
-                    onDragEnd = onDragEnd,
-                    onDragCancel = onDragEnd,
-                ) { change, _ -> change.consume(); onDrag((change.position.x / widthPx).coerceIn(0f, 1f)) }
+                    onDragStart = { o -> currentOnDrag((o.x / widthPx).coerceIn(0f, 1f)) },
+                    onDragEnd = { currentOnDragEnd() },
+                    onDragCancel = { currentOnDragEnd() },
+                ) { change, _ -> change.consume(); currentOnDrag((change.position.x / widthPx).coerceIn(0f, 1f)) }
             },
         contentAlignment = Alignment.CenterStart,
     ) {

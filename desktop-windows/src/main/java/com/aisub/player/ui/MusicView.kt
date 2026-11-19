@@ -75,6 +75,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -451,14 +452,15 @@ private fun SongTitleRow(title: String, subtitle: String, liked: Boolean, onLike
 private fun MusicSeekBar(positionMs: Long, durationMs: Long, onSeek: (Long) -> Unit) {
     var widthPx by remember { mutableFloatStateOf(1f) }
     var dragging by remember { mutableStateOf<Float?>(null) }
+    val currentOnSeek by rememberUpdatedState(onSeek)
     val fraction = dragging ?: if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
-    val finish = { dragging?.let { onSeek((it * durationMs).toLong()) }; dragging = null }
+    val finish = { dragging?.let { currentOnSeek((it * durationMs).toLong()) }; dragging = null }
     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
         Box(
             Modifier.fillMaxWidth().height(32.dp)
                 .onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
                 .pointerInput(durationMs) {
-                    detectTapGestures { o -> if (durationMs > 0) onSeek(((o.x / widthPx).coerceIn(0f, 1f) * durationMs).toLong()) }
+                    detectTapGestures { o -> if (durationMs > 0) currentOnSeek(((o.x / widthPx).coerceIn(0f, 1f) * durationMs).toLong()) }
                 }
                 .pointerInput(durationMs) {
                     if (durationMs <= 0) return@pointerInput

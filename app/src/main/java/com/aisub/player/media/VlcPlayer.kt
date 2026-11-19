@@ -61,8 +61,11 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
     private var volume = 1f
     private var trackParams = TrackSelectionParameters.DEFAULT
     private var tracks = Tracks.EMPTY
-    /** ENDED 之后拖动：先重新开始播放，进入 Playing 后再跳到目标位置 */
+    /** ENDED 之后或起播 Opening 阶段拖动：进入 Playing 后再跳到目标位置 */
     private var pendingSeekMs: Long? = null
+    private var hasEnteredPlaying = false
+    private var seekHoldTargetMs: Long = C.TIME_UNSET
+    private var seekHoldUntilMs: Long = 0L
     /** 当前媒体是否已经调用过 play() */
     private var started = false
     /** 下一次状态里带上"已渲染首帧" */
@@ -174,6 +177,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
                 playbackState = if (e.buffering >= 100f) Player.STATE_READY else Player.STATE_BUFFERING
             }
             MediaPlayer.Event.Playing -> {
+                hasEnteredPlaying = true
                 playbackState = Player.STATE_READY
                 pendingSeekMs?.let { mp.setTime(it); pendingSeekMs = null }
                 applyTrackSelectionInternal()
@@ -181,10 +185,12 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
             }
             MediaPlayer.Event.Paused -> if (playbackState == Player.STATE_BUFFERING) playbackState = Player.STATE_READY
             MediaPlayer.Event.EndReached -> {
+                hasEnteredPlaying = false
                 playbackState = Player.STATE_ENDED
                 playWhenReady = false
             }
             MediaPlayer.Event.EncounteredError -> {
+                hasEnteredPlaying = false
                 val isLive = items.firstOrNull()?.localConfiguration?.tag == "live"
                 error = PlaybackException(
                     if (isLive) "VLC 内核无法打开这个直播源（可能源已失效、地址受限或网络中断）"
@@ -281,10 +287,14 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
             .setCurrentMediaItemIndex(if (playlist.isEmpty()) C.INDEX_UNSET else 0)
             .setContentPositionMs(
                 PositionSupplier {
+                    val rawTime = mp.time.coerceAtLeast(0)
                     when {
                         playbackState == Player.STATE_ENDED && durationMs != C.TIME_UNSET -> durationMs
                         pendingSeekMs != null -> pendingSeekMs!!
-                        else -> mp.time.coerceAtLeast(0)
+                        System.currentTimeMillis() < seekHoldUntilMs &&
+                            seekHoldTargetMs != C.TIME_UNSET &&
+                            (rawTime <= 0L || kotlin.math.abs(rawTime - seekHoldTargetMs) > 2_000L) -> seekHoldTargetMs
+                        else -> rawTime
                     }
                 },
             )
@@ -301,6 +311,10 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         durationMs = C.TIME_UNSET
         tracks = Tracks.EMPTY
         error = null
+        hasEnteredPlaying = false
+        pendingSeekMs = null
+        seekHoldTargetMs = C.TIME_UNSET
+        seekHoldUntilMs = 0L
         if (items.isEmpty()) {
             mp.stop()
             playbackState = Player.STATE_IDLE
@@ -330,7 +344,10 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
             directRemoteStream = false
             lastDirectReadBytes = -1L
             started = false
+            hasEnteredPlaying = false
             pendingSeekMs = null
+            seekHoldTargetMs = C.TIME_UNSET
+            seekHoldUntilMs = 0L
             mp.stop()
             playbackState = Player.STATE_IDLE
             durationMs = C.TIME_UNSET
@@ -348,7 +365,10 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         lastDirectReadBytes = -1L
         playWhenReady = false
         started = false
+        hasEnteredPlaying = false
         pendingSeekMs = null
+        seekHoldTargetMs = C.TIME_UNSET
+        seekHoldUntilMs = 0L
         videoView?.removeOnLayoutChangeListener(layoutListener)
         videoView = null
         if (mp.vlcVout.areViewsAttached()) mp.vlcVout.detachViews()
@@ -414,6 +434,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         audioBridge.rebindCallbacks(mp)
         mp.media = media
         media.release()
+        hasEnteredPlaying = false
         playbackState = Player.STATE_BUFFERING
         // VLC 在打开过程中暂停容易卡住，所以未要求播放时先不启动，等 setPlayWhenReady(true) 再开始
         started = playWhenReady
@@ -440,12 +461,18 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
 
     override fun handleSeek(mediaItemIndex: Int, positionMs: Long, seekCommand: Int): ListenableFuture<*> {
         val target = positionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0) ?: 0
+        seekHoldTargetMs = target
+        seekHoldUntilMs = System.currentTimeMillis() + 500L
         if (playbackState == Player.STATE_ENDED) {
             pendingSeekMs = target
+            hasEnteredPlaying = false
             playbackState = Player.STATE_BUFFERING
             mp.stop()
             audioBridge.rebindCallbacks(mp)
             mp.play()
+        } else if (!hasEnteredPlaying) {
+            pendingSeekMs = target
+            startPositionMs = target
         } else {
             mp.setTime(target)
         }

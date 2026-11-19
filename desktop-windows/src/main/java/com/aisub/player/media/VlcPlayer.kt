@@ -49,8 +49,11 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
     private var vlcVolume = 1f
     private var trackParams = TrackSelectionParameters.DEFAULT
     private var tracks = Tracks.EMPTY
-    /** ENDED 之后拖动：先重新开始播放，进入 Playing 后再跳到目标位置 */
+    /** ENDED 之后或起播 Opening 阶段拖动：进入 Playing 后再跳到目标位置 */
     private var pendingSeekMs: Long? = null
+    private var hasEnteredPlaying = false
+    private var seekHoldTargetMs: Long = C.TIME_UNSET
+    private var seekHoldUntilMs: Long = 0L
     /** 当前媒体是否已经调用过 play() */
     private var started = false
     /** 下一次状态里带上"已渲染首帧" */
@@ -71,6 +74,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
                 vlcPlaybackState = if (e.buffering >= 100f) Player.STATE_READY else Player.STATE_BUFFERING
             }
             MediaPlayer.Event.Playing -> {
+                hasEnteredPlaying = true
                 vlcPlaybackState = Player.STATE_READY
                 pendingSeekMs?.let { mp.setTime(it); pendingSeekMs = null }
                 applyTrackParamsToMp()
@@ -78,10 +82,12 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
             }
             MediaPlayer.Event.Paused -> if (vlcPlaybackState == Player.STATE_BUFFERING) vlcPlaybackState = Player.STATE_READY
             MediaPlayer.Event.EndReached -> {
+                hasEnteredPlaying = false
                 vlcPlaybackState = Player.STATE_ENDED
                 vlcPlayWhenReady = false
             }
             MediaPlayer.Event.EncounteredError -> {
+                hasEnteredPlaying = false
                 error = PlaybackException(
                     "VLC 无法打开这个文件（可能是加密的蓝光、损坏的镜像或网络中断）",
                     null, PlaybackException.ERROR_CODE_UNSPECIFIED,
@@ -195,10 +201,14 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
             .setCurrentMediaItemIndex(0)
             .setContentPositionMs(
                 PositionSupplier {
+                    val rawTime = mp.time.coerceAtLeast(0)
                     when {
                         vlcPlaybackState == Player.STATE_ENDED && durationMs != C.TIME_UNSET -> durationMs
                         pendingSeekMs != null -> pendingSeekMs!!
-                        else -> mp.time.coerceAtLeast(0)
+                        System.currentTimeMillis() < seekHoldUntilMs &&
+                            seekHoldTargetMs != C.TIME_UNSET &&
+                            (rawTime <= 0L || kotlin.math.abs(rawTime - seekHoldTargetMs) > 2_000L) -> seekHoldTargetMs
+                        else -> rawTime
                     }
                 },
             )
@@ -214,6 +224,10 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         this.startPositionMs = startPositionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0) ?: 0
         durationMs = C.TIME_UNSET
         tracks = Tracks.EMPTY
+        hasEnteredPlaying = false
+        pendingSeekMs = null
+        seekHoldTargetMs = C.TIME_UNSET
+        seekHoldUntilMs = 0L
         return Futures.immediateVoidFuture()
     }
 
@@ -244,6 +258,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         if (startPositionMs > 0) media.addOption(":start-time=${startPositionMs / 1000.0}")
         mp.media = media
         media.release()
+        hasEnteredPlaying = false
         vlcPlaybackState = Player.STATE_BUFFERING
         // VLC 在打开过程中暂停容易卡住，所以未要求播放时先不启动，等 setPlayWhenReady(true) 再开始
         started = vlcPlayWhenReady
@@ -266,11 +281,17 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
 
     override fun handleSeek(mediaItemIndex: Int, positionMs: Long, seekCommand: Int): ListenableFuture<*> {
         val target = positionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0) ?: 0
+        seekHoldTargetMs = target
+        seekHoldUntilMs = System.currentTimeMillis() + 500L
         if (vlcPlaybackState == Player.STATE_ENDED) {
             pendingSeekMs = target
+            hasEnteredPlaying = false
             vlcPlaybackState = Player.STATE_BUFFERING
             mp.stop()
             mp.play()
+        } else if (!hasEnteredPlaying) {
+            pendingSeekMs = target
+            startPositionMs = target
         } else {
             mp.setTime(target)
         }

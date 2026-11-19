@@ -29,6 +29,9 @@ class TgDataSource : BaseDataSource(true) {
 
     @Volatile
     private var latest: TdApi.File? = null
+    @Volatile
+    private var closed = false
+    private var lastDownloadReqMs = 0L
     private val lock = Object()
     private val listener: (TdApi.File) -> Unit = { f ->
         if (f.id == fileId) {
@@ -38,6 +41,8 @@ class TgDataSource : BaseDataSource(true) {
     }
 
     override fun open(dataSpec: DataSpec): Long {
+        closed = false
+        lastDownloadReqMs = System.currentTimeMillis()
         uri = dataSpec.uri
         transferInitializing(dataSpec)
         val (chatId, messageId) = Telegram.parse(dataSpec.uri.toString()) ?: throw IOException("不是 Telegram 视频地址")
@@ -67,8 +72,10 @@ class TgDataSource : BaseDataSource(true) {
         if (length == 0) return 0
         var n: Int
         while (true) {
+            if (closed || Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("TgDataSource closed")
             if (remaining == 0L) return C.RESULT_END_OF_INPUT
             if (ready <= 0) waitForData()
+            if (closed || Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("TgDataSource closed")
             if (remaining == 0L) return C.RESULT_END_OF_INPUT
             val want = minOf(length.toLong(), ready, if (remaining > 0) remaining else Long.MAX_VALUE).toInt()
             val f = openFile()
@@ -91,6 +98,7 @@ class TgDataSource : BaseDataSource(true) {
         var lastProgress = System.currentTimeMillis()
         var lastDownloaded = -1L
         while (true) {
+            if (closed || Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("TgDataSource closed")
             if (size > 0 && position >= size) {
                 remaining = 0
                 return
@@ -103,8 +111,17 @@ class TgDataSource : BaseDataSource(true) {
                 return
             }
             val f = latest
-            // 下载停了，或者正在下别的位置（另一个读的人把位置拉走了）：从这里重新开始
-            if (f != null && (!f.local.isDownloadingActive || f.local.downloadOffset > position) && !f.local.isDownloadingCompleted) download(position)
+            val now = System.currentTimeMillis()
+            // 下载停了，或者当前下载窗口与播放读取位置偏差过大（例如拖动快进/快退），从新位置重新发起下载
+            if (f != null && !f.local.isDownloadingCompleted) {
+                val activeStart = f.local.downloadOffset
+                val activeEnd = activeStart + f.local.downloadedPrefixSize
+                val outOfRange = position < activeStart || position > activeEnd + 2L * 1024 * 1024
+                if (!f.local.isDownloadingActive || (outOfRange && now - lastDownloadReqMs >= 800L)) {
+                    lastDownloadReqMs = now
+                    download(position)
+                }
+            }
             val downloaded = latest?.local?.downloadedSize ?: 0
             if (downloaded != lastDownloaded) {
                 lastDownloaded = downloaded
@@ -113,6 +130,7 @@ class TgDataSource : BaseDataSource(true) {
                 throw IOException("Telegram 视频一分钟没下载到数据")
             }
             synchronized(lock) { lock.wait(500) }
+            if (closed || Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("TgDataSource closed")
         }
     }
 
@@ -126,8 +144,10 @@ class TgDataSource : BaseDataSource(true) {
     override fun getUri(): Uri? = uri
 
     override fun close() {
+        closed = true
         Telegram.fileListeners.remove(listener)
-        raf?.close()
+        synchronized(lock) { lock.notifyAll() }
+        runCatching { raf?.close() }
         raf = null
         if (uri != null) {
             uri = null

@@ -3,10 +3,14 @@ package com.aisub.player.ui
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -43,12 +47,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aisub.player.media.MediaEntry
@@ -201,7 +208,7 @@ fun TelegramScreen(onBack: () -> Unit, openSaved: () -> Unit, openChat: (TgChat)
     if (editCredentials) AppDialog(
         onDismissRequest = { editCredentials = false },
         title = { Text("api_id / api_hash") },
-        text = { CredentialsForm(onSaved = { editCredentials = false }) },
+        text = { CredentialsForm(onSaved = { editCredentials = false }, inDialog = true) },
         confirmButton = { TextButton(onClick = { editCredentials = false }) { Text("取消") } },
     )
     if (cacheDialog) CacheDialog(onDismiss = { cacheDialog = false })
@@ -209,18 +216,25 @@ fun TelegramScreen(onBack: () -> Unit, openSaved: () -> Unit, openChat: (TgChat)
 
 /** 填 api_id / api_hash（用户自己在 my.telegram.org 申请） */
 @Composable
-private fun CredentialsForm(onSaved: () -> Unit) {
+private fun CredentialsForm(onSaved: () -> Unit, inDialog: Boolean = false) {
     var id by remember { mutableStateOf(Telegram.apiId().takeIf { it != 0 }?.toString().orEmpty()) }
     var hash by remember { mutableStateOf("") }
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(PageGutter), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("接入 Telegram", style = MaterialTheme.typography.titleMedium)
+    val valid = id.toIntOrNull() != null && hash.length >= 16
+    val formBody: @Composable ColumnScope.() -> Unit = {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            IconBadge(AppIcons.Telegram, size = 44.dp)
+            Column {
+                Text("接入 Telegram", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text("使用个人 API 凭证直连频道与群组", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
         Text(
-            "Telegram 要求每个第三方客户端用自己的凭证：\n" +
-                "1. 用浏览器打开 my.telegram.org，用你的手机号登录\n" +
-                "2. 进「API development tools」，随便填个应用名创建\n" +
-                "3. 把页面上的 api_id 和 api_hash 填到下面\n" +
-                "凭证只存在这台手机上，不会进备份。",
-            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            "1. 用浏览器打开 my.telegram.org，用你的手机号登录\n" +
+                "2. 进入「API development tools」，随便填个应用名创建\n" +
+                "3. 把页面上的 api_id 和 api_hash 填到下方\n" +
+                "凭证仅保存在本机，不会参与云端备份。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         OutlinedTextField(
             id, { id = it.filter(Char::isDigit) }, label = { Text("api_id") }, singleLine = true,
@@ -235,8 +249,21 @@ private fun CredentialsForm(onSaved: () -> Unit) {
             id = v["id"]?.filter(Char::isDigit) ?: id
             hash = v["hash"]?.trim() ?: hash
         }
-        val valid = id.toIntOrNull() != null && hash.length >= 16
-        Button(onClick = { Telegram.setCredentials(id.toInt(), hash); onSaved() }, enabled = valid, modifier = Modifier.fillMaxWidth()) { Text("保存并登录") }
+        Button(
+            onClick = { Telegram.setCredentials(id.toInt(), hash); onSaved() },
+            enabled = valid,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth().height(46.dp),
+        ) { Text("保存并登录") }
+    }
+    if (inDialog) {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp), content = formBody)
+    } else {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(vertical = PageGutter)) {
+            SurfaceCard {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = formBody)
+            }
+        }
     }
 }
 
@@ -254,31 +281,40 @@ private fun LoginStep(
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(PageGutter), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(title, style = MaterialTheme.typography.titleMedium)
-        Text(note, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        OutlinedTextField(
-            value, { value = it; error = null }, label = { Text(label) }, singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = type),
-            visualTransformation = if (password) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
-            colors = appFieldColors(), modifier = Modifier.fillMaxWidth(),
-        )
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-        Button(
-            onClick = {
-                busy = true
-                scope.launch {
-                    try {
-                        submit(value)
-                    } catch (e: Exception) {
-                        error = loginError(e.message)
-                    } finally {
-                        busy = false
-                    }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(vertical = PageGutter)) {
+        SurfaceCard {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    IconBadge(AppIcons.Telegram, size = 44.dp)
+                    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 }
-            },
-            enabled = value.isNotBlank() && !busy, modifier = Modifier.fillMaxWidth(),
-        ) { Text(if (busy) "请稍候…" else "下一步") }
+                Text(note, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedTextField(
+                    value, { value = it; error = null }, label = { Text(label) }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = type),
+                    visualTransformation = if (password) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+                    colors = appFieldColors(), modifier = Modifier.fillMaxWidth(),
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                Button(
+                    onClick = {
+                        busy = true
+                        scope.launch {
+                            try {
+                                submit(value)
+                            } catch (e: Exception) {
+                                error = loginError(e.message)
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    },
+                    enabled = value.isNotBlank() && !busy,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth().height(46.dp),
+                ) { Text(if (busy) "请稍候…" else "下一步") }
+            }
+        }
     }
 }
 
@@ -365,13 +401,15 @@ private fun ChatList(openChat: (TgChat) -> Unit) {
         r.isFailure -> EmptyState("读取频道失败：${r.exceptionOrNull()?.message}", buttonText = "重试", icon = AppIcons.Live) { reload++ }
         else -> Column(Modifier.fillMaxSize()) {
             val all = r.getOrThrow()
-            OutlinedTextField(
-                query, { query = it }, singleLine = true,
-                placeholder = { Text("搜索频道和群（也能搜没加入的公开频道）") },
-                leadingIcon = { Icon(AppIcons.Search, null) },
-                trailingIcon = { if (query.isNotEmpty()) IconButton(onClick = { query = "" }) { Icon(AppIcons.Close, "清除") } },
-                colors = appFieldColors(),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            CompactSearchField(
+                value = query,
+                onValueChange = { query = it },
+                onSearch = {},
+                placeholder = "搜索频道、群组或 @公开频道",
+                phoneLabel = "搜索 Telegram 频道",
+                height = 44.dp,
+                cornerRadius = 22.dp,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
             )
             // 已加入的也按服务器的结果算（输入 @用户名 或 t.me 链接时名字里没有这些字）
             val publicIds = public?.getOrNull().orEmpty().map { it.id }.toSet()
@@ -394,15 +432,15 @@ private fun ChatList(openChat: (TgChat) -> Unit) {
             }
             val mine = sorted.sortedBy { pinned.indexOf(it.id).let { i -> if (i < 0) Int.MAX_VALUE else i } }
             androidx.compose.foundation.lazy.LazyRow(
-                contentPadding = PaddingValues(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 item { MenuChip(CHAT_FILTERS, filter, highlighted = filter > 0) { filter = it; Telegram.chatFilter = it } }
                 item { MenuChip(CHAT_SORTS, sort, highlighted = sort > 0) { sort = it; Telegram.chatSort = it } }
                 // 竖线隔开：前面是显示方式和排序，后面是分组（免得「所有分组」和「全部频道」看着像一回事）
                 item {
                     Box(Modifier.height(32.dp), contentAlignment = Alignment.Center) {
-                        Box(Modifier.width(1.dp).height(20.dp).background(MaterialTheme.colorScheme.outlineVariant))
+                        Box(Modifier.width(1.dp).height(18.dp).background(MaterialTheme.colorScheme.outlineVariant))
                     }
                 }
                 val tabs = listOf<String?>(null, FAVORITES) + groups
@@ -411,14 +449,17 @@ private fun ChatList(openChat: (TgChat) -> Unit) {
                     androidx.compose.material3.FilterChip(
                         selected = group == g,
                         onClick = { group = g },
+                        shape = RoundedCornerShape(50),
+                        leadingIcon = if (g == FAVORITES) ({ Icon(AppIcons.Star, null, Modifier.size(16.dp)) }) else null,
                         label = { Text(g ?: "所有分组") },
                     )
                 }
                 item {
                     androidx.compose.material3.AssistChip(
                         onClick = { managing = true },
+                        shape = RoundedCornerShape(50),
                         label = { Text("管理分组") },
-                        leadingIcon = { Icon(AppIcons.Edit, null, Modifier.size(18.dp)) },
+                        leadingIcon = { Icon(AppIcons.Edit, null, Modifier.size(16.dp)) },
                     )
                 }
             }
@@ -427,7 +468,7 @@ private fun ChatList(openChat: (TgChat) -> Unit) {
                 EmptyState("还没有加入频道或群\n在 Telegram App 里加入，或者在上面搜公开频道", buttonText = "刷新", icon = AppIcons.Live) { reload++ }
                 return@Column
             }
-            LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 4.dp)) {
+            LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(top = 4.dp, bottom = 12.dp)) {
                 itemsIndexed(mine, key = { _, c -> c.id }) { _, c ->
                     ChatRow(
                         c, c.id in favorites, c.id in fresh, onFavorite = { toggle(c) },
@@ -491,6 +532,7 @@ private fun MenuChip(options: List<String>, selected: Int, highlighted: Boolean,
         androidx.compose.material3.FilterChip(
             selected = highlighted,
             onClick = { open = true },
+            shape = RoundedCornerShape(50),
             label = { Text(options[selected.coerceIn(options.indices)]) },
             trailingIcon = { Icon(AppIcons.ArrowDropDown, null, Modifier.size(18.dp)) },
         )
@@ -598,6 +640,28 @@ private fun NoteText(text: String) {
     )
 }
 
+private val AVATAR_COLORS = listOf(
+    Color(0xFFE56555),
+    Color(0xFFF28C00),
+    Color(0xFF8E63CE),
+    Color(0xFF4CA85E),
+    Color(0xFF28A9C8),
+    Color(0xFF3E8EE0),
+    Color(0xFFD95B96),
+)
+
+@Composable
+private fun Modifier.tgCard(shape: RoundedCornerShape): Modifier {
+    val glass = LocalLiquidGlassEnabled.current
+    return if (glass) {
+        this.liquidGlass(shape = shape, style = GlassStyle.Card, tint = currentVisualPalette().cardTint, enableBackdrop = false)
+    } else {
+        this.clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceContainerLowest)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f), shape)
+    }
+}
+
 @Composable
 private fun ChatRow(
     c: TgChat,
@@ -612,44 +676,95 @@ private fun ChatRow(
     onMove: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
+    val cardShape = RoundedCornerShape(16.dp)
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 3.dp)
+            .tgCard(cardShape)
+            .tvFocusRing(cardShape)
+            .clickable(onClick = onClick)
+            .padding(start = 12.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box {
             ChatAvatar(c)
             // 收藏的频道有新视频
             if (fresh) Box(
-                Modifier.align(Alignment.TopEnd).size(12.dp).clip(CircleShape)
+                Modifier.align(Alignment.TopEnd).size(13.dp).clip(CircleShape)
                     .background(MaterialTheme.colorScheme.surface).padding(2.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error),
             )
         }
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(c.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            val info = listOfNotNull(
-                "置顶".takeIf { pinned },
-                if (c.isChannel) "频道" else "群",
-                group,
-                stats?.let { if (it.videos > 0) "${countText(it.videos)} 个视频" else if (it.media > 0) "没有视频" else "没有媒体" },
-                c.members.takeIf { it > 0 }?.let { "${countText(it)} ${if (c.isChannel) "订阅" else "成员"}" },
-                c.username?.let { "@$it" },
-                "有新视频".takeIf { fresh },
-            ).joinToString(" · ")
-            Text(
-                info, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                color = if (fresh) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    c.title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (pinned) Text(
+                    "置顶",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
+                        .padding(horizontal = 6.dp, vertical = 1.dp),
+                )
+                if (fresh) Text(
+                    "有更新",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(MaterialTheme.colorScheme.error.copy(alpha = 0.14f))
+                        .padding(horizontal = 6.dp, vertical = 1.dp),
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (!group.isNullOrBlank()) Text(
+                    group,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f))
+                        .padding(horizontal = 6.dp, vertical = 1.dp),
+                )
+                val info = listOfNotNull(
+                    if (c.isChannel) "频道" else "群组",
+                    stats?.let { if (it.videos > 0) "${countText(it.videos)} 个视频" else if (it.media > 0) "无视频" else "暂无媒体" },
+                    c.members.takeIf { it > 0 }?.let { "${countText(it)} ${if (c.isChannel) "订阅" else "成员"}" },
+                    c.username?.let { "@$it" },
+                ).joinToString(" · ")
+                Text(
+                    info,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
-        IconButton(onClick = onFavorite) {
+        IconButton(onClick = onFavorite, modifier = Modifier.size(38.dp)) {
             Icon(
-                if (favorite) AppIcons.Star else AppIcons.StarBorder, if (favorite) "取消收藏" else "收藏",
-                tint = if (favorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                if (favorite) AppIcons.Star else AppIcons.StarBorder,
+                if (favorite) "取消收藏" else "收藏",
+                tint = if (favorite) Orange else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
             )
         }
         if (onPin != null || onMove != null) Box {
             var menu by remember { mutableStateOf(false) }
-            IconButton(onClick = { menu = true }) { Icon(AppIcons.MoreVert, "更多") }
+            IconButton(onClick = { menu = true }, modifier = Modifier.size(38.dp)) {
+                Icon(AppIcons.MoreVert, "更多", modifier = Modifier.size(20.dp))
+            }
             AppMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 onPin?.let { DropdownMenuItem(text = { Text(if (pinned) "取消置顶" else "置顶") }, onClick = { menu = false; it() }) }
                 DropdownMenuItem(text = { Text(if (favorite) "取消收藏" else "收藏") }, onClick = { menu = false; onFavorite() })
@@ -661,7 +776,7 @@ private fun ChatRow(
 
 /** 频道头像：先显示模糊的小图，下好了换清楚的；没有头像显示名字的第一个字（emoji 也完整显示） */
 @Composable
-private fun ChatAvatar(c: TgChat) {
+private fun ChatAvatar(c: TgChat, size: Dp = 48.dp) {
     val mini = remember(c.id) { c.photoMini?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } }
     val photo by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, c.id) {
         val file = c.photo ?: return@produceState
@@ -669,13 +784,22 @@ private fun ChatAvatar(c: TgChat) {
             runCatching { Telegram.thumbnailPath(file)?.let { BitmapFactory.decodeFile(it)?.asImageBitmap() } }.getOrNull()
         }
     }
+    val fallbackBg = remember(c.id) { AVATAR_COLORS[kotlin.math.abs(c.id.hashCode()) % AVATAR_COLORS.size] }
+    val img = photo ?: mini
     Box(
-        Modifier.size(44.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer),
+        Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(if (img != null) MaterialTheme.colorScheme.surfaceContainerHigh else fallbackBg),
         contentAlignment = Alignment.Center,
     ) {
-        val img = photo ?: mini
         if (img != null) Image(img, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-        else Text(firstGrapheme(c.title), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+        else Text(
+            firstGrapheme(c.title),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White,
+        )
     }
 }
 
@@ -696,28 +820,69 @@ private fun countText(n: Int): String = when {
     else -> n.toString()
 }
 
+private fun formatCacheLimitLabel(mb: Int): String = if (mb >= 1024) "${mb / 1024} GB" else "$mb MB"
+
 /** 视频缓存：占用多少、上限、清空 */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CacheDialog(onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     var size by remember { mutableStateOf<Long?>(null) }
     var limit by remember { mutableStateOf(Telegram.cacheLimitMb) }
+    var clearing by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { size = runCatching { Telegram.cacheSize() }.getOrNull() }
     val limits = listOf(512, 1024, 2048, 5120, 10240)
+    val limitBytes = limit.toLong() * 1024L * 1024L
+    val usedRatio = if (size != null && limitBytes > 0L) (size!!.toFloat() / limitBytes.toFloat()).coerceIn(0f, 1f) else 0f
     AppDialog(
         onDismissRequest = onDismiss,
         title = { Text("视频缓存") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("看过的视频会缓存在手机里，再看不用重新下载；超过上限时先删最早的（一小时内看过的不删）。")
-                Text("现在占用：${size?.let(::formatSize) ?: "…"}")
-                Text("上限", style = MaterialTheme.typography.titleSmall)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("已用缓存", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(size?.let(::formatSize) ?: "计算中…", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        }
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text("上限", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                formatCacheLimitLabel(limit),
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                    androidx.compose.material3.LinearProgressIndicator(
+                        progress = { usedRatio },
+                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(50)),
+                    )
+                }
+                Text(
+                    "看过的视频会缓存在本地，再看不用重新下载；超过上限时先删最早的（一小时内看过的不删）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text("缓存上限", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     limits.forEach { mb ->
                         androidx.compose.material3.FilterChip(
                             selected = limit == mb,
                             onClick = { limit = mb; Telegram.cacheLimitMb = mb },
-                            label = { Text(if (mb >= 1024) "${mb / 1024}G" else "${mb}M") },
+                            shape = RoundedCornerShape(50),
+                            label = { Text(formatCacheLimitLabel(mb)) },
                         )
                     }
                 }
@@ -725,12 +890,17 @@ private fun CacheDialog(onDismiss: () -> Unit) {
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
         dismissButton = {
-            TextButton(onClick = {
-                scope.launch {
-                    runCatching { Telegram.clearCache() }
-                    size = runCatching { Telegram.cacheSize() }.getOrNull()
-                }
-            }) { Text("清空") }
+            TextButton(
+                enabled = !clearing && (size == null || size!! > 0L),
+                onClick = {
+                    clearing = true
+                    scope.launch {
+                        runCatching { Telegram.clearCache() }
+                        size = runCatching { Telegram.cacheSize() }.getOrNull()
+                        clearing = false
+                    }
+                },
+            ) { Text(if (clearing) "清空中…" else "清空缓存") }
         },
     )
 }
@@ -871,19 +1041,21 @@ fun TelegramChatScreen(
 
     DetailScaffold(title, onBack) {
         Column(Modifier.fillMaxSize()) {
-            OutlinedTextField(
-                query, { query = it }, singleLine = true,
-                placeholder = { Text(if (mode == com.aisub.player.telegram.TgMode.ALL) "搜索这里的消息" else "搜索这里的视频") },
-                leadingIcon = { Icon(AppIcons.Search, null) },
-                trailingIcon = { if (query.isNotEmpty()) IconButton(onClick = { query = "" }) { Icon(AppIcons.Close, "清除") } },
-                colors = appFieldColors(),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            CompactSearchField(
+                value = query,
+                onValueChange = { query = it },
+                onSearch = { applied = query.trim() },
+                placeholder = if (mode == com.aisub.player.telegram.TgMode.ALL) "搜索消息、文件名或 #剧集标签" else "搜索视频说明、文件名或 #剧集标签",
+                phoneLabel = "搜索频道内容",
+                height = 42.dp,
+                cornerRadius = 21.dp,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
             )
             val tags = tagCounts.entries.filter { it.value >= 2 || tagCounts.size <= 12 }
                 .sortedByDescending { it.value }.take(30).map { it.key }
             androidx.compose.foundation.lazy.LazyRow(
-                contentPadding = PaddingValues(horizontal = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 item { ModeChip(mode) { mode = it; Telegram.mode = it } }
                 item {
@@ -899,6 +1071,7 @@ fun TelegramChatScreen(
                     androidx.compose.material3.FilterChip(
                         selected = applied == t,
                         onClick = { query = if (applied == t) "" else t },
+                        shape = RoundedCornerShape(50),
                         label = { Text(t.removePrefix("#")) },
                     )
                 }
@@ -925,7 +1098,7 @@ fun TelegramChatScreen(
                         onLongClick = { v -> if (v.isVideo) toggleSaved(v) else start(v) },
                         onTag = { query = it },
                     )
-                    else -> LazyColumn(state = results.listState, contentPadding = PaddingValues(vertical = 4.dp)) {
+                    else -> LazyColumn(state = results.listState, contentPadding = PaddingValues(top = 4.dp, bottom = 12.dp)) {
                         itemsIndexed(shown, key = { _, v -> v.messageId }) { i, v ->
                             if (i >= shown.size - 3) LaunchedEffect(shown.size) { loadMore() }
                             if (v.isText) TextRow(v) { start(v) } else VideoRow(
@@ -993,6 +1166,7 @@ private fun ModeChip(mode: com.aisub.player.telegram.TgMode, onSelect: (com.aisu
         androidx.compose.material3.FilterChip(
             selected = mode != com.aisub.player.telegram.TgMode.VIDEO,
             onClick = { open = true },
+            shape = RoundedCornerShape(50),
             label = { Text(mode.label) },
             trailingIcon = { Icon(AppIcons.ArrowDropDown, null, Modifier.size(18.dp)) },
         )
@@ -1028,12 +1202,21 @@ private suspend fun openWithOtherApp(context: android.content.Context, file: jav
 /** 文字消息：前几行正文和发送时间，点开看全文 */
 @Composable
 private fun TextRow(v: TgVideo, onClick: () -> Unit) {
-    Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp)) {
+    val cardShape = RoundedCornerShape(14.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .tgCard(cardShape)
+            .tvFocusRing(cardShape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
         Text(v.caption, style = MaterialTheme.typography.bodyMedium, maxLines = 4, overflow = TextOverflow.Ellipsis)
         Text(
             java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(v.date * 1000L)),
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 2.dp),
         )
     }
 }
@@ -1130,6 +1313,7 @@ private fun FilterMenuChip(name: String, options: List<String>, selected: Int, o
         androidx.compose.material3.FilterChip(
             selected = selected > 0,
             onClick = { open = true },
+            shape = RoundedCornerShape(50),
             label = { Text(if (selected > 0) options[selected] else name) },
             trailingIcon = { Icon(AppIcons.ArrowDropDown, null, Modifier.size(18.dp)) },
         )
@@ -1281,57 +1465,110 @@ private fun VideoRow(
             runCatching { Telegram.thumbnailPath(file)?.let { BitmapFactory.decodeFile(it)?.asImageBitmap() } }.getOrNull()
         }
     }
+    val cardShape = RoundedCornerShape(14.dp)
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp),
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .tgCard(cardShape)
+            .tvFocusRing(cardShape)
+            .clickable(onClick = onClick)
+            .padding(start = 10.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(width = 120.dp, height = 68.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh)) {
+        Box(
+            Modifier
+                .size(width = 132.dp, height = 74.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+        ) {
             (thumb ?: mini)?.let { Image(it, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
                 ?: Icon(
                     when (v.kind) { com.aisub.player.telegram.TgKind.PHOTO -> AppIcons.Image; com.aisub.player.telegram.TgKind.FILE -> AppIcons.File; else -> AppIcons.Movie },
                     null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.Center),
                 )
+            if (v.isVideo) Box(
+                Modifier
+                    .align(Alignment.Center)
+                    .size(30.dp)
+                    .clip(CircleShape)
+                    .background(Color(0x88000000)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(AppIcons.PlayArrow, null, tint = Color.White, modifier = Modifier.size(18.dp))
+            }
             if (v.durationSec > 0) Text(
-                formatDuration(v.durationSec * 1000L), style = MaterialTheme.typography.labelSmall, color = androidx.compose.ui.graphics.Color.White,
-                modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp)
-                    .background(androidx.compose.ui.graphics.Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp),
+                formatDuration(v.durationSec * 1000L),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(5.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xA6000000))
+                    .padding(horizontal = 5.dp, vertical = 1.dp),
             )
-            // 看过的：底下一条进度，看到片尾（最后 30 秒）的标「看完」
+            // 看过的：底下一条进度，看到片尾（最后 30 秒）的标「已看完」
             val duration = watched?.second?.takeIf { it > 0 } ?: (v.durationSec * 1000L)
             if (watched != null && duration > 0 && watched.first > 0) {
                 val finished = watched.first >= duration - 30_000
                 if (finished) Text(
-                    "看完", style = MaterialTheme.typography.labelSmall, color = androidx.compose.ui.graphics.Color.White,
-                    modifier = Modifier.align(Alignment.TopStart).padding(4.dp)
-                        .background(androidx.compose.ui.graphics.Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp),
+                    "已看完",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(5.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Orange.copy(alpha = 0.88f))
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
                 )
-                Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(androidx.compose.ui.graphics.Color(0x66000000))) {
+                Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color(0x66000000))) {
                     Box(
                         Modifier.fillMaxWidth(if (finished) 1f else (watched.first.toFloat() / duration).coerceIn(0f, 1f)).height(3.dp)
-                            .background(MaterialTheme.colorScheme.primary),
+                            .background(Orange),
                     )
                 }
             }
         }
         Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(v.title, style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(
+                v.title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
             // 文件名一般带集数、画质：标题一样的几条靠它分开
             val name = v.fileName.substringBeforeLast('.')
-            if (name.isNotBlank() && name !in v.title) Text(name, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (name.isNotBlank() && name !in v.title) {
+                Text(
+                    name,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             val date = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date(v.date * 1000L))
             Text(
                 listOfNotNull(source?.takeIf { it.isNotBlank() }, date, v.size.takeIf { it > 0 }?.let(::formatSize)).joinToString(" · "),
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        if (saved != null) IconButton(onClick = onSave) {
+        if (saved != null) IconButton(onClick = onSave, modifier = Modifier.size(38.dp)) {
             Icon(
-                if (saved) AppIcons.Favorite else AppIcons.FavoriteBorder, if (saved) "取消收藏" else "收藏",
-                tint = if (saved) MaterialTheme.colorScheme.primary else androidx.compose.material3.LocalContentColor.current,
+                if (saved) AppIcons.Favorite else AppIcons.FavoriteBorder,
+                if (saved) "取消收藏" else "收藏",
+                tint = if (saved) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
             )
         }
-        if (onInfo != null) IconButton(onClick = onInfo) { Icon(AppIcons.Info, "影视信息") }
+        if (onInfo != null) IconButton(onClick = onInfo, modifier = Modifier.size(38.dp)) {
+            Icon(AppIcons.Info, "影视信息", modifier = Modifier.size(20.dp))
+        }
     }
 }
 
@@ -1592,18 +1829,29 @@ fun TelegramGlobalSearchScreen(
                     if (publicChats.isEmpty()) {
                         EmptyState("没有找到与「$appliedQuery」相关的公开频道或群组", icon = AppIcons.Telegram)
                     } else {
-                        LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+                        LazyColumn(contentPadding = PaddingValues(top = 4.dp, bottom = 12.dp)) {
                             itemsIndexed(publicChats, key = { _, c -> c.id }) { _, c ->
+                                val cardShape = RoundedCornerShape(16.dp)
                                 Row(
-                                    Modifier.fillMaxWidth()
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 3.dp)
+                                        .tgCard(cardShape)
+                                        .tvFocusRing(cardShape)
                                         .clickable { openChat(c.id, c.title) }
-                                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 ) {
                                     ChatAvatar(c)
-                                    Column(Modifier.weight(1f)) {
-                                        Text(c.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(
+                                            c.title,
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
                                         val sub = listOfNotNull(
                                             c.username?.let { "@$it" },
                                             c.members.takeIf { it > 0 }?.let { "${countText(it)} 成员" },
