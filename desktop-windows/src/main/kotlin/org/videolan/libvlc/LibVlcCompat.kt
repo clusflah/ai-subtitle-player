@@ -3,6 +3,8 @@ package org.videolan.libvlc
 import android.content.Context
 import android.net.Uri
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
@@ -19,6 +21,8 @@ class LibVLC(val context: Context, val options: List<String> = emptyList()) {
 class Media(libVLC: LibVLC, val uri: Uri) {
     internal val options = mutableListOf<String>()
     internal var hwdecPref: Boolean? = null
+    internal var title: String? = null
+    internal var isLive: Boolean = false
     fun setHWDecoderEnabled(enabled: Boolean, force: Boolean) {
         hwdecPref = when {
             !enabled -> false
@@ -198,7 +202,22 @@ class MediaPlayer(libVLC: LibVLC) {
                 }
             }
             engine.hwdecPreference = m.hwdecPref
-            engine.setMediaItem(MediaItem.fromUri(m.uri), startMs)
+            val item = MediaItem.Builder()
+                .setUri(m.uri)
+                .setMediaId(m.uri.toString())
+                .apply {
+                    m.title?.takeIf { it.isNotBlank() }?.let { t ->
+                        setMediaMetadata(MediaMetadata.Builder().setTitle(t).build())
+                    }
+                    if (m.isLive) {
+                        setTag("live")
+                        if (m.uri.toString().contains(".m3u8", ignoreCase = true)) {
+                            setMimeType(MimeTypes.APPLICATION_M3U8)
+                        }
+                    }
+                }
+                .build()
+            engine.setMediaItem(item, startMs)
             engine.playWhenReady = true
             engine.prepare()
         } else {

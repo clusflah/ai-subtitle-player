@@ -246,7 +246,14 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         } else {
             uri
         }
-        val media = Media(libVlc, targetUri)
+        val live = item.localConfiguration?.tag == "live" ||
+            item.liveConfiguration.targetOffsetMs != C.TIME_UNSET ||
+            item.localConfiguration?.mimeType == MimeTypes.APPLICATION_M3U8 ||
+            uri.toString().contains(".m3u8", ignoreCase = true)
+        val media = Media(libVlc, targetUri).apply {
+            this.title = name
+            this.isLive = live
+        }
         when (userForceHwdec) {
             true -> media.setHWDecoderEnabled(true, true)
             false -> {

@@ -563,11 +563,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 直播中途出错后原地重连的时间（elapsedRealtime），用来限制次数 */
     private val liveRecoveries = ArrayDeque<Long>()
+    private var liveRecoverJob: Job? = null
 
     /**
-     * 默认内核放得好好的直播中途出错（落后直播窗口、分片暂时下载失败等）：回到直播最新处重新加载，
-     * 不换兼容模式、也不记住（不然这个频道以后都用兼容模式，有的直播在兼容模式下根本放不出来）。
-     * 一分钟内最多重连 3 次，还不行就照常报错。
+     * 默认内核放得好好的直播中途出错（落后直播窗口、分片暂时下载失败等）：退避 1.5s 后回到直播最新处重连，
+     * 避免上游瞬时抖动时高频原地狂刷 prepare() 形成回退循环；60 秒内最多自动重连 1 次，还不行就直接提示网络错误。
      */
     private fun recoverLive(error: PlaybackException): Boolean {
         val entry = _state.value.current?.takeIf { it.isLive } ?: return false
@@ -576,12 +576,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!behind && entry.uri !in liveWorked) return false
         val now = android.os.SystemClock.elapsedRealtime()
         while (liveRecoveries.isNotEmpty() && now - liveRecoveries.first() > 60_000) liveRecoveries.removeFirst()
-        if (liveRecoveries.size >= 3) return false
+        if (liveRecoveries.size >= 1) return false
         liveRecoveries.addLast(now)
-        android.util.Log.w("Voxtitle", "直播中途出错（${error.errorCodeName}），回到最新处重连：${entry.uri}")
-        exoPlayer.seekToDefaultPosition()
-        exoPlayer.prepare()
-        exoPlayer.play()
+        liveRecoverJob?.cancel()
+        android.util.Log.w("Voxtitle", "直播中途出错（${error.errorCodeName}），1.5s 后回到最新处重试一次：${entry.uri}")
+        liveRecoverJob = viewModelScope.launch {
+            delay(1_500L)
+            if (_state.value.current?.uri != entry.uri || usingExternalKernel) return@launch
+            exoPlayer.seekToDefaultPosition()
+            exoPlayer.prepare()
+            exoPlayer.play()
+        }
         return true
     }
 
@@ -720,6 +725,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val entry = _state.value.current?.takeIf { it.isLive } ?: return false
         if (usingExternalKernel || isExplicitMedia3Locked(entry.uri) || !vlcAutoTried.add(entry.uri)) return false
         if (error.errorCode in setOf(
+                PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
                 PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
                 PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
                 PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
@@ -835,6 +841,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val curSpeed = player.playbackParameters.speed
         val curRepeat = player.repeatMode
         val resumePos = if (entry.isLive) 0L else player.currentPosition.coerceAtLeast(0L)
+        liveRecoverJob?.cancel()
         vlcLiveWatch?.cancel()
         if (entry.isLive) {
             if (resolvedTarget == PlayerKernel.VLC) rememberVlcChannel(entry.uri) else forgetVlcChannel(entry.uri)
@@ -989,6 +996,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun onEntryChanged(entry: MediaEntry) {
         if (_state.value.current?.uri == entry.uri) return
+        liveRecoverJob?.cancel()
         stopLiveRecordingIfActive()
         cancelAll()
         EmbeddedSubtitles.resetDemuxCache()
@@ -1059,6 +1067,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun updateAutoAdvance() {
         val busy = _state.value.transcribing || _state.value.translating
         exoPlayer.pauseAtEndOfMediaItems = busy
+    }
+
+    /** 离开视频/直播播放页（非后台听歌）时彻底停止全部播放内核，防止高码率解码器或延迟起播滞留后台继续出声和拖卡界面。 */
+    fun stopPlaybackOnLeave() {
+        liveRecoverJob?.cancel()
+        vlcLiveWatch?.cancel()
+        frameWatch?.cancel()
+        exoPlayer.pause()
+        exoPlayer.stop()
+        vlcPlayer?.pause()
+        vlcPlayer?.stop()
+        mpvPlayer?.pause()
+        mpvPlayer?.stop()
+        com.aisub.player.desktop.DesktopPlayerEngine.clearFrame()
     }
 
     /** 记录当前播放进度，离开播放页或切换视频时调用。 */
@@ -1768,6 +1790,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 直播字幕上屏过程中要记住的东西（只在主线程用） */
     private class LivePublishState {
+        /** 按到达先后显示时，上一句的开始时间 */
+        var lastStart = Long.MIN_VALUE
+
         /** 按到达先后显示时，上一句的结束时间 */
         var lastEnd = 0L
 
@@ -1814,13 +1839,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         } else {
             val now = wall - (clock as LiveClock.Arrival).baseMs
-            // 积压太多（翻译或识别变慢）时不再排队，直接显示最新的
-            var cursor = if (ps.lastEnd - now > LIVE_MAX_BACKLOG_MS) now else maxOf(now, ps.lastEnd)
+            // VLC 音频流与画面同步：新句到达时立刻接上显示（仅确保前一句至少可见 800ms 且不与新句重叠），避免排队越积越晚
+            var cursor = when {
+                usingVlc -> if (ps.lastStart != Long.MIN_VALUE) maxOf(now, ps.lastStart + 800L) else now
+                ps.lastEnd - now > LIVE_MAX_BACKLOG_MS -> now
+                else -> maxOf(now, ps.lastEnd)
+            }
             val first = waiting.first().first.startMs
             for ((c, _) in waiting) {
                 val length = (c.endMs - c.startMs).coerceIn(LIVE_MIN_CUE_MS, 6_000)
                 // 保持这一批里各句原来的间隔
                 val start = maxOf(cursor, now + (c.startMs - first))
+                ps.lastStart = start
                 cursor = start + length
                 shown += Cue(nextCueId++, start, cursor, c.text, c.translation)
             }
@@ -1828,9 +1858,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             waiting.clear()
         }
         if (shown.isEmpty()) return
+        val firstNewStart = shown.first().startMs
         _state.update { st ->
+            val prev = if (clock is LiveClock.Arrival && usingVlc && st.cues.isNotEmpty()) {
+                st.cues.mapIndexed { idx, c ->
+                    if (idx == st.cues.lastIndex && c.endMs > firstNewStart) {
+                        c.copy(endMs = firstNewStart)
+                    } else c
+                }
+            } else {
+                st.cues
+            }
             st.copy(
-                cues = (st.cues + shown).sortedBy { it.startMs }.takeLast(LIVE_KEEP_CUES),
+                cues = (prev + shown).sortedBy { it.startMs }.takeLast(LIVE_KEEP_CUES),
                 status = if (liveDelayAdded > 0) "实时字幕 · 画面延后了 ${liveDelayAdded / 1000} 秒，和说话对齐" else "实时字幕",
             )
         }
@@ -1838,6 +1878,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun switchToArrival(waiting: MutableList<Pair<Cue, Long>>, ps: LivePublishState, why: String) {
         android.util.Log.w("Voxtitle", "直播字幕改为按到达顺序显示：$why")
+        ps.lastStart = Long.MIN_VALUE
         ps.lastEnd = 0
         _state.update { it.copy(cues = emptyList(), liveClock = LiveClock.Arrival(android.os.SystemClock.elapsedRealtime())) }
         if (waiting.isNotEmpty()) publishLive(waiting, LiveAnchors(), ps)

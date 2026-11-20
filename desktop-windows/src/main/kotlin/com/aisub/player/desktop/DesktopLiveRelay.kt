@@ -826,6 +826,9 @@ object DesktopLiveRelay {
         private val refs = AtomicInteger(0)
         private val stopped = AtomicBoolean(false)
         private val failed = AtomicBoolean(false)
+        @Volatile
+        var lastFailureReason: String = ""
+            private set
         private val firstChunkLatch = CountDownLatch(1)
         private val connActualStartMs = ConcurrentHashMap<Long, Long>()
 
@@ -970,12 +973,15 @@ object DesktopLiveRelay {
 
                     if (!everProduced && !readAnyBytes && attempts >= 1) {
                         val reason = synchronized(errSummary) { errSummary.lines().lastOrNull { it.isNotBlank() }.orEmpty() }
+                        lastFailureReason = reason
                         Log.w(TAG, "直播中继首连无数据[$id]，回退直连模式: $reason")
                         failed.set(true)
                         firstChunkLatch.countDown()
                         break
                     }
                     if (!everProduced && attempts >= 2) {
+                        val reason = synchronized(errSummary) { errSummary.lines().lastOrNull { it.isNotBlank() }.orEmpty() }
+                        if (reason.isNotBlank()) lastFailureReason = reason
                         failed.set(true)
                         firstChunkLatch.countDown()
                         break

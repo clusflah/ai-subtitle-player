@@ -2134,6 +2134,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 直播字幕上屏过程中要记住的东西（只在主线程用） */
     private class LivePublishState {
+        /** 按到达先后显示时，上一句的开始时间 */
+        var lastStart = Long.MIN_VALUE
+
         /** 按到达先后显示时，上一句的结束时间 */
         var lastEnd = 0L
 
@@ -2180,9 +2183,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         } else {
             val now = wall - (clock as LiveClock.Arrival).baseMs
-            // VLC 原生音频回调是和画面同步的实时流：新一句识别出来时立即接上显示（前一句已显示满最短时间则提前收尾），避免排队越积越晚
+            // VLC 原生音频回调是和画面同步的实时流：新一句识别出来时立即接上显示（仅确保前一句至少可见 800ms 且不与新句重叠），避免排队越积越晚
             var cursor = when {
-                usingVlc -> now
+                usingVlc -> if (ps.lastStart != Long.MIN_VALUE) maxOf(now, ps.lastStart + 800L) else now
                 ps.lastEnd - now > LIVE_MAX_BACKLOG_MS -> now
                 else -> maxOf(now, ps.lastEnd)
             }
@@ -2191,6 +2194,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val length = (c.endMs - c.startMs).coerceIn(LIVE_MIN_CUE_MS, 6_000)
                 // 保持同一批里各句原来的间隔
                 val start = maxOf(cursor, now + (c.startMs - first))
+                ps.lastStart = start
                 cursor = start + length
                 shown += Cue(nextCueId++, start, cursor, c.text, c.translation)
             }
@@ -2203,7 +2207,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val prev = if (clock is LiveClock.Arrival && usingVlc && st.cues.isNotEmpty()) {
                 st.cues.mapIndexed { idx, c ->
                     if (idx == st.cues.lastIndex && c.endMs > firstNewStart) {
-                        c.copy(endMs = maxOf(c.startMs + 800L, firstNewStart))
+                        c.copy(endMs = firstNewStart)
                     } else c
                 }
             } else {
@@ -2218,6 +2222,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun switchToArrival(waiting: MutableList<Pair<Cue, Long>>, ps: LivePublishState, why: String) {
         android.util.Log.w("Voxtitle", "直播字幕改为按到达顺序显示：$why")
+        ps.lastStart = Long.MIN_VALUE
         ps.lastEnd = 0
         _state.update { it.copy(cues = emptyList(), liveClock = LiveClock.Arrival(android.os.SystemClock.elapsedRealtime())) }
         if (waiting.isNotEmpty()) publishLive(waiting, LiveAnchors(), ps)

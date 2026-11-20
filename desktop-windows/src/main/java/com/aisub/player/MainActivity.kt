@@ -399,8 +399,10 @@ class MainActivity : ComponentActivity() {
     /** 离开播放页：视频暂停；音乐（开了后台播放时）继续放，底部显示「正在播放」小条。 */
     private fun leavePlayer() {
         main.stopLiveRecordingIfActive()
-        if (!main.keepMusicPlayingOutsidePlayer()) main.player.pause()
         main.savePosition()
+        if (!main.keepMusicPlayingOutsidePlayer()) {
+            main.stopPlaybackOnLeave()
+        }
         lib.reloadStored()
     }
 

@@ -396,10 +396,11 @@ object DesktopPlayerEngine {
         synchronized(factoryLock) {
             sharedVlcFactory?.let { return it }
             val t0 = System.currentTimeMillis()
+            val vlcCodecThreads = (Runtime.getRuntime().availableProcessors() - 2).coerceIn(2, 6)
             return runCatching {
                 MediaPlayerFactory(
                     "--avcodec-hw=none",
-                    "--avcodec-threads=0",
+                    "--avcodec-threads=$vlcCodecThreads",
                     "--network-caching=2500",
                     "--file-caching=300",
                     "--prefetch-buffer-size=65536",
@@ -954,7 +955,10 @@ class DesktopExoPlayer(
         val actualConnStart = session.actualStartMsForConnection(liveRelayConnId)
         val anchor = actualConnStart ?: liveContentBaseMs
         if (ffmpegRunning.get()) {
-            return (anchor + positionMsInternal.coerceAtLeast(0L)).coerceIn(session.oldestTimelineMs, session.latestTimelineMs)
+            if (!renderedFirstFrame.get() && !isCurrentItemAudioOnly) {
+                return anchor.coerceIn(session.oldestTimelineMs, session.latestTimelineMs)
+            }
+            return (anchor + currentFfmpegAudioClockMs()).coerceIn(session.oldestTimelineMs, session.latestTimelineMs)
         }
         if (!renderedFirstFrame.get() && !isCurrentItemAudioOnly) {
             return anchor.coerceIn(session.oldestTimelineMs, session.latestTimelineMs)
@@ -1969,6 +1973,12 @@ class DesktopExoPlayer(
         return routed to headers
     }
 
+    private fun shouldUseLibplaceboForLive(titleHint: String?, url: String): Boolean {
+        if (!autoDolbyProtection || isCurrentItemAudioOnly) return false
+        if (backendMode != DesktopBackendMode.AUTO && backendMode != DesktopBackendMode.VLC_ONLY) return false
+        return com.aisub.player.media.DolbyVisionHelper.looksLikeHdrOrDolbyTitle(titleHint ?: url)
+    }
+
     private fun startCurrentItemAsync(gen: Int, item: MediaItem, startPosMs: Long) {
         itemStartInFlight = true
         pendingVlcSeekMs = C.TIME_UNSET
@@ -2043,6 +2053,8 @@ class DesktopExoPlayer(
 
             val shouldRelay = DesktopLiveRelay.shouldRelay(uri, item)
             isCurrentMediaItemLive = shouldRelay ||
+                item.localConfiguration?.tag == "live" ||
+                item.liveConfiguration.targetOffsetMs != C.TIME_UNSET ||
                 playableUrl.contains(".m3u8", ignoreCase = true) ||
                 item.localConfiguration?.mimeType == MimeTypes.APPLICATION_M3U8
 
@@ -2075,6 +2087,16 @@ class DesktopExoPlayer(
                         lastPlayableUrl = relayUrl
                         lastHeaders = emptyMap()
                         itemStartInFlight = false
+                        val relayTitleHint = item.mediaMetadata.title?.toString() ?: uri.lastPathSegment
+                        if (shouldUseLibplaceboForLive(relayTitleHint, playableUrl)) {
+                            if (com.aisub.player.media.DolbyVisionHelper.looksLikeDolbyVisionTitle(relayTitleHint ?: playableUrl)) {
+                                detectedDolbyProfile = 5
+                            }
+                            Log.i(TAG, "检测到 HDR / HLG / 杜比视界直播流，经本地中继切至 GPU libplacebo 色调映射管线: ${redactUrlForLog(playableUrl)}")
+                            usingFfmpegPipeline = true
+                            startWithFfmpeg(gen, relayUrl, emptyMap(), 0L, preferLibplacebo = true, forceHdrColorMap = true)
+                            return@execute
+                        }
                         if (DesktopPlayerEngine.vlcAvailable && startWithVlcjOnExecutor(gen, relayUrl, emptyMap(), 0L)) {
                             usingFfmpegPipeline = false
                             return@execute
@@ -2083,10 +2105,21 @@ class DesktopExoPlayer(
                         startWithFfmpeg(gen, relayUrl, emptyMap(), 0L)
                         return@execute
                     } else {
+                        val relayFailReason = session.lastFailureReason
                         DesktopLiveRelay.release(session)
                         if (liveRelaySession === session) liveRelaySession = null
                         if (gen != mediaGeneration.get()) {
                             itemStartInFlight = false
+                            return@execute
+                        }
+                        val confirmedRelayErr = if (relayFailReason.isNotBlank()) {
+                            DesktopPlayerEngine.classifyMediaOpenFailure(playableUrl, uri.toString(), relayFailReason)
+                        } else {
+                            null
+                        }
+                        if (confirmedRelayErr != null) {
+                            itemStartInFlight = false
+                            onError(confirmedRelayErr)
                             return@execute
                         }
                     }
@@ -2098,10 +2131,18 @@ class DesktopExoPlayer(
             // 2. 若指定了 MPV / libplacebo 内核，或开启了防偏色且探测到杜比视界（IPTPQc2 / RPU）或 HDR10 / HLG / BT.2020 广色域流，
             //    主动绕过不支持 vmem 回调色调映射与色域转换的 LibVLC 3.x（否则必出紫绿或灰白偏色），直连 GPU libplacebo 色彩映射管线
             val forceMpvPipeline = backendMode == DesktopBackendMode.MPV_LIBPLACEBO
-            val colorRequirement = if (!forceMpvPipeline && backendMode == DesktopBackendMode.AUTO && autoDolbyProtection && !isCurrentItemAudioOnly) {
-                probeColorPipelineRequirementQuick(playableUrl, headers, item.mediaMetadata.title?.toString())
-            } else {
-                null
+            val titleHint = item.mediaMetadata.title?.toString() ?: uri.lastPathSegment
+            val liveHdrHint = isCurrentMediaItemLive && !forceMpvPipeline &&
+                shouldUseLibplaceboForLive(titleHint, playableUrl)
+            val colorRequirement = when {
+                liveHdrHint -> ColorPipelineProbe(
+                    dvProfile = if (com.aisub.player.media.DolbyVisionHelper.looksLikeDolbyVisionTitle(titleHint ?: playableUrl)) 5 else null,
+                    isHdrOrWideGamut = true,
+                    parsedTrackHeader = false,
+                )
+                !forceMpvPipeline && backendMode == DesktopBackendMode.AUTO && autoDolbyProtection && !isCurrentItemAudioOnly ->
+                    probeColorPipelineRequirementQuick(playableUrl, headers, titleHint)
+                else -> null
             }
             val probeDvProfile = colorRequirement?.dvProfile
             val requiresColorMap = colorRequirement != null && (probeDvProfile != null || colorRequirement.isHdrOrWideGamut)
@@ -2137,6 +2178,7 @@ class DesktopExoPlayer(
                 headers = headers,
                 startPosMs = effectiveStartMs,
                 preferLibplacebo = forceMpvPipeline || requiresColorMap,
+                forceHdrColorMap = requiresColorMap,
             )
         }
     }
@@ -2183,6 +2225,13 @@ class DesktopExoPlayer(
         lastPlayableUrl = relayUrl
         lastHeaders = emptyMap()
         Log.i("Voxtitle-sync", "直播时移切换本地播放流[${session.id}]: desired=${desiredContentMs}ms, url=$relayUrl")
+        val relayTitleHint = currentMediaItem?.mediaMetadata?.title?.toString()
+            ?: currentMediaItem?.localConfiguration?.uri?.lastPathSegment
+        if (shouldUseLibplaceboForLive(relayTitleHint, session.playableUrl)) {
+            usingFfmpegPipeline = true
+            startWithFfmpeg(gen, relayUrl, emptyMap(), 0L, preferLibplacebo = true, forceHdrColorMap = true)
+            return
+        }
         if (DesktopPlayerEngine.vlcAvailable && startWithVlcjOnExecutor(gen, relayUrl, emptyMap(), 0L)) {
             return
         }
@@ -2504,6 +2553,17 @@ class DesktopExoPlayer(
 
             override fun playing(mediaPlayer: MediaPlayer) {
                 if (vlcMp !== mp) return
+                // 若在异步打开期间用户已暂停或退出播放页，立刻在控制线程暂停并静音，防止后台突然冒出声音
+                if (!playWhenReady) {
+                    vlcActivelyPlaying = false
+                    vlcExecutor.execute {
+                        if (vlcMp === mp && !playWhenReady) {
+                            runCatching { mp.controls().setPause(true) }
+                            runCatching { mp.audio()?.setMute(true) }
+                        }
+                    }
+                    return
+                }
                 vlcPlayedCurrentItem = true
                 vlcActivelyPlaying = true
                 vlcBufferingSinceMs = 0L
@@ -3306,6 +3366,7 @@ class DesktopExoPlayer(
         headers: Map<String, String>,
         startPosMs: Long,
         preferLibplacebo: Boolean = false,
+        forceHdrColorMap: Boolean = false,
     ) {
         if (gen != mediaGeneration.get()) return
         usingFfmpegPipeline = true
@@ -3327,7 +3388,7 @@ class DesktopExoPlayer(
             }
         }
 
-        Log.i(TAG, "启动 FFmpeg/libplacebo 播放引擎: url=${redactUrlForLog(effectiveUrl)}, startPosMs=$startPosMs, preferLibplacebo=$preferLibplacebo")
+        Log.i(TAG, "启动 FFmpeg/libplacebo 播放引擎: url=${redactUrlForLog(effectiveUrl)}, startPosMs=$startPosMs, preferLibplacebo=$preferLibplacebo, forceHdrColorMap=$forceHdrColorMap")
         ioPool.submit {
             if (gen != mediaGeneration.get() || !ffmpegRunning.get()) return@submit
             val ffmpeg = DesktopBinaryFinder.ensureFfmpeg()
@@ -3342,7 +3403,12 @@ class DesktopExoPlayer(
                 return@submit
             }
 
-            val probed = probeMediaStreamsCached(effectiveUrl, effectiveHeaders, timeoutSec = 8L)
+            val probeUrl = if (effectiveUrl.startsWith("http://127.0.0.1:", ignoreCase = true) && effectiveUrl.contains("conn=")) {
+                effectiveUrl.replace(Regex("([?&])conn=\\d+&?"), "$1").trimEnd('&', '?')
+            } else {
+                effectiveUrl
+            }
+            val probed = probeMediaStreamsCached(probeUrl, effectiveHeaders, timeoutSec = if (isCurrentMediaItemLive) 5L else 8L)
             if (gen != mediaGeneration.get() || !ffmpegRunning.get()) return@submit
 
             val rawUriStr = currentMediaItem?.localConfiguration?.uri?.toString().orEmpty()
@@ -3355,15 +3421,18 @@ class DesktopExoPlayer(
                 }
             }
 
-            val srcWidth = probed?.srcWidth ?: 1280
-            val srcHeight = probed?.srcHeight ?: 720
+            val titleHintForFallback = currentMediaItem?.mediaMetadata?.title?.toString().orEmpty()
+            val looks4kTitle = titleHintForFallback.contains("4k", ignoreCase = true) ||
+                titleHintForFallback.contains("2160", ignoreCase = true)
+            val srcWidth = probed?.srcWidth ?: if (looks4kTitle) 3840 else 1280
+            val srcHeight = probed?.srcHeight ?: if (looks4kTitle) 2160 else 720
             val hasVideo = probed?.hasVideo ?: true
             val hasAudio = probed?.hasAudio ?: true
-            val fps = probed?.fps ?: 24.0
+            val fps = probed?.fps ?: if (isCurrentMediaItemLive && looks4kTitle) 50.0 else 24.0
             val dvProfile = probed?.dvProfile ?: detectedDolbyProfile
             if (dvProfile != null) detectedDolbyProfile = dvProfile
             val cachedColorHdr = colorSniffCache[rawUriStr]?.isHdrOrWideGamut == true
-            val streamIsHdrOrDv = (probed?.isHdrOrDv == true) || dvProfile != null || cachedColorHdr
+            val streamIsHdrOrDv = forceHdrColorMap || (probed?.isHdrOrDv == true) || dvProfile != null || cachedColorHdr
 
             if (probed != null) {
                 lastProbedMeta = probed
@@ -3754,6 +3823,10 @@ class DesktopExoPlayer(
             var procTail: AtomicReference<String>? = null
             try {
                 val proc = ProcessBuilder(cmd).start()
+                if (gen != mediaGeneration.get() || !ffmpegRunning.get()) {
+                    runCatching { proc.destroyForcibly() }
+                    return@submit
+                }
                 procTail = captureProcessStderrTail(proc)
                 ffmpegVideoProc = proc
                 ffmpegAudioProc = null
@@ -4304,6 +4377,10 @@ class DesktopExoPlayer(
                     }
                 }
                 val proc = ProcessBuilder(cmd).start()
+                if (gen != mediaGeneration.get() || !ffmpegRunning.get()) {
+                    runCatching { proc.destroyForcibly() }
+                    return@submit
+                }
                 procTail = captureProcessStderrTail(proc)
                 ffmpegVideoProc = proc
                 launchFfmpegTextSubtitleReaders(gen, proc, subBindings, startPosMs)
@@ -4470,6 +4547,25 @@ class DesktopExoPlayer(
         pendingVlcStart = null
         vlcActivelyPlaying = false
         ffmpegRunning.set(false)
+        vlcStatsFuture?.cancel(false)
+        vlcStatsFuture = null
+        // 立刻在调用线程静默音频输出并强杀正在跑的 4K/杜比 FFmpeg 子进程，
+        // 避免 vlcExecutor 正阻塞在 ffprobe/网络打开时旧解码器滞留后台继续播声音和吃满 CPU/GPU
+        runCatching { ffmpegAudioLine?.stop() }
+        runCatching { ffmpegAudioLine?.flush() }
+        runCatching { ffmpegAudioLine?.close() }
+        ffmpegAudioLine = null
+        runCatching { ffmpegAudioProc?.destroyForcibly() }
+        runCatching { ffmpegVideoProc?.destroyForcibly() }
+        ffmpegAudioProc = null
+        ffmpegVideoProc = null
+        runCatching { ffmpegVideoServer?.close() }
+        ffmpegVideoServer = null
+        runCatching { ffmpegAudioServer?.close() }
+        ffmpegAudioServer = null
+        ffmpegSubServers.forEach { runCatching { it.close() } }
+        ffmpegSubServers.clear()
+        runCatching { wavClip?.stop() }
         vlcExecutor.execute {
             stopInternalOnExecutor()
         }
