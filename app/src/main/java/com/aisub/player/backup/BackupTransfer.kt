@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit
 // 收到的备份不会自动写入，要在接收端确认导入。
 
 private const val SERVICE_TYPE = "_voxtitle._tcp."
-private const val MAX_BYTES = 8 * 1024 * 1024
+private const val MAX_BYTES = 64 * 1024 * 1024
 
 /** 接收端：开端口、在局域网里广播、等一份备份。 */
 class BackupReceiver(context: Context) {
@@ -104,7 +104,7 @@ class BackupReceiver(context: Context) {
             read += n
         }
         val text = bytes.copyOf(read).toString(Charsets.UTF_8)
-        val error = runCatching { Backup.parse(text) }.exceptionOrNull()
+        val error = runCatching { Backup.validateEnvelope(text) }.exceptionOrNull()
         if (error != null) {
             respond(c, 400, "text/plain", error.message ?: "备份文件无法读取")
             return null
@@ -216,7 +216,11 @@ class ReceiverFinder(context: Context) {
     }
 
     companion object {
-        private val client = com.aisub.player.net.AppProxy.builder().connectTimeout(8, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
+        private val client = com.aisub.player.net.AppProxy.builder()
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .build()
 
         /** 把备份发给接收端（address 是 IP:端口，也可以是接收端显示的整个网址）。返回对方的回复。 */
         suspend fun send(address: String, backup: String): String = withContext(Dispatchers.IO) {

@@ -1957,7 +1957,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val state = LivePublishState()
             var tick = 0
             while (true) {
-                delay(200)
+                delay(100)
                 val now = android.os.SystemClock.elapsedRealtime()
                 if (heard.getAndSet(false)) {
                     if (_state.value.cues.isEmpty() && _state.value.liveHint == null) {
@@ -1970,7 +1970,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (waiting.size > before) watchdog.cue(now)
                 if (waiting.isNotEmpty()) publishLive(waiting, anchors, state)
                 // 每秒看一次：一直没有字的时候在画面上说明原因
-                if (++tick % 5 == 0) {
+                if (++tick % 10 == 0) {
                     val hint = watchdog.hint(now)
                     if (hint != _state.value.liveHint) {
                         _state.update { it.copy(liveHint = hint, status = hint ?: if (it.cues.isEmpty()) "正在识别…" else "实时字幕") }
@@ -2183,32 +2183,54 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         } else {
             val now = wall - (clock as LiveClock.Arrival).baseMs
-            // VLC 原生音频回调是和画面同步的实时流：新一句识别出来时立即接上显示（仅确保前一句至少可见 800ms 且不与新句重叠），避免排队越积越晚
-            var cursor = when {
-                usingVlc -> if (ps.lastStart != Long.MIN_VALUE) maxOf(now, ps.lastStart + 800L) else now
-                ps.lastEnd - now > LIVE_MAX_BACKLOG_MS -> now
-                else -> maxOf(now, ps.lastEnd)
+            if (usingVlc) {
+                // VLC 原生音频回调是和画面同步的实时流：
+                // 1) ps.lastStart 只锚定「当前已上屏的首句开始时间」，绝不让之前拆分出的未来句把新到达的句子不断往后推；
+                // 2) 若前一句刚上屏不久（<=600ms），留 600ms 可见余量后再切新句；否则立即在 now 上屏；
+                // 3) 同一句被 CueSplitter 拆成多行同时到达时，中间行压缩到 900~1800ms，最后一行保留常规展示时长。
+                var cursor = if (ps.lastStart != Long.MIN_VALUE && ps.lastStart <= now) {
+                    maxOf(now, ps.lastStart + 600L)
+                } else {
+                    now
+                }
+                val lastIdx = waiting.lastIndex
+                waiting.forEachIndexed { idx, (c, _) ->
+                    val rawLen = (c.endMs - c.startMs).coerceAtLeast(0L)
+                    val length = if (idx < lastIdx) {
+                        rawLen.coerceIn(900L, 1_800L)
+                    } else {
+                        rawLen.coerceIn(LIVE_MIN_CUE_MS, 5_000L)
+                    }
+                    val start = cursor
+                    cursor = start + length
+                    shown += Cue(nextCueId++, start, cursor, c.text, c.translation)
+                }
+                if (shown.isNotEmpty()) {
+                    ps.lastStart = shown.first().startMs
+                }
+                ps.lastEnd = cursor
+            } else {
+                var cursor = if (ps.lastEnd - now > LIVE_MAX_BACKLOG_MS) now else maxOf(now, ps.lastEnd)
+                val first = waiting.first().first.startMs
+                for ((c, _) in waiting) {
+                    val length = (c.endMs - c.startMs).coerceIn(LIVE_MIN_CUE_MS, 6_000)
+                    // 保持同一批里各句原来的间隔
+                    val start = maxOf(cursor, now + (c.startMs - first))
+                    ps.lastStart = start
+                    cursor = start + length
+                    shown += Cue(nextCueId++, start, cursor, c.text, c.translation)
+                }
+                ps.lastEnd = cursor
             }
-            val first = waiting.first().first.startMs
-            for ((c, _) in waiting) {
-                val length = (c.endMs - c.startMs).coerceIn(LIVE_MIN_CUE_MS, 6_000)
-                // 保持同一批里各句原来的间隔
-                val start = maxOf(cursor, now + (c.startMs - first))
-                ps.lastStart = start
-                cursor = start + length
-                shown += Cue(nextCueId++, start, cursor, c.text, c.translation)
-            }
-            ps.lastEnd = cursor
             waiting.clear()
         }
         if (shown.isEmpty()) return
         val firstNewStart = shown.first().startMs
         _state.update { st ->
             val prev = if (clock is LiveClock.Arrival && usingVlc && st.cues.isNotEmpty()) {
-                st.cues.mapIndexed { idx, c ->
-                    if (idx == st.cues.lastIndex && c.endMs > firstNewStart) {
-                        c.copy(endMs = firstNewStart)
-                    } else c
+                // 新句到达时，裁掉旧句超出 firstNewStart 的尾巴并丢弃尚未轮到的陈旧未来排队句
+                st.cues.filter { it.startMs < firstNewStart }.map { c ->
+                    if (c.endMs > firstNewStart) c.copy(endMs = firstNewStart) else c
                 }
             } else {
                 st.cues
@@ -2321,9 +2343,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return settings.streamingAsr && settings.streamingAvailable && (current.isLive || isRemote(current))
     }
 
-    /** live：直播实时字幕，本地模型一段话最长 6 秒（要等一段说完才出字，太长字幕就赶不上画面） */
+    /** live：直播实时字幕，流式开启低延迟断句（end_window_size=450 等），本地模型缩短单句上限 */
     private fun createEngine(settings: AppSettings, live: Boolean = false): SpeechEngine {
-        if (useStreaming(settings)) settings.createStreamingEngine()?.let { return it }
+        if (useStreaming(settings)) {
+            settings.createStreamingEngine()?.let { engine ->
+                if (live && engine is com.aisub.player.asr.cloud.StreamingCloudEngine) {
+                    engine.liveStream = true
+                }
+                return engine
+            }
+        }
         return createChunkedEngine(settings, live)
     }
 
@@ -2447,7 +2476,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val pending = snapshot.cues.filter { it.translation == null && it.id !in inFlight && (!live || it.endMs >= position - 2_000) }
             if (pending.isEmpty()) {
                 if (running > 0 || snapshot.transcribing || snapshot.liveCaptions || snapshot.extractingEmbedded) {
-                    delay(250)
+                    delay(if (live) 100L else 250L)
                     continue
                 }
                 if (skipped > 0) {

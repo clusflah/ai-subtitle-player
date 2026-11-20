@@ -150,8 +150,27 @@ object Telegram {
     @Volatile
     private var client: Client? = null
 
+    @Volatile
+    private var closeLatch: java.util.concurrent.CountDownLatch? = null
+
     /** 文件下载进度（[TgDataSource] 等着它） */
     val fileListeners = CopyOnWriteArrayList<(TdApi.File) -> Unit>()
+
+    /**
+     * 备份导出或恢复 Telegram 会话数据库前安全关闭运行中的 TDLib 实例并等待落盘，
+     * 避免 td.binlog 与 db.sqlite WAL 未刷盘或文件锁导致会话损坏。
+     */
+    fun closeForBackup(timeoutMs: Long = 5_000L) {
+        val cl = synchronized(this) { client } ?: return
+        val latch = java.util.concurrent.CountDownLatch(1)
+        closeLatch = latch
+        runCatching { cl.send(TdApi.Close()) {} }
+        runCatching { latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS) }
+        synchronized(this) {
+            if (client === cl) client = null
+            if (closeLatch === latch) closeLatch = null
+        }
+    }
 
     fun init(context: Context) {
         if (::app.isInitialized) return
@@ -252,8 +271,13 @@ object Telegram {
             is TdApi.AuthorizationStateLoggingOut -> _auth.value = TgAuth.LoggingOut
             is TdApi.AuthorizationStateClosed -> {
                 // 退出登录或换凭证后客户端就关了：要再登录得重新建一个
-                synchronized(this) { client = null }
-                if (_auth.value == TgAuth.LoggingOut) start()
+                val wasLoggingOut = _auth.value == TgAuth.LoggingOut
+                synchronized(this) {
+                    client = null
+                    closeLatch?.countDown()
+                    closeLatch = null
+                }
+                if (wasLoggingOut) start()
             }
             else -> {}
         }

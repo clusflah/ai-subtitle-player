@@ -94,6 +94,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
                 "--live-caching=1200",
                 "--prefetch-buffer-size=16384",
                 "--avcodec-skiploopfilter=1",
+                "--input-fast-seek",
                 "--http-reconnect",
                 "--audio-time-stretch",
             )
@@ -105,6 +106,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
                 "--prefetch-buffer-size=16384",
                 "--audio-desync=-160",
                 "--avcodec-skiploopfilter=1",
+                "--input-fast-seek",
                 "--http-reconnect",
                 "--audio-time-stretch",
             )
@@ -372,6 +374,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         videoView?.removeOnLayoutChangeListener(layoutListener)
         videoView = null
         if (mp.vlcVout.areViewsAttached()) mp.vlcVout.detachViews()
+        detachSubtitlesView()
         mp.stop()
         items = emptyList()
         playbackState = Player.STATE_IDLE
