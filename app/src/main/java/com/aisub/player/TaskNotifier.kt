@@ -69,6 +69,13 @@ class TaskNotifier(private val context: Context) {
         runCatching { manager.notify(ID, n) }
     }
 
+    /** 立即收起通知（不弹完成提示） */
+    fun cancel() {
+        running = false
+        lastUpdate = 0
+        manager.cancel(ID)
+    }
+
     companion object {
         private const val CHANNEL = "tasks"
         private const val ID = 2001

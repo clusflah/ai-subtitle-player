@@ -108,6 +108,10 @@ class CaptureService : Service() {
             .build()
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        stopSelf()
+    }
+
     override fun onDestroy() {
         running = false
         thread?.join(500)

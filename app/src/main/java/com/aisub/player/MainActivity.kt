@@ -427,10 +427,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** 离开播放页：视频暂停；音乐（开了后台播放时）继续放，底部显示「正在播放」小条。 */
+    /** 离开播放页：视频暂停；直播停掉录制与实时字幕；音乐（开了后台播放时）继续放，底部显示「正在播放」小条。 */
     private fun leavePlayer() {
         main.stopLiveRecordingIfActive()
-        if (!main.keepMusicPlayingOutsidePlayer()) main.player.pause()
+        main.stopLiveTasksIfActive()
+        if (!main.keepMusicPlayingOutsidePlayer()) {
+            main.player.pause()
+            main.stopPlaybackService()
+        }
         main.savePosition()
         lib.reloadStored()
         if (isInPopoutMode()) {
@@ -520,7 +524,10 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         main.savePosition()
-        if (!main.keepPlayingInBackground()) main.player.pause()
+        if (!main.keepPlayingInBackground()) {
+            main.stopLiveTasksIfActive()
+            main.player.pause()
+        }
     }
 
     companion object {

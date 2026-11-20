@@ -320,6 +320,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             .onFailure { android.util.Log.w("Voxtitle", "无法启动后台播放服务", it) }
     }
 
+    /** 退出播放页且不需要后台播放时，停掉媒体会话服务，避免通知栏残留已暂停的视频/直播播放卡片 */
+    fun stopPlaybackService() {
+        if (PlaybackService.session !== session) return
+        val app = getApplication<Application>()
+        runCatching { app.stopService(Intent(app, PlaybackService::class.java)) }
+    }
+
     /** 切到后台时是否继续播放：音乐看设置，视频选了「继续播放声音」时继续 */
     fun keepPlayingInBackground(): Boolean {
         val e = _state.value.current ?: return false
@@ -688,23 +695,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
+    private val taskNotifier = TaskNotifier(app)
+    private var remoteAsrSuspended = false
+
     init {
         if (_state.value.settings.ttsEnabled) ttsReader.start()
         exoPlayer.addListener(listener)
         // 内嵌字幕默认不显示（避免和 AI 字幕重叠），除非设置了首选字幕语言
         extras.applyTrackDefaults()
-        // 识别、翻译的进度放到通知栏，离开播放页也看得到
+        // 识别、翻译的进度放到通知栏，离开播放页也看得到（直播实时字幕是持续流，不放通知栏）
         viewModelScope.launch {
-            val notifier = TaskNotifier(app)
             var wasBusy = false
+            var lastTitle = ""
             _state.collect { s ->
-                val busy = s.transcribing || s.translating || s.extractingEmbedded
+                val isLive = s.current?.isLive == true
+                val busy = !isLive && (s.transcribing || s.translating || s.extractingEmbedded)
                 val title = s.current?.displayTitle.orEmpty()
                 if (busy) {
                     val step = s.status.ifEmpty { if (s.translating) "正在翻译字幕…" else "正在识别字幕…" }
-                    notifier.progress(title, step, s.progress)
+                    taskNotifier.progress(title, step, s.progress)
+                    lastTitle = title
                 } else if (wasBusy) {
-                    notifier.done(title, if (s.error == null && s.cues.isNotEmpty()) "字幕准备好了" else null)
+                    val completed = !isLive && !remoteAsrSuspended && s.error == null && s.cues.isNotEmpty() && s.status != "已取消"
+                    taskNotifier.done(title.ifEmpty { lastTitle }, if (completed) "字幕准备好了" else null)
                 }
                 wasBusy = busy
             }
@@ -1381,6 +1394,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 离开直播播放页或后台暂停直播时，停掉直播实时字幕识别、实时翻译与自带字幕翻译，避免后台空转和残留状态。 */
+    fun stopLiveTasksIfActive() {
+        if (_state.value.current?.isLive != true) return
+        val hadTask = transcribeJob?.isActive == true ||
+            translateJob?.isActive == true ||
+            captionJob?.isActive == true ||
+            _state.value.liveHint != null
+        if (!hadTask) return
+        cancelAll()
+        _state.update { it.copy(liveHint = null, progress = null) }
+    }
+
     /** 多端同步落盘后热刷新内存中的设置 */
     fun reloadSettings() {
         val loaded = settingsRepo.load()
@@ -1633,6 +1658,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val keep = resume || partial
         val uri = _state.value.videoUri ?: return
         if (transcribeJob?.isActive == true) return
+        remoteAsrSuspended = false
         gapWatch?.cancel()
         if (!resume) lastAlsoTranslate = alsoTranslate
         coverageKey = key
@@ -1726,8 +1752,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 ensureActive()
                 if (!live) {
-                    val count = _state.value.cues.size
-                    _state.update { it.copy(status = "识别完成，共 $count 条字幕", progress = null) }
+                    if (!remoteAsrSuspended) {
+                        val count = _state.value.cues.size
+                        _state.update { it.copy(status = "识别完成，共 $count 条字幕", progress = null) }
+                    }
                     persistCues(uri)
                     saveSidecar()
                 }
@@ -1787,7 +1815,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 coverage.nextGap(cursor.coerceAtLeast(0), duration) ?: coverage.nextGap(0, duration) ?: break
             }
             if (gap == null) {
-                // 远程视频已经领先播放够多了：等播放追上来（或拖到没识别的地方）
+                // 远程视频/音频已经领先播放够多了：播放暂停或离开播放页时先收尾退出，由 gapWatch 在恢复播放后无缝续上，避免常驻通知栏
+                if (!player.isPlaying) {
+                    remoteAsrSuspended = true
+                    _state.update { it.copy(status = "已识别当前进度，恢复播放后继续", progress = null) }
+                    startGapWatch(uri)
+                    break
+                }
                 if (!waiting) {
                     waiting = true
                     _state.update { it.copy(status = "已识别到播放位置之后几分钟，跟着播放继续识别（省流量）") }
@@ -1805,6 +1839,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: com.aisub.player.asr.SourceReadException) {
                 // 网盘、NAS 读到一半断了（网络抖动、直链过期）：换个新直链，从断开的地方接着识别
                 persistCues(uri)
+                if (remote && !player.isPlaying) {
+                    remoteAsrSuspended = true
+                    _state.update { it.copy(status = "已暂停识别，恢复播放后继续", progress = null) }
+                    startGapWatch(uri)
+                    break
+                }
                 // 断开前识别了不少：不算连续失败
                 if (coverage.coveredMs(duration) > coveredBefore + 30_000) readFailures = 0
                 val cloud = CloudRegistry.isCloud(uri.toString())
@@ -2537,7 +2577,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 网盘、NAS、网络地址等不在手机上的文件：边下边识别，翻译走实时方案。 */
     private fun isRemote(e: MediaEntry) = Uri.parse(e.uri).scheme?.lowercase().let { it != null && it !in LOCAL_SCHEMES }
 
-    /** 识别结束后盯着播放位置：拖到没识别过的地方，就接着识别那里（等这次识别真正结束后才开始） */
+    /** 识别结束后盯着播放位置：拖到没识别过的地方，或远程文件快追上已识别进度时，就接着识别那里（等这次识别真正结束后才开始） */
     private fun startGapWatch(uri: Uri) {
         gapWatch?.cancel()
         embeddedGapWatch?.cancel()
@@ -2545,9 +2585,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             while (true) {
                 delay(1000)
                 if (_state.value.videoUri != uri || !coverageActive) return@launch
-                if (transcribeJob?.isActive == true) continue
+                if (transcribeJob?.isActive == true || !player.isPlaying) continue
                 val p = player.currentPosition
-                if (p in 0 until coverageLimit && !coverage.contains(p)) {
+                if (p !in 0 until coverageLimit) continue
+                val remote = _state.value.current?.let(::isRemote) == true
+                val needResume = !coverage.contains(p) || (
+                    remote && coverage.nextGap((p - LEAD_IN_MS).coerceAtLeast(0), coverageLimit)
+                        ?.let { it.first < p + REMOTE_RESUME_MS } == true
+                )
+                if (needResume) {
                     generateSubtitles(alsoTranslate = lastAlsoTranslate, resume = true)
                     return@launch
                 }
@@ -2563,7 +2609,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             while (true) {
                 delay(1000)
                 if (_state.value.videoUri != uri) return@launch
-                if (embeddedJob?.isActive == true || transcribeJob?.isActive == true) continue
+                if (embeddedJob?.isActive == true || transcribeJob?.isActive == true || !player.isPlaying) continue
                 if (streamingEmbeddedTrackId == null) continue
                 val p = player.currentPosition
                 if (p < 0L) continue
@@ -3656,6 +3702,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             playbackStatsJob = null
         }
         stopLiveRecordingIfActive()
+        stopLiveTasksIfActive()
+        taskNotifier.cancel()
         equalizer.release()
         ttsReader.stop()
         previewPlayer?.release()
