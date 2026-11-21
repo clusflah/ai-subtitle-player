@@ -308,6 +308,7 @@ class MediaProxy(private val factory: DataSource.Factory) {
                 runCatching {
                     out.write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
                     out.flush()
+                    finishGracefully(client, true)
                 }
             }
         } finally {

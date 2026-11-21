@@ -110,6 +110,28 @@ internal object LanTlsSupport {
         return ctx.socketFactory to tm
     }
 
+    fun routingSocketFactory(defaultFactory: SSLSocketFactory, lanFactory: SSLSocketFactory): SSLSocketFactory {
+        if (defaultFactory === lanFactory) return defaultFactory
+        return object : SSLSocketFactory() {
+            private fun pick(host: String?): SSLSocketFactory =
+                if (Endpoints.isRegisteredPrivateServerHost(host)) lanFactory else defaultFactory
+
+            override fun getDefaultCipherSuites(): Array<String> = defaultFactory.defaultCipherSuites
+            override fun getSupportedCipherSuites(): Array<String> = defaultFactory.supportedCipherSuites
+            override fun createSocket(): Socket = defaultFactory.createSocket()
+            override fun createSocket(s: Socket?, host: String?, port: Int, autoClose: Boolean): Socket =
+                pick(host).createSocket(s, host, port, autoClose)
+            override fun createSocket(host: String?, port: Int): Socket =
+                pick(host).createSocket(host, port)
+            override fun createSocket(host: String?, port: Int, localHost: java.net.InetAddress?, localPort: Int): Socket =
+                pick(host).createSocket(host, port, localHost, localPort)
+            override fun createSocket(host: java.net.InetAddress?, port: Int): Socket =
+                pick(host?.hostAddress).createSocket(host, port)
+            override fun createSocket(address: java.net.InetAddress?, port: Int, localAddress: java.net.InetAddress?, localPort: Int): Socket =
+                pick(address?.hostAddress).createSocket(address, port, localAddress, localPort)
+        }
+    }
+
     private val trackedContexts = java.util.concurrent.CopyOnWriteArrayList<SSLContext>()
 
     internal fun invalidateSessions() {

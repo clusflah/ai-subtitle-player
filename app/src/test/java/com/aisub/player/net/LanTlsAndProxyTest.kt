@@ -59,21 +59,29 @@ class LanTlsAndProxyTest {
     }
 
     @Test
-    fun proxyOffStillBypassesSystemProxyForLanAndCnHosts() {
+    fun proxyOffBypassesSystemProxyForLanWhileAppProxyBypassesCnHosts() {
+        val ctx = RuntimeEnvironment.getApplication()
         val fakeClash = Proxy(Proxy.Type.HTTP, InetSocketAddress.createUnresolved("127.0.0.1", 7890))
         AppProxy.systemSelectorForTest = object : ProxySelector() {
             override fun select(uri: URI?): List<Proxy> = listOf(fakeClash)
             override fun connectFailed(uri: URI?, sa: SocketAddress?, ioe: IOException?) {}
         }
 
+        AppProxy.apply(ctx, ProxyType.OFF, "", 0, bypassCn = true)
         assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://192.168.1.10:5006/dav")))
         assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://127.0.0.1:5006/dav")))
         assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://nas.lan:5006/dav")))
         assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://[fd00::1]:5006/dav")))
         assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://[fe80::1%25eth0]:5006/dav")))
-        assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://www.bilibili.com/")))
-        assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://nas.example.cn:5006/dav")))
+        assertEquals(listOf(fakeClash), AppProxy.selector.select(URI("https://proapi.115.com/app/chrome/downurl")))
         assertEquals(listOf(fakeClash), AppProxy.selector.select(URI("https://api.openai.com/v1/models")))
+
+        val appProxy = Proxy(Proxy.Type.HTTP, InetSocketAddress.createUnresolved("127.0.0.1", 10809))
+        AppProxy.apply(ctx, ProxyType.HTTP, "127.0.0.1", 10809, bypassCn = true)
+        assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://www.bilibili.com/")))
+        assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://cdn.115cdn.org/file.mkv")))
+        assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://nas.example.cn:5006/dav")))
+        assertEquals(listOf(appProxy, Proxy.NO_PROXY), AppProxy.selector.select(URI("https://api.openai.com/v1/models")))
     }
 
     @Test

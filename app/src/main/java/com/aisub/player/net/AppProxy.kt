@@ -40,11 +40,10 @@ object AppProxy {
             val host = uri?.host
             // 本机与局域网地址始终直连，不受应用内代理或系统代理影响
             if (isLocal(host)) return listOf(Proxy.NO_PROXY)
-            // 国内站点与大陆 IP 按设置直连：即使应用代理未开启，也不应回落到系统代理（如 Clash 7890）
-            if (bypassCn && CnNetworkBypass.shouldBypass(host)) return listOf(Proxy.NO_PROXY)
             val p = proxy
-            // 代理连不上（电脑关了、代理软件没开局域网连接）时接着直连，免得什么都打不开
+            // 仅在启用应用内代理时按开关旁路国内站点与大陆 IP；应用代理为「不使用」时完全遵循系统网络/系统代理（如 Clash 规则），避免拆散 115 等同源直链 IP
             if (p != Proxy.NO_PROXY) {
+                if (bypassCn && CnNetworkBypass.shouldBypass(host)) return listOf(Proxy.NO_PROXY)
                 return listOf(p, Proxy.NO_PROXY)
             }
             return (systemSelectorForTest ?: system)?.select(uri) ?: listOf(Proxy.NO_PROXY)
@@ -73,7 +72,12 @@ object AppProxy {
         val b = OkHttpClient.Builder()
             .proxySelector(selector)
             .hostnameVerifier(LanTlsSupport.hostnameVerifier())
-        lanSslPair()?.let { (sf, tm) -> b.sslSocketFactory(sf, tm) }
+        lanSslPair()?.let { (sf, tm) ->
+            val routedSf = if (compatSslPair != null) sf else runCatching {
+                LanTlsSupport.routingSocketFactory(javax.net.ssl.SSLContext.getDefault().socketFactory, sf)
+            }.getOrDefault(sf)
+            b.sslSocketFactory(routedSf, tm)
+        }
         return b
     }
 
@@ -129,9 +133,13 @@ object AppProxy {
     }
 
     fun install(context: Context) {
+        val origHttpsFactory = javax.net.ssl.HttpsURLConnection.getDefaultSSLSocketFactory()
         initCompatTls(context)
-        lanSslPair()?.let { (sf, _) ->
-            javax.net.ssl.HttpsURLConnection.setDefaultSSLSocketFactory(sf)
+        val baseFactory = compatSslPair?.first ?: origHttpsFactory
+        lanSslPair()?.let { (lanSf, _) ->
+            javax.net.ssl.HttpsURLConnection.setDefaultSSLSocketFactory(
+                LanTlsSupport.routingSocketFactory(baseFactory, lanSf),
+            )
         }
         javax.net.ssl.HttpsURLConnection.setDefaultHostnameVerifier(
             LanTlsSupport.hostnameVerifier(javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier()),

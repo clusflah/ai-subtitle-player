@@ -1,4 +1,11 @@
-## 本版更新（2.10.13）
+## 本版更新（2.10.18）
+
+- **修复 `2.10.13+` 跨端（Android 手机 / Android TV / Windows）播放 115 等网盘与高码率视频卡顿回归**：
+  - 恢复 `2.10.12` 的 `AppProxy` 分流行为：应用内代理设为「不使用」时仅对本机与局域网私网地址强制直连，公网域名完整遵循系统网络与系统代理/VPN 规则，解决 `proapi.115.com` 与 `115cdn.org` 等直链出口 IP 被拆散引发的 `Connection reset by peer` 断流与缓冲饥饿卡顿；开启应用内代理时补齐 `115cdn.org` / `115cdn.com` 同源直连规则。
+  - 优化 `LanTlsSupport` 按主机动态分流 `SSLSocketFactory` 并补齐 Android `X509TrustManagerExtensions` 原生校验方法：公网流媒体 100% 直通系统默认原生 TLS 会话池，仅对已登记的局域网私网服务器走双地址/自签名兼容层。
+  - Windows 桌面端恢复 LibVLC `--avcodec-threads=0` 全核多线程软解（解除 `2.10.14` 的 6 线程上限），并结合 Vulkan 零拷贝硬解直通 `libplacebo` 管线与后台 Skia 帧上传，保障 4K HDR/SDR 60fps 流畅播放。
+
+## 2.10.13 更新
 
 - **修复双地址内网 HTTPS 证书校验与系统代理旁路问题（Windows / Android / TV）**：
   - 新增 `LanTlsSupport` 与 `Endpoints` 配对主机校验：当服务器同时配置外网域名与内网 HTTPS 地址时，内网连接自动支持外网配对域名证书（如 Let's Encrypt）及已登记私网 NAS 自签名证书（对一切公网域名与未登记主机保持严格默认 TLS 校验），解决局域网探测失败后误回退外网导致无法播放的问题。

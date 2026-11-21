@@ -96,20 +96,30 @@ class LanTlsAndErrorClassificationTest {
     }
 
     @Test
-    fun proxyOffStillBypassesSystemProxyForLanAndCnHosts() {
+    fun proxyOffBypassesSystemProxyForLanWhileAppProxyBypassesCnHosts() {
         val fakeClash = Proxy(Proxy.Type.HTTP, InetSocketAddress.createUnresolved("127.0.0.1", 7890))
         AppProxy.systemSelectorForTest = object : ProxySelector() {
             override fun select(uri: URI?): List<Proxy> = listOf(fakeClash)
             override fun connectFailed(uri: URI?, sa: SocketAddress?, ioe: IOException?) {}
         }
 
+        // 应用内代理为 OFF 时：局域网/回环始终直连，公网域名交由系统代理（Clash 规则）统一调度
+        AppProxy.apply(android.content.GlobalDesktopApp, com.aisub.player.net.ProxyType.OFF, "", 0, bypassCn = true)
         assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://192.168.1.10:5006/dav")))
         assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://127.0.0.1:5006/dav")))
         assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://nas.lan:5006/dav")))
         assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://[fd00::1]:5006/dav")))
-        assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://www.bilibili.com/")))
-        assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://nas.example.cn:5006/dav")))
+        assertEquals(listOf(fakeClash), AppProxy.selector.select(URI("https://proapi.115.com/app/chrome/downurl")))
         assertEquals(listOf(fakeClash), AppProxy.selector.select(URI("https://api.openai.com/v1/models")))
+
+        // 开启应用内代理且勾选国内直连时：国内站点（含 115 全系 CDN 域名）直连，海外走应用内代理
+        val appProxy = Proxy(Proxy.Type.HTTP, InetSocketAddress.createUnresolved("127.0.0.1", 10809))
+        AppProxy.apply(android.content.GlobalDesktopApp, com.aisub.player.net.ProxyType.HTTP, "127.0.0.1", 10809, bypassCn = true)
+        assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://www.bilibili.com/")))
+        assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://cdn.115cdn.org/file.mkv")))
+        assertEquals(listOf(Proxy.NO_PROXY), AppProxy.selector.select(URI("https://nas.example.cn:5006/dav")))
+        assertEquals(listOf(appProxy, Proxy.NO_PROXY), AppProxy.selector.select(URI("https://api.openai.com/v1/models")))
+        AppProxy.apply(android.content.GlobalDesktopApp, com.aisub.player.net.ProxyType.OFF, "", 0, bypassCn = true)
     }
 
     @Test

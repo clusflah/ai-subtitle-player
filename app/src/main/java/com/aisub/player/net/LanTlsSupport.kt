@@ -82,6 +82,32 @@ internal object LanTlsSupport {
         return ctx.socketFactory to tm
     }
 
+    /**
+     * 公网域名直通系统原生默认 [SSLSocketFactory]（完整保留 Android Conscrypt 会话缓存与底层快速路径），
+     * 仅对已登记的局域网私网服务器切换至 [lanFactory]，确保公网流媒体（如 115 CDN）与 v2.10.12 零差异。
+     */
+    fun routingSocketFactory(defaultFactory: SSLSocketFactory, lanFactory: SSLSocketFactory): SSLSocketFactory {
+        if (defaultFactory === lanFactory) return defaultFactory
+        return object : SSLSocketFactory() {
+            private fun pick(host: String?): SSLSocketFactory =
+                if (Endpoints.isRegisteredPrivateServerHost(host)) lanFactory else defaultFactory
+
+            override fun getDefaultCipherSuites(): Array<String> = defaultFactory.defaultCipherSuites
+            override fun getSupportedCipherSuites(): Array<String> = defaultFactory.supportedCipherSuites
+            override fun createSocket(): Socket = defaultFactory.createSocket()
+            override fun createSocket(s: Socket?, host: String?, port: Int, autoClose: Boolean): Socket =
+                pick(host).createSocket(s, host, port, autoClose)
+            override fun createSocket(host: String?, port: Int): Socket =
+                pick(host).createSocket(host, port)
+            override fun createSocket(host: String?, port: Int, localHost: java.net.InetAddress?, localPort: Int): Socket =
+                pick(host).createSocket(host, port, localHost, localPort)
+            override fun createSocket(host: java.net.InetAddress?, port: Int): Socket =
+                pick(host?.hostAddress).createSocket(host, port)
+            override fun createSocket(address: java.net.InetAddress?, port: Int, localAddress: java.net.InetAddress?, localPort: Int): Socket =
+                pick(address?.hostAddress).createSocket(address, port, localAddress, localPort)
+        }
+    }
+
     private val trackedContexts = java.util.concurrent.CopyOnWriteArrayList<SSLContext>()
 
     internal fun invalidateSessions() {
@@ -112,6 +138,27 @@ internal object LanTlsSupport {
     private object Api24 {
         fun wrap(base: X509TrustManager): X509TrustManager = object : X509ExtendedTrustManager(), LanTrustMarker {
             private val extBase = base as? X509ExtendedTrustManager
+            private val androidExt = runCatching { android.net.http.X509TrustManagerExtensions(base) }.getOrNull()
+
+            @androidx.annotation.Keep
+            @Throws(CertificateException::class)
+            fun checkServerTrusted(
+                chain: Array<out X509Certificate>?,
+                authType: String?,
+                host: String?,
+            ): List<X509Certificate> {
+                try {
+                    val ext = androidExt
+                    if (ext != null) return ext.checkServerTrusted(chain, authType, host)
+                    base.checkServerTrusted(chain, authType)
+                    return chain?.toList().orEmpty()
+                } catch (e: CertificateException) {
+                    if (shouldAllowPrivateUntrusted(chain, host)) {
+                        return chain?.toList().orEmpty()
+                    }
+                    throw e
+                }
+            }
 
             override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
                 base.checkClientTrusted(chain, authType)

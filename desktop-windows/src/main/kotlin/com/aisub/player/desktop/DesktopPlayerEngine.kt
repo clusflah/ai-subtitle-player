@@ -410,11 +410,10 @@ object DesktopPlayerEngine {
         synchronized(factoryLock) {
             sharedVlcFactory?.let { return it }
             val t0 = System.currentTimeMillis()
-            val vlcCodecThreads = (Runtime.getRuntime().availableProcessors() - 2).coerceIn(2, 6)
             return runCatching {
                 MediaPlayerFactory(
                     "--avcodec-hw=none",
-                    "--avcodec-threads=$vlcCodecThreads",
+                    "--avcodec-threads=0",
                     "--network-caching=2500",
                     "--file-caching=300",
                     "--prefetch-buffer-size=65536",
