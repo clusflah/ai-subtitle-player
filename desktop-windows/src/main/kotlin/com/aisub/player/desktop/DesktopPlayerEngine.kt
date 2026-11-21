@@ -132,6 +132,15 @@ internal class FrameSlot(val width: Int, val height: Int) {
         skiaBitmap.installPixels(imageInfo, bytes, width * 4)
         skiaBitmap.notifyPixelsChanged()
     }
+
+    fun uploadBytesToSkia(src: ByteArray) {
+        skiaBitmap.installPixels(imageInfo, src, width * 4)
+        skiaBitmap.notifyPixelsChanged()
+    }
+
+    fun readBgraBytes(): ByteArray {
+        return runCatching { skiaBitmap.readPixels(imageInfo, width * 4) }.getOrNull() ?: bytes.clone()
+    }
 }
 
 object DesktopPlayerEngine {
@@ -166,8 +175,13 @@ object DesktopPlayerEngine {
     private val decodedFramesWindow = AtomicInteger(0)
     private val drawnFramesWindow = AtomicInteger(0)
     private val coalescedFramesWindow = AtomicInteger(0)
+    private val droppedFramesWindow = AtomicInteger(0)
     @Volatile
     private var statsWindowStartMs = System.currentTimeMillis()
+
+    internal fun recordDroppedFrame() {
+        droppedFramesWindow.incrementAndGet()
+    }
 
     // 截图 / 书签（PixelCopy）按需懒加载缓存，正常播放期间零分配
     @Volatile
@@ -187,7 +201,7 @@ object DesktopPlayerEngine {
             }
             val (w, h, rawBytes) = synchronized(swapLock) {
                 val slot = readSlot ?: readySlot ?: return null
-                Triple(slot.width, slot.height, slot.bytes.clone())
+                Triple(slot.width, slot.height, slot.readBgraBytes())
             }
             val img = BufferedImage(w, h, BufferedImage.TYPE_INT_RGB)
             val pixels = (img.raster.dataBuffer as DataBufferInt).data
@@ -439,16 +453,40 @@ object DesktopPlayerEngine {
     @Volatile
     internal var vulkanPlaceboSupported: Boolean? = null
 
-    private val vulkanProbeStarted = AtomicBoolean(false)
+    @Volatile
+    internal var vulkanVideoDecodeCodecs: Set<String> = emptySet()
 
-    internal fun probeVulkanPlaceboAsync() {
-        if (vulkanPlaceboSupported != null || !vulkanProbeStarted.compareAndSet(false, true)) return
-        DesktopExoPlayer.watchdogPool.schedule({
-            if (vulkanPlaceboSupported != null || activePlayer != null) return@schedule
-            val ffmpeg = DesktopBinaryFinder.findFfmpeg() ?: return@schedule
+    private val vulkanProbeStarted = AtomicBoolean(false)
+    private val vulkanProbeLock = Any()
+
+    internal fun supportsVulkanVideoDecode(sampleMimeType: String?, titleOrUrlHint: String? = null): Boolean {
+        val codecs = vulkanVideoDecodeCodecs
+        if (codecs.isEmpty()) return false
+        if (!sampleMimeType.isNullOrBlank()) {
+            return when (sampleMimeType.lowercase()) {
+                MimeTypes.VIDEO_H265, "video/hevc" -> "hevc" in codecs
+                MimeTypes.VIDEO_H264, "video/avc" -> "h264" in codecs
+                MimeTypes.VIDEO_AV1, "video/av01" -> "av1" in codecs
+                else -> false
+            }
+        }
+        val hint = titleOrUrlHint.orEmpty().lowercase()
+        return when {
+            "hevc" in hint || "h.265" in hint || "h265" in hint || "x265" in hint -> "hevc" in codecs
+            "av1" in hint -> "av1" in codecs
+            "h.264" in hint || "h264" in hint || "x264" in hint || "avc" in hint -> "h264" in codecs
+            else -> "hevc" in codecs && "h264" in codecs
+        }
+    }
+
+    internal fun probeVulkanCapabilitiesNow(ffmpeg: String): Boolean {
+        vulkanPlaceboSupported?.let { return it }
+        synchronized(vulkanProbeLock) {
+            vulkanPlaceboSupported?.let { return it }
+            var codecs = emptySet<String>()
             val ok = runCatching {
                 val proc = ProcessBuilder(
-                    ffmpeg, "-v", "error",
+                    ffmpeg, "-v", "verbose",
                     "-init_hw_device", "vulkan=vk",
                     "-filter_hw_device", "vk",
                     "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.04",
@@ -456,19 +494,50 @@ object DesktopPlayerEngine {
                     "-vf", "hwupload,libplacebo=w=64:h=64:format=rgba,hwdownload,format=rgba",
                     "-pix_fmt", "bgra",
                     "-f", "null", "-",
-                ).redirectError(ProcessBuilder.Redirect.DISCARD).start()
-                if (!proc.waitFor(4, TimeUnit.SECONDS)) {
+                ).redirectErrorStream(true).start()
+                val logBuf = StringBuilder()
+                val reader = Thread {
+                    runCatching {
+                        proc.inputStream.bufferedReader().useLines { lines ->
+                            lines.forEach { line ->
+                                if (logBuf.length < 16_384) {
+                                    logBuf.append(line).append('\n')
+                                }
+                            }
+                        }
+                    }
+                }.apply { isDaemon = true; start() }
+                val finished = proc.waitFor(4, TimeUnit.SECONDS)
+                if (!finished) {
                     proc.destroyForcibly()
                     false
                 } else {
+                    runCatching { reader.join(300L) }
+                    val text = logBuf.toString()
+                    if ("VK_KHR_video_decode_queue" in text) {
+                        val found = LinkedHashSet<String>(3)
+                        if ("VK_KHR_video_decode_h265" in text) found.add("hevc")
+                        if ("VK_KHR_video_decode_h264" in text) found.add("h264")
+                        if ("VK_KHR_video_decode_av1" in text) found.add("av1")
+                        codecs = found
+                    }
                     proc.exitValue() == 0
                 }
             }.getOrDefault(false)
-            if (vulkanPlaceboSupported == null) {
-                vulkanPlaceboSupported = ok
-            }
-            Log.i(TAG, "Vulkan libplacebo 预探测结果: supported=$ok")
-        }, 2500L, TimeUnit.MILLISECONDS)
+            vulkanVideoDecodeCodecs = if (ok) codecs else emptySet()
+            vulkanPlaceboSupported = ok
+            Log.i(TAG, "Vulkan libplacebo 预探测结果: supported=$ok, videoDecode=$vulkanVideoDecodeCodecs")
+            return ok
+        }
+    }
+
+    internal fun probeVulkanPlaceboAsync() {
+        if (vulkanPlaceboSupported != null || !vulkanProbeStarted.compareAndSet(false, true)) return
+        DesktopExoPlayer.watchdogPool.schedule({
+            if (vulkanPlaceboSupported != null || activePlayer != null) return@schedule
+            val ffmpeg = DesktopBinaryFinder.findFfmpeg() ?: return@schedule
+            probeVulkanCapabilitiesNow(ffmpeg)
+        }, 800L, TimeUnit.MILLISECONDS)
     }
 
     /** 应用启动后在后台线程预热 VLC、Vulkan libplacebo 管线与双地址服务器探测，避免首次点击播放时阻塞等待 */
@@ -510,13 +579,18 @@ object DesktopPlayerEngine {
         buf.rewind()
         val count = minOf(slot.bytes.size, buf.remaining())
         buf.get(slot.bytes, 0, count)
+        slot.uploadToSkia()
         publishWrittenSlot(slot)
     }
 
     internal fun submitFrameBgraBytes(width: Int, height: Int, src: ByteArray) {
         val slot = acquireWriteSlot(width, height)
-        val count = minOf(slot.bytes.size, src.size)
-        System.arraycopy(src, 0, slot.bytes, 0, count)
+        if (src.size >= slot.bytes.size) {
+            slot.uploadBytesToSkia(src)
+        } else {
+            System.arraycopy(src, 0, slot.bytes, 0, src.size)
+            slot.uploadToSkia()
+        }
         publishWrittenSlot(slot)
     }
 
@@ -531,12 +605,13 @@ object DesktopPlayerEngine {
         val target = slot.bytes
         var off = 0
         while (off < target.size && shouldContinue()) {
-            val n = ins.read(target, off, minOf(65_536, target.size - off))
+            val n = ins.read(target, off, minOf(262_144, target.size - off))
             if (n < 0) return false
             off += n
         }
         if (off < target.size) return false
         if (renderFrame) {
+            slot.uploadToSkia()
             publishWrittenSlot(slot)
         }
         return true
@@ -574,7 +649,6 @@ object DesktopPlayerEngine {
                     }
                 }
                 if (slotToPublish != null) {
-                    slotToPublish!!.uploadToSkia()
                     val bmpToPublish = slotToPublish!!.composeBitmap
                     currentDrawBitmap = bmpToPublish
                     val tick = frameCounter.incrementAndGet()
@@ -593,16 +667,18 @@ object DesktopPlayerEngine {
             val dec = decodedFramesWindow.getAndSet(0)
             val drw = drawnFramesWindow.getAndSet(0)
             val coal = coalescedFramesWindow.getAndSet(0)
-            if (dec > 0) {
+            val drop = droppedFramesWindow.getAndSet(0)
+            if (dec > 0 || drop > 0) {
                 val decFps = (dec * 1000.0 / elapsed)
                 val drwFps = (drw * 1000.0 / elapsed)
                 Log.d(
                     TAG,
-                    "视频帧率统计: 解码=%.1ffps, 绘制=%.1ffps, 合并帧=%d, 缓冲尺寸=%dx%d".format(
+                    "视频帧率统计: 解码=%.1ffps, 绘制=%.1ffps, 合并帧=%d, 丢帧=%d, 缓冲尺寸=%dx%d".format(
                         java.util.Locale.US,
                         decFps,
                         drwFps,
                         coal,
+                        drop,
                         slotWidth,
                         slotHeight,
                     ),
@@ -3305,12 +3381,13 @@ class DesktopExoPlayer(
         startPosMs: Long,
         useVulkanDevice: Boolean = false,
         useD3d11Hwdec: Boolean = false,
+        useVulkanHwdec: Boolean = false,
     ): MutableList<String> {
         val cmd = mutableListOf(ffmpeg, "-v", "error")
-        if (useD3d11Hwdec) {
+        if (useD3d11Hwdec && !useVulkanHwdec) {
             cmd.addAll(listOf("-init_hw_device", "d3d11va=d3d"))
         }
-        if (useVulkanDevice) {
+        if (useVulkanDevice || useVulkanHwdec) {
             cmd.addAll(listOf("-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk"))
         }
         if (url.startsWith("http://127.0.0.1:", ignoreCase = true) || url.startsWith("http://localhost:", ignoreCase = true)) {
@@ -3326,7 +3403,9 @@ class DesktopExoPlayer(
             val hdr = headers.entries.joinToString("\r\n") { "${it.key}: ${it.value}" } + "\r\n"
             cmd.addAll(listOf("-headers", hdr))
         }
-        if (useD3d11Hwdec) {
+        if (useVulkanHwdec) {
+            cmd.addAll(listOf("-hwaccel", "vulkan", "-hwaccel_device", "vk", "-hwaccel_output_format", "vulkan"))
+        } else if (useD3d11Hwdec) {
             cmd.addAll(listOf("-hwaccel", "d3d11va", "-hwaccel_device", "d3d"))
         }
         cmd.addAll(listOf("-i", url))
@@ -3339,18 +3418,21 @@ class DesktopExoPlayer(
         mode: Int,
         sourceFps: Double = 24.0,
         isHdrOrDv: Boolean = true,
+        vulkanHwInput: Boolean = false,
     ): String {
         val targetFps = computeTargetRenderFps(sourceFps)
-        // 对 120fps / 119.88fps 高帧率片源在上传 GPU 之前先执行整数倍抽帧（如 119.88 -> 59.94），直接减半 PCIe 上传、着色与读回带宽
+        // 对 120fps / 119.88fps 高帧率片源在上传/着色之前先执行整数倍抽帧（如 119.88 -> 59.94），直接减半 GPU 着色与读回带宽
         val fpsPrefix = if (sourceFps > 60.5) "fps=%.6f,".format(java.util.Locale.US, targetFps) else ""
+        val uploadPrefix = if (vulkanHwInput) "" else "hwupload,"
         return when (mode) {
             // Mode 1: 高速单趟 Vulkan GPU libplacebo 色彩与动态色调映射：
+            // 启用 Vulkan Video 硬解时帧直接驻留 Vulkan 显存，省去 4K 10bit GPU->CPU->GPU 往返拷贝；
             // 必须以 format=rgba,hwdownload,format=rgba 从 Vulkan 读回再由 -pix_fmt bgra 输出，避免 FFmpeg Vulkan/libplacebo format=bgra 的 R/B 通道互换偏色；
             // 纯 SDR 片源关闭 tonemapping 与 IPTPQc2 映射以原汁原味保留 BT.709 伽马与肤色。
             1 -> if (isHdrOrDv) {
-                "${fpsPrefix}hwupload,libplacebo=w=$width:h=$height:upscaler=bilinear:downscaler=bilinear:peak_detect=false:sigmoid=false:apply_filmgrain=false:dithering=ordered_fixed:tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=iec61966-2-1:apply_dolbyvision=true:format=rgba,hwdownload,format=rgba"
+                "${fpsPrefix}${uploadPrefix}libplacebo=w=$width:h=$height:upscaler=bilinear:downscaler=bilinear:peak_detect=false:sigmoid=false:apply_filmgrain=false:dithering=ordered_fixed:tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=iec61966-2-1:apply_dolbyvision=true:format=rgba,hwdownload,format=rgba"
             } else {
-                "${fpsPrefix}hwupload,libplacebo=w=$width:h=$height:upscaler=bilinear:downscaler=bilinear:peak_detect=false:sigmoid=false:apply_filmgrain=false:dithering=ordered_fixed:colorspace=bt709:color_primaries=bt709:color_trc=bt709:apply_dolbyvision=false:format=rgba,hwdownload,format=rgba"
+                "${fpsPrefix}${uploadPrefix}libplacebo=w=$width:h=$height:upscaler=bilinear:downscaler=bilinear:peak_detect=false:sigmoid=false:apply_filmgrain=false:dithering=ordered_fixed:colorspace=bt709:color_primaries=bt709:color_trc=bt709:apply_dolbyvision=false:format=rgba,hwdownload,format=rgba"
             }
             // Mode 2: 极少数无 Vulkan 驱动机器上的轻量 CPU zscale HDR 色调映射兜底
             2 -> "${fpsPrefix}zscale=w=$width:h=$height:t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=bt2390:desat=0,zscale=t=bt709:m=bt709:r=tv,format=bgra"
@@ -3452,6 +3534,9 @@ class DesktopExoPlayer(
                 selectedFfmpegBitmapSubIdx = -1
             }
 
+            if ((preferLibplacebo || streamIsHdrOrDv) && DesktopPlayerEngine.vulkanPlaceboSupported == null) {
+                DesktopPlayerEngine.probeVulkanCapabilitiesNow(ffmpeg)
+            }
             val vkKnownUnsupported = DesktopPlayerEngine.vulkanPlaceboSupported == false
             val usePlacebo = (preferLibplacebo || streamIsHdrOrDv) && !vkKnownUnsupported
             val initialFilterMode = when {
@@ -3462,8 +3547,8 @@ class DesktopExoPlayer(
 
             var maxW = if (initialFilterMode == 2) 1280 else DesktopPlayerEngine.displayWidthPx.coerceIn(1280, 1920)
             var maxH = if (initialFilterMode == 2) 720 else DesktopPlayerEngine.displayHeightPx.coerceIn(720, 1080)
-            // 4K >48fps 高帧率（如 59.94fps/60fps《比利·林恩》）限制 Vulkan 读回分辨率，确保 PCIe 带宽充裕不掉帧
-            if (initialFilterMode == 1 && fps > 48.0 && srcWidth >= 2560) {
+            // 4K >48fps 高帧率（如 59.94fps/60fps）统一限制 rawvideo 读回与管道分辨率，避免 1080p@60fps 500MB/s 带宽饱和掉帧
+            if (fps > 48.0 && srcWidth >= 2560) {
                 maxW = minOf(maxW, 1280)
                 maxH = minOf(maxH, 720)
             }
@@ -3472,8 +3557,16 @@ class DesktopExoPlayer(
             val width = ((((srcWidth * scale).roundToInt() + 8) / 16) * 16).coerceAtLeast(16)
             val height = (((srcHeight * scale).roundToInt() / 2) * 2).coerceAtLeast(2)
 
-            val wantD3d11Hwdec = IS_WINDOWS_HOST && (hwdecPreference != false)
-            val hwLabel = if (wantD3d11Hwdec) "D3D11VA 硬解 + " else "FFmpeg 软解 + "
+            val wantHwdec = IS_WINDOWS_HOST && (hwdecPreference != false)
+            val wantVulkanHwdec = wantHwdec &&
+                initialFilterMode == 1 &&
+                DesktopPlayerEngine.supportsVulkanVideoDecode(probed?.videoFormat?.sampleMimeType, titleHintForFallback.ifBlank { rawUriStr })
+            val wantD3d11Hwdec = wantHwdec && !wantVulkanHwdec
+            val hwLabel = when {
+                wantVulkanHwdec -> "Vulkan 零拷贝硬解 + "
+                wantD3d11Hwdec -> "D3D11VA 硬解 + "
+                else -> "FFmpeg 软解 + "
+            }
             activePipelineDescription = when {
                 initialFilterMode == 1 && dvProfile != null -> "${hwLabel}libplacebo Vulkan · 杜比视界 P$dvProfile → BT.709"
                 initialFilterMode == 1 && !streamIsHdrOrDv -> "${hwLabel}libplacebo Vulkan · SDR 精准色彩管线"
@@ -3502,6 +3595,7 @@ class DesktopExoPlayer(
                         fps = fps,
                         filterMode = initialFilterMode,
                         useD3d11Hwdec = wantD3d11Hwdec,
+                        useVulkanHwdec = wantVulkanHwdec,
                         isHdrOrDv = streamIsHdrOrDv,
                         isHdrFallbackCandidate = streamIsHdrOrDv && dvProfile != 5,
                         subtitleStreams = subtitleStreams,
@@ -3518,6 +3612,7 @@ class DesktopExoPlayer(
                         fps = fps,
                         filterMode = initialFilterMode,
                         useD3d11Hwdec = wantD3d11Hwdec,
+                        useVulkanHwdec = wantVulkanHwdec,
                         isHdrOrDv = streamIsHdrOrDv,
                         subtitleStreams = subtitleStreams,
                     )
@@ -3580,7 +3675,7 @@ class DesktopExoPlayer(
             cmd.addAll(
                 listOf(
                     "-filter_complex",
-                    "[0:v:0]$vfStr[vbase];[0:$bitmapSubIdx]scale=$width:$height[sub];[vbase][sub]overlay=eof_action=pass:shortest=0,format=bgra[vout]",
+                    "[0:v:0]$vfStr[vbase];[0:$bitmapSubIdx]scale=$width:$height[sub];[vbase][sub]overlay=format=rgb:eof_action=pass:shortest=0,format=bgra[vout]",
                     "-map", "[vout]",
                 ),
             )
@@ -3757,6 +3852,7 @@ class DesktopExoPlayer(
         fps: Double,
         filterMode: Int = 0,
         useD3d11Hwdec: Boolean = false,
+        useVulkanHwdec: Boolean = false,
         isHdrOrDv: Boolean = true,
         isHdrFallbackCandidate: Boolean = false,
         subtitleStreams: List<ProbedSubtitleStream> = emptyList(),
@@ -3773,7 +3869,7 @@ class DesktopExoPlayer(
                 }
             }.getOrElse { e ->
                 Log.e(TAG, "FFmpeg 本地音频套接字创建失败，改用纯视频模式", e)
-                startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode, useD3d11Hwdec, isHdrOrDv, subtitleStreams)
+                startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode, useD3d11Hwdec, useVulkanHwdec, isHdrOrDv, subtitleStreams)
                 return@submit
             }
             ffmpegVideoServer = null
@@ -3785,7 +3881,14 @@ class DesktopExoPlayer(
             val afStr = buildFfmpegAudioFilter(curSpeed)
             val hasLiveAudio = AtomicBoolean(true)
             val audioDoneLatch = CountDownLatch(1)
-            val vfStr = buildColorMappedVfFilter(width, height, filterMode, fps, isHdrOrDv = isHdrOrDv)
+            val vfStr = buildColorMappedVfFilter(
+                width = width,
+                height = height,
+                mode = filterMode,
+                sourceFps = fps,
+                isHdrOrDv = isHdrOrDv,
+                vulkanHwInput = useVulkanHwdec && filterMode == 1,
+            )
             val audioMapSpec = selectedFfmpegAudioStreamSpec.ifEmpty { "0:a:0?" }
             val cmd = buildFfmpegInputArgs(
                 ffmpeg = ffmpeg,
@@ -3794,6 +3897,7 @@ class DesktopExoPlayer(
                 startPosMs = startPosMs,
                 useVulkanDevice = filterMode == 1,
                 useD3d11Hwdec = useD3d11Hwdec,
+                useVulkanHwdec = useVulkanHwdec && filterMode == 1,
             ).apply {
                 addAll(listOf("-threads", "0", "-filter_threads", "0"))
                 appendFfmpegVideoFilterAndOutputArgs(this, vfStr, width, height, fps, fpsStr, bitmapSubIdx)
@@ -3890,7 +3994,7 @@ class DesktopExoPlayer(
             } catch (e: Throwable) {
                 runCatching { Thread.sleep(30L) }
                 val errDetail = procTail?.get().orEmpty().also { stderrTailRef.set(it) }
-                Log.w(TAG, "FFmpeg 管线运行退出 (hwdec=$useD3d11Hwdec, mode=$filterMode, frames=$framesRead): ${e.message}" + if (errDetail.isNotBlank()) " [$errDetail]" else "")
+                Log.w(TAG, "FFmpeg 管线运行退出 (vkHwdec=$useVulkanHwdec, d3d11=$useD3d11Hwdec, mode=$filterMode, frames=$framesRead): ${e.message}" + if (errDetail.isNotBlank()) " [$errDetail]" else "")
             } finally {
                 runCatching { ffmpegVideoProc?.destroy() }
                 runCatching { audioServer.close() }
@@ -3910,6 +4014,32 @@ class DesktopExoPlayer(
                 if (ioErr != null) {
                     ffmpegRunning.set(false)
                     onError(ioErr)
+                    return@submit
+                }
+                // 0) 若 Vulkan Video 硬解初始化失败，先回退至 D3D11VA 硬解 + Vulkan libplacebo
+                if (useVulkanHwdec) {
+                    val fallbackD3d11 = IS_WINDOWS_HOST && (hwdecPreference != false)
+                    Log.w(TAG, "Vulkan 零拷贝硬解未输出帧，自动回退至 ${if (fallbackD3d11) "D3D11VA 硬解" else "软解"} + libplacebo 管线")
+                    activePipelineDescription = activePipelineDescription.replace(
+                        "Vulkan 零拷贝硬解 + ",
+                        if (fallbackD3d11) "D3D11VA 硬解 + " else "FFmpeg 多核软解 + ",
+                    )
+                    startFfmpegMuxedPlayback(
+                        gen = gen,
+                        ffmpeg = ffmpeg,
+                        url = url,
+                        headers = headers,
+                        startPosMs = startPosMs,
+                        width = width,
+                        height = height,
+                        fps = fps,
+                        filterMode = filterMode,
+                        useD3d11Hwdec = fallbackD3d11,
+                        useVulkanHwdec = false,
+                        isHdrOrDv = isHdrOrDv,
+                        isHdrFallbackCandidate = isHdrFallbackCandidate,
+                        subtitleStreams = subtitleStreams,
+                    )
                     return@submit
                 }
                 // 1) 若 D3D11VA 硬解初始化失败（如老显卡不支持 HEVC Main10 硬解），优先降级为多线程软解 + Vulkan libplacebo（保持杜比视界正常色彩）
@@ -3989,7 +4119,7 @@ class DesktopExoPlayer(
             DesktopPlayerEngine.vulkanPlaceboSupported = true
         }
         val frameBytes = width * height * 4
-        val ringCap = 12
+        val ringCap = if (safeFps > 40.0) 24 else 16
         val ringBuffers = acquireRingBuffers(ringCap, frameBytes)
         val ringPts = LongArray(ringCap)
         val ringLock = java.util.concurrent.locks.ReentrantLock()
@@ -4019,7 +4149,7 @@ class DesktopExoPlayer(
                     val target = ringBuffers[slotIdx]
                     var off = 0
                     while (off < frameBytes && ffmpegRunning.get() && gen == mediaGeneration.get()) {
-                        val n = ins.read(target, off, minOf(65_536, frameBytes - off))
+                        val n = ins.read(target, off, minOf(262_144, frameBytes - off))
                         if (n < 0) break
                         off += n
                     }
@@ -4145,6 +4275,7 @@ class DesktopExoPlayer(
                 } else {
                     if (DesktopPlayerEngine.activePlayer === this@DesktopExoPlayer) {
                         updateFfmpegRenderedSubtitle(framePtsMs)
+                        DesktopPlayerEngine.recordDroppedFrame()
                     }
                     consecutiveDropped++
                 }
@@ -4341,6 +4472,7 @@ class DesktopExoPlayer(
         fps: Double,
         filterMode: Int = 0,
         useD3d11Hwdec: Boolean = false,
+        useVulkanHwdec: Boolean = false,
         isHdrOrDv: Boolean = true,
         subtitleStreams: List<ProbedSubtitleStream> = emptyList(),
     ) {
@@ -4353,7 +4485,14 @@ class DesktopExoPlayer(
             try {
                 val safeFps = computeTargetRenderFps(fps)
                 val fpsStr = "%.6f".format(java.util.Locale.US, safeFps)
-                val vfStr = buildColorMappedVfFilter(width, height, filterMode, fps, isHdrOrDv = isHdrOrDv)
+                val vfStr = buildColorMappedVfFilter(
+                    width = width,
+                    height = height,
+                    mode = filterMode,
+                    sourceFps = fps,
+                    isHdrOrDv = isHdrOrDv,
+                    vulkanHwInput = useVulkanHwdec && filterMode == 1,
+                )
                 val cmd = buildFfmpegInputArgs(
                     ffmpeg = ffmpeg,
                     url = url,
@@ -4361,6 +4500,7 @@ class DesktopExoPlayer(
                     startPosMs = startPosMs,
                     useVulkanDevice = filterMode == 1,
                     useD3d11Hwdec = useD3d11Hwdec,
+                    useVulkanHwdec = useVulkanHwdec && filterMode == 1,
                 ).apply {
                     addAll(listOf("-threads", "0", "-filter_threads", "0"))
                     appendFfmpegVideoFilterAndOutputArgs(this, vfStr, width, height, fps, fpsStr, bitmapSubIdx)
@@ -4416,12 +4556,17 @@ class DesktopExoPlayer(
                     onError(ioErr)
                     return@submit
                 }
+                if (useVulkanHwdec) {
+                    val fallbackD3d11 = IS_WINDOWS_HOST && (hwdecPreference != false)
+                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = filterMode, useD3d11Hwdec = fallbackD3d11, useVulkanHwdec = false, isHdrOrDv = isHdrOrDv, subtitleStreams = subtitleStreams)
+                    return@submit
+                }
                 if (useD3d11Hwdec) {
-                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = filterMode, useD3d11Hwdec = false, isHdrOrDv = isHdrOrDv, subtitleStreams = subtitleStreams)
+                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = filterMode, useD3d11Hwdec = false, useVulkanHwdec = false, isHdrOrDv = isHdrOrDv, subtitleStreams = subtitleStreams)
                     return@submit
                 }
                 if (filterMode == 1) {
-                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = 0, useD3d11Hwdec = false, isHdrOrDv = isHdrOrDv, subtitleStreams = subtitleStreams)
+                    startFfmpegVideoThread(gen, ffmpeg, url, headers, startPosMs, width, height, fps, filterMode = 0, useD3d11Hwdec = false, useVulkanHwdec = false, isHdrOrDv = isHdrOrDv, subtitleStreams = subtitleStreams)
                     return@submit
                 }
                 ffmpegRunning.set(false)

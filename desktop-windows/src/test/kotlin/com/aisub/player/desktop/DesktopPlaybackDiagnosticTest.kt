@@ -456,4 +456,56 @@ class DesktopPlaybackDiagnosticTest {
             acceptThread.join(1000)
         }
     }
+
+    @Test(timeout = 45_000L)
+    fun vulkanZeroCopyFilterAndHdrHevcPlaybackWorks() {
+        val ffmpeg = DesktopBinaryFinder.ensureFfmpeg()
+        assumeTrue("FFmpeg binary must be available", ffmpeg != null)
+
+        val player = DesktopExoPlayer(
+            GlobalDesktopApp,
+            DefaultDataSource.Factory(GlobalDesktopApp),
+            DesktopBackendMode.MPV_LIBPLACEBO,
+        )
+        try {
+            val withUpload = player.buildColorMappedVfFilter(1280, 720, mode = 1, sourceFps = 60.0, isHdrOrDv = true, vulkanHwInput = false)
+            val zeroCopy = player.buildColorMappedVfFilter(1280, 720, mode = 1, sourceFps = 60.0, isHdrOrDv = true, vulkanHwInput = true)
+            assertTrue("Non-vulkan-hwdec filter must keep hwupload", withUpload.startsWith("hwupload,libplacebo="))
+            assertTrue("Zero-copy vulkan-hwdec filter must omit hwupload", zeroCopy.startsWith("libplacebo="))
+
+            val hdrClip = File(tempWork, "hdr_4k_60fps_sample.mkv")
+            val genProc = ProcessBuilder(
+                ffmpeg!!, "-y", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=60:d=2",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+                "-pix_fmt", "yuv420p10le",
+                "-c:v", "libx265", "-preset", "ultrafast",
+                "-x265-params", "log-level=error:hdr-opt=1:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
+                "-c:a", "flac",
+                hdrClip.absolutePath,
+            ).redirectErrorStream(true).start()
+            assertEquals(0, genProc.waitFor())
+
+            val firstFrame = CountDownLatch(1)
+            player.addListener(object : Player.Listener {
+                override fun onRenderedFirstFrame() {
+                    firstFrame.countDown()
+                }
+            })
+            player.setMediaItem(MediaItem.fromUri(Uri.fromFile(hdrClip)), 0L)
+            player.playWhenReady = true
+            player.prepare()
+            player.play()
+
+            assertTrue("HDR10 HEVC 60fps should render first frame", firstFrame.await(20, TimeUnit.SECONDS))
+            if (DesktopPlayerEngine.supportsVulkanVideoDecode("video/hevc")) {
+                assertTrue(
+                    "Expected Vulkan zero-copy hwdec pipeline, got: ${player.activePipelineDescription}",
+                    player.activePipelineDescription.contains("Vulkan 零拷贝硬解"),
+                )
+            }
+        } finally {
+            player.release()
+        }
+    }
 }
