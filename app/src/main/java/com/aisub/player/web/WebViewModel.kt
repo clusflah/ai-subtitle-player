@@ -300,6 +300,8 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
     inner class Bridge(
         private val active: () -> Boolean,
         private val manga: WebMangaCollector? = null,
+        private val allowOpenApp: () -> Boolean = { false },
+        private val currentPageUrl: () -> String? = { null },
         /** web_guard.js 拦下了一个浮动广告里的链接（网址）：App 提示，可以「仍然打开」 */
         private val onAdLink: (String) -> Unit = {},
     ) {
@@ -310,6 +312,10 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
         /** 这个网站要不要藏起所有贴边浮动广告（点选屏蔽里选过「屏蔽本站浮动广告」） */
         @JavascriptInterface
         fun floatAds(host: String): Boolean = _adBlock.value && AdBlock.floating(host)
+
+        @JavascriptInterface
+        fun isWhitelistedLink(url: String): Boolean =
+            WebAppWhitelist.isWhitelistedCrossSiteNavigation(url, currentPageUrl(), allowOpenApp(), userTapped = true)
 
         @JavascriptInterface
         fun adLinkBlocked(url: String) {
@@ -336,6 +342,11 @@ class WebViewModel(app: Application) : AndroidViewModel(app) {
 
         @JavascriptInterface
         fun cleanPage(): Boolean = _cleanPages.value
+
+        /** 当前域名是否需要执行「屏蔽打开 App 弹窗」：白名单网盘及发现页跳转播放站点直接放行 */
+        @JavascriptInterface
+        fun shouldClean(host: String): Boolean =
+            _cleanPages.value && !WebAppWhitelist.isCleanPageWhitelisted(host.ifBlank { currentPageUrl() }, allowOpenApp())
 
         /** 点选屏蔽：选中了一个元素（选择器、网页上一共几个、简短说明） */
         @JavascriptInterface

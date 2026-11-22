@@ -15,13 +15,14 @@ enum class ServerType(val label: String, val isCloud: Boolean = false, val rootR
     EMBY("Emby", isCloud = true, rootRef = ""),
     JELLYFIN("Jellyfin", isCloud = true, rootRef = ""),
     PLEX("Plex", isCloud = true, rootRef = ""),
+    SUBSONIC("Navidrome / Subsonic", isCloud = true, rootRef = ""),
     ONEDRIVE("OneDrive", isCloud = true, rootRef = ""),
     DROPBOX("Dropbox", isCloud = true, rootRef = ""),
     GDRIVE("Google Drive", isCloud = true, rootRef = "root"),
     ;
 
     /** 媒体服务器（有自己的媒体库、海报、进度同步），和普通文件存储分开显示 */
-    val isMediaServer: Boolean get() = this == PLEX || this == EMBY || this == JELLYFIN
+    val isMediaServer: Boolean get() = this == PLEX || this == EMBY || this == JELLYFIN || this == SUBSONIC
 }
 
 /**

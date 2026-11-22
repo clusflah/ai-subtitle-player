@@ -709,6 +709,23 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
 
         // 2. 外部内核（MPV / VLC）专属隔离视图：切换内核或退出时通过 onRelease 立即解绑 Surface
         if (usingExternalKernel) {
+            var observedVideoSize by remember(player) { mutableStateOf(player.videoSize) }
+            DisposableEffect(player) {
+                observedVideoSize = player.videoSize
+                val sizeListener = object : Player.Listener {
+                    override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                        observedVideoSize = videoSize
+                    }
+                    override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                        if (player.videoSize != observedVideoSize) observedVideoSize = player.videoSize
+                    }
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        if (player.videoSize != observedVideoSize) observedVideoSize = player.videoSize
+                    }
+                }
+                player.addListener(sizeListener)
+                onDispose { player.removeListener(sizeListener) }
+            }
             androidx.compose.runtime.key(activeKernel) {
                 AndroidView(
                     factory = { ctx ->
@@ -725,8 +742,19 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         }.also { playerView = it }
                     },
                     update = {
+                        // 读取 landscape 与 observedVideoSize，确保横竖屏切换及再次进入同频道时立即同步画面宽高比
+                        @Suppress("UNUSED_EXPRESSION")
+                        landscape
                         if (it.player !== player) it.player = player
                         it.resizeMode = RESIZE_MODES[resizeIndex].first
+                        val vs = observedVideoSize.takeIf { s -> s.width > 0 && s.height > 0 }
+                            ?: player.videoSize.takeIf { s -> s.width > 0 && s.height > 0 }
+                        if (vs != null) {
+                            val par = vs.pixelWidthHeightRatio.takeIf { r -> !r.isNaN() && r > 0f } ?: 1f
+                            val targetAspect = (vs.width * par) / vs.height.toFloat()
+                            it.findViewById<AspectRatioFrameLayout>(androidx.media3.ui.R.id.exo_content_frame)
+                                ?.setAspectRatio(targetAspect)
+                        }
                         it.subtitleView?.visibility = android.view.View.GONE
                         val aiVisible = state.settings.showAiSubtitles && state.cues.isNotEmpty()
                         val embeddedInAi = aiVisible && (state.embeddedTracks != null || state.extractingEmbedded)
@@ -1146,7 +1174,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                 }
                 if (isLive) {
                     val showDelayControls = state.transcribing || state.cues.isNotEmpty()
-                    val compactLiveRow = LocalConfiguration.current.screenWidthDp < 400 && showDelayControls
+                    val narrowLiveRow = LocalConfiguration.current.screenWidthDp < 520
                     @Composable
                     fun SubtitleDelayInline() {
                         val step = 500L
@@ -1210,28 +1238,23 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                                 color = Color.White,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
                             )
                         }
                     }
-                    if (compactLiveRow) {
-                        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)) {
+                    if (narrowLiveRow) {
+                        Column(
+                            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+                            verticalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
                                 Spacer(Modifier.width(8.dp))
                                 LiveRecordPillButton()
                                 Spacer(Modifier.weight(1f))
-                                LiveKernelSwitch(
-                                    selectedKernel = state.selectedKernel,
-                                    activeKernel = activeKernel,
+                                LiveDecodeModeBadge(
                                     decodeMode = state.settings.decodeMode,
                                     tv = tv,
-                                    onSelect = { target ->
-                                        if (target != state.selectedKernel) {
-                                            vm.switchKernel(target)
-                                            indicator = null to if (target == com.aisub.player.PlayerKernel.AUTO) "已切换为自动调度" else "已切换至${target.shortLabel}内核"
-                                        }
-                                        interactions++
-                                    },
                                     onCycleDecodeMode = { nextMode ->
                                         vm.setDecodeMode(nextMode)
                                         indicator = null to "解码方式：${nextMode.label}"
@@ -1239,19 +1262,42 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                                     },
                                 )
                             }
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                                SubtitleDelayInline()
+                            Row(
+                                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                LiveKernelSwitch(
+                                    selectedKernel = state.selectedKernel,
+                                    activeKernel = activeKernel,
+                                    decodeMode = state.settings.decodeMode,
+                                    tv = tv,
+                                    showDecodeBadge = false,
+                                    onSelect = { target ->
+                                        if (target != state.selectedKernel) {
+                                            vm.switchKernel(target)
+                                            indicator = null to if (target == com.aisub.player.PlayerKernel.AUTO) "已切换为自动调度" else "已切换至${target.shortLabel}内核"
+                                        }
+                                        interactions++
+                                    },
+                                    onCycleDecodeMode = {},
+                                )
+                            }
+                            if (showDelayControls) {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                                    SubtitleDelayInline()
+                                }
                             }
                         }
                     } else {
                         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text("● 直播", color = Color(0xFFFF5252), fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
                             Spacer(Modifier.width(10.dp))
                             LiveKernelSwitch(
                                 selectedKernel = state.selectedKernel,
                                 activeKernel = activeKernel,
                                 decodeMode = state.settings.decodeMode,
                                 tv = tv,
+                                showDecodeBadge = true,
                                 onSelect = { target ->
                                     if (target != state.selectedKernel) {
                                         vm.switchKernel(target)
@@ -2353,7 +2399,7 @@ private fun openSystemEqualizer(context: Context, sessionId: Int) {
  */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
-private fun EqualizerDialog(vm: MainViewModel, onDismiss: () -> Unit) {
+internal fun EqualizerDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val player by vm.playerFlow.collectAsStateWithLifecycle()
     val usingExternal = player !== vm.exoPlayer
@@ -2834,7 +2880,7 @@ private fun CueList(
 // ---------------- 对话框 ----------------
 
 @Composable
-private fun ChoiceDialog(title: String, options: List<String>, selected: Int, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
+internal fun ChoiceDialog(title: String, options: List<String>, selected: Int, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
     AppDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
@@ -3253,6 +3299,7 @@ private fun LiveKernelSwitch(
     onSelect: (com.aisub.player.PlayerKernel) -> Unit,
     onCycleDecodeMode: (com.aisub.player.DecodeMode) -> Unit,
     modifier: Modifier = Modifier,
+    showDecodeBadge: Boolean = true,
 ) {
     val outerShape = RoundedCornerShape(50)
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -3296,6 +3343,18 @@ private fun LiveKernelSwitch(
             }
         }
     }
+    if (showDecodeBadge) {
+        LiveDecodeModeBadge(decodeMode = decodeMode, tv = tv, onCycleDecodeMode = onCycleDecodeMode)
+    }
+    }
+}
+
+@Composable
+private fun LiveDecodeModeBadge(
+    decodeMode: com.aisub.player.DecodeMode,
+    tv: Boolean,
+    onCycleDecodeMode: (com.aisub.player.DecodeMode) -> Unit,
+) {
     var decodeFocused by remember { mutableStateOf(false) }
     val decodeHighlight = tv && decodeFocused
     val decodeShape = RoundedCornerShape(50)
@@ -3329,12 +3388,11 @@ private fun LiveKernelSwitch(
             maxLines = 1,
         )
     }
-    }
 }
 
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
-private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
+internal fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     val p by vm.playerFlow.collectAsStateWithLifecycle()
     val exo = p as? androidx.media3.exoplayer.ExoPlayer
     val v = exo?.videoFormat

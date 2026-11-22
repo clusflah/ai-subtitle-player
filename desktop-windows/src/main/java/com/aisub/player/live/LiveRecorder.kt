@@ -44,6 +44,7 @@ data class LiveRecordState(
     val channelTitle: String = "",
     val streamUrl: String = "",
     val startedAtMs: Long = 0L,
+    val startCueTimeMs: Long = 0L,
     val elapsedMs: Long = 0L,
     val bytesWritten: Long = 0L,
     val lastSavedMessage: String? = null,
@@ -74,6 +75,8 @@ object LiveRecorder {
     private val writtenCounter = AtomicLong(0L)
     private var activeTempFile: File? = null
     private var activeFfmpegProcess: Process? = null
+    @Volatile
+    private var detectedContainerExt: String? = null
 
     fun clearMessage() {
         _state.update { it.copy(lastSavedMessage = null, error = null) }
@@ -84,6 +87,7 @@ object LiveRecorder {
         context: Context,
         streamUrl: String,
         channelTitle: String,
+        startCueTimeMs: Long = 0L,
         mpvStreamRecordStarter: ((File) -> (() -> Unit)?)? = null,
     ) {
         if (_state.value.recording || _state.value.saving) return
@@ -99,6 +103,7 @@ object LiveRecorder {
         writtenCounter.set(0L)
         activeTempFile = tempFile
         activeFfmpegProcess = null
+        detectedContainerExt = null
         val startMs = System.currentTimeMillis()
 
         _state.value = LiveRecordState(
@@ -107,6 +112,7 @@ object LiveRecorder {
             channelTitle = channelTitle.ifBlank { "直播频道" },
             streamUrl = streamUrl,
             startedAtMs = startMs,
+            startCueTimeMs = startCueTimeMs.coerceAtLeast(0L),
             elapsedMs = 0L,
             bytesWritten = 0L,
         )
@@ -196,16 +202,11 @@ object LiveRecorder {
             val finalVideoFile = remuxToMp4IfPossible(tempFile, outDir, baseTitle)
             if (cuesSnapshot.isNotEmpty()) {
                 runCatching {
-                    val baseOffset = cuesSnapshot.first().startMs
-                    val shifted = cuesSnapshot.mapIndexed { idx, c ->
-                        c.copy(
-                            id = idx + 1,
-                            startMs = (c.startMs - baseOffset).coerceAtLeast(0L),
-                            endMs = (c.endMs - baseOffset).coerceAtLeast(200L),
-                        )
-                    }
-                    FileOutputStream(File(outDir, "$baseTitle.srt")).use { out ->
-                        writeSrt(shifted, SrtMode.BILINGUAL, out)
+                    val shifted = filterAndRebaseLiveCues(cuesSnapshot, snapshot.startCueTimeMs)
+                    if (shifted.isNotEmpty()) {
+                        FileOutputStream(File(outDir, "$baseTitle.srt")).use { out ->
+                            writeSrt(shifted, SrtMode.BILINGUAL, out)
+                        }
                     }
                 }
             }
@@ -223,21 +224,32 @@ object LiveRecorder {
         }
     }
 
+    internal fun filterAndRebaseLiveCues(cues: List<Cue>, startCueTimeMs: Long): List<Cue> =
+        LiveStreamRebaser.filterAndRebaseLiveCues(cues, startCueTimeMs)
+
     private fun recordWithFfmpeg(ffmpegPath: String, streamUrl: String, outTs: File) {
         val headers = requestHeadersFor(streamUrl)
         val headerLines = headers.entries.joinToString("\r\n") { "${it.key}: ${it.value}" } + "\r\n"
+        val isHttp = streamUrl.startsWith("http://", ignoreCase = true) || streamUrl.startsWith("https://", ignoreCase = true)
+        val looksHls = streamUrl.substringBefore('?').lowercase().endsWith(".m3u8")
         val args = ArrayList<String>().apply {
             add(ffmpegPath)
             add("-y")
             add("-loglevel"); add("error")
-            if (streamUrl.startsWith("http://", ignoreCase = true) || streamUrl.startsWith("https://", ignoreCase = true)) {
+            if (isHttp) {
                 add("-headers"); add(headerLines)
                 add("-reconnect"); add("1")
                 add("-reconnect_streamed"); add("1")
                 add("-reconnect_delay_max"); add("5")
             }
+            if (looksHls) {
+                // 从点击时刻对应的最新直播分片开始拉取，避免默认 live_start_index=-3 回溯前 15-30 秒历史画面
+                add("-live_start_index"); add("-1")
+            }
+            add("-fflags"); add("+genpts")
             add("-i"); add(streamUrl)
             add("-c"); add("copy")
+            add("-avoid_negative_ts"); add("make_zero")
             add("-f"); add("mpegts")
             add(outTs.absolutePath)
         }
@@ -269,9 +281,11 @@ object LiveRecorder {
             val ok = runCatching {
                 val p = ProcessBuilder(
                     ffmpeg, "-y", "-loglevel", "error",
+                    "-fflags", "+genpts",
                     "-i", tempTs.absolutePath,
                     "-c", "copy",
                     "-bsf:a", "aac_adtstoasc",
+                    "-avoid_negative_ts", "make_zero",
                     "-movflags", "+faststart",
                     mp4File.absolutePath,
                 ).start()
@@ -284,12 +298,13 @@ object LiveRecorder {
             }
             mp4File.delete()
         }
-        val tsFile = File(outDir, "$baseTitle.ts")
-        if (!tempTs.renameTo(tsFile)) {
-            tempTs.copyTo(tsFile, overwrite = true)
+        val ext = (detectedContainerExt ?: "ts").ifEmpty { "ts" }
+        val targetFile = File(outDir, "$baseTitle.$ext")
+        if (!tempTs.renameTo(targetFile)) {
+            tempTs.copyTo(targetFile, overwrite = true)
             tempTs.delete()
         }
-        return tsFile
+        return targetFile
     }
 
     private fun requestHeadersFor(url: String): Map<String, String> {
@@ -321,14 +336,43 @@ object LiveRecorder {
                 }
             }
             val body = resp.body ?: throw IOException("直播流无数据")
+            val tsRebaser = LiveStreamRebaser.TsRebaser()
+            val flvRebaser = LiveStreamRebaser.FlvRebaser()
+            var streamFormat: String? = when {
+                ctype.contains("flv") || finalUrl.substringBefore('?').lowercase().endsWith(".flv") -> "flv"
+                ctype.contains("mp4") -> "mp4"
+                else -> null
+            }
             body.byteStream().use { ins ->
                 FileOutputStream(outFile, false).use { fos ->
                     val buf = ByteArray(64 * 1024)
                     while (!stopRequested.get()) {
                         val n = ins.read(buf)
                         if (n < 0) break
-                        fos.write(buf, 0, n)
-                        writtenCounter.addAndGet(n.toLong())
+                        if (writtenCounter.get() == 0L && n > 0) {
+                            if (streamFormat == null) {
+                                streamFormat = when {
+                                    n >= 3 && buf[0] == 'F'.code.toByte() && buf[1] == 'L'.code.toByte() && buf[2] == 'V'.code.toByte() -> "flv"
+                                    LiveStreamRebaser.looksLikeMp4Segment(buf, n) -> "mp4"
+                                    else -> "ts"
+                                }
+                            }
+                            detectedContainerExt = streamFormat
+                        }
+                        when (streamFormat) {
+                            "flv" -> {
+                                flvRebaser.processChunk(buf, n, fos)
+                                writtenCounter.addAndGet(n.toLong())
+                            }
+                            "ts" -> {
+                                val written = tsRebaser.processChunk(buf, n, fos)
+                                writtenCounter.addAndGet(written.toLong())
+                            }
+                            else -> {
+                                fos.write(buf, 0, n)
+                                writtenCounter.addAndGet(n.toLong())
+                            }
+                        }
                     }
                     fos.flush()
                 }
@@ -341,6 +385,10 @@ object LiveRecorder {
         var initialManifest: String? = firstText
         val seenSegments = LinkedHashSet<String>()
         val keyCache = HashMap<String, ByteArray>()
+        var initMapWritten = false
+        var isFmp4 = false
+        val tsRebaser = LiveStreamRebaser.TsRebaser()
+        val fmp4Rebaser = LiveStreamRebaser.Fmp4Rebaser()
 
         FileOutputStream(outFile, false).use { fos ->
             while (!stopRequested.get()) {
@@ -358,22 +406,38 @@ object LiveRecorder {
                     }
                 }
                 var seq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(manifest)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                var initMapUrl: String? = null
                 var keyUri: String? = null
                 var keyIv: String? = null
+                var endList = false
                 val segs = ArrayList<Triple<String, Long, Pair<String?, String?>>>()
                 for (raw in manifest.lines()) {
                     val line = raw.trim()
-                    if (line.startsWith("#EXT-X-KEY:")) {
+                    if (line.startsWith("#EXT-X-MAP:")) {
+                        Regex("""URI="([^"]+)"""").find(line)?.groupValues?.get(1)?.let {
+                            initMapUrl = resolveUrl(playlistUrl, it)
+                        }
+                    } else if (line.startsWith("#EXT-X-KEY:")) {
                         val method = Regex("""METHOD=([^,\s]+)""").find(line)?.groupValues?.get(1)
                         keyUri = if (method == "AES-128") Regex("""URI="([^"]+)"""").find(line)?.groupValues?.get(1)?.let { resolveUrl(playlistUrl, it) } else null
                         keyIv = Regex("""IV=0[xX]([0-9a-fA-F]+)""").find(line)?.groupValues?.get(1)
+                    } else if (line == "#EXT-X-ENDLIST") {
+                        endList = true
                     } else if (line.isNotEmpty() && !line.startsWith("#")) {
                         segs += Triple(resolveUrl(playlistUrl, line), seq++, keyUri to keyIv)
                     }
                 }
-                val activeSegs = if (seenSegments.isEmpty() && segs.size > 3) {
-                    segs.dropLast(2).forEach { seenSegments.add(it.first) }
-                    segs.takeLast(2)
+                if (!initMapWritten && initMapUrl != null) {
+                    val initBytes = http.newCall(buildRequest(initMapUrl!!)).execute().use { it.body?.bytes() ?: ByteArray(0) }
+                    isFmp4 = true
+                    detectedContainerExt = "mp4"
+                    fos.write(initBytes)
+                    writtenCounter.addAndGet(initBytes.size.toLong())
+                    initMapWritten = true
+                }
+                val activeSegs = if (seenSegments.isEmpty() && segs.isNotEmpty() && !endList) {
+                    segs.dropLast(1).forEach { seenSegments.add(it.first) }
+                    segs.takeLast(1)
                 } else segs
 
                 for ((u, s, kp) in activeSegs) {
@@ -387,10 +451,16 @@ object LiveRecorder {
                         }
                         decryptAes128(raw, kb, kp.second, s)
                     } else raw
-                    fos.write(bytes)
+                    if (detectedContainerExt == null) {
+                        isFmp4 = isFmp4 || LiveStreamRebaser.looksLikeMp4Segment(bytes)
+                        detectedContainerExt = if (isFmp4) "mp4" else "ts"
+                    }
+                    val rebased = if (isFmp4) fmp4Rebaser.processSegment(bytes) else tsRebaser.processSegment(bytes)
+                    fos.write(rebased)
                     fos.flush()
-                    writtenCounter.addAndGet(bytes.size.toLong())
+                    writtenCounter.addAndGet(rebased.size.toLong())
                 }
+                if (endList) break
                 delay(1500L)
             }
         }

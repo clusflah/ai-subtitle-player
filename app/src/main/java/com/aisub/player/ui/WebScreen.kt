@@ -260,9 +260,10 @@ fun WebScreen(
         return true
     }
 
-    fun go(input: String) {
+    fun go(input: String, allowOpenApp: Boolean = false) {
         val target = toUrl(input) ?: return
         showAddress(target)
+        tab.allowOpenApp = allowOpenApp
         extractRe0SearchQuery(target)?.let { q ->
             tab.pendingRe0Query = q
             tab.re0RedirectedToSearch = false
@@ -349,8 +350,8 @@ fun WebScreen(
         saveTabs()
     }
 
-    fun newTab(url: String? = null) {
-        tabs.add(WebTab(nextTabId++, url))
+    fun newTab(url: String? = null, allowOpenApp: Boolean = false) {
+        tabs.add(WebTab(nextTabId++, url, allowOpenApp))
         switchTo(tabs.lastIndex)
         if (url == null) showAddress("")
     }
@@ -385,6 +386,7 @@ fun WebScreen(
         tab.webView = null
         tab.url = null
         tab.pageUrl = null
+        tab.allowOpenApp = false
         tab.title = ""
         tab.canGoBack = false
         tab.progress = 100
@@ -616,7 +618,15 @@ fun WebScreen(
                 false
             }
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-            addJavascriptInterface(vm.Bridge({ t.active }, t.manga) { url -> post { blockedPopup(url) } }, "VoxBridge")
+            addJavascriptInterface(
+                vm.Bridge(
+                    active = { t.active },
+                    manga = t.manga,
+                    allowOpenApp = { t.allowOpenApp },
+                    currentPageUrl = { t.pageUrl },
+                ) { url -> post { blockedPopup(url) } },
+                "VoxBridge",
+            )
             val startScript = if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 WebViewCompat.addDocumentStartJavaScript(this, script, setOf("*"))
                 WebViewCompat.addDocumentStartJavaScript(this, cleanScript, setOf("*"))
@@ -631,17 +641,23 @@ fun WebScreen(
                         view.post { com.aisub.player.meta.MagnetLaunch.pending = rawUrl }
                         return true
                     }
-                    // 「打开 App」之类的跳转（bilibili://、intent://）不处理，留在网页里
-                    if (scheme != "http" && scheme != "https") return true
+                    // 「打开 App」之类的跳转：白名单网盘及发现页跳转播放允许拉起外部 App，其余留在网页里
+                    if (scheme != "http" && scheme != "https") {
+                        if (com.aisub.player.web.WebAppWhitelist.shouldAllowAppLaunch(rawUrl, t.pageUrl, t.allowOpenApp)) {
+                            launchWhitelistedApp(view.context, view, rawUrl)
+                        }
+                        return true
+                    }
                     // 网页脚本把整页带去另一个网站（点一下就跳广告、看着看着自己跳走）：拦下，底部提示可以「仍然打开」。
-                    // 点的就是指向那个网站的链接、刚打开网页时的跳转（「正在跳转」页）、服务器重定向照常
+                    // 点的就是指向那个网站的链接、白名单网盘/流媒体跨站跳转、刚打开网页时的跳转、服务器重定向照常
                     if (isMainFrame && !isRedirect && t.webView === view) {
                         val page = t.pageUrl
+                        val now = android.os.SystemClock.uptimeMillis()
+                        val tapped = now - t.tappedAt < 3_000
                         if (page != null && page.startsWith("http") && !sameSite(rawUrl, page) &&
-                            !isCloudflareChallengeUrl(rawUrl) && !isCloudflareChallengeUrl(page)
+                            !isCloudflareChallengeUrl(rawUrl) && !isCloudflareChallengeUrl(page) &&
+                            !com.aisub.player.web.WebAppWhitelist.isWhitelistedCrossSiteNavigation(rawUrl, page, t.allowOpenApp, userTapped = tapped)
                         ) {
-                            val now = android.os.SystemClock.uptimeMillis()
-                            val tapped = now - t.tappedAt < 3_000
                             val link = t.recentLink()
                             // 网页刚打开两秒内的跳转（「正在跳转」页、搜索结果的中转页）照常
                             val age = now - t.startedAt
@@ -748,6 +764,18 @@ fun WebScreen(
                     if (t.active) fullscreen = null
                 }
 
+                override fun onJsConfirm(view: WebView, url: String?, message: String?, result: android.webkit.JsResult): Boolean {
+                    val hostTarget = url?.takeIf { it.isNotBlank() } ?: t.pageUrl
+                    if (vm.cleanPages.value &&
+                        !com.aisub.player.web.WebAppWhitelist.isCleanPageWhitelisted(hostTarget, t.allowOpenApp) &&
+                        com.aisub.player.web.WebAppWhitelist.isOpenAppPromptText(message)
+                    ) {
+                        result.cancel()
+                        return true
+                    }
+                    return super.onJsConfirm(view, url, message, result)
+                }
+
                 // 网页要开新窗口：先用一个临时网页接住，看它要去哪，再决定在当前标签页打开还是当广告拦下
                 override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message): Boolean {
                     val link = t.recentLink()
@@ -758,9 +786,21 @@ fun WebScreen(
                         decided = true
                         view.post { temp.destroy() }
                         val scheme = Uri.parse(url).scheme?.lowercase()
-                        if (scheme != "http" && scheme != "https") return true
-                        // 点中的链接本身就要开新窗口（target=_blank），或者是本站 / Cloudflare 验证页开的：在当前标签页打开
-                        val own = isCloudflareChallengeUrl(url) || (if (link != null) sameSite(url, link) else sameSite(url, t.pageUrl))
+                        if (scheme == "magnet") {
+                            view.post { com.aisub.player.meta.MagnetLaunch.pending = url }
+                            return true
+                        }
+                        if (scheme != "http" && scheme != "https") {
+                            if (com.aisub.player.web.WebAppWhitelist.shouldAllowAppLaunch(url, t.pageUrl, t.allowOpenApp)) {
+                                launchWhitelistedApp(view.context, view, url)
+                            }
+                            return true
+                        }
+                        // 点中的链接本身就要开新窗口（target=_blank），或者是本站 / 白名单网盘与播放站点 / Cloudflare 验证页开的：在当前标签页打开
+                        val tapped = android.os.SystemClock.uptimeMillis() - t.tappedAt < 3_000 || isUserGesture
+                        val own = isCloudflareChallengeUrl(url) ||
+                            com.aisub.player.web.WebAppWhitelist.isWhitelistedCrossSiteNavigation(url, t.pageUrl, t.allowOpenApp, userTapped = tapped) ||
+                            (if (link != null) sameSite(url, link) else sameSite(url, t.pageUrl))
                         if (own) {
                             view.agentFor(url)
                             view.loadUrl(url)
@@ -1292,13 +1332,15 @@ fun WebScreen(
     }
     }
 
-    // 漫画首页点了「继续阅读」或发现页跳转搜索：在新标签页（当前是空白页就在当前页）打开
+    // 漫画首页点了「继续阅读」、发现页跳转搜索或发现页跳转播放：在新标签页（当前是空白页就在当前页）打开
     LaunchedEffect(Unit) {
         val url = com.aisub.player.web.WebLaunch.pending ?: return@LaunchedEffect
         val mangaMode = com.aisub.player.web.WebLaunch.autoReadManga
+        val allowOpenApp = com.aisub.player.web.WebLaunch.allowOpenApp
         com.aisub.player.web.WebLaunch.pending = null
         com.aisub.player.web.WebLaunch.autoReadManga = true
-        if (tab.url == null) go(url) else newTab(url)
+        com.aisub.player.web.WebLaunch.allowOpenApp = false
+        if (tab.url == null) go(url, allowOpenApp = allowOpenApp) else newTab(url, allowOpenApp = allowOpenApp)
         if (mangaMode) reopenAfter = ""
     }
 
@@ -1788,12 +1830,16 @@ private fun TvCursor(modifier: Modifier) {
 }
 
 /** 一个标签页。网页（WebView）第一次切到时才建，切走后留着（视频暂停），回来接着看 */
-private class WebTab(val id: Long, startUrl: String?) {
+private class WebTab(val id: Long, startUrl: String?, startAllowOpenApp: Boolean = false) {
     /** null：空白的新标签页，显示收藏、常用网站和最近访问 */
     var url by mutableStateOf(startUrl)
 
     /** 当前页面地址（地址栏里可能是正在输入的文字） */
     var pageUrl by mutableStateOf(startUrl)
+
+    /** 来自发现页跳转播放：放行流媒体平台的「打开 App」按钮、外部 App 唤起与跨站播放跳转 */
+    @Volatile
+    var allowOpenApp = startAllowOpenApp
 
     /** 影巢（re0.me）待自动回填并触发提交的搜索词（解决过 CF 盾后只停在空白搜索页的问题） */
     var pendingRe0Query: String? = extractRe0SearchQuery(startUrl)
@@ -1987,6 +2033,35 @@ private fun isCloudflareChallengeUrl(url: String?): Boolean {
     if (url.isNullOrEmpty()) return false
     val low = url.lowercase()
     return "challenges.cloudflare.com" in low || "/cdn-cgi/" in low || "__cf_chl_" in low
+}
+
+/** 唤起白名单外部 App（如 115 网盘、夸克、阿里云盘或发现页跳转播放的流媒体客户端）；未安装时若有兜底 H5 地址则在网页内打开 */
+private fun launchWhitelistedApp(context: android.content.Context, view: WebView, rawUrl: String) {
+    if (rawUrl.startsWith("intent:", ignoreCase = true)) {
+        val parsed = com.aisub.player.web.WebAppWhitelist.parseIntentUri(rawUrl)
+        val intent = runCatching {
+            android.content.Intent.parseUri(rawUrl, android.content.Intent.URI_INTENT_SCHEME)
+        }.getOrNull()
+        if (intent != null && intent.`package` != context.packageName) {
+            intent.addCategory(android.content.Intent.CATEGORY_BROWSABLE)
+            intent.component = null
+            intent.selector = null
+            intent.putExtra("com.android.browser.application_id", context.packageName)
+            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            val started = runCatching { context.startActivity(intent); true }.getOrDefault(false)
+            if (started) return
+        }
+        val fallback = parsed?.fallbackUrl ?: intent?.getStringExtra("browser_fallback_url")
+        if (!fallback.isNullOrBlank() && (fallback.startsWith("https://") || fallback.startsWith("http://"))) {
+            view.post { view.loadUrl(fallback) }
+        }
+        return
+    }
+    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(rawUrl)).apply {
+        addCategory(android.content.Intent.CATEGORY_BROWSABLE)
+        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching { context.startActivity(intent) }
 }
 
 private fun isRe0Host(url: String?): Boolean {

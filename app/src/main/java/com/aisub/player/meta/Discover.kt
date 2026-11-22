@@ -1292,7 +1292,7 @@ object MagnetLinks {
     private val HEX_HASH_REGEX = Regex("""^[0-9a-fA-F]{40}$""")
     private val BASE32_HASH_REGEX = Regex("""^[A-Z2-7]{32}$""", RegexOption.IGNORE_CASE)
     private val CLOUD_SHARE_REGEX = Regex(
-        """https?://(?:pan\.quark\.cn|115\.com|115cdn\.com|anxia\.com|mypikpak\.com|www\.alipan\.com|alipan\.com|www\.aliyundrive\.com|aliyundrive\.com|pan\.baidu\.com|cloud\.189\.cn|pan\.xunlei\.com|drive\.uc\.cn)/(?:s|t)/[A-Za-z0-9_-]+[^\s"'<>()\[\]{}]*""",
+        """https?://(?:pan\.quark\.cn|115\.com|115cdn\.com|115cdn\.net|115cdn\.org|anxia\.com|mypikpak\.com|www\.alipan\.com|alipan\.com|www\.aliyundrive\.com|aliyundrive\.com|pan\.baidu\.com|yun\.baidu\.com|cloud\.189\.cn|pan\.xunlei\.com|drive\.uc\.cn|fast\.uc\.cn|(?:www\.)?123pan\.(?:com|cn)|(?:www\.)?123(?:684|865|912|592)\.com|caiyun\.139\.com|share\.weiyun\.com|1drv\.ms|mega\.nz)/(?:s|t|m|j|file|folder)?/?[A-Za-z0-9_-]+[^\s"'<>()\[\]{}]*""",
         RegexOption.IGNORE_CASE,
     )
 

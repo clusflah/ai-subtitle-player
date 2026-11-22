@@ -103,6 +103,7 @@ class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
                 server.id, m.optString("ratingKey"), m.optLong("duration"), m.optLong("viewOffset"),
                 title = m.optString("title"), artist = m.optString("originalTitle").ifEmpty { m.optString("grandparentTitle") }.ifEmpty { null }.takeIf { type == "track" },
                 album = m.optString("parentTitle").ifEmpty { null }.takeIf { type == "track" },
+                coverUrl = info.posterUrl.takeIf { type == "track" },
             ))
             out += RemoteItem(
                 fileName, part.optString("key"), isDir = false, size = part.optLong("size"),
@@ -250,6 +251,46 @@ class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
         found
     }
 
+    // ---------------- 音乐播放页专用检索 ----------------
+
+    suspend fun musicTracks(sectionKey: String, limit: Int = 250): List<ServerItem> = withContext(Dispatchers.IO) {
+        get("/library/sections/$sectionKey/all?type=10&sort=addedAt:desc&X-Plex-Container-Start=0&X-Plex-Container-Size=$limit")
+            .optJSONArray("Metadata").objects().map(::item)
+    }
+
+    suspend fun musicAlbums(sectionKey: String, limit: Int = 180): List<ServerItem> = withContext(Dispatchers.IO) {
+        get("/library/sections/$sectionKey/all?type=9&sort=addedAt:desc&X-Plex-Container-Start=0&X-Plex-Container-Size=$limit")
+            .optJSONArray("Metadata").objects().map(::item)
+    }
+
+    suspend fun musicArtists(sectionKey: String, limit: Int = 180): List<ServerItem> = withContext(Dispatchers.IO) {
+        get("/library/sections/$sectionKey/all?type=8&sort=titleSort&X-Plex-Container-Start=0&X-Plex-Container-Size=$limit")
+            .optJSONArray("Metadata").objects().map(::item)
+    }
+
+    suspend fun musicPlaylists(): List<ServerItem> = withContext(Dispatchers.IO) {
+        get("/playlists?playlistType=audio").optJSONArray("Metadata").objects().map(::item)
+    }
+
+    suspend fun playlistTracks(ratingKey: String): List<ServerItem> = withContext(Dispatchers.IO) {
+        get("/playlists/$ratingKey/items").optJSONArray("Metadata").objects().map(::item)
+    }
+
+    suspend fun searchMusic(query: String): List<ServerItem> = withContext(Dispatchers.IO) {
+        val q = query.trim()
+        if (q.isEmpty()) return@withContext emptyList()
+        val hubs = get("/hubs/search?query=${Uri.encode(q)}&limit=30").optJSONArray("Hub").objects()
+        val allowed = setOf("track", "album", "artist")
+        val found = ArrayList<ServerItem>()
+        for (h in hubs) {
+            for (m in h.optJSONArray("Metadata").objects()) {
+                val it = item(m)
+                if (it.type in allowed && found.none { e -> e.ratingKey == it.ratingKey }) found += it
+            }
+        }
+        found
+    }
+
     /** 标为已看 / 未看（剧集、季会连带所有集） */
     override suspend fun setWatched(ratingKey: String, watched: Boolean) = withContext(Dispatchers.IO) {
         get("/:/${if (watched) "scrobble" else "unscrobble"}?identifier=com.plexapp.plugins.library&key=$ratingKey")
@@ -285,19 +326,22 @@ class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
         val playUrl = part?.let { p -> playUri(p.optString("key"), fileName!!) }
         val duration = m.optLong("duration")
         val offset = m.optLong("viewOffset")
+        val wide = type == "episode" || type == "clip"
+        val thumbUrl = if (wide) photo(m.optString("thumb"), 480, 270)
+        else photo(m.optString("thumb").ifEmpty { m.optString("parentThumb").ifEmpty { m.optString("grandparentThumb") } }, 450, 450)
         playUrl?.let {
             ServerProgress.register(it, ServerProgress.Entry(
                 server.id, rk, duration, offset, title = title,
                 artist = (m.optString("originalTitle").ifEmpty { showTitle.orEmpty() }).ifEmpty { null }.takeIf { type == "track" },
                 album = m.optString("parentTitle").ifEmpty { null }.takeIf { type == "track" },
+                coverUrl = thumbUrl.takeIf { type == "track" },
             ))
         }
-        val wide = type == "episode" || type == "clip"
         return ServerItem(
             ratingKey = rk, type = type, title = title,
             year = m.optInt("year").takeIf { it > 0 } ?: m.optInt("parentYear").takeIf { it > 0 },
             summary = m.optString("summary"),
-            thumb = if (wide) photo(m.optString("thumb"), 480, 270) else photo(m.optString("thumb").ifEmpty { m.optString("parentThumb") }, 300, 450),
+            thumb = thumbUrl,
             showThumb = photo(m.optString("grandparentThumb").ifEmpty { m.optString("parentThumb") }, 300, 450),
             art = photo(m.optString("art").ifEmpty { m.optString("grandparentArt") }, 1280, 720),
             durationMs = duration, viewOffsetMs = offset, viewCount = m.optInt("viewCount"),

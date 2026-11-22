@@ -104,7 +104,7 @@ class WebMangaCollector {
     }
 }
 
-/** 别的页面（漫画首页的「继续阅读」或发现页跳转搜索）要网页打开一个地址 */
+/** 别的页面（漫画首页的「继续阅读」、发现页跳转搜索或发现页跳转播放）要网页打开一个地址 */
 object WebLaunch {
     @Volatile
     var pending: String? = null
@@ -113,8 +113,13 @@ object WebLaunch {
     @Volatile
     var autoReadManga: Boolean = true
 
-    fun open(url: String?, mangaMode: Boolean = false) {
+    /** true 时来自发现页跳转播放：加入白名单，放行原平台「打开 App」按钮、App 唤起与跨站播放跳转 */
+    @Volatile
+    var allowOpenApp: Boolean = false
+
+    fun open(url: String?, mangaMode: Boolean = false, allowOpenApp: Boolean = false) {
         autoReadManga = mangaMode
+        this.allowOpenApp = allowOpenApp
         pending = url
     }
 }

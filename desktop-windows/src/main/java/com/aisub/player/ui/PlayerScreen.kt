@@ -2507,7 +2507,7 @@ private fun openSystemEqualizer(context: Context, sessionId: Int) {
  */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
-private fun EqualizerDialog(vm: MainViewModel, onDismiss: () -> Unit) {
+internal fun EqualizerDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val ctrl = vm.equalizer
     val eq = remember { if (vm.usingVlc) null else ctrl.attach() }
@@ -2976,7 +2976,7 @@ private fun CueList(
 // ---------------- 对话框 ----------------
 
 @Composable
-private fun ChoiceDialog(title: String, options: List<String>, selected: Int, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
+internal fun ChoiceDialog(title: String, options: List<String>, selected: Int, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
     AppDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
@@ -3382,7 +3382,7 @@ private fun DesktopKernelSwitchDialog(
 
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
-private fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
+internal fun InfoDialog(vm: MainViewModel, onDismiss: () -> Unit) {
     val p = vm.player
     val exo = p as? androidx.media3.exoplayer.ExoPlayer
     val v = exo?.videoFormat

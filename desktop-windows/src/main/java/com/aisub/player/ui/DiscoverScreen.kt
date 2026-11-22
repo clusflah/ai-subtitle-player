@@ -1323,6 +1323,7 @@ fun DiscoverDetailScreen(
     play: (List<MediaEntry>, Int) -> Unit,
     onOpenTelegramSearch: (String) -> Unit,
     onOpenWeb: (String) -> Unit,
+    onOpenPlayWeb: (String) -> Unit = onOpenWeb,
     onOpenMagnet: (String) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenServerDetail: (serverId: String, ratingKey: String) -> Unit = { _, _ -> },
@@ -1645,7 +1646,7 @@ fun DiscoverDetailScreen(
                                     PlatformBadgeChip(
                                         platform = platform,
                                         onClick = {
-                                            onOpenWeb(PlatformCatalog.resolvePlayUrl(platform, displayTitle))
+                                            onOpenPlayWeb(PlatformCatalog.resolvePlayUrl(platform, displayTitle))
                                         },
                                     )
                                 }
@@ -1743,7 +1744,10 @@ fun DiscoverDetailScreen(
                     if (extraLinks.isNotEmpty()) {
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             extraLinks.forEach { (label, url) ->
-                                TextButton(onClick = { onOpenWeb(url) }) {
+                                TextButton(onClick = {
+                                    if (com.aisub.player.web.WebAppWhitelist.isPlayPlatformDomain(url)) onOpenPlayWeb(url)
+                                    else onOpenWeb(url)
+                                }) {
                                     Text(label)
                                 }
                             }
@@ -1812,7 +1816,7 @@ fun DiscoverDetailScreen(
             },
             onOpenWeb = { url ->
                 playDialogOpen = false
-                onOpenWeb(url)
+                onOpenPlayWeb(url)
             },
             onOpenExternal = { url ->
                 playDialogOpen = false

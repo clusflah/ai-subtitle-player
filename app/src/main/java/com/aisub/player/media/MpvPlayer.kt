@@ -937,6 +937,7 @@ class MpvPlayer(
         this.positionMs = this.startPositionMs
         durationMs = C.TIME_UNSET
         tracks = Tracks.EMPTY
+        videoSize = VideoSize.UNKNOWN
         chaptersList = emptyList()
         activeSubTrackId = 0
         activeSubLang = null
@@ -1008,6 +1009,7 @@ class MpvPlayer(
         val name = item.mediaMetadata.title?.toString() ?: uri.lastPathSegment.orEmpty()
         val isLive = item.localConfiguration?.tag == "live"
         error = null
+        videoSize = VideoSize.UNKNOWN
 
         val raw = uri.toString()
         val scheme = uri.scheme?.lowercase().orEmpty()
@@ -1199,6 +1201,8 @@ class MpvPlayer(
             bridge.commandSync("stop")
         }
         playbackState = Player.STATE_IDLE
+        videoSize = VideoSize.UNKNOWN
+        tracks = Tracks.EMPTY
         return Futures.immediateVoidFuture()
     }
 
@@ -1218,7 +1222,15 @@ class MpvPlayer(
     fun setStreamRecordPath(path: String): Boolean {
         if (!MpvNativeBridge.isAvailable()) return false
         return runCatching {
-            bridge.setPropertyString("stream-record", path)
+            val lowRam = isLowRamOr32BitDevice()
+            if (path.isNotBlank()) {
+                // 开启录制前先清空 demuxer 回看缓冲，避免把点击之前的历史缓存画面一并写入录屏文件
+                bridge.setPropertyString("demuxer-max-back-bytes", "0")
+                bridge.setPropertyString("stream-record", path)
+            } else {
+                bridge.setPropertyString("stream-record", "")
+                bridge.setPropertyString("demuxer-max-back-bytes", if (lowRam) "6MiB" else "16MiB")
+            }
             true
         }.getOrDefault(false)
     }

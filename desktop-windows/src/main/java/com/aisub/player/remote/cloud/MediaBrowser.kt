@@ -80,7 +80,7 @@ data class ServerItem(
     val playUrl: String? = null,
     val sizeBytes: Long = 0,
 ) {
-    val isFolder get() = type in setOf("show", "season", "artist", "album", "collection")
+    val isFolder get() = type in setOf("show", "season", "artist", "album", "collection", "playlist")
 
     /** 看完了：剧集、季看所有集；其他看播放次数 */
     val watched get() = if (type == "show" || type == "season") leafCount > 0 && viewedLeafCount >= leafCount else viewCount > 0
@@ -109,6 +109,7 @@ object ServerProgress {
         val title: String? = null,
         val artist: String? = null,
         val album: String? = null,
+        val coverUrl: String? = null,
     )
 
     private val byUri = ConcurrentHashMap<String, Entry>()

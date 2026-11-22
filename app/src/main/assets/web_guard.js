@@ -63,6 +63,9 @@
     if (s === me || s === topSite) return;
     // 浮动层里的外站链接，或者第三方 iframe（广告框）里的外站链接
     if (!thirdPartyFrame && !floatingAncestor(a)) return;
+    try {
+      if (window.VoxBridge && typeof VoxBridge.isWhitelistedLink === 'function' && VoxBridge.isWhitelistedLink(url.href)) return;
+    } catch (e) {}
     ev.preventDefault();
     ev.stopImmediatePropagation();
     try { VoxBridge.adLinkBlocked(url.href); } catch (e) {}

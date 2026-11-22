@@ -78,6 +78,7 @@ fun ServerTypeIcon(type: ServerType, size: Dp = 40.dp, modifier: Modifier = Modi
             ServerType.EMBY -> drawEmbyIcon(s)
             ServerType.JELLYFIN -> drawJellyfinIcon(s)
             ServerType.PLEX -> drawPlexIcon(s)
+            ServerType.SUBSONIC -> drawSubsonicIcon(s)
             ServerType.PAN115 -> drawPan115Icon(s)
             ServerType.ALIYUN -> drawAliyunIcon(s)
             ServerType.BAIDU -> drawBaiduIcon(s)
@@ -514,6 +515,36 @@ private fun DrawScope.drawGoogleDriveIcon(s: Float) {
         close()
     }
     drawPath(redCorner, color = Color(0xFFEA4335))
+}
+
+/** Navidrome / Subsonic：靛蓝渐变黑胶圆盘 + 亮青色音符中心环。 */
+private fun DrawScope.drawSubsonicIcon(s: Float) {
+    drawCircle(
+        brush = Brush.linearGradient(
+            listOf(Color(0xFF00B4D8), Color(0xFF2563EB), Color(0xFF4F46E5)),
+            start = Offset(3f * s, 3f * s),
+            end = Offset(21f * s, 21f * s),
+        ),
+        radius = 10.2f * s,
+        center = Offset(12f * s, 12f * s),
+    )
+    drawCircle(
+        color = Color.White.copy(alpha = 0.28f),
+        radius = 7.4f * s,
+        center = Offset(12f * s, 12f * s),
+        style = Stroke(width = 1.2f * s),
+    )
+    val note = Path().apply {
+        moveTo(10.6f * s, 15.2f * s)
+        lineTo(10.6f * s, 7.6f * s)
+        lineTo(16.2f * s, 6.4f * s)
+        lineTo(16.2f * s, 9.0f * s)
+        lineTo(12.4f * s, 9.8f * s)
+        lineTo(12.4f * s, 15.6f * s)
+        close()
+    }
+    drawPath(note, color = Color.White)
+    drawCircle(color = Color.White, radius = 2.3f * s, center = Offset(10.1f * s, 15.6f * s))
 }
 
 /** Telegram：天蓝渐变圆形 + 白色纸飞机。 */

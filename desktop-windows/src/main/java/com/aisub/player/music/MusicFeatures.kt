@@ -87,11 +87,14 @@ class MusicFeatures(
                 else (if (FileOps.isLocal(e)) TrackTags.fromRetriever(app, Uri.parse(e.uri), e.title) else null)
                     ?: TrackTags.fromMetadata(e.title, duration, emptyList())
             }
-            // Plex、Emby 的歌：文件里没写歌手、专辑时用服务器整理好的
+            // Plex、Emby、Navidrome / Subsonic 的歌：文件里没写歌名、歌手、专辑时用服务器整理好的元数据
             val server = com.aisub.player.remote.cloud.ServerProgress.find(e.uri)
+            val fallbackTitle = e.title.substringBeforeLast('.')
             val tags = if (server == null) fileTags else fileTags.copy(
+                title = if (fileTags.title == fallbackTitle && !server.title.isNullOrBlank()) server.title else fileTags.title,
                 artist = fileTags.artist ?: server.artist,
                 album = fileTags.album ?: server.album,
+                durationMs = if (fileTags.durationMs > 0) fileTags.durationMs else server.durationMs,
             )
             rawTags = tags
             val shown = withContext(Dispatchers.IO) { applySavedInfo(e, tags) }
@@ -162,6 +165,7 @@ class MusicFeatures(
         val local = cached?.let { Lyrics.parse(it, "已保存") }
             ?: tags.lyrics?.let { Lyrics.parse(it, "内嵌") }
             ?: withContext(Dispatchers.IO) { sidecarLrc(e) }?.let { Lyrics.parse(it, "LRC 文件") }
+            ?: withContext(Dispatchers.IO) { serverLyrics(e, tags) }
         if (local != null) {
             val tr = withContext(Dispatchers.IO) { savedTranslations(e, local) }
             _state.update { it.copy(lyrics = local, lyricsStatus = null, translations = tr) }
@@ -191,6 +195,14 @@ class MusicFeatures(
         return listOf("$base.lrc", "$base.LRC").firstNotNullOfOrNull { name ->
             runCatching { File(dir, name).takeIf { it.canRead() }?.readText() }.getOrNull()
         }
+    }
+
+    /** 自建音乐库（Navidrome / Subsonic / OpenSubsonic）自带的同步或纯文本歌词 */
+    private fun serverLyrics(e: MediaEntry, tags: TrackTags): Lyrics? {
+        val srvEntry = com.aisub.player.remote.cloud.ServerProgress.find(e.uri) ?: return null
+        val srv = com.aisub.player.remote.cloud.CloudRegistry.serverLookup(srvEntry.serverId) ?: return null
+        val sub = com.aisub.player.remote.cloud.CloudRegistry.client(srv) as? com.aisub.player.remote.cloud.SubsonicClient ?: return null
+        return runCatching { sub.fetchLyricsBlocking(srvEntry.ratingKey, tags.artist, tags.title)?.let(::localize) }.getOrNull()
     }
 
     suspend fun searchLyrics(title: String, artist: String?): List<SongCandidate> = withContext(Dispatchers.IO) {
@@ -300,7 +312,9 @@ class MusicFeatures(
         val (bitmap, source) = when {
             cached != null -> cached to "已保存"
             else -> withContext(Dispatchers.IO) {
-                tags.cover?.let(::decode)?.let { it to "内嵌" } ?: mediaStoreCover(e)?.let { it to "文件夹" }
+                tags.cover?.let(::decode)?.let { it to "内嵌" }
+                    ?: mediaStoreCover(e)?.let { it to "文件夹" }
+                    ?: serverCover(e)?.let { it to "音乐库" }
             } ?: (null to null)
         }
         if (bitmap != null) {
@@ -312,6 +326,13 @@ class MusicFeatures(
         val bytes = withContext(Dispatchers.IO) { MusicLookup.bestCover(tags) } ?: return
         val online = withContext(Dispatchers.IO) { decode(bytes)?.also { coverFile(e).writeBytes(bytes) } } ?: return
         if (entry == e) _state.update { it.copy(cover = online, coverSource = "在线") }
+    }
+
+    /** Plex / Emby / Jellyfin / Navidrome / Subsonic 音乐库提供的专辑封面 */
+    private fun serverCover(e: MediaEntry): Bitmap? {
+        val coverUrl = com.aisub.player.remote.cloud.ServerProgress.find(e.uri)?.coverUrl ?: return null
+        val bytes = fetchServerImageBytes(coverUrl) ?: return null
+        return decode(bytes)?.also { runCatching { coverFile(e).writeBytes(bytes) } }
     }
 
     /** 系统媒体库给的封面：内嵌图片，或歌曲文件夹里的 AlbumArt.jpg、cover.jpg、folder.jpg 等。 */
@@ -348,6 +369,15 @@ class MusicFeatures(
 
         private fun keyOf(uri: String) = MessageDigest.getInstance("SHA-1").digest(uri.toByteArray()).joinToString("") { "%02x".format(it) }
 
+        private fun fetchServerImageBytes(url: String): ByteArray? = runCatching {
+            val req = okhttp3.Request.Builder().url(url).apply {
+                com.aisub.player.remote.AuthRegistry.headersFor(url).forEach { (k, v) -> header(k, v) }
+            }.build()
+            com.aisub.player.remote.cloud.cloudHttp.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.bytes() else null
+            }
+        }.getOrNull()
+
         /** 播放时找到的封面（内嵌、文件夹）存一张小图，最近播放等列表里直接用 */
         private fun saveThumb(context: android.content.Context, uri: String, bitmap: Bitmap) = runCatching {
             val f = thumbFile(context, keyOf(uri)).apply { parentFile?.mkdirs() }
@@ -376,6 +406,19 @@ class MusicFeatures(
             thumbFile(context, key).takeIf { it.exists() }?.let { f -> BitmapFactory.decodeFile(f.path)?.let { return it } }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && uri.startsWith("content://media/")) {
                 runCatching { context.contentResolver.loadThumbnail(Uri.parse(uri), Size(maxPx, maxPx), null) }.getOrNull()?.let { return it }
+            }
+            com.aisub.player.remote.cloud.ServerProgress.find(uri)?.coverUrl?.let { remoteCover ->
+                val bytes = fetchServerImageBytes(remoteCover)
+                if (bytes != null) {
+                    val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                    var sample = 1
+                    while (maxOf(opts.outWidth, opts.outHeight) / (sample * 2) >= maxPx) sample *= 2
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })?.let { bmp ->
+                        saveThumb(context, uri, bmp)
+                        return bmp
+                    }
+                }
             }
             if (!uri.startsWith("content://") && !uri.startsWith("file://")) return null
             val art = runCatching {

@@ -37,6 +37,7 @@ import com.aisub.player.remote.cloud.Pkce
 import com.aisub.player.remote.cloud.PlexClient
 import com.aisub.player.remote.cloud.QrSession
 import com.aisub.player.remote.cloud.QrStatus
+import com.aisub.player.remote.cloud.SubsonicClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -368,6 +369,70 @@ internal fun GoogleLogin(onSuccess: (String) -> Unit) {
                 }
             },
         ) { Text("打开浏览器授权") }
+        if (state.busy) CircularProgressIndicator(Modifier.size(24.dp))
+    }
+}
+
+@Composable
+internal fun SubsonicLogin(
+    initialName: String,
+    initialUrl: String,
+    initialLan: String,
+    onSuccess: (creds: String, name: String, url: String, lanUrl: String) -> Unit,
+) {
+    var name by remember { mutableStateOf(initialName.ifBlank { "Navidrome" }) }
+    var url by remember { mutableStateOf(initialUrl) }
+    var lan by remember { mutableStateOf(initialLan) }
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    val (state, run) = rememberRun()
+    Hint("兼容 Navidrome、Subsonic、Airsonic、Gonic、LMS、Funkwhale 等 OpenSubsonic 音乐库，填写站点根地址（例如 http://192.168.1.2:4533，无需加 /rest）。")
+    PhoneInputButton(
+        listOf(
+            PhoneField("name", "名称", name),
+            PhoneField("url", "服务器地址", url),
+            PhoneField("lan", "内网地址（可不填）", lan),
+            PhoneField("user", "用户名", username),
+            PhoneField("pass", "密码", secret = true),
+        ),
+        title = "连接 Navidrome / Subsonic",
+    ) { v ->
+        name = v["name"]?.ifBlank { name } ?: name
+        url = v["url"].orEmpty()
+        lan = v["lan"].orEmpty()
+        username = v["user"].orEmpty()
+        password = v["pass"].orEmpty()
+    }
+    OutlinedTextField(name, { name = it }, label = { Text("音乐库名称") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
+    OutlinedTextField(
+        url, { url = it }, label = { Text("服务器地址") }, placeholder = { Text("http://192.168.1.2:4533") },
+        singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false,
+    )
+    OutlinedTextField(
+        lan, { lan = it }, label = { Text("内网地址（可不填）") }, placeholder = { Text("http://192.168.1.2:4533") },
+        supportingText = { Text("上面填公网域名时，在家能连上内网地址会自动优先走内网") },
+        singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false,
+    )
+    OutlinedTextField(username, { username = it }, label = { Text("用户名") }, singleLine = true, modifier = Modifier.fillMaxWidth(), phoneInput = false)
+    OutlinedTextField(
+        password, { password = it }, label = { Text("密码") }, singleLine = true,
+        visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), phoneInput = false,
+    )
+    ErrorText(state.error)
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        OutlinedButton(
+            enabled = !state.busy && url.isNotBlank() && username.isNotBlank(),
+            onClick = {
+                run {
+                    fun fix(u: String) = u.trim().trimEnd('/').removeSuffix("/rest")
+                        .let { if (it.isEmpty() || it.startsWith("http")) it else "http://$it" }
+                    val fixed = fix(url)
+                    val fixedLan = fix(lan)
+                    val creds = withContext(Dispatchers.IO) { SubsonicClient.login(fixed, fixedLan, username.trim(), password) }
+                    onSuccess(creds, name.trim().ifEmpty { "Navidrome" }, fixed, fixedLan)
+                }
+            },
+        ) { Text("连接并保存") }
         if (state.busy) CircularProgressIndicator(Modifier.size(24.dp))
     }
 }

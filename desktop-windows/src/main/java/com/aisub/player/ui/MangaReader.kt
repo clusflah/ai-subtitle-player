@@ -2,6 +2,7 @@ package com.aisub.player.ui
 
 import android.app.Activity
 import android.view.KeyEvent
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -159,6 +160,38 @@ fun MangaReader(
     var retryTick by remember { mutableIntStateOf(0) }
     /** 最后一页再按「下一页」：提示一次，再按进下一话 */
     var endHint by remember { mutableStateOf<String?>(null) }
+    var saveCandidatePages by remember { mutableStateOf<List<Int>?>(null) }
+    var savingImage by remember { mutableStateOf(false) }
+
+    fun requestSavePages(indices: List<Int>) {
+        val valid = indices.distinct().filter { it in pages.indices }
+        if (valid.isEmpty() || savingImage) return
+        savingImage = true
+        scope.launch {
+            try {
+                var savedCount = 0
+                var lastErr: String? = null
+                for (idx in valid) {
+                    runCatching {
+                        MangaImages.savePageToGallery(context, book.title, pages[idx], idx)
+                    }.onSuccess {
+                        savedCount++
+                    }.onFailure { e ->
+                        lastErr = e.message ?: e.javaClass.simpleName
+                    }
+                }
+                val msg = when {
+                    savedCount == 0 -> "保存图片失败：${lastErr ?: "未知错误"}"
+                    valid.size == 1 -> "已保存第 ${valid.first() + 1} 页到 Pictures/译幕"
+                    else -> "已保存 $savedCount 张图片到 Pictures/译幕"
+                }
+                endHint = msg
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            } finally {
+                savingImage = false
+            }
+        }
+    }
     var boxSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
     val rootFocus = remember { FocusRequester() }
     val controlsFocus = remember { FocusRequester() }
@@ -193,8 +226,8 @@ fun MangaReader(
     }
 
     // 控制栏一会儿没操作就藏起来
-    LaunchedEffect(controls, lastInteraction, panel) {
-        if (!controls || panel != null) return@LaunchedEffect
+    LaunchedEffect(controls, lastInteraction, panel, saveCandidatePages) {
+        if (!controls || panel != null || saveCandidatePages != null) return@LaunchedEffect
         delay(5_000)
         controls = false
     }
@@ -354,7 +387,18 @@ fun MangaReader(
             val stripWidth = with(density) { (base * zoom).coerceAtMost(w).toDp() }
             LazyColumn(
                 state = strip,
-                modifier = Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onTap = { if (controls) controls = false else showControls() }) },
+                modifier = Modifier.fillMaxSize().pointerInput(pages.size) {
+                    detectTapGestures(
+                        onTap = { if (controls) controls = false else showControls() },
+                        onLongPress = { o ->
+                            val hit = strip.layoutInfo.visibleItemsInfo
+                                .firstOrNull { it.index in pages.indices && o.y.toInt() in it.offset..(it.offset + it.size) }
+                                ?.index
+                                ?: page.coerceIn(0, (pages.size - 1).coerceAtLeast(0))
+                            if (hit in pages.indices) saveCandidatePages = listOf(hit)
+                        },
+                    )
+                },
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 items(pages.size, key = { it }) { i ->
@@ -385,7 +429,8 @@ fun MangaReader(
                 key = { it },
             ) { u ->
                 val current = u == pager.currentPage
-                val tapModifier = Modifier.pointerInput(rtl, mode) {
+                val unitForTap = units.getOrNull(u)
+                val tapModifier = Modifier.pointerInput(rtl, mode, u, unitForTap) {
                     detectTapGestures(
                         onTap = { o ->
                             // 点左右三分之一翻页，中间显示 / 隐藏控制栏
@@ -398,6 +443,19 @@ fun MangaReader(
                             }
                         },
                         onDoubleTap = if (zoomable) { _: Offset -> setZoom(if (zoom > 1f) 1f else 2f) } else null,
+                        onLongPress = if (unitForTap != null && unitForTap.isNotEmpty()) {
+                            { o ->
+                                if (mode == MangaMode.DOUBLE && unitForTap.size == 2) {
+                                    val ordered = if (rtl) unitForTap.reversed() else unitForTap
+                                    val mid = size.width / 2f + (if (current) pan.x else 0f)
+                                    val picked = if (o.x < mid) ordered[0] else ordered[1]
+                                    val other = if (picked == ordered[0]) ordered[1] else ordered[0]
+                                    saveCandidatePages = listOf(picked, other)
+                                } else {
+                                    saveCandidatePages = listOf(unitForTap.first())
+                                }
+                            }
+                        } else null,
                     )
                 }
                 if (u >= units.size) {
@@ -478,7 +536,36 @@ fun MangaReader(
                     val percent = if (pages.size > 1) page * 100 / (pages.size - 1) else 100
                     Text("第 ${page + 1} / ${pages.size} 页 · $percent% · ${mode.label}${if (rtl) " · 从右往左" else ""}", color = Color(0xCCFFFFFF), style = MaterialTheme.typography.bodySmall)
                 }
-                // 手机竖屏时底部按钮可能放不下；始终在顶部保留目录与显示方式入口。
+                // 始终在顶部保留保存图片、目录与显示方式入口。
+                IconButton(
+                    enabled = !savingImage && pages.isNotEmpty(),
+                    onClick = {
+                        lastInteraction = System.currentTimeMillis()
+                        if (mode == MangaMode.DOUBLE) {
+                            val curUnit = units.getOrNull(pager.currentPage.coerceIn(0, (units.size - 1).coerceAtLeast(0))).orEmpty()
+                            if (curUnit.size > 1) {
+                                saveCandidatePages = if (rtl) curUnit.reversed() else curUnit
+                            } else {
+                                requestSavePages(listOf(curUnit.firstOrNull() ?: page))
+                            }
+                        } else if (mode == MangaMode.STRIP) {
+                            val vpMid = strip.layoutInfo.viewportSize.height / 2
+                            val centerIdx = strip.layoutInfo.visibleItemsInfo
+                                .filter { it.index in pages.indices }
+                                .minByOrNull { info ->
+                                    val top = info.offset
+                                    val bottom = info.offset + info.size
+                                    if (vpMid in top..bottom) 0 else minOf(kotlin.math.abs(vpMid - top), kotlin.math.abs(vpMid - bottom))
+                                }?.index ?: page
+                            requestSavePages(listOf(centerIdx))
+                        } else {
+                            requestSavePages(listOf(page))
+                        }
+                    },
+                    modifier = Modifier.tvFocusRing(RoundedCornerShape(50), scale = true, fillBackground = true),
+                ) {
+                    Icon(AppIcons.Download, "保存图片", tint = Color.White)
+                }
                 IconButton(onClick = { panel = ReaderPanel.THUMBS }, modifier = Modifier.tvFocusRing(RoundedCornerShape(50), scale = true, fillBackground = true)) {
                     Icon(AppIcons.ListIcon, "目录", tint = Color.White)
                 }
@@ -720,7 +807,88 @@ fun MangaReader(
             )
             null -> {}
         }
+
+        saveCandidatePages?.let { candidates ->
+            SaveMangaPageDialog(
+                candidates = candidates,
+                totalPages = pages.size,
+                onSave = { targets ->
+                    saveCandidatePages = null
+                    requestSavePages(targets)
+                },
+                onDismiss = { saveCandidatePages = null },
+            )
+        }
     }
+    }
+}
+
+@Composable
+private fun SaveMangaPageDialog(
+    candidates: List<Int>,
+    totalPages: Int,
+    onSave: (List<Int>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    androidx.compose.runtime.CompositionLocalProvider(LocalForceDarkPopup provides true) {
+        AppDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("保存漫画图片") },
+            confirmButton = {
+                if (candidates.size == 1) {
+                    Button(
+                        onClick = { onSave(candidates) },
+                        modifier = Modifier.tvFocusRing(RoundedCornerShape(50)),
+                    ) {
+                        Text("保存图片")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismiss, modifier = Modifier.tvFocusRing(RoundedCornerShape(50))) {
+                    Text("取消")
+                }
+            },
+            text = {
+                if (candidates.size == 1) {
+                    val p = candidates.first() + 1
+                    Text("将第 $p / $totalPages 页原图保存到「Pictures/译幕」？")
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        candidates.forEach { pIdx ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .tvFocusRing(RoundedCornerShape(8.dp))
+                                    .clickable { onSave(listOf(pIdx)) }
+                                    .padding(horizontal = 8.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(AppIcons.Download, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                Spacer(Modifier.width(10.dp))
+                                Text("保存第 ${pIdx + 1} 页", style = MaterialTheme.typography.bodyLarge)
+                            }
+                        }
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .tvFocusRing(RoundedCornerShape(8.dp))
+                                .clickable { onSave(candidates) }
+                                .padding(horizontal = 8.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(AppIcons.Download, null, tint = Orange, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                "同时保存两页（第 ${candidates.joinToString("、") { (it + 1).toString() }} 页）",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                    }
+                }
+            },
+        )
     }
 }
 

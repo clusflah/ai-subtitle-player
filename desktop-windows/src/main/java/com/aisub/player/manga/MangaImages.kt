@@ -1,8 +1,13 @@
 package com.aisub.player.manga
 
+import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaScannerConnection
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.util.LruCache
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -11,6 +16,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.IOException
 
 /**
  * 漫画图片：按屏幕宽度解码（不是按最长边：条漫一张图很长，按最长边缩会糊成一条），
@@ -109,4 +117,107 @@ object MangaImages {
     /** BitmapFactory 不认识的格式（AVIF、HEIC）：交给系统 ImageDecoder */
     private fun decodeOther(bytes: ByteArray, maxWidth: Int): Bitmap? =
         com.aisub.player.ui.ImageLoader.decode(bytes, maxWidth * 2)
+
+    /** 根据图片魔数识别真实扩展名与 MIME，保持原图无损落盘。 */
+    internal fun sniffImageFormat(bytes: ByteArray, hintName: String? = null): Pair<String, String> {
+        if (bytes.size >= 12) {
+            val b0 = bytes[0].toInt() and 0xFF
+            val b1 = bytes[1].toInt() and 0xFF
+            val b2 = bytes[2].toInt() and 0xFF
+            val b3 = bytes[3].toInt() and 0xFF
+            if (b0 == 0xFF && b1 == 0xD8 && b2 == 0xFF) return "jpg" to "image/jpeg"
+            if (b0 == 0x89 && b1 == 0x50 && b2 == 0x4E && b3 == 0x47) return "png" to "image/png"
+            if (b0 == 0x47 && b1 == 0x49 && b2 == 0x46 && b3 == 0x38) return "gif" to "image/gif"
+            if (b0 == 0x52 && b1 == 0x49 && b2 == 0x46 && b3 == 0x46 &&
+                bytes[8] == 'W'.code.toByte() && bytes[9] == 'E'.code.toByte() &&
+                bytes[10] == 'B'.code.toByte() && bytes[11] == 'P'.code.toByte()
+            ) return "webp" to "image/webp"
+            if (bytes[4] == 'f'.code.toByte() && bytes[5] == 't'.code.toByte() &&
+                bytes[6] == 'y'.code.toByte() && bytes[7] == 'p'.code.toByte()
+            ) {
+                val brand = String(bytes, 8, 4, Charsets.US_ASCII)
+                if (brand == "avif" || brand == "avis") return "avif" to "image/avif"
+                if (brand == "heic" || brand == "heix" || brand == "mif1") return "heic" to "image/heic"
+            }
+        }
+        val ext = hintName?.substringBefore('?')?.substringAfterLast('.', "")?.lowercase().orEmpty()
+        return when (ext) {
+            "png" -> "png" to "image/png"
+            "webp" -> "webp" to "image/webp"
+            "gif" -> "gif" to "image/gif"
+            "avif" -> "avif" to "image/avif"
+            else -> "jpg" to "image/jpeg"
+        }
+    }
+
+    /**
+     * 将漫画指定页原图无损保存到系统相册 `Pictures/译幕`（PDF 页面高分辨率渲染为 PNG；断网/失效时回退保存已解码缓存图）。
+     * @return 保存后的文件名。
+     */
+    suspend fun savePageToGallery(
+        context: Context,
+        bookTitle: String,
+        page: MangaPage,
+        pageIndex: Int,
+    ): String = withContext(Dispatchers.IO) {
+        val pdfIdx = pdfPage(page)
+        val (rawBytes, extAndMime) = if (pdfIdx != null) {
+            val bmp = MangaArchive.renderPdf(context, page.url, pdfIdx, 2400)
+            val bos = ByteArrayOutputStream()
+            if (!bmp.compress(Bitmap.CompressFormat.PNG, 100, bos)) {
+                throw IOException("无法编码 PDF 页面图片")
+            }
+            bos.toByteArray() to ("png" to "image/png")
+        } else {
+            val fetched = runCatching { MangaFetcher.bytes(context, page) }.getOrNull()?.takeIf { it.isNotEmpty() }
+            if (fetched != null) {
+                fetched to sniffImageFormat(fetched, page.entry ?: page.url)
+            } else {
+                val cachedBmp = cached(page)?.asAndroidBitmap()
+                    ?: throw IOException("无法读取该页图片数据")
+                val bos = ByteArrayOutputStream()
+                if (!cachedBmp.compress(Bitmap.CompressFormat.PNG, 100, bos)) {
+                    throw IOException("无法编码缓存图片")
+                }
+                bos.toByteArray() to ("png" to "image/png")
+            }
+        }
+
+        val (ext, mime) = extAndMime
+        val safeTitle = bookTitle.replace(Regex("""[\\/:*?"<>|]"""), "_").trim().take(48).ifEmpty { "漫画" }
+        val pageLabel = (pageIndex + 1).toString().padStart(3, '0')
+        val fileName = "${safeTitle}_P${pageLabel}_${System.currentTimeMillis() % 100000}.$ext"
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Images.Media.MIME_TYPE, mime)
+                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/译幕")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                ?: throw IOException("无法写入系统相册")
+            try {
+                resolver.openOutputStream(uri)?.use { out -> out.write(rawBytes) }
+                    ?: throw IOException("无法打开相册输出流")
+                resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            } catch (e: Exception) {
+                runCatching { resolver.delete(uri, null, null) }
+                throw e
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                "译幕",
+            ).apply { mkdirs() }
+            val dst = File(dir, fileName)
+            dst.outputStream().use { out -> out.write(rawBytes) }
+            runCatching {
+                MediaScannerConnection.scanFile(context, arrayOf(dst.absolutePath), arrayOf(mime), null)
+            }
+        }
+        fileName
+    }
 }

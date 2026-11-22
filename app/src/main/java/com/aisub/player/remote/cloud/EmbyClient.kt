@@ -88,6 +88,7 @@ class EmbyClient(server: Server) : CloudClient(server), MediaBrowser {
                 ServerProgress.Entry(
                     server.id, id, it.optLong("RunTimeTicks") / 10_000, 0, title = it.optString("Name"),
                     artist = it.optString("AlbumArtist").ifEmpty { null }, album = it.optString("Album").ifEmpty { null },
+                    coverUrl = meta.posterUrl,
                 ),
             )
             items += RemoteItem(
@@ -252,6 +253,61 @@ class EmbyClient(server: Server) : CloudClient(server), MediaBrowser {
         get("/Users/$uid/Items", params).optJSONArray("Items").objects().map(::item)
     }
 
+    // ---------------- 音乐播放页专用检索 ----------------
+
+    suspend fun musicTracks(sectionKey: String? = null, limit: Int = 250): List<ServerItem> = withContext(Dispatchers.IO) {
+        val params = browseFields + mapOf(
+            "Recursive" to "true",
+            "IncludeItemTypes" to "Audio",
+            "SortBy" to "DateCreated,SortName",
+            "SortOrder" to "Descending",
+            "Limit" to limit.toString(),
+        ) + (if (!sectionKey.isNullOrBlank()) mapOf("ParentId" to sectionKey) else emptyMap())
+        get("/Users/$uid/Items", params).optJSONArray("Items").objects().map(::item)
+    }
+
+    suspend fun musicAlbums(sectionKey: String? = null, limit: Int = 180): List<ServerItem> = withContext(Dispatchers.IO) {
+        val params = browseFields + mapOf(
+            "Recursive" to "true",
+            "IncludeItemTypes" to "MusicAlbum",
+            "SortBy" to "DateCreated,SortName",
+            "SortOrder" to "Descending",
+            "Limit" to limit.toString(),
+        ) + (if (!sectionKey.isNullOrBlank()) mapOf("ParentId" to sectionKey) else emptyMap())
+        get("/Users/$uid/Items", params).optJSONArray("Items").objects().map(::item)
+    }
+
+    suspend fun musicArtists(sectionKey: String? = null, limit: Int = 180): List<ServerItem> = withContext(Dispatchers.IO) {
+        val params = browseFields + mapOf(
+            "UserId" to uid,
+            "SortBy" to "SortName",
+            "SortOrder" to "Ascending",
+            "Limit" to limit.toString(),
+        ) + (if (!sectionKey.isNullOrBlank()) mapOf("ParentId" to sectionKey) else emptyMap())
+        get("/Artists", params).optJSONArray("Items").objects().map(::item)
+    }
+
+    suspend fun musicPlaylists(): List<ServerItem> = withContext(Dispatchers.IO) {
+        val params = browseFields + mapOf(
+            "Recursive" to "true",
+            "IncludeItemTypes" to "Playlist",
+            "Limit" to "100",
+        )
+        get("/Users/$uid/Items", params).optJSONArray("Items").objects().map(::item)
+    }
+
+    suspend fun searchMusic(query: String): List<ServerItem> = withContext(Dispatchers.IO) {
+        val q = query.trim()
+        if (q.isEmpty()) return@withContext emptyList()
+        val params = browseFields + mapOf(
+            "Recursive" to "true",
+            "SearchTerm" to q,
+            "IncludeItemTypes" to "Audio,MusicAlbum,MusicArtist",
+            "Limit" to "60",
+        )
+        get("/Users/$uid/Items", params).optJSONArray("Items").objects().map(::item)
+    }
+
     override suspend fun setWatched(ratingKey: String, watched: Boolean) = withContext(Dispatchers.IO) {
         call("/Users/$uid/PlayedItems/$ratingKey", method = if (watched) "POST" else "DELETE")
         Unit
@@ -285,6 +341,7 @@ class EmbyClient(server: Server) : CloudClient(server), MediaBrowser {
             "MusicArtist" -> "artist"
             "MusicAlbum" -> "album"
             "Audio" -> "track"
+            "Playlist" -> "playlist"
             "BoxSet" -> "collection"
             else -> rawType.lowercase()
         }
@@ -333,6 +390,7 @@ class EmbyClient(server: Server) : CloudClient(server), MediaBrowser {
                 server.id, id, durationMs, offsetMs, title = name,
                 artist = it.optString("AlbumArtist").ifEmpty { it.optJSONArray("Artists")?.optString(0).orEmpty() }.ifEmpty { null }.takeIf { type == "track" },
                 album = it.optString("Album").ifEmpty { null }.takeIf { type == "track" },
+                coverUrl = thumb.takeIf { type == "track" },
             ))
         }
         return ServerItem(

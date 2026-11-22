@@ -88,6 +88,9 @@ fun CloudLoginDialog(type: ServerType, existing: Server?, onDismiss: () -> Unit,
                     ServerType.EMBY, ServerType.JELLYFIN -> EmbyLogin(existing?.baseUrl.orEmpty(), existing?.lanUrl.orEmpty()) { creds, url, lan ->
                         onLoggedIn(base.copy(extra = creds, baseUrl = url, lanUrl = lan))
                     }
+                    ServerType.SUBSONIC -> SubsonicLogin(existing?.name.orEmpty(), existing?.baseUrl.orEmpty(), existing?.lanUrl.orEmpty()) { creds, name, url, lan ->
+                        onLoggedIn(base.copy(name = name, extra = creds, baseUrl = url, lanUrl = lan))
+                    }
                     ServerType.PLEX -> PlexLogin(finish)
                     ServerType.ONEDRIVE -> OneDriveLogin(finish)
                     ServerType.DROPBOX -> DropboxLogin(finish)

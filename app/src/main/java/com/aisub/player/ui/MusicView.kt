@@ -126,12 +126,13 @@ enum class MusicAction {
 private val Dim = Color(0x99FFFFFF)
 private val Faint = Color(0x66FFFFFF)
 
-/** 上方两页：0 歌曲（唱片），1 歌词 */
+/** 上方标签页：0 歌曲（唱片），1 歌词，2 乐库（仅音乐主页面提供） */
 private const val LYRICS_PAGE = 1
+private const val LIBRARY_PAGE = 2
 
 /**
- * 播放音乐时的整页：上面「推荐 / 歌曲 / 歌词」三页左右滑，
- * 下面固定显示歌名、喜欢、菜单、进度条和播放按钮。背景是模糊的封面。
+ * 播放音乐时的整页：上方「歌曲 / 歌词」（音乐主页含「乐库」）左右滑，
+ * 下方固定显示歌名、喜欢、菜单、进度条和播放按钮。背景是模糊的封面。
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -144,34 +145,59 @@ fun MusicView(
     cues: List<Cue>,
     positionMs: Long,
     wantsPlay: Boolean,
-    onBack: () -> Unit,
+    onBack: (() -> Unit)?,
     onSeek: (Long) -> Unit,
     onAction: (MusicAction) -> Unit,
     onMessage: (String) -> Unit,
+    inHomeTab: Boolean = false,
+    bottomOverlayPadding: androidx.compose.ui.unit.Dp = 0.dp,
+    applyNavigationBarInset: Boolean = true,
+    standbyTags: com.aisub.player.music.TrackTags? = null,
+    standbyCover: android.graphics.Bitmap? = null,
+    onIdlePlay: (() -> Unit)? = null,
+    topLeadingContent: (@Composable () -> Unit)? = null,
+    onOpenSourceSettings: (() -> Unit)? = null,
+    externalPager: androidx.compose.foundation.pager.PagerState? = null,
+    libraryTabContent: (@Composable () -> Unit)? = null,
 ) {
-    val tags = music.tags ?: return
+    val activeMusic = music.tags != null
+    val tags = music.tags ?: standbyTags ?: return
+    val displayCover = music.cover ?: standbyCover
+    val effectiveEntry = current?.takeIf { activeMusic && !it.isVideo && !it.isLive }
+    val effectiveWantsPlay = activeMusic && wantsPlay
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     val scope = rememberCoroutineScope()
-    val pager = rememberPagerState(initialPage = 0) { 2 }
+    val pageCount = if (libraryTabContent != null) 3 else 2
+    val internalPager = rememberPagerState(initialPage = 0) { pageCount }
+    val pager = externalPager ?: internalPager
     val onLyricsPage = pager.currentPage == LYRICS_PAGE
+    val onLibraryPage = libraryTabContent != null && pager.currentPage == LIBRARY_PAGE
     var showQueue by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
-    var liked by remember(current?.uri) { mutableStateOf(current?.let { vm.isLiked(it.uri) } == true) }
+    var liked by remember(effectiveEntry?.uri) { mutableStateOf(effectiveEntry?.let { vm.isLiked(it.uri) } == true) }
     val toggleLike = {
-        liked = vm.toggleLiked()
-        onMessage(if (liked) "已加入「${MainViewModel.LIKED_PLAYLIST}」" else "已从「${MainViewModel.LIKED_PLAYLIST}」移除")
+        if (effectiveEntry != null) {
+            liked = vm.toggleLiked()
+            onMessage(if (liked) "已加入「${MainViewModel.LIKED_PLAYLIST}」" else "已从「${MainViewModel.LIKED_PLAYLIST}」移除")
+        } else {
+            onMessage("开始播放歌曲后即可加入我喜欢的音乐")
+        }
     }
     // 没有歌词、但生成过 AI 字幕时，把字幕当歌词
-    val lyrics = music.lyrics ?: remember(cues) {
+    val lyrics = if (!activeMusic) null else music.lyrics ?: remember(cues) {
         cues.takeIf { it.isNotEmpty() }?.let { c -> Lyrics(c.sortedBy { it.startMs }.map { LyricLine(it.startMs, it.text) }, synced = true, source = "AI 字幕") }
     }
-    val translations = if (music.lyrics != null) music.translations else remember(cues) {
+    val translations = if (!activeMusic) null else if (music.lyrics != null) music.translations else remember(cues) {
         cues.sortedBy { it.startMs }.map { it.translation }.takeIf { t -> t.any { it != null } }
     }
-    // 竖屏停在歌词页时，一会儿不操作就淡出下方控件，让歌词占满；点一下屏幕再显示
+    // 竖屏停在歌词页时，一会儿不操作就淡出下方控件，让歌词占满；处于「乐库」页时竖屏收起下方大面板腾出选歌空间
     var touches by remember { mutableIntStateOf(0) }
     var controlsShown by remember { mutableStateOf(true) }
-    LaunchedEffect(pager.currentPage, touches, landscape, showMenu, showQueue) {
+    LaunchedEffect(pager.currentPage, touches, landscape, showMenu, showQueue, onLibraryPage) {
+        if (onLibraryPage && !landscape) {
+            controlsShown = false
+            return@LaunchedEffect
+        }
         controlsShown = true
         if (onLyricsPage && !landscape && !showMenu && !showQueue) {
             delay(4_000)
@@ -199,17 +225,26 @@ fun MusicView(
             .pointerInput(Unit) { detectTapGestures { } },
     ) {
         Box(Modifier.fillMaxSize()) {
-            Backdrop(music)
+            Backdrop(displayCover)
         }
         val pages: @Composable (Modifier) -> Unit = { mod ->
             Column(mod) {
-                TopTabs(pager.currentPage, onBack) { scope.launch { pager.animateScrollToPage(it) } }
+                TopTabs(
+                    page = pager.currentPage,
+                    showLibraryTab = libraryTabContent != null,
+                    onBack = onBack,
+                    leadingContent = topLeadingContent,
+                    onOpenSourceSettings = onOpenSourceSettings,
+                ) { scope.launch { pager.animateScrollToPage(it) } }
                 HorizontalPager(pager, Modifier.weight(1f).fillMaxWidth(), beyondViewportPageCount = 1) { page ->
-                    if (page == LYRICS_PAGE) {
-                        LyricsPage(vm, music, lyrics, translations, positionMs, onSeek, onAction, onMessage, toolsShown = controlsShown)
-                    } else {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Vinyl(music, wantsPlay, Modifier.fillMaxWidth(if (landscape) 0.62f else 0.84f).widthIn(max = 420.dp))
+                    when (page) {
+                        LYRICS_PAGE -> LyricsPage(
+                            vm, music, lyrics, translations, positionMs, onSeek, onAction, onMessage,
+                            toolsShown = controlsShown, activeMusic = activeMusic,
+                        )
+                        LIBRARY_PAGE -> libraryTabContent?.invoke()
+                        else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Vinyl(displayCover, effectiveWantsPlay, Modifier.fillMaxWidth(if (landscape) 0.62f else 0.84f).widthIn(max = 420.dp))
                         }
                     }
                 }
@@ -224,23 +259,40 @@ fun MusicView(
                     line.ifEmpty { "♪" }, color = Color(0xCCFFFFFF), fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 14.dp),
                 ) else Spacer(Modifier.height(14.dp))
-                MusicSeekBar(positionMs, player.duration.takeIf { it > 0 } ?: tags.durationMs, onSeek)
-                PlayControls(vm, player, wantsPlay, onMessage, onQueue = { showQueue = true })
+                val effectiveDuration = if (activeMusic) (player.duration.takeIf { it > 0 } ?: tags.durationMs) else tags.durationMs
+                MusicSeekBar(
+                    positionMs = if (activeMusic) positionMs else positionMs.coerceAtMost(effectiveDuration),
+                    durationMs = effectiveDuration,
+                    onSeek = { target -> if (activeMusic) onSeek(target) else onIdlePlay?.invoke() },
+                )
+                PlayControls(
+                    vm = vm,
+                    player = player,
+                    wantsPlay = effectiveWantsPlay,
+                    activeMusic = activeMusic,
+                    onIdlePlay = onIdlePlay,
+                    onMessage = onMessage,
+                    onQueue = { if (activeMusic && vm.queueSize > 0) showQueue = true else if (libraryTabContent != null) scope.launch { pager.animateScrollToPage(LIBRARY_PAGE) } },
+                )
             }
         }
+        val insetMod = Modifier.fillMaxSize()
+            .statusBarsPadding()
+            .let { if (applyNavigationBarInset) it.navigationBarsPadding() else it }
+            .padding(bottom = bottomOverlayPadding)
         if (landscape) {
-            Row(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
-                pages(Modifier.weight(1f).fillMaxHeight())
+            Row(insetMod) {
+                pages(Modifier.weight(if (onLibraryPage) 1.25f else 1f).fillMaxHeight())
                 controls(Modifier.weight(1f).align(Alignment.CenterVertically).padding(bottom = 8.dp))
             }
         } else {
-            Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+            Column(insetMod) {
                 pages(Modifier.weight(1f).fillMaxWidth())
                 AnimatedVisibility(
                     controlsShown,
                     enter = fadeIn(tween(250)) + expandVertically(tween(250)),
                     exit = fadeOut(tween(800)) + shrinkVertically(tween(800)),
-                ) { controls(Modifier.fillMaxWidth().padding(bottom = 20.dp)) }
+                ) { controls(Modifier.fillMaxWidth().padding(bottom = if (inHomeTab) 10.dp else 20.dp)) }
             }
         }
     }
@@ -248,20 +300,20 @@ fun MusicView(
     if (showQueue) AppSheet(
         onDismissRequest = { showQueue = false },
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-    ) { QueueSheet(vm, player, current, onMessage) }
+    ) { QueueSheet(vm, player, effectiveEntry, onMessage) }
 
     if (showMenu) AppSheet(
         onDismissRequest = { showMenu = false },
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
     ) {
-        ActionSheet(music, current, liked, toggleLike) { action -> showMenu = false; onAction(action) }
+        ActionSheet(tags, displayCover, effectiveEntry, activeMusic, liked, toggleLike) { action -> showMenu = false; onAction(action) }
     }
 }
 
 /** 背景：封面缩成很小再放大（就是模糊，Modifier.blur 要 Android 12），再压暗 */
 @Composable
-private fun Backdrop(music: MusicState) {
-    val bmp = music.cover ?: return
+private fun Backdrop(bmp: android.graphics.Bitmap?) {
+    if (bmp == null) return
     val tiny = remember(bmp) { android.graphics.Bitmap.createScaledBitmap(bmp, 16, 16, true).asImageBitmap() }
     Image(
         tiny, null, contentScale = ContentScale.Crop, filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
@@ -271,18 +323,47 @@ private fun Backdrop(music: MusicState) {
 }
 
 @Composable
-private fun TopTabs(page: Int, onBack: () -> Unit, onSelect: (Int) -> Unit) {
+private fun TopTabs(
+    page: Int,
+    showLibraryTab: Boolean,
+    onBack: (() -> Unit)?,
+    leadingContent: (@Composable () -> Unit)?,
+    onOpenSourceSettings: (() -> Unit)?,
+    onSelect: (Int) -> Unit,
+) {
+    val tabs = if (showLibraryTab) listOf("歌曲", "歌词", "乐库") else listOf("歌曲", "歌词")
     Box(Modifier.fillMaxWidth().height(56.dp)) {
-        IconButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterStart).padding(start = 8.dp)) {
-            Icon(AppIcons.ExpandMore, "返回", tint = Color.White, modifier = Modifier.size(30.dp))
+        if (onBack != null) {
+            IconButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterStart).padding(start = 8.dp)) {
+                Icon(AppIcons.ExpandMore, "返回", tint = Color.White, modifier = Modifier.size(30.dp))
+            }
+        } else if (leadingContent != null) {
+            Box(Modifier.align(Alignment.CenterStart).padding(start = 12.dp)) {
+                leadingContent()
+            }
         }
-        Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(28.dp)) {
-            listOf("歌曲", "歌词").forEachIndexed { i, label ->
+        Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(if (showLibraryTab) 20.dp else 28.dp)) {
+            tabs.forEachIndexed { i, label ->
                 Text(
                     label, color = if (i == page) Color.White else Dim, fontSize = 18.sp,
-                    fontWeight = if (i == page) FontWeight.Medium else FontWeight.Normal,
-                    modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable { onSelect(i) }.padding(horizontal = 4.dp, vertical = 6.dp),
+                    fontWeight = if (i == page) FontWeight.SemiBold else FontWeight.Normal,
+                    modifier = Modifier
+                        .tvFocusRing(RoundedCornerShape(6.dp), color = Color.White)
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { onSelect(i) }
+                        .padding(horizontal = 4.dp, vertical = 6.dp),
                 )
+            }
+        }
+        if (onOpenSourceSettings != null) {
+            IconButton(
+                onClick = onOpenSourceSettings,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 8.dp)
+                    .tvFocusRing(CircleShape, color = Color.White),
+            ) {
+                Icon(AppIcons.Settings, "音乐源与设置", tint = Color.White, modifier = Modifier.size(24.dp))
             }
         }
     }
@@ -291,7 +372,7 @@ private fun TopTabs(page: Int, onBack: () -> Unit, onSelect: (Int) -> Unit) {
 // ---------------- 歌曲：转动的唱片 ----------------
 
 @Composable
-private fun Vinyl(music: MusicState, playing: Boolean, modifier: Modifier) {
+private fun Vinyl(cover: android.graphics.Bitmap?, playing: Boolean, modifier: Modifier) {
     // 播放时慢慢转，暂停停在原处
     val angle = remember { Animatable(0f) }
     LaunchedEffect(playing) {
@@ -321,7 +402,6 @@ private fun Vinyl(music: MusicState, playing: Boolean, modifier: Modifier) {
             Modifier.fillMaxSize(0.68f).clip(CircleShape).background(Color(0xFF2A2A2A)).border(3.dp, Color(0xFF050505), CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            val cover = music.cover
             if (cover != null) Image(cover.asImageBitmap(), "封面", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
             else Icon(AppIcons.MusicNote, null, tint = Color(0xFF777777), modifier = Modifier.size(72.dp))
         }
@@ -431,15 +511,29 @@ private fun rememberPlayMode(player: Player): Pair<PlayMode, () -> PlayMode> {
 }
 
 @Composable
-private fun PlayControls(vm: MainViewModel, player: Player, wantsPlay: Boolean, onMessage: (String) -> Unit, onQueue: () -> Unit) {
+private fun PlayControls(
+    vm: MainViewModel,
+    player: Player,
+    wantsPlay: Boolean,
+    activeMusic: Boolean = true,
+    onIdlePlay: (() -> Unit)? = null,
+    onMessage: (String) -> Unit,
+    onQueue: () -> Unit,
+) {
     val (mode, next) = rememberPlayMode(player)
-    val canSkip = vm.queueSize > 1
+    val canSkip = activeMusic && vm.queueSize > 1
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(onClick = { onMessage(next().label) }) { Icon(mode.icon, mode.label, tint = Color.White, modifier = Modifier.size(28.dp)) }
-        IconButton(onClick = { if (canSkip) vm.skipInQueue(false, restartFirst = true) else player.seekTo(0) }) {
+        IconButton(
+            onClick = {
+                if (!activeMusic) onIdlePlay?.invoke()
+                else if (canSkip) vm.skipInQueue(false, restartFirst = true)
+                else player.seekTo(0)
+            },
+        ) {
             Icon(AppIcons.SkipPrevious, "上一首", tint = Color.White, modifier = Modifier.size(34.dp))
         }
         GlassBox(
@@ -447,15 +541,18 @@ private fun PlayControls(vm: MainViewModel, player: Player, wantsPlay: Boolean, 
             shape = CircleShape,
             style = GlassStyle.Floating,
             tint = Color(0x36FFFFFF),
-            onClick = { vm.togglePlay() },
+            onClick = { if (activeMusic) vm.togglePlay() else onIdlePlay?.invoke() },
             contentAlignment = Alignment.Center,
         ) {
             Icon(if (wantsPlay) AppIcons.Pause else AppIcons.PlayArrow, if (wantsPlay) "暂停" else "播放", tint = Color.White, modifier = Modifier.size(38.dp))
         }
-        IconButton(onClick = { vm.skipInQueue(true) }, enabled = canSkip) {
-            Icon(AppIcons.SkipNext, "下一首", tint = if (canSkip) Color.White else Faint, modifier = Modifier.size(34.dp))
+        IconButton(
+            onClick = { if (activeMusic) vm.skipInQueue(true) else onIdlePlay?.invoke() },
+            enabled = canSkip || (!activeMusic && onIdlePlay != null),
+        ) {
+            Icon(AppIcons.SkipNext, "下一首", tint = if (canSkip || (!activeMusic && onIdlePlay != null)) Color.White else Faint, modifier = Modifier.size(34.dp))
         }
-        IconButton(onClick = onQueue, enabled = vm.queueSize > 0) {
+        IconButton(onClick = onQueue, enabled = (activeMusic && vm.queueSize > 0) || !activeMusic) {
             Icon(AppIcons.QueueMusic, "播放列表", tint = Color.White, modifier = Modifier.size(28.dp))
         }
     }
@@ -475,6 +572,7 @@ private fun LyricsPage(
     onMessage: (String) -> Unit,
     /** 下方控件淡出时，LRC、音量这一行也一起收起 */
     toolsShown: Boolean,
+    activeMusic: Boolean = true,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -482,6 +580,9 @@ private fun LyricsPage(
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
+                !activeMusic -> Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("开始播放音乐后自动加载同步歌词", color = Dim, fontSize = 16.sp)
+                }
                 lyrics == null -> Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(music.lyricsStatus?.takeIf { it.startsWith("正在") } ?: "暂无歌词", color = Dim, fontSize = 17.sp)
                     TextButton(onClick = { onAction(MusicAction.SEARCH_LYRICS) }) { Text("搜索歌词", color = Color.White) }
@@ -684,8 +785,15 @@ private fun QueueSheet(vm: MainViewModel, player: Player, current: MediaEntry?, 
 // ---------------- 「⋮」菜单 ----------------
 
 @Composable
-private fun ActionSheet(music: MusicState, current: MediaEntry?, liked: Boolean, onLike: () -> Unit, onAction: (MusicAction) -> Unit) {
-    val tags = music.tags ?: return
+private fun ActionSheet(
+    tags: com.aisub.player.music.TrackTags,
+    cover: android.graphics.Bitmap?,
+    current: MediaEntry?,
+    activeMusic: Boolean,
+    liked: Boolean,
+    onLike: () -> Unit,
+    onAction: (MusicAction) -> Unit,
+) {
     Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 16.dp)) {
         Row(
             Modifier.fillMaxWidth()
@@ -694,7 +802,7 @@ private fun ActionSheet(music: MusicState, current: MediaEntry?, liked: Boolean,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.size(60.dp).clip(RoundedCornerShape(8.dp)).background(LocalPopupColors.current.button), contentAlignment = Alignment.Center) {
-                music.cover?.let { Image(it.asImageBitmap(), null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
+                cover?.let { Image(it.asImageBitmap(), null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
                     ?: Icon(AppIcons.MusicNote, null, tint = MaterialTheme.colorScheme.outline)
             }
             Spacer(Modifier.width(14.dp))
@@ -705,36 +813,50 @@ private fun ActionSheet(music: MusicState, current: MediaEntry?, liked: Boolean,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
-            IconButton(onClick = onLike) {
-                Icon(if (liked) AppIcons.Favorite else AppIcons.FavoriteBorder, if (liked) "取消喜欢" else "喜欢", tint = if (liked) Color(0xFFFF5A6E) else MaterialTheme.colorScheme.onSurface)
+            if (activeMusic) {
+                IconButton(onClick = onLike) {
+                    Icon(if (liked) AppIcons.Favorite else AppIcons.FavoriteBorder, if (liked) "取消喜欢" else "喜欢", tint = if (liked) Color(0xFFFF5A6E) else MaterialTheme.colorScheme.onSurface)
+                }
             }
         }
-        ActionGroup(
-            listOf(
-                Triple(MusicAction.ADD_TO_PLAYLIST, AppIcons.PlaylistAdd, "添加到"),
-                Triple(MusicAction.SLEEP, AppIcons.Timer, "定时停止"),
-                Triple(MusicAction.SPEED, AppIcons.Speed, "播放速度"),
-                Triple(MusicAction.EQUALIZER, AppIcons.Equalizer, "均衡器"),
-            ),
-            onAction,
-        )
-        ActionGroup(
-            listOf(
-                Triple(MusicAction.SEARCH_LYRICS, AppIcons.Search, "搜索歌词"),
-                Triple(MusicAction.IMPORT_LYRICS, AppIcons.File, "导入歌词"),
-                Triple(MusicAction.SEARCH_COVER, AppIcons.Image, "更换封面"),
-                Triple(MusicAction.EDIT_INFO, AppIcons.Edit, "编辑信息"),
-            ),
-            onAction,
-        )
-        ActionGroup(
-            listOf(
-                Triple(MusicAction.TRACKS, AppIcons.Subtitles, "音轨字幕"),
-                Triple(MusicAction.INFO, AppIcons.Info, "歌曲信息"),
-                Triple(MusicAction.SETTINGS, AppIcons.Settings, "设置"),
-            ),
-            onAction,
-        )
+        if (activeMusic) {
+            ActionGroup(
+                listOf(
+                    Triple(MusicAction.ADD_TO_PLAYLIST, AppIcons.PlaylistAdd, "添加到"),
+                    Triple(MusicAction.SLEEP, AppIcons.Timer, "定时停止"),
+                    Triple(MusicAction.SPEED, AppIcons.Speed, "播放速度"),
+                    Triple(MusicAction.EQUALIZER, AppIcons.Equalizer, "均衡器"),
+                ),
+                onAction,
+            )
+            ActionGroup(
+                listOf(
+                    Triple(MusicAction.SEARCH_LYRICS, AppIcons.Search, "搜索歌词"),
+                    Triple(MusicAction.IMPORT_LYRICS, AppIcons.File, "导入歌词"),
+                    Triple(MusicAction.SEARCH_COVER, AppIcons.Image, "更换封面"),
+                    Triple(MusicAction.EDIT_INFO, AppIcons.Edit, "编辑信息"),
+                ),
+                onAction,
+            )
+            ActionGroup(
+                listOf(
+                    Triple(MusicAction.TRACKS, AppIcons.Subtitles, "音轨字幕"),
+                    Triple(MusicAction.INFO, AppIcons.Info, "歌曲信息"),
+                    Triple(MusicAction.SETTINGS, AppIcons.Settings, "设置"),
+                ),
+                onAction,
+            )
+        } else {
+            ActionGroup(
+                listOf(
+                    Triple(MusicAction.SLEEP, AppIcons.Timer, "定时停止"),
+                    Triple(MusicAction.SPEED, AppIcons.Speed, "播放速度"),
+                    Triple(MusicAction.EQUALIZER, AppIcons.Equalizer, "均衡器"),
+                    Triple(MusicAction.SETTINGS, AppIcons.Settings, "设置"),
+                ),
+                onAction,
+            )
+        }
     }
 }
 

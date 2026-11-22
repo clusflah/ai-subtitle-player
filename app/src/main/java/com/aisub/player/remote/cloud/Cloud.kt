@@ -101,6 +101,7 @@ object CloudRegistry {
         com.aisub.player.remote.ServerType.PIKPAK -> PikPakClient(server)
         com.aisub.player.remote.ServerType.EMBY, com.aisub.player.remote.ServerType.JELLYFIN -> EmbyClient(server)
         com.aisub.player.remote.ServerType.PLEX -> PlexClient(server)
+        com.aisub.player.remote.ServerType.SUBSONIC -> SubsonicClient(server)
         com.aisub.player.remote.ServerType.ONEDRIVE -> OneDriveClient(server)
         com.aisub.player.remote.ServerType.DROPBOX -> DropboxClient(server)
         com.aisub.player.remote.ServerType.GDRIVE -> GoogleDriveClient(server)

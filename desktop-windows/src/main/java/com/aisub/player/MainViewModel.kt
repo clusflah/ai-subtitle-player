@@ -1104,10 +1104,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         val cur = _state.value.current ?: return
         if (!cur.isLive) return
+        val startCueMs = (subtitleTime() - _state.value.subtitleDelayMs).coerceAtLeast(0L)
         com.aisub.player.live.LiveRecorder.start(
             context = app,
             streamUrl = cur.uri,
             channelTitle = cur.displayTitle,
+            startCueTimeMs = startCueMs,
         )
     }
 
@@ -1115,6 +1117,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (com.aisub.player.live.LiveRecorder.state.value.recording) {
             com.aisub.player.live.LiveRecorder.stop(getApplication(), _state.value.cues)
         }
+    }
+
+    fun stopLivePlaybackOnExit() {
+        if (_state.value.current?.isLive != true) return
+        vlcLiveWatch?.cancel()
+        frameWatch?.cancel()
+        sawFirstFrame = false
+        player.stop()
     }
 
     /** 多端同步落盘后热刷新内存中的设置 */

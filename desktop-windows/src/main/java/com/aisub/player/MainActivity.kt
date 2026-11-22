@@ -156,7 +156,7 @@ class MainActivity : ComponentActivity() {
             AppTheme(ui.settings.appBackground, ui.settings.appDarkMode, ui.settings.liquidGlass) {
                 val view = LocalView.current
                 val isDark = androidx.compose.material3.MaterialTheme.colorScheme.background.luminance() < 0.5f
-                val darkCanvas = nav.current == Screen.Player || nav.current is Screen.MangaRead || nav.current is Screen.ImageViewer
+                val darkCanvas = nav.current == Screen.Player || nav.current is Screen.MangaRead || nav.current is Screen.ImageViewer || (nav.current == Screen.Home && lib.homeTab == 3)
                 SideEffect {
                     val lightBars = !darkCanvas && !isDark
                     runCatching {
@@ -315,6 +315,10 @@ class MainActivity : ComponentActivity() {
                                 com.aisub.player.web.WebLaunch.open(url, mangaMode = false)
                                 nav.push(Screen.Web)
                             },
+                            onOpenPlayWeb = { url ->
+                                com.aisub.player.web.WebLaunch.open(url, mangaMode = false, allowOpenApp = true)
+                                nav.push(Screen.Web)
+                            },
                             onOpenMagnet = { mag -> com.aisub.player.meta.MagnetLaunch.pending = mag },
                             onOpenSettings = { nav.push(Screen.Settings) },
                             onOpenServerDetail = { serverId, ratingKey ->
@@ -328,9 +332,9 @@ class MainActivity : ComponentActivity() {
                                 }
                             },
                             onOpenLocalLibrary = {
-                                lib.homeTab = 3 // Tab.LOCAL
-                                lib.localShowsVideo = true
+                                lib.homeTab = 2 // Tab.BROWSE
                                 while (nav.stack.size > 1) nav.pop()
+                                nav.push(Screen.LocalFolder("", "用户目录"))
                             },
                             onOpenCustomItem = { libId, itemId ->
                                 nav.push(Screen.CustomLibraryItem(libId, itemId))
@@ -345,7 +349,7 @@ class MainActivity : ComponentActivity() {
                             onOpenDetail = { item -> nav.push(Screen.DiscoverDetail(item)) },
                             onOpenSettings = { nav.push(Screen.Settings) },
                             onOpenWeb = { url ->
-                                com.aisub.player.web.WebLaunch.open(url, mangaMode = false)
+                                com.aisub.player.web.WebLaunch.open(url, mangaMode = false, allowOpenApp = true)
                                 nav.push(Screen.Web)
                             },
                         )

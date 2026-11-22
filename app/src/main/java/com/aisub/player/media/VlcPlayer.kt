@@ -172,6 +172,19 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
     val audioBackendLabel: String
         get() = audioBridge.activeBackendLabel()
 
+    private fun updateVideoSizeFromTrack() {
+        val t = mp.currentVideoTrack ?: return
+        if (t.width > 0 && t.height > 0) {
+            val sar = if (t.sarNum > 0 && t.sarDen > 0) t.sarNum.toFloat() / t.sarDen else 1f
+            // libVLC IMedia.VideoTrack.Orientation: 4..7 为旋转 90°/270°（宽高对调）
+            videoSize = if (t.orientation in 4..7) {
+                VideoSize(t.height, t.width, if (sar > 0f) 1f / sar else 1f)
+            } else {
+                VideoSize(t.width, t.height, sar)
+            }
+        }
+    }
+
     private fun onVlcEvent(e: MediaPlayer.Event) {
         when (e.type) {
             MediaPlayer.Event.Opening -> playbackState = Player.STATE_BUFFERING
@@ -182,6 +195,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
                 hasEnteredPlaying = true
                 playbackState = Player.STATE_READY
                 pendingSeekMs?.let { mp.setTime(it); pendingSeekMs = null }
+                if (videoSize == VideoSize.UNKNOWN) updateVideoSizeFromTrack()
                 applyTrackSelectionInternal()
                 refreshTracks()
             }
@@ -203,19 +217,19 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
             }
             MediaPlayer.Event.LengthChanged -> durationMs = e.lengthChanged.takeIf { it > 0 } ?: C.TIME_UNSET
             MediaPlayer.Event.ESAdded -> {
+                if (videoSize == VideoSize.UNKNOWN) updateVideoSizeFromTrack()
                 applyTrackSelectionInternal()
                 refreshTracks()
             }
-            MediaPlayer.Event.ESDeleted, MediaPlayer.Event.ESSelected -> refreshTracks()
+            MediaPlayer.Event.ESDeleted, MediaPlayer.Event.ESSelected -> {
+                if (videoSize == VideoSize.UNKNOWN) updateVideoSizeFromTrack()
+                refreshTracks()
+            }
             // 画面开始输出：通知 PlayerView 去掉黑色遮罩，并更新视频尺寸（决定画面比例）
             MediaPlayer.Event.Vout -> if (e.voutCount > 0) {
                 firstFrame = true
-                mp.currentVideoTrack?.let { t ->
-                    if (t.width > 0 && t.height > 0) {
-                        val sar = if (t.sarNum > 0 && t.sarDen > 0) t.sarNum.toFloat() / t.sarDen else 1f
-                        videoSize = if (t.orientation == 5 || t.orientation == 6) VideoSize(t.height, t.width, sar) else VideoSize(t.width, t.height, sar)
-                    }
-                }
+                updateVideoSizeFromTrack()
+                refreshTracks()
             }
             else -> return
         }
@@ -227,9 +241,22 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         mp.getChapters(-1).orEmpty().map { Chapter(it.timeOffset, (it.timeOffset + it.duration).takeIf { _ -> it.duration > 0 }, it.name.orEmpty()) }
     }.getOrDefault(emptyList())
 
-    /** VLC 的音轨、内嵌字幕轨转成 Media3 的 Tracks，播放页的音轨列表直接可用。 */
+    /** VLC 的视频轨、音轨、内嵌字幕轨转成 Media3 的 Tracks，保证 PlayerView 正确识别视频轨并刷新画面宽高比。 */
     private fun refreshTracks() {
         val groups = ArrayList<Tracks.Group>()
+        val vt = mp.currentVideoTrack
+        val vw = vt?.width?.takeIf { it > 0 } ?: videoSize.width
+        val vh = vt?.height?.takeIf { it > 0 } ?: videoSize.height
+        if (vw > 0 && vh > 0) {
+            val vSelected = C.TRACK_TYPE_VIDEO !in trackParams.disabledTrackTypes
+            val vf = Format.Builder()
+                .setId("v0")
+                .setSampleMimeType(MimeTypes.VIDEO_UNKNOWN)
+                .setWidth(vw)
+                .setHeight(vh)
+                .build()
+            groups += Tracks.Group(TrackGroup("v0", vf), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(vSelected))
+        }
         val audio = mp.audioTracks.orEmpty().filter { it.id >= 0 }
         val currentAudio = mp.audioTrack
         audio.forEach { t ->
@@ -312,6 +339,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         this.startPositionMs = startPositionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0) ?: 0
         durationMs = C.TIME_UNSET
         tracks = Tracks.EMPTY
+        videoSize = VideoSize.UNKNOWN
         error = null
         hasEnteredPlaying = false
         pendingSeekMs = null
@@ -391,6 +419,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         val name = item.mediaMetadata.title?.toString() ?: uri.lastPathSegment.orEmpty()
         val isLive = item.localConfiguration?.tag == "live"
         error = null
+        videoSize = VideoSize.UNKNOWN
 
         val raw = uri.toString()
         val scheme = uri.scheme?.lowercase().orEmpty()
@@ -607,10 +636,13 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
             if (visibleWidth > 0 && visibleHeight > 0) {
                 val ratio = if (sarNum > 0 && sarDen > 0) sarNum.toFloat() / sarDen else 1f
                 videoSize = VideoSize(visibleWidth, visibleHeight, ratio)
+                refreshTracks()
                 invalidateState()
             }
         })
         if (view.width > 0 && view.height > 0) vout.setWindowSize(view.width, view.height)
+        if (videoSize == VideoSize.UNKNOWN) updateVideoSizeFromTrack()
+        refreshTracks()
         return Futures.immediateVoidFuture()
     }
 
@@ -627,6 +659,8 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         lastDirectReadBytes = -1L
         mp.stop()
         playbackState = Player.STATE_IDLE
+        videoSize = VideoSize.UNKNOWN
+        tracks = Tracks.EMPTY
         return Futures.immediateVoidFuture()
     }
 

@@ -260,9 +260,10 @@ fun WebScreen(
         return true
     }
 
-    fun go(input: String) {
+    fun go(input: String, allowOpenApp: Boolean = false) {
         val target = toUrl(input) ?: return
         showAddress(target)
+        tab.allowOpenApp = allowOpenApp
         if (tab.url == null) {
             tab.url = target
             tab.pageUrl = target
@@ -344,8 +345,8 @@ fun WebScreen(
         saveTabs()
     }
 
-    fun newTab(url: String? = null) {
-        tabs.add(WebTab(nextTabId++, url))
+    fun newTab(url: String? = null, allowOpenApp: Boolean = false) {
+        tabs.add(WebTab(nextTabId++, url, allowOpenApp))
         switchTo(tabs.lastIndex)
         if (url == null) showAddress("")
     }
@@ -380,6 +381,7 @@ fun WebScreen(
         tab.webView = null
         tab.url = null
         tab.pageUrl = null
+        tab.allowOpenApp = false
         tab.title = ""
         tab.canGoBack = false
         tab.progress = 100
@@ -593,7 +595,15 @@ fun WebScreen(
                 false
             }
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-            addJavascriptInterface(vm.Bridge({ t.active }, t.manga) { url -> post { blockedPopup(url) } }, "VoxBridge")
+            addJavascriptInterface(
+                vm.Bridge(
+                    active = { t.active },
+                    manga = t.manga,
+                    allowOpenApp = { t.allowOpenApp },
+                    currentPageUrl = { t.pageUrl },
+                ) { url -> post { blockedPopup(url) } },
+                "VoxBridge",
+            )
             val startScript = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
             if (startScript) {
                 WebViewCompat.addDocumentStartJavaScript(this, script, setOf("*"))
@@ -603,22 +613,29 @@ fun WebScreen(
             }
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                    val rawUrl = request.url.toString()
                     val scheme = request.url.scheme?.lowercase()
                     if (scheme == "magnet") {
-                        val raw = request.url.toString()
-                        view.post { com.aisub.player.meta.MagnetLaunch.pending = raw }
+                        view.post { com.aisub.player.meta.MagnetLaunch.pending = rawUrl }
                         return true
                     }
-                    // 「打开 App」之类的跳转（bilibili://、intent://）不处理，留在网页里
-                    if (scheme != "http" && scheme != "https") return true
+                    // 「打开 App」之类的跳转：白名单网盘及发现页跳转播放允许拉起外部程序，其余留在网页里
+                    if (scheme != "http" && scheme != "https") {
+                        if (com.aisub.player.web.WebAppWhitelist.shouldAllowAppLaunch(rawUrl, t.pageUrl, t.allowOpenApp)) {
+                            launchWhitelistedApp(view.context, view, rawUrl)
+                        }
+                        return true
+                    }
                     // 网页脚本把整页带去另一个网站（点一下就跳广告、看着看着自己跳走）：拦下，底部提示可以「仍然打开」。
-                    // 点的就是指向那个网站的链接、刚打开网页时的跳转（「正在跳转」页）、服务器重定向照常
+                    // 点的就是指向那个网站的链接、白名单网盘/流媒体跨站跳转、刚打开网页时的跳转、服务器重定向照常
                     if (request.isForMainFrame && !request.isRedirect && t.webView === view) {
-                        val target = request.url.toString()
+                        val target = rawUrl
                         val page = t.pageUrl
-                        if (page != null && page.startsWith("http") && !sameSite(target, page)) {
-                            val now = android.os.SystemClock.uptimeMillis()
-                            val tapped = now - t.tappedAt < 3_000
+                        val now = android.os.SystemClock.uptimeMillis()
+                        val tapped = now - t.tappedAt < 3_000
+                        if (page != null && page.startsWith("http") && !sameSite(target, page) &&
+                            !com.aisub.player.web.WebAppWhitelist.isWhitelistedCrossSiteNavigation(target, page, t.allowOpenApp, userTapped = tapped)
+                        ) {
                             val link = t.recentLink()
                             // 网页刚打开两秒内的跳转（「正在跳转」页、搜索结果的中转页）照常
                             val age = now - t.startedAt
@@ -721,9 +738,20 @@ fun WebScreen(
                         decided = true
                         view.post { temp.destroy() }
                         val scheme = Uri.parse(url).scheme?.lowercase()
-                        if (scheme != "http" && scheme != "https") return true
-                        // 点中的链接本身就要开新窗口（target=_blank），或者是本站自己开的：在当前标签页打开（和以前一样）
-                        val own = if (link != null) sameSite(url, link) else sameSite(url, t.pageUrl)
+                        if (scheme == "magnet") {
+                            view.post { com.aisub.player.meta.MagnetLaunch.pending = url }
+                            return true
+                        }
+                        if (scheme != "http" && scheme != "https") {
+                            if (com.aisub.player.web.WebAppWhitelist.shouldAllowAppLaunch(url, t.pageUrl, t.allowOpenApp)) {
+                                launchWhitelistedApp(view.context, view, url)
+                            }
+                            return true
+                        }
+                        // 点中的链接本身就要开新窗口（target=_blank），或者是本站 / 白名单网盘与播放站点开的：在当前标签页打开
+                        val tapped = android.os.SystemClock.uptimeMillis() - t.tappedAt < 3_000 || isUserGesture
+                        val own = com.aisub.player.web.WebAppWhitelist.isWhitelistedCrossSiteNavigation(url, t.pageUrl, t.allowOpenApp, userTapped = tapped) ||
+                            (if (link != null) sameSite(url, link) else sameSite(url, t.pageUrl))
                         if (own) {
                             view.agentFor(url)
                             view.loadUrl(url)
@@ -1253,20 +1281,23 @@ fun WebScreen(
     }
     }
 
-    // 漫画首页点了「继续阅读」或发现页跳转搜索：在新标签页（当前是空白页就在当前页）打开
+    // 漫画首页点了「继续阅读」、发现页跳转搜索或发现页跳转播放：在新标签页（当前是空白页就在当前页）打开
     var autoOpenedPageUrl by remember(tab.id) { mutableStateOf<String?>(null) }
     var allowAutoManga by remember { mutableStateOf(true) }
     LaunchedEffect(Unit) {
         val url = com.aisub.player.web.WebLaunch.pending ?: return@LaunchedEffect
         val mangaMode = com.aisub.player.web.WebLaunch.autoReadManga
+        val allowOpenApp = com.aisub.player.web.WebLaunch.allowOpenApp
         com.aisub.player.web.WebLaunch.pending = null
         com.aisub.player.web.WebLaunch.autoReadManga = true
+        com.aisub.player.web.WebLaunch.allowOpenApp = false
         allowAutoManga = mangaMode
-        if (tab.url == null) go(url)
+        if (tab.url == null) go(url, allowOpenApp = allowOpenApp)
         else if (tab.url == url || tab.pageUrl == url) {
+            tab.allowOpenApp = allowOpenApp
             autoOpenedPageUrl = null
             if (mangaMode && tab.manga.manga != null) openReader()
-        } else newTab(url)
+        } else newTab(url, allowOpenApp = allowOpenApp)
         if (mangaMode) reopenAfter = ""
     }
 
@@ -1763,12 +1794,16 @@ private fun TvCursor(modifier: Modifier) {
 }
 
 /** 一个标签页。网页（WebView）第一次切到时才建，切走后留着（视频暂停），回来接着看 */
-private class WebTab(val id: Long, startUrl: String?) {
+private class WebTab(val id: Long, startUrl: String?, startAllowOpenApp: Boolean = false) {
     /** null：空白的新标签页，显示收藏、常用网站和最近访问 */
     var url by mutableStateOf(startUrl)
 
     /** 当前页面地址（地址栏里可能是正在输入的文字） */
     var pageUrl by mutableStateOf(startUrl)
+
+    /** 来自发现页跳转播放：放行流媒体平台的「打开 App」按钮、外部程序唤起与跨站播放跳转 */
+    @Volatile
+    var allowOpenApp = startAllowOpenApp
     var title by mutableStateOf("")
     var progress by mutableIntStateOf(100)
     var canGoBack by mutableStateOf(false)
@@ -1952,4 +1987,19 @@ private fun desktopAgentFor(mobile: String): String {
     // 太旧的版本号有的网站会提示升级浏览器（实测 B 站电脑版在 87 的 WebView 上也能正常播放）
     val chrome = Regex("Chrome/(\\d+)[\\d.]*").find(mobile)?.takeIf { it.groupValues[1].toInt() >= 120 }?.value?.removePrefix("Chrome/") ?: "120.0.0.0"
     return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chrome Safari/537.36"
+}
+
+private fun launchWhitelistedApp(context: android.content.Context, view: WebView, rawUrl: String) {
+    if (rawUrl.startsWith("intent:", ignoreCase = true)) {
+        val parsed = com.aisub.player.web.WebAppWhitelist.parseIntentUri(rawUrl)
+        val fallback = parsed?.fallbackUrl
+        if (!fallback.isNullOrBlank() && (fallback.startsWith("https://") || fallback.startsWith("http://"))) {
+            view.post { view.loadUrl(fallback) }
+        }
+        return
+    }
+    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(rawUrl)).apply {
+        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching { context.startActivity(intent) }
 }

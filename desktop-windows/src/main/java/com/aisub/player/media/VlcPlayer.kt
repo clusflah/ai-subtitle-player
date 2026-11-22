@@ -109,9 +109,10 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
                 mp.currentVideoTrack?.let { t ->
                     if (t.width > 0 && t.height > 0) {
                         val sar = if (t.sarNum > 0 && t.sarDen > 0) t.sarNum.toFloat() / t.sarDen else 1f
-                        vlcVideoSize = if (t.orientation == 5 || t.orientation == 6) VideoSize(t.height, t.width, sar) else VideoSize(t.width, t.height, sar)
+                        vlcVideoSize = if (t.orientation in 4..7) VideoSize(t.height, t.width, if (sar > 0f) 1f / sar else 1f) else VideoSize(t.width, t.height, sar)
                     }
                 }
+                refreshTracks()
             }
             else -> return
         }
@@ -150,6 +151,14 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
     /** VLC 的音轨、内嵌字幕轨转成 Media3 的 Tracks，播放页的音轨列表直接可用。 */
     private fun refreshTracks() {
         val groups = ArrayList<Tracks.Group>()
+        val vt = mp.currentVideoTrack
+        val vw = vt?.width?.takeIf { it > 0 } ?: vlcVideoSize.width
+        val vh = vt?.height?.takeIf { it > 0 } ?: vlcVideoSize.height
+        if (vw > 0 && vh > 0) {
+            val vSelected = C.TRACK_TYPE_VIDEO !in trackParams.disabledTrackTypes
+            val vf = Format.Builder().setId("v0").setSampleMimeType(MimeTypes.VIDEO_UNKNOWN).setWidth(vw).setHeight(vh).build()
+            groups += Tracks.Group(TrackGroup("v0", vf), false, intArrayOf(C.FORMAT_HANDLED), booleanArrayOf(vSelected))
+        }
         val audio = mp.audioTracks.orEmpty().filter { it.id >= 0 }
         val currentAudio = mp.audioTrack
         audio.forEach { t ->
@@ -227,6 +236,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         this.startPositionMs = startPositionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0) ?: 0
         durationMs = C.TIME_UNSET
         tracks = Tracks.EMPTY
+        vlcVideoSize = VideoSize.UNKNOWN
         hasEnteredPlaying = false
         pendingSeekMs = null
         seekHoldTargetMs = C.TIME_UNSET
@@ -239,6 +249,7 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         val uri = item.localConfiguration?.uri ?: Uri.parse(item.mediaId)
         val name = item.mediaMetadata.title?.toString() ?: uri.lastPathSegment.orEmpty()
         error = null
+        vlcVideoSize = VideoSize.UNKNOWN
         val scheme = uri.scheme?.lowercase().orEmpty()
         val isLocalFile = scheme.isEmpty() || scheme == "file" || scheme == "content"
         val targetUri = if (isLocalFile && !needsVlc(name)) {
@@ -399,6 +410,8 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
     override fun handleStop(): ListenableFuture<*> {
         mp.stop()
         vlcPlaybackState = Player.STATE_IDLE
+        vlcVideoSize = VideoSize.UNKNOWN
+        tracks = Tracks.EMPTY
         return Futures.immediateVoidFuture()
     }
 

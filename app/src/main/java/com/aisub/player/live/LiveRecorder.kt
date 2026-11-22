@@ -47,6 +47,7 @@ data class LiveRecordState(
     val channelTitle: String = "",
     val streamUrl: String = "",
     val startedAtMs: Long = 0L,
+    val startCueTimeMs: Long = 0L,
     val elapsedMs: Long = 0L,
     val bytesWritten: Long = 0L,
     val lastSavedMessage: String? = null,
@@ -78,6 +79,10 @@ object LiveRecorder {
     private val writtenCounter = AtomicLong(0L)
     private var activeTempFile: File? = null
     private var mpvStopHook: (() -> Unit)? = null
+    @Volatile
+    private var detectedContainerExt: String? = null
+    @Volatile
+    private var usedMpvRecord: Boolean = false
 
     fun clearMessage() {
         _state.update { it.copy(lastSavedMessage = null, error = null) }
@@ -85,6 +90,7 @@ object LiveRecorder {
 
     /**
      * 开始录制当前直播流。
+     * @param startCueTimeMs 点击录制时刻对应的实时字幕时间轴位置，用于对齐导出的外挂字幕。
      * @param mpvStreamRecordStarter 若当前处于 MPV 内核且流协议非 HTTP（如 rtsp/rtmp），可传入原生 `stream-record` 钩子。
      */
     @Synchronized
@@ -92,6 +98,7 @@ object LiveRecorder {
         context: Context,
         streamUrl: String,
         channelTitle: String,
+        startCueTimeMs: Long = 0L,
         mpvStreamRecordStarter: ((File) -> (() -> Unit)?)? = null,
     ) {
         if (_state.value.recording || _state.value.saving) return
@@ -106,6 +113,8 @@ object LiveRecorder {
         writtenCounter.set(0L)
         activeTempFile = tempFile
         mpvStopHook = null
+        detectedContainerExt = null
+        usedMpvRecord = false
         val startMs = System.currentTimeMillis()
 
         _state.value = LiveRecordState(
@@ -114,6 +123,7 @@ object LiveRecorder {
             channelTitle = channelTitle.ifBlank { "直播频道" },
             streamUrl = streamUrl,
             startedAtMs = startMs,
+            startCueTimeMs = startCueTimeMs.coerceAtLeast(0L),
             elapsedMs = 0L,
             bytesWritten = 0L,
         )
@@ -140,6 +150,7 @@ object LiveRecorder {
                 if (scheme != "http" && scheme != "https") {
                     val hook = mpvStreamRecordStarter?.invoke(tempFile)
                         ?: throw IOException("该直播协议 ($scheme) 请切换至 MPV 内核后再开启录屏")
+                    usedMpvRecord = true
                     mpvStopHook = hook
                     while (isActive && !stopRequested.get()) {
                         delay(300L)
@@ -200,9 +211,9 @@ object LiveRecorder {
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(snapshot.startedAtMs))
             val baseTitle = "直播录屏_${MovieSaver.safeName(snapshot.channelTitle).take(48)}_$stamp"
             runCatching {
-                val savedUri = saveRecordedVideo(app, tempFile, baseTitle)
+                val savedUri = saveRecordedVideo(app, tempFile, baseTitle, rebaseOnCopy = usedMpvRecord)
                 if (cuesSnapshot.isNotEmpty()) {
-                    runCatching { saveSidecarLiveSrt(app, baseTitle, cuesSnapshot) }
+                    runCatching { saveSidecarLiveSrt(app, baseTitle, cuesSnapshot, snapshot.startCueTimeMs) }
                 }
                 savedUri
             }.onSuccess { uri ->
@@ -228,8 +239,29 @@ object LiveRecorder {
         }
     }
 
-    private fun saveRecordedVideo(context: Context, tempFile: File, baseTitle: String): Uri {
-        val ext = tempFile.extension.lowercase().ifEmpty { "ts" }
+    private fun copyRecordedStream(tempFile: File, out: java.io.OutputStream, rebaseOnCopy: Boolean, ext: String) {
+        tempFile.inputStream().use { ins ->
+            if (!rebaseOnCopy) {
+                ins.copyTo(out, 256 * 1024)
+                return
+            }
+            val buf = ByteArray(64 * 1024)
+            val tsRebaser = if (ext == "ts") LiveStreamRebaser.TsRebaser() else null
+            val flvRebaser = if (ext == "flv") LiveStreamRebaser.FlvRebaser() else null
+            while (true) {
+                val n = ins.read(buf)
+                if (n < 0) break
+                when {
+                    tsRebaser != null -> tsRebaser.processChunk(buf, n, out)
+                    flvRebaser != null -> flvRebaser.processChunk(buf, n, out)
+                    else -> out.write(buf, 0, n)
+                }
+            }
+        }
+    }
+
+    private fun saveRecordedVideo(context: Context, tempFile: File, baseTitle: String, rebaseOnCopy: Boolean = false): Uri {
+        val ext = (detectedContainerExt ?: tempFile.extension.lowercase()).ifEmpty { "ts" }
         val fileName = "$baseTitle.$ext"
         val mime = when (ext) {
             "mp4" -> "video/mp4"
@@ -249,7 +281,7 @@ object LiveRecorder {
                 ?: throw IOException("无法创建系统媒体库文件")
             try {
                 resolver.openOutputStream(uri)!!.use { out ->
-                    tempFile.inputStream().use { ins -> ins.copyTo(out, 256 * 1024) }
+                    copyRecordedStream(tempFile, out, rebaseOnCopy, ext)
                 }
                 resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
             } catch (e: Exception) {
@@ -265,8 +297,8 @@ object LiveRecorder {
                 MovieSaver.FOLDER,
             ).apply { mkdirs() }
             val dst = File(dir, fileName)
-            tempFile.inputStream().use { ins ->
-                FileOutputStream(dst).use { out -> ins.copyTo(out, 256 * 1024) }
+            FileOutputStream(dst).use { out ->
+                copyRecordedStream(tempFile, out, rebaseOnCopy, ext)
             }
             tempFile.delete()
             runCatching {
@@ -276,16 +308,12 @@ object LiveRecorder {
         }
     }
 
-    private fun saveSidecarLiveSrt(context: Context, baseTitle: String, cues: List<Cue>) {
-        if (cues.isEmpty()) return
-        val baseOffset = cues.first().startMs
-        val shifted = cues.mapIndexed { idx, c ->
-            c.copy(
-                id = idx + 1,
-                startMs = (c.startMs - baseOffset).coerceAtLeast(0L),
-                endMs = (c.endMs - baseOffset).coerceAtLeast(200L),
-            )
-        }
+    internal fun filterAndRebaseLiveCues(cues: List<Cue>, startCueTimeMs: Long): List<Cue> =
+        LiveStreamRebaser.filterAndRebaseLiveCues(cues, startCueTimeMs)
+
+    private fun saveSidecarLiveSrt(context: Context, baseTitle: String, cues: List<Cue>, startCueTimeMs: Long) {
+        val shifted = filterAndRebaseLiveCues(cues, startCueTimeMs)
+        if (shifted.isEmpty()) return
         val srtName = "$baseTitle.srt"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
@@ -340,27 +368,55 @@ object LiveRecorder {
                 }
             }
 
-            // 连续字节流（HTTP-TS / HTTP-FLV 等）直接从当前响应体开始落盘
+            // 连续字节流（HTTP-TS / HTTP-FLV 等）直接从点击时刻响应体开始落盘，并归零流内时间戳
             val body = resp.body ?: throw IOException("直播流无数据")
+            val tsRebaser = LiveStreamRebaser.TsRebaser()
+            val flvRebaser = LiveStreamRebaser.FlvRebaser()
+            var streamFormat: String? = when {
+                ctype.contains("flv") || finalUrl.substringBefore('?').lowercase().endsWith(".flv") -> "flv"
+                ctype.contains("mp4") -> "mp4"
+                else -> null
+            }
             body.byteStream().use { ins ->
                 FileOutputStream(outFile, false).use { fos ->
                     val buf = ByteArray(64 * 1024)
                     while (!stopRequested.get()) {
                         val n = ins.read(buf)
                         if (n < 0) break
-                        // 可能首包其实是未带扩展名的 M3U8 文本
-                        if (writtenCounter.get() == 0L && n < 16384) {
-                            val head = String(buf, 0, minOf(n, 64), Charsets.UTF_8).trimStart()
-                            if (head.startsWith("#EXTM3U")) {
-                                val rest = ins.readBytes()
-                                val fullPlaylist = String(buf, 0, n, Charsets.UTF_8) + String(rest, Charsets.UTF_8)
-                                fos.close()
-                                recordHlsLoop(finalUrl, fullPlaylist, outFile)
-                                return
+                        if (writtenCounter.get() == 0L && n > 0) {
+                            if (n < 16384) {
+                                val head = String(buf, 0, minOf(n, 64), Charsets.UTF_8).trimStart()
+                                if (head.startsWith("#EXTM3U")) {
+                                    val rest = ins.readBytes()
+                                    val fullPlaylist = String(buf, 0, n, Charsets.UTF_8) + String(rest, Charsets.UTF_8)
+                                    fos.close()
+                                    recordHlsLoop(finalUrl, fullPlaylist, outFile)
+                                    return
+                                }
+                            }
+                            if (streamFormat == null) {
+                                streamFormat = when {
+                                    n >= 3 && buf[0] == 'F'.code.toByte() && buf[1] == 'L'.code.toByte() && buf[2] == 'V'.code.toByte() -> "flv"
+                                    LiveStreamRebaser.looksLikeMp4Segment(buf, n) -> "mp4"
+                                    else -> "ts"
+                                }
+                            }
+                            detectedContainerExt = streamFormat
+                        }
+                        when (streamFormat) {
+                            "flv" -> {
+                                flvRebaser.processChunk(buf, n, fos)
+                                writtenCounter.addAndGet(n.toLong())
+                            }
+                            "ts" -> {
+                                val written = tsRebaser.processChunk(buf, n, fos)
+                                writtenCounter.addAndGet(written.toLong())
+                            }
+                            else -> {
+                                fos.write(buf, 0, n)
+                                writtenCounter.addAndGet(n.toLong())
                             }
                         }
-                        fos.write(buf, 0, n)
-                        writtenCounter.addAndGet(n.toLong())
                     }
                     fos.flush()
                 }
@@ -381,7 +437,10 @@ object LiveRecorder {
 
         val seenSegments = LinkedHashSet<String>()
         var initMapWritten = false
+        var isFmp4 = false
         val keyCache = HashMap<String, ByteArray>()
+        val tsRebaser = LiveStreamRebaser.TsRebaser()
+        val fmp4Rebaser = LiveStreamRebaser.Fmp4Rebaser()
 
         FileOutputStream(outFile, false).use { fos ->
             while (!stopRequested.get()) {
@@ -398,16 +457,18 @@ object LiveRecorder {
                 val parsed = parseMediaPlaylist(playlistUrl, manifest)
                 if (!initMapWritten && parsed.initMapUrl != null) {
                     val initBytes = fetchBytes(parsed.initMapUrl)
+                    isFmp4 = true
+                    detectedContainerExt = "mp4"
                     fos.write(initBytes)
                     writtenCounter.addAndGet(initBytes.size.toLong())
                     initMapWritten = true
                 }
 
                 var newSegCount = 0
-                val segmentsToFetch = if (seenSegments.isEmpty() && parsed.segments.size > 3) {
-                    // 首次进入直播只从最后 2 个分片开始录，其余历史分片标记为已跳过
-                    parsed.segments.dropLast(2).forEach { seenSegments.add(it.url) }
-                    parsed.segments.takeLast(2)
+                val segmentsToFetch = if (seenSegments.isEmpty() && parsed.segments.isNotEmpty() && !parsed.endList) {
+                    // 从点击时刻对应的最新直播分片开始录，跳过滑动窗口中所有早于点击时刻的历史分片
+                    parsed.segments.dropLast(1).forEach { seenSegments.add(it.url) }
+                    parsed.segments.takeLast(1)
                 } else {
                     parsed.segments
                 }
@@ -431,9 +492,18 @@ object LiveRecorder {
                     } else {
                         rawBytes
                     }
-                    fos.write(decoded)
+                    if (detectedContainerExt == null) {
+                        isFmp4 = isFmp4 || LiveStreamRebaser.looksLikeMp4Segment(decoded)
+                        detectedContainerExt = if (isFmp4) "mp4" else "ts"
+                    }
+                    val rebased = if (isFmp4) {
+                        fmp4Rebaser.processSegment(decoded)
+                    } else {
+                        tsRebaser.processSegment(decoded)
+                    }
+                    fos.write(rebased)
                     fos.flush()
-                    writtenCounter.addAndGet(decoded.size.toLong())
+                    writtenCounter.addAndGet(rebased.size.toLong())
                     newSegCount++
                 }
 

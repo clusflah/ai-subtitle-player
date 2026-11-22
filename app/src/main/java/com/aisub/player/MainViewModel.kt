@@ -1380,10 +1380,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 } else null
             }
         }
+        val startCueMs = (subtitleTime() - _state.value.subtitleDelayMs).coerceAtLeast(0L)
         com.aisub.player.live.LiveRecorder.start(
             context = app,
             streamUrl = cur.uri,
             channelTitle = cur.displayTitle,
+            startCueTimeMs = startCueMs,
             mpvStreamRecordStarter = mpvHook,
         )
     }
@@ -1392,6 +1394,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (com.aisub.player.live.LiveRecorder.state.value.recording) {
             com.aisub.player.live.LiveRecorder.stop(getApplication(), _state.value.cues)
         }
+    }
+
+    /** 离开直播播放页时彻底停掉直播流（避免仅 pause 导致内核保留旧流连接和陈旧画面尺寸状态）。 */
+    fun stopLivePlaybackOnExit() {
+        if (_state.value.current?.isLive != true) return
+        vlcLiveWatch?.cancel()
+        frameWatch?.cancel()
+        sawFirstFrame = false
+        player.stop()
     }
 
     /** 离开直播播放页或后台暂停直播时，停掉直播实时字幕识别、实时翻译与自带字幕翻译，避免后台空转和残留状态。 */

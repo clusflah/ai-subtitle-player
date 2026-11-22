@@ -112,7 +112,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     HOME("首页", AppIcons.Home),
     DISCOVER("发现", AppIcons.Explore),
     BROWSE("浏览", AppIcons.Folder),
-    LOCAL("本机", AppIcons.Phone),
+    MUSIC("音乐", AppIcons.MusicNote),
     ME("我的", AppIcons.Person),
 }
 
@@ -187,10 +187,9 @@ fun HomeScreen(
 
     // 多选：长按进入，返回键或右上角关闭退出
     var selected by remember { mutableStateOf(emptySet<String>()) }
-    val selectable = if (tab == Tab.LOCAL) (if (localVideo) state.videos else state.audios) else emptyList()
+    val selectable = emptyList<MediaEntry>()
     val selectedEntries = selectable.filter { it.uri in selected }
     BackHandler(enabled = selected.isNotEmpty()) { selected = emptySet() }
-    val toggle: (MediaEntry) -> Unit = { e -> selected = if (e.uri in selected) selected - e.uri else selected + e.uri }
     val openSettings = { nav.push(Screen.Settings) }
     val wide = LocalWideLayout.current
     val glass = LocalLiquidGlassEnabled.current
@@ -211,7 +210,9 @@ fun HomeScreen(
         containerColor = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = {
-            if (selected.isNotEmpty()) {
+            if (tab == Tab.MUSIC) {
+                // 音乐页自带沉浸式顶栏（音源切换、歌曲/歌词/乐库、右上角设置）
+            } else if (selected.isNotEmpty()) {
                 SelectionBar(
                     count = selected.size,
                     onClose = { selected = emptySet() },
@@ -393,128 +394,7 @@ fun HomeScreen(
                                     }
                                 }
 
-                                Tab.LOCAL -> {
-                                    // 本机页：仅保留搜索、过滤、排序、视图切换、刷新本机媒体与隐藏本机文件夹
-                                    val localTabIdx = when {
-                                        localPhotos -> 2
-                                        localVideo -> 0
-                                        else -> 1
-                                    }
-                                    LiquidGlassIconButton(
-                                        onClick = {
-                                            searching = !searching
-                                            if (!searching) { query = ""; lib.searchSubtitles("") }
-                                        },
-                                        icon = if (searching) AppIcons.Close else AppIcons.Search,
-                                        contentDescription = "搜索",
-                                    )
-                                    Box {
-                                        LiquidGlassIconButton(
-                                            onClick = { dialog = HomeDialog.LocalFilter(localTabIdx) },
-                                            icon = AppIcons.Tune,
-                                            contentDescription = "过滤",
-                                        )
-                                        if (state.localFilter.totalActiveCount > 0) {
-                                            Box(
-                                                Modifier
-                                                    .align(Alignment.TopEnd)
-                                                    .padding(3.dp)
-                                                    .size(8.dp)
-                                                    .background(Orange, CircleShape),
-                                            )
-                                        }
-                                    }
-                                    var localMenu by remember { mutableStateOf(false) }
-                                    Box {
-                                        LiquidGlassIconButton(
-                                            onClick = { localMenu = true },
-                                            icon = AppIcons.MoreHoriz,
-                                            contentDescription = "本机列表选项",
-                                        )
-                                        AppMenu(expanded = localMenu, onDismissRequest = { localMenu = false }) {
-                                            val page = when {
-                                                localPhotos -> "image"
-                                                localVideo -> "video"
-                                                else -> "audio"
-                                            }
-                                            val current = when {
-                                                localPhotos -> state.imageSort
-                                                localVideo -> state.videoSort
-                                                else -> state.audioSort
-                                            }
-                                            val sortChoices = if (localPhotos) {
-                                                SortOrder.entries.filter { it != SortOrder.DURATION }
-                                            } else {
-                                                SortOrder.entries
-                                            }
-                                            sortChoices.forEach { o ->
-                                                DropdownMenuItem(
-                                                    text = { Text("按${o.label}排序") },
-                                                    trailingIcon = if (o == current) {
-                                                        {
-                                                            Icon(
-                                                                AppIcons.Check,
-                                                                contentDescription = null,
-                                                                tint = MaterialTheme.colorScheme.primary,
-                                                                modifier = Modifier.size(18.dp),
-                                                            )
-                                                        }
-                                                    } else null,
-                                                    onClick = { localMenu = false; lib.setSort(page, o) },
-                                                )
-                                            }
-                                            if (localVideo && !localPhotos) {
-                                                DropdownMenuItem(
-                                                    text = { Text(if (state.videoGrid) "列表视图" else "网格视图") },
-                                                    onClick = { localMenu = false; lib.setVideoGrid(!state.videoGrid) },
-                                                )
-                                            }
-                                            val activeCnt = state.localFilter.activeCountForTab(localTabIdx)
-                                            DropdownMenuItem(
-                                                leadingIcon = {
-                                                    Icon(
-                                                        AppIcons.Tune,
-                                                        contentDescription = null,
-                                                        tint = if (activeCnt > 0) Orange else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                        modifier = Modifier.size(20.dp),
-                                                    )
-                                                },
-                                                text = {
-                                                    Text(
-                                                        "过滤",
-                                                        color = if (activeCnt > 0) Orange else Color.Unspecified,
-                                                    )
-                                                },
-                                                onClick = {
-                                                    localMenu = false
-                                                    dialog = HomeDialog.LocalFilter(localTabIdx)
-                                                },
-                                            )
-                                            if (activeCnt > 0) {
-                                                DropdownMenuItem(
-                                                    text = { Text("清除当前分类过滤条件") },
-                                                    onClick = {
-                                                        localMenu = false
-                                                        com.aisub.player.media.LocalMediaFilterStore.clearTab(context, localTabIdx)
-                                                    },
-                                                )
-                                            }
-                                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                                            DropdownMenuItem(
-                                                text = { Text("刷新本机媒体") },
-                                                onClick = {
-                                                    localMenu = false
-                                                    lib.refreshMedia()
-                                                    if (localPhotos) lib.refreshImages()
-                                                },
-                                            )
-                                            DropdownMenuItem(
-                                                text = { Text("隐藏的文件夹") },
-                                                onClick = { localMenu = false; nav.push(Screen.HiddenFolders) },
-                                            )
-                                        }
-                                    }
-                                }
+                                Tab.MUSIC -> {}
 
                                 Tab.ME -> {
                                     // 我的页：右上角仅保留「设置」图标，不再重复叠放无关菜单
@@ -573,10 +453,13 @@ fun HomeScreen(
         },
         bottomBar = {
           Column {
-            // 音乐在后台放着时的「正在播放」小条，放在标签栏上面，占自己的位置
-            NowPlayingBar(main, bottomPadding = 4.dp, onOpen = { nav.push(Screen.Player) }, navigationBarInset = false)
+            // 音乐在后台放着时的「正在播放」小条，放在标签栏上面，占自己的位置（音乐主页已全屏展示播放页，不重复显示）
+            if (tab != Tab.MUSIC) {
+                NowPlayingBar(main, bottomPadding = 4.dp, onOpen = { selectTab(Tab.MUSIC) }, navigationBarInset = false)
+            }
             // 电视、横屏平板：标签放在左侧竖栏（见下面），底部不放
-            if (!wide) AnimatedVisibility(barVisible, enter = slideInVertically { it }, exit = slideOutVertically { it }) {
+            val showBottomNav = barVisible || tab == Tab.MUSIC
+            if (!wide) AnimatedVisibility(showBottomNav, enter = slideInVertically { it }, exit = slideOutVertically { it }) {
                 LiquidGlassBottomBar(
                     items = remember {
                         Tab.entries.map { t ->
@@ -595,7 +478,13 @@ fun HomeScreen(
           }
         },
     ) { padding ->
-      Row(Modifier.padding(if (glass) PaddingValues(top = padding.calculateTopPadding()) else padding).fillMaxSize()) {
+      val contentPadding = when {
+          tab == Tab.MUSIC && glass -> PaddingValues(0.dp)
+          tab == Tab.MUSIC -> PaddingValues(bottom = padding.calculateBottomPadding())
+          glass -> PaddingValues(top = padding.calculateTopPadding())
+          else -> padding
+      }
+      Row(Modifier.padding(contentPadding).fillMaxSize()) {
         if (wide) {
             val railItems = remember {
                 Tab.entries.map { t ->
@@ -646,8 +535,11 @@ fun HomeScreen(
                 }
         ) {
             val openServer: (Server) -> Unit = { s ->
-                // Plex、Emby / Jellyfin 用官方客户端那样的首页；首页菜单里还能切回按文件夹浏览
-                if (s.type.isMediaServer) nav.push(Screen.ServerHome(s.id, s.name))
+                // Navidrome / Subsonic 是专用音乐库，点击直接切到「音乐」页该音源；Plex、Emby / Jellyfin 打开官方海报墙首页
+                if (s.type == ServerType.SUBSONIC) {
+                    com.aisub.player.music.MusicSourceStore.selectServer(context, s)
+                    selectTab(Tab.MUSIC)
+                } else if (s.type.isMediaServer) nav.push(Screen.ServerHome(s.id, s.name))
                 else nav.push(Screen.Remote(s.id, s.rootPath, s.name))
             }
             when (tab) {
@@ -659,8 +551,8 @@ fun HomeScreen(
                         if (f.serverId == null) nav.push(Screen.LocalFolder(f.path, f.title))
                         else nav.push(Screen.Remote(f.serverId, f.path, f.title))
                     },
-                    goLocal = { lib.homeTab = Tab.LOCAL.ordinal },
-                    goBrowse = { lib.homeTab = Tab.BROWSE.ordinal },
+                    goLocal = { selectTab(Tab.BROWSE) },
+                    goBrowse = { selectTab(Tab.BROWSE) },
                     addSource = { dialog = HomeDialog.AddSource(setOf(AddKind.STORAGE, AddKind.MEDIA_SERVER)) },
                     openReading = { nav.push(Screen.MangaRead(it)) },
                     openWebManga = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
@@ -672,80 +564,14 @@ fun HomeScreen(
                         else nav.push(Screen.Remote(srv.id, path, title))
                     },
                 )
-                Tab.LOCAL -> Column {
-                    val mediaOptions = listOf(
-                        "视频 ${state.videos.size}",
-                        "音乐 ${state.audios.size}",
-                        "照片 ${state.images.size}",
-                    )
-                    val selectedMediaIdx = when {
-                        localPhotos -> 2
-                        localVideo -> 0
-                        else -> 1
-                    }
-                    val selectMediaIdx: (Int) -> Unit = { index ->
-                        localPhotos = index == 2
-                        if (index < 2) lib.localShowsVideo = index == 0
-                        selected = emptySet()
-                        if (index == 2) {
-                            if (!state.hasImagePermission) onRequestImagePermission() else lib.refreshImages()
-                        }
-                    }
-                    if (glass) {
-                        LiquidGlassSegmentedControl(
-                            options = mediaOptions,
-                            selectedIndex = selectedMediaIdx,
-                            onSelect = selectMediaIdx,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                        )
-                    } else {
-                        Row(
-                            Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            mediaOptions.forEachIndexed { index, label ->
-                                FilterChip(
-                                    selected = selectedMediaIdx == index,
-                                    onClick = { selectMediaIdx(index) },
-                                    label = { Text(label) },
-                                )
-                            }
-                        }
-                    }
-
-                    if (localPhotos) {
-                        val qTrim = query.trim()
-                        val displayImages = remember(state.images, qTrim, state.imageSort) {
-                            val searched = if (qTrim.isEmpty()) state.images else state.images.filter {
-                                it.title.contains(qTrim, ignoreCase = true) || it.folder.contains(qTrim, ignoreCase = true)
-                            }
-                            searched.sortedBy(state.imageSort)
-                        }
-                        if (!state.hasImagePermission) EmptyState("需要照片访问权限才能显示手机里的图片", "授予权限", icon = AppIcons.Image, onButton = onRequestImagePermission)
-                        else if (displayImages.isEmpty() && qTrim.isNotEmpty()) EmptyState("没有找到匹配「$qTrim」的图片", icon = AppIcons.Search)
-                        else if (displayImages.isEmpty() && state.hiddenByImageFilter > 0) EmptyState(
-                            "当前过滤条件下没有显示的图片（已过滤 ${state.hiddenByImageFilter} 张）",
-                            "调整过滤条件",
-                            icon = AppIcons.Tune,
-                            onButton = { dialog = HomeDialog.LocalFilter(2) },
-                        )
-                        else if (displayImages.isEmpty()) EmptyState("手机里还没有照片", "刷新照片", icon = AppIcons.Image, onButton = lib::refreshImages)
-                        else LazyVerticalGrid(GridCells.Adaptive(if (LocalTv.current) 180.dp else 112.dp), contentPadding = PaddingValues(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 104.dp)) {
-                            itemsIndexed(displayImages, key = { _, e -> e.uri }) { index, e ->
-                                NetImage(e.uri, Modifier.padding(3.dp).aspectRatio(1f).clip(MaterialTheme.shapes.small)
-                                    .clickable { nav.push(Screen.ImageViewer(null, displayImages.map { image ->
-                                        com.aisub.player.remote.RemoteItem(image.title, image.uri, false, image.sizeBytes, image.uri)
-                                    }, index)) }, contentScale = androidx.compose.ui.layout.ContentScale.Crop, fallback = AppIcons.Image)
-                            }
-                        }
-                    } else MediaTab(
-                        state, isVideo = localVideo, query, onRequestPermission, lib::refreshMedia, play, entryMenu, selected, toggle,
-                        onRemoveHistory = lib::removeHistory,
-                        onOpenFilter = { dialog = HomeDialog.LocalFilter(if (localVideo) 0 else 1) },
-                        listState = lib.listState(if (localVideo) "local.video" else "local.audio"),
-                        gridState = lib.gridState("local.video"),
-                    )
-                }
+                Tab.MUSIC -> MusicTabScreen(
+                    lib = lib,
+                    main = main,
+                    bottomOverlayPadding = if (!wide && glass) 84.dp else 0.dp,
+                    applyNavigationBarInset = glass,
+                    onRequestPermission = onRequestPermission,
+                    onOpenAppSettings = openSettings,
+                )
                 Tab.DISCOVER -> DiscoverTab(
                     settings = mainUi.settings,
                     lib = lib,
@@ -802,7 +628,7 @@ fun HomeScreen(
                     onHistory = { music -> nav.push(Screen.History(music)) },
                     onPlayHistory = { item -> play(listOf(item.entry), 0) },
                     onRemoveHistory = lib::removeHistory,
-                    onPlayMusic = play,
+                    onPlayMusic = { list, i -> main.play(list, i); selectTab(Tab.MUSIC) },
                     onOpenPlaylist = { nav.push(Screen.PlaylistDetail(it.id)) },
                     onHiddenFolders = { nav.push(Screen.HiddenFolders) },
                     openFavorite = { f ->
@@ -1122,7 +948,7 @@ private fun BrowseTab(
                 if (mediaServers.isEmpty()) {
                     ListRow(
                         title = "添加媒体服务器",
-                        subtitle = "Plex、Emby、Jellyfin：海报墙、继续观看，进度同步回服务器",
+                        subtitle = "Plex、Emby、Jellyfin、Navidrome / Subsonic：海报墙、音乐库与进度同步",
                         icon = AppIcons.Add, mutedIcon = true, onClick = { addSource(setOf(AddKind.MEDIA_SERVER)) },
                     )
                 }
@@ -1208,6 +1034,7 @@ private fun AddSourceDropdownMenu(
         ServerMenuItem(ServerType.EMBY)
         ServerMenuItem(ServerType.JELLYFIN)
         ServerMenuItem(ServerType.PLEX)
+        ServerMenuItem(ServerType.SUBSONIC)
         HorizontalDivider(Modifier.padding(vertical = 4.dp))
         ServerMenuItem(ServerType.PAN115)
         ServerMenuItem(ServerType.ALIYUN)
@@ -1260,6 +1087,7 @@ private fun AddSourceDialog(
         ServerType.EMBY to "Emby 媒体服务器，账号密码登录",
         ServerType.JELLYFIN to "Jellyfin 媒体服务器，账号密码登录",
         ServerType.PLEX to "plex.tv 账号授权，或填服务器地址和令牌",
+        ServerType.SUBSONIC to "Navidrome、Subsonic、Airsonic 等音乐库",
     )
     val show = kinds.ifEmpty { AddKind.entries.toSet() }
     AppDialog(
@@ -1318,7 +1146,7 @@ private fun HomeTab(
     openServerDetailById: (String, String) -> Unit = { _, _ -> },
     openRemotePath: (Server, String, String) -> Unit = { _, _, _ -> },
 ) {
-    val mediaServers = state.servers.filter { it.type.isMediaServer }
+    val mediaServers = state.servers.filter { it.type.isMediaServer && it.type != ServerType.SUBSONIC }
     val favorites = remember(state.favoriteFolders, state.servers) {
         state.favoriteFolders.filter { f -> f.serverId == null || state.servers.any { it.id == f.serverId } }
     }
