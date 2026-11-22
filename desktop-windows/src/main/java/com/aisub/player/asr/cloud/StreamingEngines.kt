@@ -190,8 +190,8 @@ abstract class StreamingCloudEngine : SpeechEngine {
             return
         }
         val now = System.currentTimeMillis()
-        if (!e.isOpened && now - e.createdAtMs > 15_000L) {
-            log("流式识别连接握手超过 15 秒未完成，主动重连")
+        if (!e.isOpened && now - e.createdAtMs > 12_000L) {
+            log("流式识别连接握手超过 12 秒未完成，主动重连")
             session?.close()
             session = null
             e.failed("流式识别连接握手超时")
@@ -216,7 +216,7 @@ abstract class StreamingCloudEngine : SpeechEngine {
                 unansweredSpeechSamples = 0L
                 session?.close()
                 session = null
-                e.end()
+                e.failed("流式识别连续 ${unansweredMs / 1000} 秒无响应")
             }
         }
     }
@@ -324,10 +324,17 @@ abstract class StreamingCloudEngine : SpeechEngine {
         var e = events
         if (session == null || e == null || e.ended) {
             session?.close()
-            val maxRetry = if (liveStream) 6 else MAX_FAILURES
-            // 接连几路连接都没出结果就断了：多半是配置或网络有问题，别一直重连
-            if (e != null && e.hadError && !e.any && sessionAudioMs < 5_000L && ++failures >= maxRetry) {
-                throw IOException(lastError ?: "流式识别连接失败")
+            // 接连几路连接都没出结果就断了（含握手超时、连续 16 秒无响应）：多半是流式接口不可用或网络受阻，抛出让上层回退分段/备选引擎
+            if (e != null && e.hadError && !e.any) {
+                failures++
+                val maxRetry = when {
+                    liveStream && sessionAudioMs >= 5_000L -> 2
+                    liveStream -> 3
+                    else -> MAX_FAILURES
+                }
+                if (failures >= maxRetry) {
+                    throw IOException(lastError ?: "流式识别连接失败")
+                }
             }
             if (e != null && e.hadError) Thread.sleep(minOf(500L * failures, 2_000L))
             fatalError?.let { throw IOException(it) }

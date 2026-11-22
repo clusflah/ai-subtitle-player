@@ -104,7 +104,18 @@ class WebMangaCollector {
     }
 }
 
-/** 别的页面（漫画首页的「继续阅读」、发现页跳转搜索或发现页跳转播放）要网页打开一个地址 */
+data class WebLaunchRequest(
+    val url: String,
+    val mangaMode: Boolean,
+    val allowOpenApp: Boolean,
+)
+
+data class WebLaunchTabPlan(
+    val urls: List<String?>,
+    val activeIndex: Int,
+)
+
+/** 别的页面（漫画首页/我的页的「继续阅读」、发现页跳转搜索或发现页跳转播放）要网页打开一个地址 */
 object WebLaunch {
     @Volatile
     var pending: String? = null
@@ -117,9 +128,110 @@ object WebLaunch {
     @Volatile
     var allowOpenApp: Boolean = false
 
+    @Synchronized
     fun open(url: String?, mangaMode: Boolean = false, allowOpenApp: Boolean = false) {
         autoReadManga = mangaMode
         this.allowOpenApp = allowOpenApp
         pending = url
+    }
+
+    @Synchronized
+    fun consume(): WebLaunchRequest? {
+        val raw = pending?.trim()?.takeIf { it.isNotEmpty() }
+        val manga = autoReadManga
+        val allowApp = allowOpenApp
+        pending = null
+        autoReadManga = true
+        allowOpenApp = false
+        return raw?.let { WebLaunchRequest(it, manga, allowApp) }
+    }
+
+    /** 归一化比对两个网页地址是否指向同一页（忽略锚点 #、末尾斜杠、http/https 与前导 www.） */
+    fun normalizeTargetUrl(raw: String?): String? {
+        val s = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val noHash = s.substringBefore('#').trimEnd('/')
+        val schemeSep = noHash.indexOf("://")
+        if (schemeSep <= 0) return noHash
+        val scheme = noHash.substring(0, schemeSep).lowercase()
+        val rest = noHash.substring(schemeSep + 3)
+        val slash = rest.indexOf('/')
+        val authority = (if (slash >= 0) rest.substring(0, slash) else rest).lowercase().removePrefix("www.")
+        val pathAndQuery = if (slash >= 0) rest.substring(slash) else ""
+        val normScheme = if (scheme == "http") "https" else scheme
+        return "$normScheme://$authority$pathAndQuery"
+    }
+
+    fun sameTargetUrl(a: String?, b: String?): Boolean {
+        val na = normalizeTargetUrl(a) ?: return false
+        val nb = normalizeTargetUrl(b) ?: return false
+        return na == nb
+    }
+
+    private fun extractHost(raw: String?): String? {
+        val s = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val schemeSep = s.indexOf("://")
+        if (schemeSep <= 0) return null
+        val rest = s.substring(schemeSep + 3)
+        val end = rest.indexOfAny(charArrayOf('/', '?', '#'))
+        val authority = (if (end >= 0) rest.substring(0, end) else rest).substringAfterLast('@')
+        val host = authority.substringBefore(':').trim().lowercase()
+        return host.takeIf { it.isNotEmpty() }
+    }
+
+    fun sameSiteHost(a: String?, b: String?): Boolean {
+        val ha = extractHost(a) ?: return false
+        val hb = extractHost(b) ?: return false
+        return AdRules.siteOf(ha) == AdRules.siteOf(hb)
+    }
+
+    /**
+     * 解析外部唤起网页时的标签页复用方案：
+     * 1. 若已有标签页打开了同一目标页，直接切换到该标签并清理历史遗留的同网址重复标签；
+     * 2. 若存在空白标签页（null），直接在空白标签页打开；
+     * 3. 若为漫画「继续阅读」（mangaMode = true）且已有同漫画站点的标签页，直接复用该站点标签页跳转章节，避免每次点继续阅读新增标签；
+     * 4. 其余情况才新建标签页，不覆盖其他无关网站。
+     */
+    fun resolveTabs(
+        existingUrls: List<String?>,
+        currentActiveIndex: Int,
+        targetUrl: String,
+        mangaMode: Boolean,
+    ): WebLaunchTabPlan {
+        val base = if (existingUrls.isEmpty()) mutableListOf<String?>(null) else existingUrls.toMutableList()
+        val safeActive = currentActiveIndex.coerceIn(0, base.lastIndex)
+
+        val exactMatches = base.indices.filter { sameTargetUrl(base[it], targetUrl) }
+        if (exactMatches.isNotEmpty()) {
+            var keepIdx = if (safeActive in exactMatches) safeActive else exactMatches.first()
+            base[keepIdx] = targetUrl
+            for (idx in exactMatches.reversed()) {
+                if (idx != keepIdx) {
+                    base.removeAt(idx)
+                    if (idx < keepIdx) keepIdx--
+                }
+            }
+            return WebLaunchTabPlan(base, keepIdx)
+        }
+
+        val blankIdx = if (base[safeActive].isNullOrBlank()) safeActive else base.indexOfFirst { it.isNullOrBlank() }
+        if (blankIdx >= 0) {
+            base[blankIdx] = targetUrl
+            return WebLaunchTabPlan(base, blankIdx)
+        }
+
+        if (mangaMode) {
+            val siteIdx = if (sameSiteHost(base[safeActive], targetUrl)) {
+                safeActive
+            } else {
+                base.indexOfLast { sameSiteHost(it, targetUrl) }
+            }
+            if (siteIdx >= 0) {
+                base[siteIdx] = targetUrl
+                return WebLaunchTabPlan(base, siteIdx)
+            }
+        }
+
+        base.add(targetUrl)
+        return WebLaunchTabPlan(base, base.lastIndex)
     }
 }

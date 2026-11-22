@@ -200,11 +200,11 @@ fun RemoteFolderScreen(
     /** 海报墙缺海报时到网上找要用（TMDB Key、是否用豆瓣） */
     settings: com.aisub.player.AppSettings,
 ) {
-    val server = lib.server(serverId)
+    val state by lib.state.collectAsStateWithLifecycle()
+    val server = state.servers.firstOrNull { it.id == serverId } ?: lib.server(serverId)
     val appContext = LocalContext.current.applicationContext
     val viewPrefs = remember { com.aisub.player.media.ViewPrefs(appContext) }
     var posterWall by remember { mutableStateOf(viewPrefs.grid("remote")) }
-    val state by lib.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var loaded by remember { mutableStateOf<List<RemoteItem>?>(null) }
@@ -212,6 +212,7 @@ fun RemoteFolderScreen(
     val items = remember(loaded, state.hiddenFolders, state.showHidden) { loaded?.filterNot { it.isDir && lib.isHidden(serverId, it.path) } }
     var error by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
+    var reauth by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<RemoteItem?>(null) }
     var deleting by remember { mutableStateOf<RemoteItem?>(null) }
@@ -219,7 +220,7 @@ fun RemoteFolderScreen(
     var addTo by remember { mutableStateOf<List<MediaEntry>?>(null) }
     var downloadPlan by remember { mutableStateOf<Downloads.Plan?>(null) }
 
-    LaunchedEffect(serverId, path, reload) {
+    LaunchedEffect(serverId, server?.extra, server?.username, server?.password, server?.baseUrl, path, reload) {
         if (server == null) return@LaunchedEffect
         loaded = null
         error = null
@@ -243,6 +244,7 @@ fun RemoteFolderScreen(
                 Toast.makeText(context, done, Toast.LENGTH_SHORT).show()
                 reload++
             } catch (e: Exception) {
+                if (com.aisub.player.remote.ServerAuth.isServerAuthError(e.message)) reauth = true
                 Toast.makeText(context, "操作失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
             }
             busy = false
@@ -255,6 +257,7 @@ fun RemoteFolderScreen(
                 val n = Downloads.enqueue(context, jobs)
                 Toast.makeText(context, "已加入下载 $n 个文件，保存到 Download/${Downloads.ROOT}，进度见通知栏", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
+                if (com.aisub.player.remote.ServerAuth.isServerAuthError(e.message)) reauth = true
                 Toast.makeText(context, "下载失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
             }
         }
@@ -268,6 +271,7 @@ fun RemoteFolderScreen(
             try {
                 downloadPlan = Downloads.planFolder(lib.client(server), folder)
             } catch (e: Exception) {
+                if (com.aisub.player.remote.ServerAuth.isServerAuthError(e.message)) reauth = true
                 Toast.makeText(context, "读取文件夹失败：${e.message ?: e}", Toast.LENGTH_LONG).show()
             }
             busy = false
@@ -357,7 +361,10 @@ fun RemoteFolderScreen(
             if (server != null) FavoriteFolderButton(lib, serverId, path, title)
             IconButton(onClick = { reload++ }) { Icon(AppIcons.Refresh, "刷新") }
             OverflowMenu(
-                listOf(
+                listOfNotNull(
+                    server?.let { s ->
+                        MenuAction(com.aisub.player.remote.ServerAuth.reauthButtonLabel(s.type)) { reauth = true }
+                    },
                     MenuAction("新建文件夹") { creatingFolder = true },
                     MenuAction("下载整个文件夹") { downloadFolder(RemoteItem(title, path, isDir = true)) },
                     MenuAction("查看下载") {
@@ -370,7 +377,19 @@ fun RemoteFolderScreen(
         val list = items
         when {
             server == null -> EmptyState("服务器不存在", icon = AppIcons.Cloud)
-            error != null -> EmptyState("加载失败：$error", "重试", icon = AppIcons.Cloud) { reload++ }
+            error != null -> {
+                if (com.aisub.player.remote.ServerAuth.isServerAuthError(error)) {
+                    EmptyState(
+                        message = "加载失败：$error",
+                        buttonText = com.aisub.player.remote.ServerAuth.reauthButtonLabel(server.type),
+                        icon = AppIcons.Cloud,
+                        secondaryText = "重试",
+                        onSecondary = { reload++ },
+                    ) { reauth = true }
+                } else {
+                    EmptyState("加载失败：$error", "重试", icon = AppIcons.Cloud) { reload++ }
+                }
+            }
             list == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             else -> {
                 val shown = list.filter { it.isDir } + list.filter { !it.isDir && it.playUrl != null }
@@ -389,6 +408,18 @@ fun RemoteFolderScreen(
                 }
             }
         }
+    }
+
+    if (reauth && server != null) {
+        ServerReauthDialog(
+            server = server,
+            onDismiss = { reauth = false },
+            onSaved = { updated ->
+                lib.saveServer(updated)
+                reauth = false
+                reload++
+            },
+        )
     }
 
     renaming?.let { item ->

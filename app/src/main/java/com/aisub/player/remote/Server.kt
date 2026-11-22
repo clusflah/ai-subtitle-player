@@ -172,3 +172,40 @@ internal fun encodePath(path: String): String =
 
 internal fun joinPath(dir: String, name: String): String =
     (if (dir.endsWith('/')) dir else "$dir/") + name
+
+/** 识别 115 / 阿里云盘 / 百度网盘 / PikPak / OAuth 网盘 / Plex / Emby / Subsonic / WebDAV / OpenList 等登录或鉴权失效。 */
+object ServerAuth {
+    private val AUTH_ERROR_KEYWORDS = listOf(
+        "登录已失效", "登录失效", "登录过期", "重新登录", "重新扫码",
+        "授权已失效", "授权失败", "未登录", "请先登录",
+        "用户名或密码错误", "账号或密码错误", "密码错误", "鉴权失败",
+        "http 401", "status 401", "401 unauthorized", "unauthorized",
+        "invalid_grant", "invalid_token", "token expired", "token is expired",
+        "accesstokeninvalid", "accesstokenexpired", "refreshtokeninvalid",
+        "refreshtokenexpired", "invalidparameter.refreshtoken",
+        "unauthenticated", "wrong username or password",
+    )
+
+    fun isServerAuthError(message: String?): Boolean {
+        val low = message?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return false
+        return AUTH_ERROR_KEYWORDS.any { low.contains(it) }
+    }
+
+    fun reauthButtonLabel(type: ServerType): String = when (type) {
+        ServerType.PAN115, ServerType.ALIYUN -> "重新扫码登录"
+        else -> if (type.isCloud) "重新登录" else "修改账号密码"
+    }
+
+    fun serverIdForMediaUri(uri: String?, servers: List<Server>): String? {
+        val raw = uri?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (raw.startsWith("cloud://")) {
+            return raw.removePrefix("cloud://").substringBefore('/').takeIf { it.isNotEmpty() }
+        }
+        if (raw.startsWith("http://") || raw.startsWith("https://")) {
+            return servers.firstOrNull { s ->
+                listOf(s.normalizedBase, s.normalizedLan).any { p -> p.isNotEmpty() && raw.startsWith("$p/") }
+            }?.id
+        }
+        return null
+    }
+}

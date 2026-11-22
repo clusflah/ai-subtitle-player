@@ -134,9 +134,13 @@ class PikPakClient(server: Server) : CloudClient(server) {
     }
 
     private fun checkError(json: JSONObject) {
-        if (json.optInt("error_code") == 0) return
+        val code = json.optInt("error_code")
+        if (code == 0) return
         val msg = json.optString("error_description").ifEmpty { json.optString("error") }
-        throw IOException("PikPak：$msg（${json.optInt("error_code")}）")
+        if (code in setOf(16, 4121, 4122, 4126) || msg.contains("unauthenticated", ignoreCase = true) || msg.contains("invalid_grant", ignoreCase = true)) {
+            throw IOException("PikPak 登录已失效，请重新登录（$msg）")
+        }
+        throw IOException("PikPak：$msg（$code）")
     }
 
     override suspend fun list(path: String): List<RemoteItem> = withContext(Dispatchers.IO) {

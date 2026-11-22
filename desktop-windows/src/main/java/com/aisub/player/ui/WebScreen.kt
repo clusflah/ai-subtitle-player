@@ -202,14 +202,43 @@ fun WebScreen(
     val adInfo by vm.adBlockInfo.collectAsStateWithLifecycle()
 
     // ---- 标签页 ----
+    val initialSetup = remember {
+        val saved = vm.savedTabs()
+        val req = com.aisub.player.web.WebLaunch.consume()
+        val resolvedTarget = req?.url?.let(::toUrl)
+        if (req != null && resolvedTarget != null) {
+            val plan = com.aisub.player.web.WebLaunch.resolveTabs(
+                existingUrls = saved.first,
+                currentActiveIndex = saved.second,
+                targetUrl = resolvedTarget,
+                mangaMode = req.mangaMode,
+            )
+            Triple(plan.urls, plan.activeIndex, req.copy(url = resolvedTarget))
+        } else {
+            val urls = saved.first.ifEmpty { listOf(null) }
+            Triple(urls, saved.second.coerceIn(0, urls.lastIndex), null)
+        }
+    }
     var nextTabId by remember { mutableLongStateOf(1L) }
     val tabs = remember {
-        mutableStateListOf<WebTab>().apply { vm.savedTabs().first.forEach { add(WebTab(nextTabId++, it)) } }
+        mutableStateListOf<WebTab>().apply {
+            val launchReq = initialSetup.third
+            initialSetup.first.forEachIndexed { idx, u ->
+                val allowApp = launchReq != null && idx == initialSetup.second && launchReq.allowOpenApp
+                add(WebTab(nextTabId++, u, allowApp))
+            }
+        }
     }
-    var activeIndex by remember { mutableIntStateOf(vm.savedTabs().second.coerceIn(0, tabs.lastIndex)) }
+    var activeIndex by remember { mutableIntStateOf(initialSetup.second.coerceIn(0, tabs.lastIndex)) }
     val tab = tabs[activeIndex.coerceIn(0, tabs.lastIndex)]
-    LaunchedEffect(Unit) { tab.active = true }
     fun saveTabs() = vm.saveTabs(tabs.map { it.pageUrl ?: it.url }, activeIndex)
+    LaunchedEffect(Unit) {
+        tab.active = true
+        initialSetup.third?.let { req ->
+            saveTabs()
+            if (req.mangaMode) reopenAfter = ""
+        }
+    }
 
     var address by remember { mutableStateOf(tab.pageUrl.orEmpty()) }
     var editing by remember { mutableStateOf(false) }
@@ -260,16 +289,24 @@ fun WebScreen(
         return true
     }
 
-    fun go(input: String, allowOpenApp: Boolean = false) {
+    fun goOnTab(t: WebTab, input: String, allowOpenApp: Boolean = false) {
         val target = toUrl(input) ?: return
-        showAddress(target)
-        tab.allowOpenApp = allowOpenApp
-        if (tab.url == null) {
-            tab.url = target
-            tab.pageUrl = target
+        if (t === tabs.getOrNull(activeIndex)) showAddress(target)
+        t.allowOpenApp = allowOpenApp
+        val w = t.webView
+        if (t.url == null || w == null) {
+            t.url = target
+            t.pageUrl = target
             saveTabs()
-        } else tab.webView?.let { it.agentFor(target); it.loadUrl(target) }
+        } else {
+            t.pageUrl = target
+            saveTabs()
+            w.agentFor(target)
+            w.loadUrl(target)
+        }
     }
+
+    fun go(input: String, allowOpenApp: Boolean = false) = goOnTab(tab, input, allowOpenApp)
 
     fun playInPlayer(mediaUrl: String, page: String, title: String) {
         vm.captions.stop()
@@ -1281,24 +1318,51 @@ fun WebScreen(
     }
     }
 
-    // 漫画首页点了「继续阅读」、发现页跳转搜索或发现页跳转播放：在新标签页（当前是空白页就在当前页）打开
+    // 网页已挂载期间再次收到外部跳转请求（继续阅读、发现页搜索/跳转播放）：优先复用同网址、空白页或同漫画站点标签页
     var autoOpenedPageUrl by remember(tab.id) { mutableStateOf<String?>(null) }
-    var allowAutoManga by remember { mutableStateOf(true) }
-    LaunchedEffect(Unit) {
-        val url = com.aisub.player.web.WebLaunch.pending ?: return@LaunchedEffect
-        val mangaMode = com.aisub.player.web.WebLaunch.autoReadManga
-        val allowOpenApp = com.aisub.player.web.WebLaunch.allowOpenApp
-        com.aisub.player.web.WebLaunch.pending = null
-        com.aisub.player.web.WebLaunch.autoReadManga = true
-        com.aisub.player.web.WebLaunch.allowOpenApp = false
-        allowAutoManga = mangaMode
-        if (tab.url == null) go(url, allowOpenApp = allowOpenApp)
-        else if (tab.url == url || tab.pageUrl == url) {
-            tab.allowOpenApp = allowOpenApp
-            autoOpenedPageUrl = null
-            if (mangaMode && tab.manga.manga != null) openReader()
-        } else newTab(url, allowOpenApp = allowOpenApp)
-        if (mangaMode) reopenAfter = ""
+    var allowAutoManga by remember { mutableStateOf(initialSetup.third?.mangaMode ?: true) }
+    LaunchedEffect(com.aisub.player.web.WebLaunch.pending) {
+        val req = com.aisub.player.web.WebLaunch.consume() ?: return@LaunchedEffect
+        val target = toUrl(req.url) ?: return@LaunchedEffect
+        allowAutoManga = req.mangaMode
+        val exactIdx = tabs.indexOfFirst {
+            com.aisub.player.web.WebLaunch.sameTargetUrl(it.pageUrl ?: it.url, target)
+        }
+        val blankIdx = if (tab.url == null) activeIndex else tabs.indexOfFirst { it.url == null }
+        val mangaSiteIdx = if (req.mangaMode) {
+            if (com.aisub.player.web.WebLaunch.sameSiteHost(tab.pageUrl ?: tab.url, target)) activeIndex
+            else tabs.indexOfLast { com.aisub.player.web.WebLaunch.sameSiteHost(it.pageUrl ?: it.url, target) }
+        } else -1
+        when {
+            exactIdx >= 0 -> {
+                val chosen = tabs[exactIdx]
+                chosen.allowOpenApp = req.allowOpenApp
+                switchTo(exactIdx)
+                autoOpenedPageUrl = null
+                if (!com.aisub.player.web.WebLaunch.sameTargetUrl(chosen.pageUrl, target)) {
+                    goOnTab(chosen, target, allowOpenApp = req.allowOpenApp)
+                }
+                if (req.mangaMode) {
+                    if (chosen.manga.manga != null) openReader() else reopenAfter = ""
+                }
+            }
+            blankIdx >= 0 -> {
+                switchTo(blankIdx)
+                autoOpenedPageUrl = null
+                goOnTab(tabs[blankIdx], target, allowOpenApp = req.allowOpenApp)
+                if (req.mangaMode) reopenAfter = ""
+            }
+            mangaSiteIdx >= 0 -> {
+                switchTo(mangaSiteIdx)
+                autoOpenedPageUrl = null
+                goOnTab(tabs[mangaSiteIdx], target, allowOpenApp = req.allowOpenApp)
+                reopenAfter = ""
+            }
+            else -> {
+                newTab(target, allowOpenApp = req.allowOpenApp)
+                if (req.mangaMode) reopenAfter = ""
+            }
+        }
     }
 
     // Windows 桌面版：仅在漫画阅读流中识别出漫画后自动进入阅读模式；普通搜索网页不自动跳阅读器

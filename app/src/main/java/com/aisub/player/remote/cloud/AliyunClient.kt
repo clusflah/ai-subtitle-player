@@ -27,9 +27,16 @@ class AliyunClient(server: Server) : CloudClient(server) {
     private fun accessToken(forceRefresh: Boolean = false): String {
         val cached = creds.optString("access_token")
         if (cached.isNotEmpty() && !forceRefresh) return cached
-        val tokens = JSONObject(TvAuth().exchange("refresh_token", creds.getString("refresh_token")))
+        val refresh = creds.optString("refresh_token").ifEmpty {
+            throw IOException("阿里云盘登录已失效，请重新扫码")
+        }
+        val tokens = try {
+            JSONObject(TvAuth().exchange("refresh_token", refresh))
+        } catch (e: Exception) {
+            throw IOException("阿里云盘登录已失效，请重新扫码（${e.message ?: e}）", e)
+        }
         creds.put("access_token", tokens.getString("access_token"))
-        creds.put("refresh_token", tokens.optString("refresh_token").ifEmpty { creds.getString("refresh_token") })
+        creds.put("refresh_token", tokens.optString("refresh_token").ifEmpty { refresh })
         saveCreds()
         return creds.getString("access_token")
     }
@@ -45,6 +52,9 @@ class AliyunClient(server: Server) : CloudClient(server) {
             if (!retried && code in setOf("AccessTokenInvalid", "AccessTokenExpired", "I400JD")) {
                 accessToken(forceRefresh = true)
                 return api(path, body, retried = true)
+            }
+            if (code in setOf("AccessTokenInvalid", "AccessTokenExpired", "RefreshTokenInvalid", "RefreshTokenExpired", "InvalidParameter.RefreshToken")) {
+                throw IOException("阿里云盘登录已失效，请重新扫码")
             }
             throw IOException("阿里云盘：${json.optString("message").ifEmpty { code }}")
         }

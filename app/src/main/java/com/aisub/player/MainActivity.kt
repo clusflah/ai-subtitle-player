@@ -191,7 +191,7 @@ class MainActivity : ComponentActivity() {
                     when (val screen = nav.current) {
                         Screen.Home -> HomeScreen(lib, main, nav, onRequestPermission = { permissionLauncher.launch(mediaPermissions) },
                             onRequestImagePermission = { imagePermissionLauncher.launch(imagePermission) })
-                        Screen.Player -> PlayerScreen(main, onBack = back, onOpenSettings = { nav.push(Screen.Settings) })
+                        Screen.Player -> PlayerScreen(main, onBack = back, onOpenSettings = { nav.push(Screen.Settings) }, lib = lib)
                         Screen.Settings -> SettingsScreen(main, onBack = { nav.pop() })
                         Screen.HiddenFolders -> com.aisub.player.ui.HiddenFoldersScreen(lib, back)
                         Screen.Link -> LinkScreen(

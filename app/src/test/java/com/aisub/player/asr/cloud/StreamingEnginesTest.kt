@@ -250,4 +250,99 @@ class StreamingEnginesTest {
         assertEquals(listOf("测试一下。"), cues.map { it.text })
         assertEquals(200L, cues.first().startMs)
     }
+
+    @Test
+    fun geminiLiveStreamPeriodicFlushAndVadConfig() {
+        var sawVadConfig = false
+        var midStreamFlushes = 0
+        val url = serve(object : WebSocketListener() {
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                val json = JSONObject(text)
+                when {
+                    json.has("setup") -> {
+                        val vad = json.getJSONObject("setup")
+                            .getJSONObject("realtimeInputConfig")
+                            .getJSONObject("automaticActivityDetection")
+                        sawVadConfig = vad.getInt("silenceDurationMs") <= 500 &&
+                            vad.getString("endOfSpeechSensitivity") == "END_SENSITIVITY_HIGH"
+                        webSocket.send(JSONObject().put("setupComplete", JSONObject()).toString())
+                    }
+                    json.getJSONObject("realtimeInput").optBoolean("audioStreamEnd") -> {
+                        midStreamFlushes++
+                        webSocket.send(
+                            JSONObject().put(
+                                "serverContent",
+                                JSONObject().put("inputTranscription", JSONObject().put("text", "直播背景音乐下的连续解说。")).put("turnComplete", true),
+                            ).toString(),
+                        )
+                    }
+                }
+            }
+        })
+        val engine = GeminiStreamingTranscriber("key", "", url.replace("ws://", "http://"), "英语").apply {
+            liveStream = true
+        }
+        val cues = Collections.synchronizedList(ArrayList<Cue>())
+        // 先等 setupComplete 握手完成，再连续送入 6 秒音频触发 5.5 秒周期性 audioStreamEnd 催断句
+        engine.accept(FloatArray(1_600) { 0.05f }) { cues.add(it) }
+        Thread.sleep(150)
+        repeat(60) {
+            engine.accept(FloatArray(1_600) { 0.05f }) { cues.add(it) }
+        }
+        val deadline = System.currentTimeMillis() + 2_000L
+        while (cues.isEmpty() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(30)
+            engine.accept(FloatArray(1_600) { 0.01f }) { cues.add(it) }
+        }
+        engine.close()
+        assertTrue(sawVadConfig)
+        assertTrue(midStreamFlushes >= 1)
+        assertEquals(listOf("直播背景音乐下的连续解说。"), cues.map { it.text })
+    }
+
+    @Test
+    fun liveStreamThrowsAfterRepeatedLongFailuresInsteadOfLoopingForever() {
+        var openedSessions = 0
+        val engine = object : StreamingCloudEngine() {
+            override fun openSession(events: Events): Session {
+                openedSessions++
+                return object : Session() {
+                    private var packets = 0
+                    override fun send(pcm: ByteArray) {
+                        // 模拟每路连接发满 6 秒（> 5000ms）后因无响应或超时失败，验证不会卡在 failures=0 死循环
+                        if (++packets >= 60) {
+                            events.failed("模拟流式识别连续无响应")
+                        }
+                    }
+                    override fun finish() = events.end()
+                    override fun close() {}
+                }
+            }
+        }.apply { liveStream = true }
+
+        val err = runCatching {
+            repeat(200) {
+                engine.accept(FloatArray(1_600) { 0.05f }) {}
+            }
+        }.exceptionOrNull()
+        engine.close()
+        assertTrue("Expected IOException on repeated long failures, got $err", err is java.io.IOException)
+        assertEquals(2, openedSessions)
+    }
+
+    @Test
+    fun effectiveSubtitleDelayClampsNegativeInArrivalMode() {
+        val arrivalNeg = com.aisub.player.UiState(
+            liveClock = com.aisub.player.live.LiveClock.Arrival(1000L),
+            subtitleDelayMs = -5000L,
+        )
+        val arrivalPos = arrivalNeg.copy(subtitleDelayMs = 2000L)
+        val streamNeg = com.aisub.player.UiState(
+            liveClock = com.aisub.player.live.LiveClock.Stream,
+            subtitleDelayMs = -5000L,
+        )
+        assertEquals(0L, arrivalNeg.effectiveSubtitleDelayMs)
+        assertEquals(2000L, arrivalPos.effectiveSubtitleDelayMs)
+        assertEquals(-5000L, streamNeg.effectiveSubtitleDelayMs)
+    }
 }

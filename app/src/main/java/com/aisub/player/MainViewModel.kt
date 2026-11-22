@@ -166,6 +166,9 @@ data class UiState(
 ) {
     /** 当前视频识别时用的设置：语音语言换成这个视频单独选的 */
     val asrSettings: AppSettings get() = videoAsrLanguage?.let { settings.copy(asrLanguage = it) } ?: settings
+
+    /** 按到达顺序显示的直播实时字幕（VLC 等）没有未来的句子可提前取，负延迟会导致刚识别出的句子立即过期不显示 */
+    val effectiveSubtitleDelayMs: Long get() = if (liveClock is LiveClock.Arrival) subtitleDelayMs.coerceAtLeast(0L) else subtitleDelayMs
 }
 
 /** 链接下载任务的状态。done 时界面跳到播放页。 */
@@ -503,7 +506,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         snapshot = {
             val s = _state.value
             TtsSnapshot(
-                s.cues, s.roles, s.subtitleDelayMs, s.settings.ttsEngine, s.settings.ttsVoices[s.settings.ttsEngine],
+                s.cues, s.roles, s.effectiveSubtitleDelayMs, s.settings.ttsEngine, s.settings.ttsVoices[s.settings.ttsEngine],
                 s.settings.ttsLocale, s.settings.ttsDuckVolume,
             )
         },
@@ -1181,6 +1184,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun retryPlaybackAfterAuth() {
+        val current = _state.value.current
+        if (current != null && CloudRegistry.isCloud(current.uri)) {
+            CloudRegistry.invalidate(current.uri)
+        }
+        _state.update { it.copy(playbackError = null, videoProblem = null) }
+        if (player.playbackState == Player.STATE_IDLE) {
+            player.prepare()
+            player.play()
+        } else if (current != null) {
+            val q = queueEntries.ifEmpty { listOf(current) }
+            val idx = q.indexOfFirst { it.uri == current.uri }.coerceAtLeast(0)
+            play(q, idx)
+        }
+    }
+
     /** 播放一组媒体，从 index 开始；上次看到一半的会自动续播。 */
     fun play(entries: List<MediaEntry>, index: Int) {
         if (entries.isEmpty()) return
@@ -1380,7 +1399,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 } else null
             }
         }
-        val startCueMs = (subtitleTime() - _state.value.subtitleDelayMs).coerceAtLeast(0L)
+        val startCueMs = (subtitleTime() - _state.value.effectiveSubtitleDelayMs).coerceAtLeast(0L)
         com.aisub.player.live.LiveRecorder.start(
             context = app,
             streamUrl = cur.uri,
@@ -1704,21 +1723,38 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (candidates.isEmpty()) {
                     throw IllegalStateException(baseSettings.asrProblem() ?: "没有可用的语音识别引擎")
                 }
-                val translate = (baseSettings.autoTranslate || alsoTranslate) && baseSettings.createTranslator() != null
-                if ((baseSettings.autoTranslate || alsoTranslate) && !translate) {
+                val wantsTranslate = baseSettings.autoTranslate || alsoTranslate
+                val translate = wantsTranslate && baseSettings.createTranslator() != null
+                val geminiCanTranslateInline = wantsTranslate && AsrEngine.GEMINI in candidates && baseSettings.asrProblemFor(AsrEngine.GEMINI) == null
+                if (wantsTranslate && !translate && !geminiCanTranslateInline) {
                     // 要翻译但翻译服务没设置好：说出来，不要只出原文让人以为翻译坏了
                     _state.update { it.copy(error = "字幕不会翻译：${baseSettings.translatorProblem() ?: "翻译服务没有设置好"}。到「设置 → 字幕翻译」改好后，点「翻译」补上", failedTask = Task.TRANSLATE) }
                 }
-                inlineTranslate = translate
+                inlineTranslate = translate || wantsTranslate
                 if (translate) startTranslation()
 
+                // 支持流式的云端引擎若 WebSocket 流式无响应或被代理拦截，先自动退回同一引擎的 HTTPS 分段识别，再退回下一个候选引擎
+                val attempts = buildList {
+                    for (engineChoice in candidates) {
+                        val cs = if (engineChoice == baseSettings.asrEngine) baseSettings else baseSettings.copy(asrEngine = engineChoice)
+                        add(cs)
+                        if (useStreaming(cs)) {
+                            add(cs.copy(streamingAsr = false))
+                        }
+                    }
+                }
+
                 var lastError: Exception? = null
-                for ((idx, engineChoice) in candidates.withIndex()) {
+                for ((idx, candidateSettings) in attempts.withIndex()) {
                     ensureActive()
-                    val candidateSettings = if (engineChoice == baseSettings.asrEngine) baseSettings else baseSettings.copy(asrEngine = engineChoice)
+                    val engineChoice = candidateSettings.asrEngine
                     if (idx > 0) {
-                        val prev = candidates[idx - 1].label
-                        val notice = "${prev} 识别失败，已自动回退到 ${engineChoice.label}"
+                        val prev = attempts[idx - 1].asrEngine
+                        val notice = if (prev == engineChoice) {
+                            "${engineChoice.label} 流式识别无响应，已自动切换为分段识别"
+                        } else {
+                            "${prev.label} 识别失败，已自动回退到 ${engineChoice.label}"
+                        }
                         android.util.Log.w("Voxtitle", notice, lastError)
                         extras.emit(notice)
                     } else if (engineChoice != baseSettings.asrEngine) {
@@ -1745,7 +1781,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         val cuesBefore = _state.value.cues.size
                         asrInfoWatch = launch {
                             _state.map { it.cues.size }.first { it > cuesBefore }
-                            _state.update { it.copy(asrInfo = asrInfo) }
+                            _state.update { s ->
+                                val inlineTrInfo = if (!streaming && candidateSettings.asrEngine == AsrEngine.GEMINI && wantsTranslate && s.translateInfo == null && s.cues.any { !it.translation.isNullOrBlank() }) {
+                                    "翻译：Gemini" + (asrModel?.let { " · $it" } ?: "")
+                                } else s.translateInfo
+                                s.copy(asrInfo = asrInfo, translateInfo = inlineTrInfo)
+                            }
                         }
                         if (live) runLive(candidateSettings) else runOnDemand(candidateSettings, uri)
                         break
@@ -1757,8 +1798,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     } catch (e: Exception) {
                         if (!isActive) throw CancellationException("cancelled")
                         lastError = e
-                        android.util.Log.w("Voxtitle", "语音识别引擎 ${engineChoice.label} 失败", e)
-                        if (idx == candidates.lastIndex) throw e
+                        android.util.Log.w("Voxtitle", "语音识别引擎 ${engineChoice.label}（streaming=${useStreaming(candidateSettings)}）失败", e)
+                        if (idx == attempts.lastIndex) throw e
                     }
                 }
                 ensureActive()
@@ -2032,10 +2073,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         try {
             withContext(dispatcher) {
                 createEngine(settings, live = true).use { engine ->
-                    (engine as? com.aisub.player.asr.cloud.ChunkedCloudEngine)?.useChunks(
-                        if (vlcMode) LIVE_VLC_FIRST_CHUNK_SEC else LIVE_FIRST_CHUNK_SEC,
-                        if (vlcMode) LIVE_VLC_CHUNK_SEC else LIVE_CHUNK_SEC,
-                    )
+                    (engine as? com.aisub.player.asr.cloud.ChunkedCloudEngine)?.apply {
+                        useChunks(
+                            if (vlcMode) LIVE_VLC_FIRST_CHUNK_SEC else LIVE_FIRST_CHUNK_SEC,
+                            if (vlcMode) LIVE_VLC_CHUNK_SEC else LIVE_CHUNK_SEC,
+                        )
+                        useLiveTimeout(25)
+                    }
                     val cancelHandle = coroutineContext.job.invokeOnCompletion { engine.cancel() }
                     val onCue: (Cue) -> Unit = { incoming.add(it to android.os.SystemClock.elapsedRealtime()) }
                     // 解码和识别分开两条线程：识别引擎会等（流式识别控制发送速度、断线重连，
@@ -2238,48 +2282,54 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // VLC 原生音频回调是和画面同步的实时流：
                 // 1) ps.lastStart 只锚定「当前已上屏的首句开始时间」，绝不让之前拆分出的未来句把新到达的句子不断往后推；
                 // 2) 若前一句刚上屏不久（<=600ms），留 600ms 可见余量后再切新句；否则立即在 now 上屏；
-                // 3) 同一句被 CueSplitter 拆成多行同时到达时，中间行压缩到 900~1800ms，最后一行保留常规展示时长。
+                // 3) 同一句被 CueSplitter 拆成多行同时到达时，中间行压缩到 900~1800ms，最后一行保留至少 4.5s 余量等待译文返回（下一句到达时自动裁尾）。
                 var cursor = if (ps.lastStart != Long.MIN_VALUE && ps.lastStart <= now) {
                     maxOf(now, ps.lastStart + 600L)
                 } else {
                     now
                 }
                 val lastIdx = waiting.lastIndex
+                var naturalEnd = cursor
                 waiting.forEachIndexed { idx, (c, _) ->
                     val rawLen = (c.endMs - c.startMs).coerceAtLeast(0L)
-                    val length = if (idx < lastIdx) {
-                        rawLen.coerceIn(900L, 1_800L)
-                    } else {
-                        rawLen.coerceIn(LIVE_MIN_CUE_MS, 5_000L)
-                    }
                     val start = cursor
-                    cursor = start + length
+                    if (idx < lastIdx) {
+                        val length = rawLen.coerceIn(900L, 1_800L)
+                        cursor = start + length
+                        naturalEnd = cursor
+                    } else {
+                        naturalEnd = start + rawLen.coerceIn(LIVE_MIN_CUE_MS, 5_000L)
+                        cursor = start + rawLen.coerceIn(4_500L, 7_500L)
+                    }
                     shown += Cue(nextCueId++, start, cursor, c.text, c.translation)
                 }
                 if (shown.isNotEmpty()) {
                     ps.lastStart = shown.first().startMs
                 }
-                ps.lastEnd = cursor
+                ps.lastEnd = naturalEnd
             } else {
                 var cursor = if (ps.lastEnd - now > LIVE_MAX_BACKLOG_MS) now else maxOf(now, ps.lastEnd)
                 val first = waiting.first().first.startMs
-                for ((c, _) in waiting) {
-                    val length = (c.endMs - c.startMs).coerceIn(LIVE_MIN_CUE_MS, 6_000)
+                val lastIdx = waiting.lastIndex
+                var naturalEnd = cursor
+                waiting.forEachIndexed { idx, (c, _) ->
+                    val rawLen = (c.endMs - c.startMs).coerceIn(LIVE_MIN_CUE_MS, 6_000)
                     // 保持同一批里各句原来的间隔
                     val start = maxOf(cursor, now + (c.startMs - first))
                     ps.lastStart = start
-                    cursor = start + length
+                    naturalEnd = start + rawLen
+                    cursor = if (idx == lastIdx) start + rawLen.coerceIn(4_500L, 7_500L) else naturalEnd
                     shown += Cue(nextCueId++, start, cursor, c.text, c.translation)
                 }
-                ps.lastEnd = cursor
+                ps.lastEnd = naturalEnd
             }
             waiting.clear()
         }
         if (shown.isEmpty()) return
         val firstNewStart = shown.first().startMs
         _state.update { st ->
-            val prev = if (clock is LiveClock.Arrival && usingVlc && st.cues.isNotEmpty()) {
-                // 新句到达时，裁掉旧句超出 firstNewStart 的尾巴并丢弃尚未轮到的陈旧未来排队句
+            val prev = if (clock is LiveClock.Arrival && st.cues.isNotEmpty()) {
+                // 新句到达时，裁掉旧句超出 firstNewStart 的留屏尾巴并丢弃尚未轮到的陈旧排队句
                 st.cues.filter { it.startMs < firstNewStart }.map { c ->
                     if (c.endMs > firstNewStart) c.copy(endMs = firstNewStart) else c
                 }
@@ -2523,8 +2573,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
             val snapshot = _state.value
             val position = subtitleTime()
-            // 直播：画面已经播过去的不翻了
-            val pending = snapshot.cues.filter { it.translation == null && it.id !in inFlight && (!live || it.endMs >= position - 2_000) }
+            // 直播：画面已经播过去太久的不翻了
+            val pending = snapshot.cues.filter { it.translation == null && it.id !in inFlight && (!live || it.endMs >= position - 5_000) }
             if (pending.isEmpty()) {
                 if (running > 0 || snapshot.transcribing || snapshot.liveCaptions || snapshot.extractingEmbedded) {
                     delay(if (live) 100L else 250L)
@@ -2849,14 +2899,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 点 AI 字幕面板的「翻译字幕」时，是否应该读取并翻译视频自带字幕。 */
     fun shouldExtractEmbeddedOnTranslate(): Boolean {
         val s = _state.value
-        if (s.current?.isLive == true && usingExternalKernel) return false
-        if (s.cues.isEmpty()) return true
+        val live = s.current?.isLive == true
+        if (live && usingExternalKernel) return false
         val hasTextSubtitles = player.currentTracks.groups.any { g ->
             g.type == C.TRACK_TYPE_TEXT && (0 until g.length).any { i ->
                 val f = g.getTrackFormat(i)
-                (f.codecs ?: f.sampleMimeType) !in listOf("application/pgs", "application/vobsub", "application/dvbsubs")
+                val nonImage = (f.codecs ?: f.sampleMimeType) !in listOf("application/pgs", "application/vobsub", "application/dvbsubs")
+                val phantomLiveCea = live && f.language.isNullOrBlank() && f.label.isNullOrBlank() && isDictatedCaptions(f)
+                nonImage && !phantomLiveCea
             }
         }
+        if (live) return s.cues.isEmpty() && hasTextSubtitles
+        if (s.cues.isEmpty()) return true
         if (!hasTextSubtitles) return false
         val pos = player.currentPosition.coerceAtLeast(0L)
         return s.asrInfo == null && s.embeddedTracks == null && s.cues.none { pos in (it.startMs - 15_000L)..(it.endMs + 30_000L) }
@@ -3114,6 +3168,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         captionJob = viewModelScope.launch {
+            val selfJob = coroutineContext.job
+            var autoSwitchToAsr = false
             try {
                 previous.joinAll()
                 takeOver()
@@ -3132,6 +3188,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         aheadUsable.set(false)
                     }
                 }
+                val startedAt = android.os.SystemClock.elapsedRealtime()
                 val ps = AheadPublishState(leadMs)
                 while (true) {
                     delay(300)
@@ -3147,13 +3204,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     if (!aheadUsable.get()) useAhead.set(false)
                     if (!useAhead.get()) publishCaptions(screen.tick(now))
+                    if (_state.value.cues.isEmpty() && now - startedAt >= 10_000L) {
+                        android.util.Log.i("Voxtitle", "直播自带字幕 10 秒内未收到任何文字，自动切换为语音识别实时字幕")
+                        autoSwitchToAsr = true
+                        break
+                    }
                 }
             } finally {
                 p.removeListener(listener)
+                if (captionJob === selfJob) captionJob = null
                 // 被新开的一次顶掉时不要把它的状态清掉；时钟留着，已有字幕按它算时间（见 runLive 的收尾）
                 if (captionJob?.isActive != true) {
-                    _state.update { it.copy(liveCaptions = false) }
+                    _state.update {
+                        it.copy(
+                            liveCaptions = false,
+                            asrInfo = if (it.cues.isEmpty() && it.asrInfo == "字幕：直播自带") null else it.asrInfo,
+                            status = if (it.cues.isEmpty() && it.status == "正在读取直播自带的字幕…") "" else it.status,
+                        )
+                    }
                     if (liveDelayAdded > 0 && !_state.value.transcribing) restoreLivePlayback(entry)
+                }
+                if (autoSwitchToAsr && _state.value.current?.uri == entry.uri && !_state.value.transcribing) {
+                    extras.emit("未检测到直播自带字幕，已自动切换为语音识别实时字幕")
+                    viewModelScope.launch { generateSubtitles(alsoTranslate = true) }
                 }
             }
         }

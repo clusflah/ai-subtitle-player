@@ -55,8 +55,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aisub.player.LibraryViewModel
 import com.aisub.player.media.MediaEntry
+import com.aisub.player.remote.ServerAuth
 import com.aisub.player.remote.cloud.LibrarySort
 import com.aisub.player.remote.cloud.MediaBrowser
 import com.aisub.player.remote.cloud.ServerHub
@@ -75,11 +77,28 @@ private fun minutes(ms: Long) = "${(ms / 60_000).coerceAtLeast(1)} 分钟"
 
 /** 加载中 / 出错 / 内容 */
 @Composable
-private fun <T> Loaded(value: T?, error: String?, onRetry: () -> Unit, content: @Composable (T) -> Unit) {
+private fun <T> Loaded(
+    value: T?,
+    error: String?,
+    onRetry: () -> Unit,
+    reauthLabel: String? = null,
+    onReauth: (() -> Unit)? = null,
+    content: @Composable (T) -> Unit,
+) {
     when {
-        error != null -> Column(Modifier.fillMaxSize().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            Text(error, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            TextButton(onClick = onRetry) { Text("重试") }
+        error != null -> {
+            if (onReauth != null && ServerAuth.isServerAuthError(error)) {
+                EmptyState(
+                    message = "加载失败：$error",
+                    buttonText = reauthLabel ?: "重新登录",
+                    icon = AppIcons.Cloud,
+                    secondaryText = "重试",
+                    onSecondary = onRetry,
+                    onButton = onReauth,
+                )
+            } else {
+                EmptyState("加载失败：$error", "重试", icon = AppIcons.Cloud, onButton = onRetry)
+            }
         }
         value == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         else -> content(value)
@@ -98,10 +117,13 @@ fun ServerHomeScreen(
     openItem: (ServerItem) -> Unit,
     openFolders: () -> Unit,
 ) {
+    val state by lib.state.collectAsStateWithLifecycle()
+    val server = state.servers.firstOrNull { it.id == serverId } ?: lib.server(serverId)
     var data by remember { mutableStateOf<Pair<List<ServerSection>, List<ServerHub>>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
-    LaunchedEffect(serverId, reload) {
+    var reauth by remember { mutableStateOf(false) }
+    LaunchedEffect(serverId, server?.extra, server?.baseUrl, reload) {
         error = null
         val plex = lib.plex(serverId) ?: run { error = "找不到这个媒体服务器"; return@LaunchedEffect }
         try {
@@ -114,9 +136,19 @@ fun ServerHomeScreen(
         }
     }
     DetailScaffold(title, onBack, actions = {
-        OverflowMenu(listOf(MenuAction("刷新") { reload++ }, MenuAction("按文件夹浏览", onClick = openFolders)))
+        OverflowMenu(
+            listOfNotNull(
+                server?.let { s -> MenuAction(ServerAuth.reauthButtonLabel(s.type)) { reauth = true } },
+                MenuAction("刷新") { reload++ },
+                MenuAction("按文件夹浏览", onClick = openFolders),
+            ),
+        )
     }) {
-        Loaded(data, error, { reload++ }) { (sections, hubs) ->
+        Loaded(
+            data, error, { reload++ },
+            reauthLabel = server?.let { ServerAuth.reauthButtonLabel(it.type) },
+            onReauth = if (server != null) ({ reauth = true }) else null,
+        ) { (sections, hubs) ->
             LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
                 item {
                     Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -139,6 +171,13 @@ fun ServerHomeScreen(
                     Text("媒体库是空的", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(24.dp))
                 }
             }
+        }
+    }
+    if (reauth && server != null) {
+        ServerReauthDialog(server, onDismiss = { reauth = false }) { updated ->
+            lib.saveServer(updated)
+            reauth = false
+            reload++
         }
     }
 }
@@ -244,12 +283,15 @@ fun ServerLibraryScreen(
     onBack: () -> Unit,
     openItem: (ServerItem) -> Unit,
 ) {
+    val state by lib.state.collectAsStateWithLifecycle()
+    val server = state.servers.firstOrNull { it.id == serverId } ?: lib.server(serverId)
     var sort by remember { mutableStateOf(LibrarySort.NAME) }
     var unwatched by remember { mutableStateOf(false) }
     var items by remember { mutableStateOf<List<ServerItem>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
-    LaunchedEffect(serverId, sectionKey, sort, unwatched, reload) {
+    var reauth by remember { mutableStateOf(false) }
+    LaunchedEffect(serverId, server?.extra, server?.baseUrl, sectionKey, sort, unwatched, reload) {
         error = null
         items = null
         try {
@@ -264,7 +306,11 @@ fun ServerLibraryScreen(
                 LibrarySort.entries.forEach { s -> FilterChip(selected = sort == s, onClick = { sort = s }, label = { Text(s.label) }) }
                 FilterChip(selected = unwatched, onClick = { unwatched = !unwatched }, label = { Text("只看未看") })
             }
-            Loaded(items, error, { reload++ }) { list ->
+            Loaded(
+                items, error, { reload++ },
+                reauthLabel = server?.let { ServerAuth.reauthButtonLabel(it.type) },
+                onReauth = if (server != null) ({ reauth = true }) else null,
+            ) { list ->
                 if (list.isEmpty()) {
                     Text("没有内容", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(24.dp))
                 } else {
@@ -273,6 +319,13 @@ fun ServerLibraryScreen(
                     }
                 }
             }
+        }
+    }
+    if (reauth && server != null) {
+        ServerReauthDialog(server, onDismiss = { reauth = false }) { updated ->
+            lib.saveServer(updated)
+            reauth = false
+            reload++
         }
     }
 }
@@ -296,17 +349,20 @@ fun ServerDetailScreen(
     onOpenSettings: (() -> Unit)? = null,
     onOpenDiscoverDetail: (com.aisub.player.meta.DiscoverItem) -> Unit = {},
 ) {
+    val state by lib.state.collectAsStateWithLifecycle()
+    val server = state.servers.firstOrNull { it.id == serverId } ?: lib.server(serverId)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var item by remember { mutableStateOf<ServerItem?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
+    var reauth by remember { mutableStateOf(false) }
     /** 剧集的各季（季页面时是所属剧集的各季） */
     var seasons by remember { mutableStateOf<List<ServerItem>>(emptyList()) }
     var season by remember { mutableStateOf<String?>(null) }
     var episodes by remember { mutableStateOf<List<ServerItem>?>(null) }
 
-    LaunchedEffect(serverId, ratingKey, reload) {
+    LaunchedEffect(serverId, server?.extra, server?.baseUrl, ratingKey, reload) {
         error = null
         val plex = lib.plex(serverId) ?: run { error = "找不到这个媒体服务器"; return@LaunchedEffect }
         try {
@@ -354,7 +410,11 @@ fun ServerDetailScreen(
     }
 
     DetailScaffold(item?.let { it.grandparentTitle?.takeIf { _ -> it.type == "episode" } ?: it.title } ?: "", onBack) {
-        Loaded(item, error, { reload++ }) { it ->
+        Loaded(
+            item, error, { reload++ },
+            reauthLabel = server?.let { ServerAuth.reauthButtonLabel(it.type) },
+            onReauth = if (server != null) ({ reauth = true }) else null,
+        ) { it ->
             LazyColumn(contentPadding = PaddingValues(bottom = 32.dp)) {
                 item { Header(it) }
                 item {
@@ -404,6 +464,13 @@ fun ServerDetailScreen(
                     }
                 }
             }
+        }
+    }
+    if (reauth && server != null) {
+        ServerReauthDialog(server, onDismiss = { reauth = false }) { updated ->
+            lib.saveServer(updated)
+            reauth = false
+            reload++
         }
     }
 }

@@ -45,6 +45,10 @@ class GeminiStreamingTranscriber(
         @Volatile
         private var finishing = false
 
+        /** 持续送出但尚未收到服务端转写/断句回调的音频包数（100ms/包），电视直播背景乐不断时定期发 audioStreamEnd 催服务端断句 */
+        @Volatile
+        private var chunksSinceTranscript = 0
+
         /** 还没凑成一句的转写 */
         private val pending = StringBuilder()
         private var pendingStart = -1L
@@ -59,7 +63,7 @@ class GeminiStreamingTranscriber(
                 Request.Builder().url(url).build(),
                 object : Listener(events, "Gemini") {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
-                        super.onOpen(webSocket, response)
+                        events.touch()
                         webSocket.send(setup().toString())
                     }
 
@@ -82,12 +86,18 @@ class GeminiStreamingTranscriber(
         private fun setup(): JSONObject {
             val instruction = "你只负责听，不要回答、不要说话、不要输出任何内容。" +
                 if (language.isNotEmpty()) "音频里说的是$language。" else ""
+            val vad = JSONObject()
+                .put("disabled", false)
+                .put("prefixPaddingMs", 200)
+                .put("silenceDurationMs", if (liveStream) 450 else 600)
+                .put("endOfSpeechSensitivity", "END_SENSITIVITY_HIGH")
             return JSONObject().put(
                 "setup",
                 JSONObject()
                     .put("model", "models/$model")
                     .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO")))
                     .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", instruction))))
+                    .put("realtimeInputConfig", JSONObject().put("automaticActivityDetection", vad))
                     .put("inputAudioTranscription", JSONObject()),
             )
         }
@@ -101,7 +111,7 @@ class GeminiStreamingTranscriber(
             var handshakeTimedOut = false
             synchronized(early) {
                 if (!ready) {
-                    if (early.size >= 120) {
+                    if (early.size >= 100) {
                         early.clear()
                         handshakeTimedOut = true
                     } else {
@@ -115,7 +125,12 @@ class GeminiStreamingTranscriber(
                 events.failed("Gemini 流式识别握手超时")
                 return
             }
-            checkSend(socket, events, socket.send(audio(pcm)))
+            val ok = socket.send(audio(pcm))
+            checkSend(socket, events, ok)
+            if (ok && liveStream && !finishing && ++chunksSinceTranscript >= LIVE_FLUSH_PACKETS) {
+                chunksSinceTranscript = 0
+                socket.send(JSONObject().put("realtimeInput", JSONObject().put("audioStreamEnd", true)).toString())
+            }
         }
 
         override fun finish() {
@@ -136,13 +151,15 @@ class GeminiStreamingTranscriber(
                 val err = json.optJSONObject("error")
                 val code = err?.optInt("code") ?: 0
                 val msg = err?.optString("message").orEmpty()
-                events.failed("Gemini 流式识别出错（$code）：$msg", fatal = code == 401 || code == 403)
+                events.failed("Gemini 流式识别出错（$code）：$msg", fatal = code == 401 || code == 403 || code == 404)
                 return
             }
             if (json.has("setupComplete")) {
+                events.open()
                 synchronized(early) {
                     ready = true
                     early.forEach { socket.send(audio(it)) }
+                    chunksSinceTranscript = early.size
                     early.clear()
                 }
                 readyLatch.countDown()
@@ -150,13 +167,14 @@ class GeminiStreamingTranscriber(
             }
             val content = json.optJSONObject("serverContent") ?: return
             content.optJSONObject("inputTranscription")?.let { t ->
+                chunksSinceTranscript = 0
                 val piece = t.optString("text")
                 if (piece.isNotEmpty()) synchronized(pending) {
                     if (pending.isEmpty()) pendingStart = offsetMs(t.optString("startOffset"))
                     pending.append(piece)
                     offsetMs(t.optString("endOffset")).takeIf { it >= 0 }?.let { pendingEnd = it }
-                    // 一句话说完了就先交出去，不等这一轮结束
-                    if (piece.trimEnd().lastOrNull() in SENTENCE_END) {
+                    // 一句话说完了（或长句连续无标点攒够长度）就先交出去，不等这一轮结束
+                    if (piece.trimEnd().lastOrNull() in SENTENCE_END || pending.length >= 90) {
                         emit()
                     } else {
                         events.partial(pending.toString())
@@ -164,6 +182,7 @@ class GeminiStreamingTranscriber(
                 }
             }
             if (content.optBoolean("turnComplete")) {
+                chunksSinceTranscript = 0
                 synchronized(pending) { emit() }
                 if (finishing) events.end()
             }
@@ -186,6 +205,9 @@ class GeminiStreamingTranscriber(
 
     companion object {
         const val DEFAULT_MODEL = "gemini-3.8-live"
+
+        /** 实时音频持续 5.5 秒未断句时发一次 audioStreamEnd 刷新服务端缓冲，避免电视背景乐导致一直不出字 */
+        private const val LIVE_FLUSH_PACKETS = 55
 
         /** 文字到达时，已发出的音频比这句话的结尾大约多出的长度 */
         private const val LAG_MS = 1_500L

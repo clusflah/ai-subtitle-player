@@ -2649,6 +2649,8 @@ fun MagnetActionDialog(
     var busyServerId by remember { mutableStateOf<String?>(null) }
     var feedback by remember(magnetUri) { mutableStateOf<String?>(null) }
     var succeededServer by remember(magnetUri) { mutableStateOf<Server?>(null) }
+    var failedAuthServer by remember(magnetUri) { mutableStateOf<Server?>(null) }
+    var reauthServer by remember { mutableStateOf<Server?>(null) }
 
     AppDialog(
         onDismissRequest = onDismiss,
@@ -2724,8 +2726,11 @@ fun MagnetActionDialog(
                                     }.onSuccess { msg ->
                                         feedback = msg
                                         succeededServer = server
+                                        failedAuthServer = null
                                     }.onFailure { e ->
-                                        feedback = e.message ?: "添加离线任务失败"
+                                        val msg = e.message ?: "添加离线任务失败"
+                                        feedback = msg
+                                        failedAuthServer = if (com.aisub.player.remote.ServerAuth.isServerAuthError(msg)) server else null
                                     }
                                     busyServerId = null
                                 }
@@ -2752,6 +2757,15 @@ fun MagnetActionDialog(
                         color = if (succeededServer != null) Orange else MaterialTheme.colorScheme.primary,
                     )
                 }
+                if (failedAuthServer != null && lib != null) {
+                    val target = servers.firstOrNull { it.id == failedAuthServer!!.id } ?: failedAuthServer!!
+                    OutlinedButton(
+                        onClick = { reauthServer = target },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("${com.aisub.player.remote.ServerAuth.reauthButtonLabel(target.type)}（${target.name}）")
+                    }
+                }
                 if (succeededServer != null && onOpenServer != null) {
                     TextButton(onClick = {
                         val s = succeededServer!!
@@ -2767,6 +2781,20 @@ fun MagnetActionDialog(
             TextButton(onClick = onDismiss) { Text("关闭") }
         },
     )
+
+    if (reauthServer != null && lib != null) {
+        val current = servers.firstOrNull { it.id == reauthServer!!.id } ?: reauthServer!!
+        ServerReauthDialog(
+            server = current,
+            onDismiss = { reauthServer = null },
+            onSaved = { updated ->
+                lib.saveServer(updated)
+                reauthServer = null
+                failedAuthServer = null
+                feedback = "已重新登录「${updated.name}」，请再次点击离线下载"
+            },
+        )
+    }
 }
 
 /** 管理与自定义发现页资源搜索源的弹窗 */

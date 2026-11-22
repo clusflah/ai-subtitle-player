@@ -642,7 +642,7 @@ fun HomeScreen(
                     goBrowse = { selectTab(Tab.BROWSE) },
                     addSource = { dialog = HomeDialog.AddSource(setOf(AddKind.STORAGE, AddKind.MEDIA_SERVER)) },
                     openReading = { nav.push(Screen.MangaRead(it)) },
-                    openWebManga = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
+                    openWebManga = { url -> com.aisub.player.web.WebLaunch.open(url, mangaMode = true); nav.push(Screen.Web) },
                     openCustomLibrary = { libId -> nav.push(Screen.CustomLibrary(libId)) },
                     openCustomItem = { libId, itemId -> nav.push(Screen.CustomLibraryItem(libId, itemId)) },
                     openServerDetailById = { sid, rk -> nav.push(Screen.ServerDetail(sid, rk)) },
@@ -729,7 +729,7 @@ fun HomeScreen(
                     openManga = { nav.push(Screen.Manga) },
                     openBooks = { nav.push(Screen.Books) },
                     openReading = { nav.push(Screen.MangaRead(it)) },
-                    openWebManga = { url -> com.aisub.player.web.WebLaunch.pending = url; nav.push(Screen.Web) },
+                    openWebManga = { url -> com.aisub.player.web.WebLaunch.open(url, mangaMode = true); nav.push(Screen.Web) },
                     openServer = openServer,
                     openServerItem = { s, item -> nav.push(Screen.ServerDetail(s.id, item.ratingKey)) },
                 )

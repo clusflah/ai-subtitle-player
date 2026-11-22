@@ -4,12 +4,16 @@ import android.content.Context
 import android.content.res.Configuration
 import android.media.AudioManager
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -78,10 +82,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
@@ -94,6 +100,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -101,6 +108,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -167,7 +176,9 @@ fun MusicView(
     val displayCover = music.cover ?: standbyCover
     val effectiveEntry = current?.takeIf { activeMusic && !it.isVideo && !it.isLive }
     val effectiveWantsPlay = activeMusic && wantsPlay
-    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val config = LocalConfiguration.current
+    val landscape = config.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val screenH = config.screenHeightDp.dp
     val scope = rememberCoroutineScope()
     val pageCount = if (libraryTabContent != null) 3 else 2
     val internalPager = rememberPagerState(initialPage = 0) { pageCount }
@@ -277,12 +288,68 @@ fun MusicView(
         Box(Modifier.fillMaxSize()) {
             Backdrop(displayCover)
         }
+        val immersive = !barsVisible && !onLibraryPage
+        val immersiveVinyl = immersive && !onLyricsPage
+        val vinylWidthFraction by animateFloatAsState(
+            targetValue = when {
+                landscape && immersiveVinyl -> 0.78f
+                landscape -> 0.70f
+                immersiveVinyl -> 0.88f
+                else -> 0.82f
+            },
+            animationSpec = tween(360),
+            label = "vinylWidthFraction",
+        )
+        val vinylMaxHeightFraction by animateFloatAsState(
+            targetValue = when {
+                landscape -> 0.86f
+                immersiveVinyl -> 0.78f
+                else -> 0.85f
+            },
+            animationSpec = tween(360),
+            label = "vinylMaxHeightFraction",
+        )
+        val vinylMaxDiameter by animateDpAsState(
+            targetValue = if (immersiveVinyl) 450.dp else 410.dp,
+            animationSpec = tween(360),
+            label = "vinylMaxDiameter",
+        )
+        val vinylBiasY by animateFloatAsState(
+            targetValue = if (immersiveVinyl && !landscape) 0.22f else 0f,
+            animationSpec = tween(360),
+            label = "vinylBiasY",
+        )
+        val controlsBottomPad by animateDpAsState(
+            targetValue = when {
+                landscape -> 8.dp
+                immersiveVinyl -> ((screenH - 480.dp) * 0.30f).coerceIn(28.dp, 124.dp)
+                inHomeTab -> 10.dp
+                else -> 20.dp
+            },
+            animationSpec = tween(360),
+            label = "controlsBottomPad",
+        )
+        val landscapeOuterPad by animateDpAsState(
+            targetValue = if (landscape && immersive) 20.dp else 0.dp,
+            animationSpec = tween(360),
+            label = "landscapeOuterPad",
+        )
+        val lyricTopPad by animateDpAsState(
+            targetValue = if (immersiveVinyl) 18.dp else 12.dp,
+            animationSpec = tween(340),
+            label = "lyricTopPad",
+        )
+        val lyricBottomPad by animateDpAsState(
+            targetValue = if (immersiveVinyl) 10.dp else 4.dp,
+            animationSpec = tween(340),
+            label = "lyricBottomPad",
+        )
         val pages: @Composable (Modifier) -> Unit = { mod ->
             Column(mod) {
                 AnimatedVisibility(
                     visible = barsVisible || onLibraryPage,
-                    enter = fadeIn(tween(220)) + expandVertically(tween(220)),
-                    exit = fadeOut(tween(420)) + shrinkVertically(tween(420)),
+                    enter = fadeIn(tween(240)) + expandVertically(tween(280)),
+                    exit = fadeOut(tween(340)) + shrinkVertically(tween(360)),
                 ) {
                     TopTabs(
                         page = pager.currentPage,
@@ -302,8 +369,16 @@ fun MusicView(
                             toolsShown = barsVisible, activeMusic = activeMusic,
                         )
                         LIBRARY_PAGE -> libraryTabContent?.invoke()
-                        else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Vinyl(displayCover, effectiveWantsPlay && vinylVisible, Modifier.fillMaxWidth(if (landscape) 0.62f else 0.84f).widthIn(max = 420.dp))
+                        else -> Box(Modifier.fillMaxSize(), contentAlignment = BiasAlignment(0f, vinylBiasY)) {
+                            Vinyl(
+                                cover = displayCover,
+                                playing = effectiveWantsPlay && vinylVisible,
+                                modifier = Modifier.vinylSquareSize(
+                                    widthFraction = vinylWidthFraction,
+                                    maxDiameter = vinylMaxDiameter,
+                                    maxHeightFraction = vinylMaxHeightFraction,
+                                ),
+                            )
                         }
                     }
                 }
@@ -319,17 +394,52 @@ fun MusicView(
                 else -> AppIcons.Volume
             }
             Column(mod) {
-                SongTitleRow(tags.title, listOfNotNull(tags.artist, tags.album).joinToString(" - "), liked, { touches++; toggleLike() }) { touches++; showMenu = true }
-                // 歌词页以外，在歌名下面显示正在唱的一句
-                val line = lyrics?.takeIf { it.synced && !onLyricsPage }?.let { l -> l.lines.getOrNull(l.indexAt(positionMs))?.text }
-                if (line != null && !landscape) Text(
-                    line.ifEmpty { "♪" }, color = Color(0xCCFFFFFF), fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 14.dp),
-                ) else Spacer(Modifier.height(14.dp))
+                SongTitleRow(
+                    title = tags.title,
+                    subtitle = listOfNotNull(tags.artist, tags.album).joinToString(" - "),
+                    liked = liked,
+                    immersive = immersive,
+                    onLike = { touches++; toggleLike() },
+                    onMenu = { touches++; showMenu = true },
+                )
+                // 歌词页以外，在歌名下面显示正在唱的一句（沉浸态字号与留白放大，并可带出译文）
+                val lyricIdx = lyrics?.takeIf { it.synced && !onLyricsPage }?.indexAt(positionMs) ?: -1
+                val line = if (lyricIdx >= 0) lyrics?.lines?.getOrNull(lyricIdx)?.text else null
+                val transLine = if (lyricIdx >= 0) translations?.getOrNull(lyricIdx)?.takeIf { it.isNotBlank() } else null
+                if (line != null) {
+                    Column(
+                        Modifier.fillMaxWidth()
+                            .padding(start = 28.dp, end = 28.dp, top = lyricTopPad, bottom = lyricBottomPad),
+                    ) {
+                        Text(
+                            line.ifEmpty { "♪" },
+                            color = if (immersiveVinyl) Color(0xEBFFFFFF) else Color(0xCCFFFFFF),
+                            fontSize = if (immersiveVinyl) 16.5.sp else 15.sp,
+                            fontWeight = if (immersiveVinyl) FontWeight.Medium else FontWeight.Normal,
+                            lineHeight = 23.sp,
+                            maxLines = if (immersiveVinyl) 2 else 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (immersiveVinyl && transLine != null) {
+                            Text(
+                                transLine,
+                                color = Color(0x99FFFFFF),
+                                fontSize = 14.sp,
+                                lineHeight = 19.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(top = 3.dp),
+                            )
+                        }
+                    }
+                } else {
+                    Spacer(Modifier.height(if (immersiveVinyl) 18.dp else 14.dp))
+                }
                 val effectiveDuration = if (activeMusic) (player.duration.takeIf { it > 0 } ?: tags.durationMs) else tags.durationMs
                 MusicSeekBar(
                     positionMs = if (activeMusic) positionMs else positionMs.coerceAtMost(effectiveDuration),
                     durationMs = effectiveDuration,
+                    immersive = immersive,
                     onSeek = { target ->
                         touches++
                         if (activeMusic) onSeek(target) else onIdlePlay?.invoke()
@@ -338,8 +448,8 @@ fun MusicView(
                 )
                 AnimatedVisibility(
                     visible = barsVisible,
-                    enter = fadeIn(tween(220)) + expandVertically(tween(220)),
-                    exit = fadeOut(tween(420)) + shrinkVertically(tween(420)),
+                    enter = fadeIn(tween(240)) + expandVertically(tween(280)),
+                    exit = fadeOut(tween(340)) + shrinkVertically(tween(360)),
                 ) {
                     Column {
                         PlayControls(
@@ -390,18 +500,18 @@ fun MusicView(
             .let { if (applyNavigationBarInset) it.navigationBarsPadding() else it }
             .padding(bottom = bottomOverlayPadding)
         if (landscape) {
-            Row(insetMod) {
+            Row(insetMod.padding(horizontal = landscapeOuterPad)) {
                 pages(Modifier.weight(if (onLibraryPage) 1.25f else 1f).fillMaxHeight())
-                controls(Modifier.weight(1f).align(Alignment.CenterVertically).padding(bottom = 8.dp))
+                controls(Modifier.weight(1f).align(Alignment.CenterVertically).padding(bottom = controlsBottomPad))
             }
         } else {
             Column(insetMod) {
                 pages(Modifier.weight(1f).fillMaxWidth())
                 AnimatedVisibility(
                     controlsPanelShown,
-                    enter = fadeIn(tween(250)) + expandVertically(tween(250)),
-                    exit = fadeOut(tween(500)) + shrinkVertically(tween(500)),
-                ) { controls(Modifier.fillMaxWidth().padding(bottom = if (inHomeTab) 10.dp else 20.dp)) }
+                    enter = fadeIn(tween(240)) + expandVertically(tween(280)),
+                    exit = fadeOut(tween(360)) + shrinkVertically(tween(380)),
+                ) { controls(Modifier.fillMaxWidth().padding(bottom = controlsBottomPad)) }
             }
         }
     }
@@ -523,6 +633,18 @@ private fun TopTabs(
 
 // ---------------- 歌曲：转动的唱片 ----------------
 
+private fun Modifier.vinylSquareSize(
+    widthFraction: Float,
+    maxDiameter: Dp,
+    maxHeightFraction: Float,
+): Modifier = this.layout { measurable, constraints ->
+    val maxByW = if (constraints.hasBoundedWidth) constraints.maxWidth * widthFraction else maxDiameter.toPx()
+    val maxByH = if (constraints.hasBoundedHeight) constraints.maxHeight * maxHeightFraction else maxDiameter.toPx()
+    val side = minOf(maxByW, maxByH, maxDiameter.toPx()).roundToInt().coerceAtLeast(0)
+    val placeable = measurable.measure(Constraints.fixed(side, side))
+    layout(side, side) { placeable.placeRelative(0, 0) }
+}
+
 @Composable
 private fun Vinyl(cover: android.graphics.Bitmap?, playing: Boolean, modifier: Modifier) {
     // 播放时慢慢转，暂停停在原处
@@ -533,29 +655,37 @@ private fun Vinyl(cover: android.graphics.Bitmap?, playing: Boolean, modifier: M
             angle.snapTo(angle.value % 360f)
         }
     }
-    Box(modifier.aspectRatio(1f).graphicsLayer { rotationZ = angle.value }, contentAlignment = Alignment.Center) {
-        Canvas(Modifier.fillMaxSize()) {
-            val r = size.minDimension / 2
-            drawCircle(Color(0xFF0E0E0E), r)
-            drawCircle(Color(0x33FFFFFF), r - 1.dp.toPx(), style = Stroke(1.dp.toPx()))
-            // 纹路
-            var gr = r * 0.97f
-            while (gr > r * 0.7f) {
-                drawCircle(Color(0x14FFFFFF), gr, style = Stroke(0.6.dp.toPx()))
-                gr -= 3.dp.toPx()
+    val coverBitmap = remember(cover) {
+        cover?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }?.asImageBitmap()
+    }
+    Box(
+        modifier.shadow(24.dp, CircleShape, ambientColor = Color(0x66000000), spotColor = Color(0x88000000)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.fillMaxSize().graphicsLayer { rotationZ = angle.value }, contentAlignment = Alignment.Center) {
+            Canvas(Modifier.fillMaxSize()) {
+                val r = size.minDimension / 2
+                drawCircle(Color(0xFF0E0E0E), r)
+                drawCircle(Color(0x33FFFFFF), r - 1.dp.toPx(), style = Stroke(1.dp.toPx()))
+                // 纹路
+                var gr = r * 0.97f
+                while (gr > r * 0.72f) {
+                    drawCircle(Color(0x14FFFFFF), gr, style = Stroke(0.6.dp.toPx()))
+                    gr -= 3.dp.toPx()
+                }
+                // 斜着的一道反光
+                drawCircle(
+                    Brush.linearGradient(listOf(Color.Transparent, Color(0x1AFFFFFF), Color.Transparent), Offset(0f, 0f), Offset(size.width, size.height)),
+                    r,
+                )
             }
-            // 斜着的一道反光
-            drawCircle(
-                Brush.linearGradient(listOf(Color.Transparent, Color(0x1AFFFFFF), Color.Transparent), Offset(0f, 0f), Offset(size.width, size.height)),
-                r,
-            )
-        }
-        Box(
-            Modifier.fillMaxSize(0.68f).clip(CircleShape).background(Color(0xFF2A2A2A)).border(3.dp, Color(0xFF050505), CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (cover != null) Image(cover.asImageBitmap(), "封面", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-            else Icon(AppIcons.MusicNote, null, tint = Color(0xFF777777), modifier = Modifier.size(72.dp))
+            Box(
+                Modifier.fillMaxSize(0.70f).clip(CircleShape).background(Color(0xFF2A2A2A)).border(3.dp, Color(0xFF050505), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (coverBitmap != null) Image(coverBitmap, "封面", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                else Icon(AppIcons.MusicNote, null, tint = Color(0xFF777777), modifier = Modifier.size(72.dp))
+            }
         }
     }
 }
@@ -563,12 +693,28 @@ private fun Vinyl(cover: android.graphics.Bitmap?, playing: Boolean, modifier: M
 // ---------------- 歌名、喜欢、菜单 ----------------
 
 @Composable
-private fun SongTitleRow(title: String, subtitle: String, liked: Boolean, onLike: () -> Unit, onMenu: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(start = 32.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun SongTitleRow(
+    title: String,
+    subtitle: String,
+    liked: Boolean,
+    immersive: Boolean = false,
+    onLike: () -> Unit,
+    onMenu: () -> Unit,
+) {
+    val endPad by animateDpAsState(if (immersive) 28.dp else 16.dp, tween(280), label = "titleEndPad")
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(start = 28.dp, end = endPad),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Column(Modifier.weight(1f)) {
             // 放不下时来回滚动显示全名（只在放不下时才动）
             Text(
-                title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1,
+                title,
+                color = Color.White,
+                fontSize = if (immersive) 24.sp else 22.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.2.sp,
+                maxLines = 1,
                 modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE, initialDelayMillis = 1_500, repeatDelayMillis = 2_000),
             )
             if (subtitle.isNotEmpty()) Text(
@@ -576,10 +722,18 @@ private fun SongTitleRow(title: String, subtitle: String, liked: Boolean, onLike
                 modifier = Modifier.padding(top = 4.dp).basicMarquee(iterations = Int.MAX_VALUE, initialDelayMillis = 1_500, repeatDelayMillis = 2_000),
             )
         }
-        IconButton(onClick = onLike) {
-            Icon(if (liked) AppIcons.Favorite else AppIcons.FavoriteBorder, if (liked) "取消喜欢" else "喜欢", tint = if (liked) Color(0xFFFF5A6E) else Color.White, modifier = Modifier.size(26.dp))
+        AnimatedVisibility(
+            visible = !immersive,
+            enter = fadeIn(tween(220)) + expandHorizontally(tween(260)),
+            exit = fadeOut(tween(220)) + shrinkHorizontally(tween(260)),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onLike) {
+                    Icon(if (liked) AppIcons.Favorite else AppIcons.FavoriteBorder, if (liked) "取消喜欢" else "喜欢", tint = if (liked) Color(0xFFFF5A6E) else Color.White, modifier = Modifier.size(26.dp))
+                }
+                IconButton(onClick = onMenu) { Icon(AppIcons.MoreVert, "更多", tint = Color.White) }
+            }
         }
-        IconButton(onClick = onMenu) { Icon(AppIcons.MoreVert, "更多", tint = Color.White) }
     }
 }
 
@@ -589,6 +743,7 @@ private fun SongTitleRow(title: String, subtitle: String, liked: Boolean, onLike
 private fun MusicSeekBar(
     positionMs: Long,
     durationMs: Long,
+    immersive: Boolean = false,
     onSeek: (Long) -> Unit,
     onDragActiveChange: (Boolean) -> Unit = {},
 ) {
@@ -597,14 +752,32 @@ private fun MusicSeekBar(
     val currentOnSeek by rememberUpdatedState(onSeek)
     val currentOnDragActive by rememberUpdatedState(onDragActiveChange)
     val fraction = dragging ?: if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
+    val trackHeight by animateDpAsState(
+        targetValue = when {
+            dragging != null -> 5.dp
+            immersive -> 3.dp
+            else -> 4.dp
+        },
+        animationSpec = tween(260),
+        label = "seekTrackHeight",
+    )
+    val thumb by animateDpAsState(
+        targetValue = when {
+            dragging != null -> 20.dp
+            immersive -> 7.dp
+            else -> 14.dp
+        },
+        animationSpec = tween(260),
+        label = "seekThumbSize",
+    )
     val finish = {
         dragging?.let { currentOnSeek((it * durationMs).toLong()) }
         dragging = null
         currentOnDragActive(false)
     }
-    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 28.dp)) {
         Box(
-            Modifier.fillMaxWidth().height(32.dp)
+            Modifier.fillMaxWidth().height(28.dp)
                 .onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
                 .pointerInput(durationMs) {
                     detectTapGestures { o -> if (durationMs > 0) currentOnSeek(((o.x / widthPx).coerceIn(0f, 1f) * durationMs).toLong()) }
@@ -618,18 +791,24 @@ private fun MusicSeekBar(
                 },
             contentAlignment = Alignment.CenterStart,
         ) {
-            Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(Color(0x40FFFFFF)))
-            Box(Modifier.fillMaxWidth(fraction).height(4.dp).clip(RoundedCornerShape(2.dp)).background(Color(0xE6FFFFFF)))
-            val thumb = if (dragging != null) 22.dp else 18.dp
+            Box(
+                Modifier.fillMaxWidth().height(trackHeight).clip(RoundedCornerShape(50))
+                    .background(if (immersive && dragging == null) Color(0x33FFFFFF) else Color(0x40FFFFFF)),
+            )
+            Box(
+                Modifier.fillMaxWidth(fraction).height(trackHeight).clip(RoundedCornerShape(50))
+                    .background(if (immersive && dragging == null) Color(0xCCFFFFFF) else Color(0xEBFFFFFF)),
+            )
             Box(
                 Modifier.offset { IntOffset((fraction * widthPx - thumb.toPx() / 2).roundToInt(), 0) }
-                    .size(thumb).clip(CircleShape).background(Color(0xFFE4E6EA)),
+                    .size(thumb).clip(CircleShape).background(Color(0xFFECEEF2)),
             )
         }
+        val clockColor = if (immersive && dragging == null) Color(0x59FFFFFF) else Faint
         Row(Modifier.fillMaxWidth()) {
-            Text(formatClock(dragging?.let { (it * durationMs).toLong() } ?: positionMs), color = Faint, fontSize = 13.sp)
+            Text(formatClock(dragging?.let { (it * durationMs).toLong() } ?: positionMs), color = clockColor, fontSize = 12.5.sp)
             Spacer(Modifier.weight(1f))
-            Text(formatClock(durationMs), color = Faint, fontSize = 13.sp)
+            Text(formatClock(durationMs), color = clockColor, fontSize = 12.5.sp)
         }
     }
 }
@@ -758,7 +937,7 @@ private fun LyricsPage(
                         translations?.getOrNull(i)?.let { Text(it, color = Dim, fontSize = 14.sp, textAlign = TextAlign.Center) }
                     }
                 }
-                else -> SyncedLyrics(lyrics, translations, positionMs, onSeek, Modifier.fillMaxSize())
+                else -> SyncedLyrics(lyrics, translations, positionMs, onSeek, Modifier.fillMaxSize(), immersive = !toolsShown)
             }
         }
         if (adjusting && lyrics?.synced == true && music.lyrics != null) {
@@ -848,7 +1027,14 @@ private fun MenuRow(text: String, icon: ImageVector, enabled: Boolean = true, on
 )
 
 @Composable
-private fun SyncedLyrics(lyrics: Lyrics, translations: List<String?>?, positionMs: Long, onSeek: (Long) -> Unit, modifier: Modifier) {
+private fun SyncedLyrics(
+    lyrics: Lyrics,
+    translations: List<String?>?,
+    positionMs: Long,
+    onSeek: (Long) -> Unit,
+    modifier: Modifier,
+    immersive: Boolean = false,
+) {
     val index = lyrics.indexAt(positionMs)
     val listState = rememberLazyListState()
     // 手动滑动后 4 秒内不自动滚
@@ -856,13 +1042,23 @@ private fun SyncedLyrics(lyrics: Lyrics, translations: List<String?>?, positionM
     val dragging = listState.isScrollInProgress
     LaunchedEffect(dragging) { if (dragging) touchedAt = System.currentTimeMillis() }
     var viewportPx by remember { mutableIntStateOf(0) }
+    val hasViewport = viewportPx > 0
+    val anchorRatio = if (immersive) 0.44f else 0.42f
+    val lineVertPad by animateDpAsState(if (immersive) 12.dp else 9.dp, tween(320), label = "lyricVertPad")
     val density = LocalDensity.current
-    LaunchedEffect(index, lyrics, viewportPx) {
-        if (viewportPx == 0) return@LaunchedEffect
+    LaunchedEffect(index, lyrics, hasViewport) {
+        if (!hasViewport) return@LaunchedEffect
         val wait = 4000 - (System.currentTimeMillis() - touchedAt)
         if (wait > 0) delay(wait)
         // 当前行放在中间偏上（第 0 项是顶部留白）
-        listState.animateScrollToItem(index.coerceAtLeast(0) + 1, -(viewportPx * 0.42f).toInt())
+        listState.animateScrollToItem(index.coerceAtLeast(0) + 1, -(viewportPx * anchorRatio).toInt())
+    }
+    LaunchedEffect(immersive) {
+        if (!hasViewport) return@LaunchedEffect
+        delay(380)
+        if (System.currentTimeMillis() - touchedAt >= 4000 && viewportPx > 0) {
+            listState.animateScrollToItem(index.coerceAtLeast(0) + 1, -(viewportPx * anchorRatio).toInt())
+        }
     }
     LazyColumn(
         modifier.onSizeChanged { viewportPx = it.height }
@@ -877,24 +1073,31 @@ private fun SyncedLyrics(lyrics: Lyrics, translations: List<String?>?, positionM
             },
         state = listState,
     ) {
-        item { Spacer(Modifier.height(with(density) { (viewportPx * 0.42f).toDp() })) }
+        item { Spacer(Modifier.height(with(density) { (viewportPx * anchorRatio).toDp() })) }
         itemsIndexed(lyrics.lines) { i, line ->
             val active = i == index
             Column(
                 Modifier.fillMaxWidth()
                     .clickable(remember { MutableInteractionSource() }, indication = null) { line.timeMs?.let(onSeek) }
-                    .padding(horizontal = 28.dp, vertical = 9.dp),
+                    .padding(horizontal = 30.dp, vertical = lineVertPad),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(
                     line.text.ifEmpty { "♪" },
-                    color = if (active) Color.White else Color(0x80FFFFFF),
-                    fontSize = if (active) 20.sp else 17.sp,
+                    color = if (active) Color.White else Color(0x78FFFFFF),
+                    fontSize = if (active) (if (immersive) 23.sp else 20.sp) else 17.sp,
                     fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-                    lineHeight = 28.sp, textAlign = TextAlign.Center,
+                    lineHeight = if (active && immersive) 32.sp else 28.sp,
+                    textAlign = TextAlign.Center,
                 )
                 translations?.getOrNull(i)?.let {
-                    Text(it, color = if (active) Color(0xDDFFFFFF) else Color(0x66FFFFFF), fontSize = if (active) 15.sp else 14.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 2.dp))
+                    Text(
+                        it,
+                        color = if (active) Color(0xDDFFFFFF) else Color(0x60FFFFFF),
+                        fontSize = if (active) (if (immersive) 16.sp else 15.sp) else 14.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(top = 3.dp),
+                    )
                 }
             }
         }

@@ -331,9 +331,17 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    val wasStreaming = engine is com.aisub.player.asr.cloud.StreamingCloudEngine
                     runCatching { engine?.close() }
                     engine = null
-                    if (candidateIdx + 1 < candidates.size) {
+                    if (wasStreaming) {
+                        log("${curEngineType.label} 流式识别异常（${e.message}），自动切换为分段识别")
+                        _state.update { it.copy(status = "${curEngineType.label} 流式不可用，已切换为分段识别…") }
+                        engine = createEngine(curEngineType, settings, ahead = false, allowStreaming = false)
+                        engineAhead = chunk.ahead
+                        engineBase = audioMs - lenMs
+                        engine!!.accept(chunk.samples) { c -> publish(c.copy(startMs = c.startMs + engineBase, endMs = c.endMs + engineBase), s) }
+                    } else if (candidateIdx + 1 < candidates.size) {
                         val failed = candidates[candidateIdx]
                         candidateIdx++
                         val next = candidates[candidateIdx]
@@ -355,8 +363,13 @@ class WebCaptions(private val app: Application, private val scope: CoroutineScop
         }
     }
 
-    private fun createEngine(engineType: AsrEngine, s: AppSettings, ahead: Boolean): SpeechEngine {
-        if (!ahead && s.streamingAvailableFor(engineType)) s.createStreamingEngineFor(engineType)?.let { return it }
+    private fun createEngine(engineType: AsrEngine, s: AppSettings, ahead: Boolean, allowStreaming: Boolean = true): SpeechEngine {
+        if (allowStreaming && !ahead && s.streamingAvailableFor(engineType)) {
+            s.createStreamingEngineFor(engineType)?.let { engine ->
+                (engine as? com.aisub.player.asr.cloud.StreamingCloudEngine)?.liveStream = true
+                return engine
+            }
+        }
         return if (engineType == AsrEngine.LOCAL) {
             val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
             // 本地模型要等一段话说完才出字：边播边读时一段最长 4 秒，不然字幕会晚十几秒

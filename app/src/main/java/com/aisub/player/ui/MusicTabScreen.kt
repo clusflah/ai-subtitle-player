@@ -314,6 +314,9 @@ fun MusicTabScreen(
                     reloadNonce = reloadNonce,
                     onRequestPermission = onRequestPermission,
                     onOpenSourceSettings = { showSourceSettings = true },
+                    onReauthServer = { srv ->
+                        addServerFlow = if (srv.type.isCloud) AddMusicServerFlow.Cloud(srv.type, srv) else AddMusicServerFlow.Storage(srv)
+                    },
                     onOpenLocalFilter = { activeDialog = MusicTabDialog.LOCAL_FILTER },
                     onPlayQueue = { queue, idx -> startQueuePlayback(queue, idx, true) },
                     onTracksLoaded = { loaded ->
@@ -436,11 +439,13 @@ fun MusicTabScreen(
             onDismiss = { addServerFlow = null },
             onLoggedIn = { saved ->
                 lib.saveServer(saved)
-                MusicSourceStore.selectServer(context, saved)
+                if (effectiveSpec.serverId != saved.id) {
+                    MusicSourceStore.selectServer(context, saved)
+                }
                 reloadNonce++
                 addServerFlow = null
                 scope.launch { pager.animateScrollToPage(2) }
-                showToast("已接入并切换至 ${saved.name}")
+                showToast(if (flow.existing != null) "已重新登录 ${saved.name}" else "已接入并切换至 ${saved.name}")
             },
         )
         is AddMusicServerFlow.Storage -> ServerDialog(
@@ -449,11 +454,13 @@ fun MusicTabScreen(
             onDismiss = { addServerFlow = null },
             onSave = { saved ->
                 lib.saveServer(saved)
-                MusicSourceStore.selectServer(context, saved, folderPath = saved.rootPath)
+                if (effectiveSpec.serverId != saved.id) {
+                    MusicSourceStore.selectServer(context, saved, folderPath = saved.rootPath)
+                }
                 reloadNonce++
                 addServerFlow = null
                 scope.launch { pager.animateScrollToPage(2) }
-                showToast("已接入并切换至 ${saved.name}")
+                showToast("已更新 ${saved.name}")
             },
         )
     }
@@ -606,6 +613,7 @@ private fun MusicLibraryBrowser(
     reloadNonce: Int,
     onRequestPermission: () -> Unit,
     onOpenSourceSettings: () -> Unit,
+    onReauthServer: (Server) -> Unit,
     onOpenLocalFilter: () -> Unit,
     onPlayQueue: (List<MediaEntry>, Int) -> Unit,
     onTracksLoaded: (List<MediaEntry>) -> Unit,
@@ -703,6 +711,9 @@ private fun MusicLibraryBrowser(
                 query = searchQuery.trim(),
                 currentPlayingUri = currentPlayingUri,
                 refreshKey = reloadNonce + refreshTick,
+                onReauth = { onReauthServer(server) },
+                onRetry = { refreshTick++ },
+                onOpenSourceSettings = onOpenSourceSettings,
                 onPlayQueue = onPlayQueue,
                 onTracksLoaded = onTracksLoaded,
             )
@@ -713,6 +724,9 @@ private fun MusicLibraryBrowser(
                 query = searchQuery.trim(),
                 currentPlayingUri = currentPlayingUri,
                 refreshKey = reloadNonce + refreshTick,
+                onReauth = { onReauthServer(server) },
+                onRetry = { refreshTick++ },
+                onOpenSourceSettings = onOpenSourceSettings,
                 onPlayQueue = onPlayQueue,
                 onTracksLoaded = onTracksLoaded,
                 onShowMessage = onShowMessage,
@@ -905,6 +919,9 @@ private fun StructuredServerMusicContent(
     query: String,
     currentPlayingUri: String?,
     refreshKey: Int,
+    onReauth: () -> Unit,
+    onRetry: () -> Unit,
+    onOpenSourceSettings: () -> Unit,
     onPlayQueue: (List<MediaEntry>, Int) -> Unit,
     onTracksLoaded: (List<MediaEntry>) -> Unit,
 ) {
@@ -994,10 +1011,17 @@ private fun StructuredServerMusicContent(
         loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = Orange)
         }
-        error != null -> DarkLibraryEmptyBox(
-            title = "无法读取 ${server.name}",
-            subtitle = error.orEmpty(),
-        )
+        error != null -> {
+            val authExpired = com.aisub.player.remote.ServerAuth.isServerAuthError(error)
+            DarkLibraryEmptyBox(
+                title = "无法读取 ${server.name}",
+                subtitle = error.orEmpty(),
+                primaryLabel = if (authExpired) com.aisub.player.remote.ServerAuth.reauthButtonLabel(server.type) else "重试",
+                onPrimary = if (authExpired) onReauth else onRetry,
+                secondaryLabel = if (authExpired) "重试" else "切换音源",
+                onSecondary = if (authExpired) onRetry else onOpenSourceSettings,
+            )
+        }
         items.isEmpty() -> DarkLibraryEmptyBox(
             title = if (query.isNotEmpty()) "没有找到匹配「$query」的音乐" else "该分类下暂无音乐内容",
             subtitle = "请确认 ${server.name} 中已建立音乐媒体库",
@@ -1052,6 +1076,9 @@ private fun StorageFolderMusicContent(
     query: String,
     currentPlayingUri: String?,
     refreshKey: Int,
+    onReauth: () -> Unit,
+    onRetry: () -> Unit,
+    onOpenSourceSettings: () -> Unit,
     onPlayQueue: (List<MediaEntry>, Int) -> Unit,
     onTracksLoaded: (List<MediaEntry>) -> Unit,
     onShowMessage: (String) -> Unit,
@@ -1138,7 +1165,17 @@ private fun StorageFolderMusicContent(
         loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = Orange)
         }
-        error != null -> DarkLibraryEmptyBox("无法读取目录", error.orEmpty())
+        error != null -> {
+            val authExpired = com.aisub.player.remote.ServerAuth.isServerAuthError(error)
+            DarkLibraryEmptyBox(
+                title = "无法读取目录",
+                subtitle = error.orEmpty(),
+                primaryLabel = if (authExpired) com.aisub.player.remote.ServerAuth.reauthButtonLabel(server.type) else "重试",
+                onPrimary = if (authExpired) onReauth else onRetry,
+                secondaryLabel = if (authExpired) "重试" else "切换音源",
+                onSecondary = if (authExpired) onRetry else onOpenSourceSettings,
+            )
+        }
         filteredDirs.isEmpty() && filteredTracks.isEmpty() -> DarkLibraryEmptyBox(
             title = if (query.isNotEmpty()) "当前目录无匹配项" else "当前目录下暂无音频文件",
             subtitle = "可进入包含 MP3 / FLAC / M4A / WAV 等音频的子文件夹并设为默认音乐目录",

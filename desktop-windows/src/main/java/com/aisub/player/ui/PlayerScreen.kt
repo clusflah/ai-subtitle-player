@@ -217,17 +217,34 @@ object PipState {
 @androidx.annotation.OptIn(UnstableApi::class)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PlayerScreen(vm: MainViewModel, onBack: () -> Unit, onOpenSettings: () -> Unit) {
+fun PlayerScreen(
+    vm: MainViewModel,
+    onBack: () -> Unit,
+    onOpenSettings: () -> Unit,
+    lib: com.aisub.player.LibraryViewModel? = null,
+) {
     MaterialTheme(colorScheme = PlayerColors, typography = MaterialTheme.typography, shapes = MaterialTheme.shapes) {
-        TvRipple { PlayerContent(vm, onBack, onOpenSettings) }
+        TvRipple { PlayerContent(vm, onBack, onOpenSettings, lib) }
     }
 }
 
 @androidx.annotation.OptIn(UnstableApi::class)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings: () -> Unit) {
+private fun PlayerContent(
+    vm: MainViewModel,
+    onBack: () -> Unit,
+    onOpenSettings: () -> Unit,
+    lib: com.aisub.player.LibraryViewModel? = null,
+) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val libState = lib?.state?.collectAsStateWithLifecycle()?.value
+    val currentServer = remember(state.current?.uri, libState?.servers) {
+        val servers = libState?.servers.orEmpty()
+        com.aisub.player.remote.ServerAuth.serverIdForMediaUri(state.current?.uri, servers)
+            ?.let { id -> servers.firstOrNull { it.id == id } }
+    }
+    var reauthServer by remember { mutableStateOf<com.aisub.player.remote.Server?>(null) }
     // 播放内核可在默认、MPV 与 VLC 之间实时切换
     val player by vm.playerFlow.collectAsStateWithLifecycle()
     val activeKernel = remember(player) { vm.activeKernel }
@@ -304,7 +321,8 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     }
     // 字幕时间轴上的"现在"：普通视频就是播放位置；直播实时字幕换算到直播流自己的时间线上（见 LiveTimeline）
     val subtitleNow = vm.subtitleTime(positionMs)
-    val current = state.cues.cueAt(subtitleNow - state.subtitleDelayMs)
+    val effectiveDelayMs = state.effectiveSubtitleDelayMs
+    val current = state.cues.cueAt(subtitleNow - effectiveDelayMs)
 
     // 同步应用内字幕活跃状态，供桌面全局悬浮字幕感知并自动避让双重叠加
     val inAppSubActive = isPlaying && state.settings.showAiSubtitles &&
@@ -474,20 +492,27 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     /** 本视频不再显示「生成字幕」提示 */
     var aiChipDismissed by remember(state.current?.uri) { mutableStateOf(false) }
     /** 视频自带的字幕轨（不在 state.cues 里，由播放器直接渲染） */
-    var embeddedTracks by remember(player) { mutableStateOf(emptyList<EmbeddedTrackInfo>()) }
-    DisposableEffect(player) {
+    var embeddedTracks by remember(player, state.current?.uri) { mutableStateOf(emptyList<EmbeddedTrackInfo>()) }
+    var sawLiveTextCues by remember(player, state.current?.uri) { mutableStateOf(false) }
+    DisposableEffect(player, isLive, sawLiveTextCues) {
         val p = player
         fun update(tracks: androidx.media3.common.Tracks) {
             embeddedTracks = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }.flatMap { g ->
-                (0 until g.length).map { i ->
+                (0 until g.length).mapNotNull { i ->
                     val f = g.getTrackFormat(i)
-                    EmbeddedTrackInfo(f.language, f.label, (f.codecs ?: f.sampleMimeType) in IMAGE_SUBTITLE_TYPES)
+                    if (isLive && !sawLiveTextCues && isPhantomLiveCeaTrack(f)) null
+                    else EmbeddedTrackInfo(f.language, f.label, (f.codecs ?: f.sampleMimeType) in IMAGE_SUBTITLE_TYPES)
                 }
             }
         }
         update(p.currentTracks)
         val listener = object : Player.Listener {
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) = update(tracks)
+            override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
+                if (isLive && !sawLiveTextCues && cueGroup.cues.any { !it.text.isNullOrBlank() }) {
+                    sawLiveTextCues = true
+                }
+            }
         }
         p.addListener(listener)
         onDispose { p.removeListener(listener) }
@@ -895,7 +920,17 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                         Text(if (showDetail) "收起详细信息" else "详细信息", color = Color(0xFF999999), fontSize = 12.sp)
                     }
                 }
+                val authExpired = currentServer != null && com.aisub.player.remote.ServerAuth.isServerAuthError(error)
                 Row(Modifier.focusRequester(errorFocus)) {
+                    if (authExpired && currentServer != null) {
+                        TextButton(onClick = { reauthServer = currentServer }) {
+                            Text(
+                                com.aisub.player.remote.ServerAuth.reauthButtonLabel(currentServer.type),
+                                color = Orange,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
                     TextButton(onClick = { vm.togglePlay() }) { Text("重试", color = Orange) }
                     if (!vm.usingMpv) TextButton(onClick = { vm.switchToMpv() }) { Text("MPV 内核播放", color = Orange) }
                     if (!vm.usingVlc) TextButton(onClick = { vm.switchToVlc() }) { Text("VLC 内核", color = Orange) }
@@ -904,6 +939,23 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
                             Text("Media3 内核", color = Color(0xFFCCCCCC))
                         }
                     }
+                }
+            }
+        }
+
+        if (reauthServer != null && lib != null) {
+            val srv = libState?.servers?.firstOrNull { it.id == reauthServer!!.id } ?: reauthServer!!
+            AppTheme {
+                androidx.compose.runtime.CompositionLocalProvider(LocalForceDarkPopup provides true) {
+                    ServerReauthDialog(
+                        server = srv,
+                        onDismiss = { reauthServer = null },
+                        onSaved = { updated ->
+                            lib.saveServer(updated)
+                            reauthServer = null
+                            vm.retryPlaybackAfterAuth()
+                        },
+                    )
                 }
             }
         }
@@ -1942,7 +1994,7 @@ private fun PlayerContent(vm: MainViewModel, onBack: () -> Unit, onOpenSettings:
     }
     editing?.let { cue ->
         CueEditDialog(
-            cue, subtitleNow - state.subtitleDelayMs,
+            cue, subtitleNow - effectiveDelayMs,
             onDismiss = { editing = null },
             onDelete = { vm.deleteCue(cue.id); editing = null },
         ) { text, translation, start, end ->
@@ -2813,6 +2865,14 @@ private fun TrackPanel(vm: MainViewModel, state: UiState, ai: Boolean, onSubtitl
 
 /** 图形字幕（没有文字，读不出来翻译）的格式 */
 private val IMAGE_SUBTITLE_TYPES = setOf("application/pgs", "application/vobsub", "application/dvbsubs")
+
+/** TS 解复用器在直播流里常挂出无语言、无标签的空 CEA-608/708 占位轨；未真正收到字幕前不当作有效自带字幕 */
+private fun isPhantomLiveCeaTrack(f: androidx.media3.common.Format): Boolean {
+    if (!f.language.isNullOrBlank() || !f.label.isNullOrBlank()) return false
+    val codec = (f.codecs ?: f.sampleMimeType).orEmpty()
+    val sample = f.sampleMimeType.orEmpty()
+    return "cea-608" in codec || "cea-708" in codec || "cea-608" in sample || "cea-708" in sample
+}
 
 /** 自带字幕轨的名字：语言 + 强制 / SDH / 格式，方便区分同语言的几条 */
 private fun subtitleTrackName(f: androidx.media3.common.Format, groupIndex: Int): String {

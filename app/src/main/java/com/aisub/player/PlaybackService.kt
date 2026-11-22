@@ -26,12 +26,14 @@ class PlaybackService : MediaSessionService() {
 
     /** 服务还在、会话换成了新界面建的（旧界面刚退出又马上打开）：把新会话也交给系统 */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_WIDGET_PLAY && !WidgetPlayback.start(this)) {
-            // 用 startForegroundService 启动的，必须先转到前台，否则系统会让应用闪退；没有能放的歌就马上结束
+        if (intent?.action == ACTION_WIDGET_PLAY) {
+            // 用 startForegroundService 启动的，必须立即转到前台，避免远程音乐缓冲慢时超过 5 秒触发系统闪退
             showBriefForeground()
-            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return START_NOT_STICKY
+            if (!WidgetPlayback.start(this)) {
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return START_NOT_STICKY
+            }
         }
         session?.takeIf { !isSessionAdded(it) }?.let(::addSession)
         return super.onStartCommand(intent, flags, startId)

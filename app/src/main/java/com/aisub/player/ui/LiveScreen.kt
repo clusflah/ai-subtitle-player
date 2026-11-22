@@ -150,11 +150,6 @@ fun LiveScreen(onBack: () -> Unit, play: (List<MediaEntry>, Int) -> Unit) {
                                             onClick = { sourceMenu = false; if (!chosen) vm.select(s, refresh = false) },
                                         )
                                     }
-                                    DropdownMenuItem(
-                                        text = { Text("添加直播源…") },
-                                        leadingIcon = { Icon(AppIcons.Add, null) },
-                                        onClick = { sourceMenu = false; adding = true },
-                                    )
                                 }
                             }
                         }
