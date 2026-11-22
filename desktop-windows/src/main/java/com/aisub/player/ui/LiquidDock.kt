@@ -55,11 +55,13 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -143,6 +145,9 @@ internal fun LiquidDock(
     val dropletTint = if (tv && focusedSlot >= 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.88f) else GlassTokens.DarkDropletTint
     val activeAccent = GlassTokens.DarkActiveBlue
 
+    var dockSize by remember { mutableStateOf(IntSize.Zero) }
+    val density = LocalDensity.current
+
     Box(
         modifier
             .fillMaxWidth()
@@ -164,46 +169,47 @@ internal fun LiquidDock(
                 tint = barTint,
                 lightShift = lightPhase * 0.5f,
             )
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+            .onSizeChanged { dockSize = it },
     ) {
-        if (dropletAlpha > 0.01f) {
-            BoxWithConstraints(Modifier.fillMaxSize()) {
-                val safeMaxW = maxWidth.coerceAtLeast(1.dp)
-                val slotWidth = (safeMaxW / safeCount).coerceIn(1.dp, safeMaxW)
-                val leftEdgeIndex = min(fastPos, slowPos)
-                val rightEdgeIndex = max(fastPos, slowPos)
-                val stretch = (rightEdgeIndex - leftEdgeIndex).coerceIn(0f, safeCount.toFloat())
-                val extraWidthFactor = (stretch * 1.05f + abs(wobble) * 0.24f + dockPress * 0.08f).coerceIn(0f, safeCount.toFloat())
-                val centerShift = (extraWidthFactor - stretch) * 0.5f
-                val dropletWidth = (slotWidth * (1f + extraWidthFactor)).coerceIn(slotWidth, safeMaxW)
-                val maxLeft = (safeMaxW - dropletWidth).coerceAtLeast(0.dp)
-                val dropletLeft = (slotWidth * (leftEdgeIndex - centerShift)).coerceIn(0.dp, maxLeft)
-                val dropletScaleY = (1f - (stretch * 0.12f).coerceAtMost(0.14f) + abs(wobble) * 0.06f - dockPress * 0.04f)
-                    .coerceIn(0.86f, 1.04f)
+        if (dropletAlpha > 0.01f && dockSize.width > 0 && dockSize.height > 0) {
+            val safeMaxW = dockSize.width.toFloat().coerceAtLeast(1f)
+            val slotW = (safeMaxW / safeCount).coerceIn(1f, safeMaxW)
+            val leftEdgeIndex = min(fastPos, slowPos)
+            val rightEdgeIndex = max(fastPos, slowPos)
+            val stretch = (rightEdgeIndex - leftEdgeIndex).coerceIn(0f, safeCount.toFloat())
+            val extraWidthFactor = (stretch * 1.05f + abs(wobble) * 0.24f + dockPress * 0.08f).coerceIn(0f, safeCount.toFloat())
+            val centerShift = (extraWidthFactor - stretch) * 0.5f
+            val dropletW = (slotW * (1f + extraWidthFactor)).roundToInt().toFloat().coerceIn(slotW, safeMaxW)
+            val maxLeft = (safeMaxW - dropletW).coerceAtLeast(0f)
+            val dropletLeftPx = (slotW * (leftEdgeIndex - centerShift)).coerceIn(0f, maxLeft).roundToInt()
+            val dropletScaleY = (1f - (stretch * 0.12f).coerceAtMost(0.14f) + abs(wobble) * 0.06f - dockPress * 0.04f)
+                .coerceIn(0.86f, 1.04f)
+            val dropletWidthDp = with(density) { dropletW.toDp() }
+            val dropletHeightDp = with(density) { dockSize.height.toDp() }
 
-                Box(
-                    Modifier
-                        .padding(start = dropletLeft)
-                        .size(width = dropletWidth, height = maxHeight)
-                        .graphicsLayer {
-                            scaleY = dropletScaleY
-                            alpha = dropletAlpha
-                        }
-                        .shadow(
-                            elevation = 8.dp,
-                            shape = barShape,
-                            ambientColor = activeAccent.copy(alpha = 0.22f * dropletAlpha),
-                            spotColor = activeAccent.copy(alpha = 0.32f * dropletAlpha),
-                        )
-                        .liquidGlass(
-                            shape = barShape,
-                            style = GlassStyle.Floating,
-                            tint = dropletTint,
-                            borderColor = if (tv && focusedSlot >= 0) Color.White else Color(0x88FFFFFF),
-                            lightShift = lightPhase,
-                        ),
-                )
-            }
+            Box(
+                Modifier
+                    .offset { IntOffset(dropletLeftPx, 0) }
+                    .size(width = dropletWidthDp, height = dropletHeightDp)
+                    .graphicsLayer {
+                        scaleY = dropletScaleY
+                        alpha = dropletAlpha
+                    }
+                    .shadow(
+                        elevation = 8.dp,
+                        shape = barShape,
+                        ambientColor = activeAccent.copy(alpha = 0.22f * dropletAlpha),
+                        spotColor = activeAccent.copy(alpha = 0.32f * dropletAlpha),
+                    )
+                    .liquidGlass(
+                        shape = barShape,
+                        style = GlassStyle.Floating,
+                        tint = dropletTint,
+                        borderColor = if (tv && focusedSlot >= 0) Color.White else Color(0x88FFFFFF),
+                        lightShift = lightPhase,
+                    ),
+            )
         }
 
         Row(

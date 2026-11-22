@@ -152,6 +152,10 @@ fun HomeScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var dialog by remember { mutableStateOf<HomeDialog?>(null) }
     var barVisible by remember { mutableStateOf(true) }
+    var musicBarsVisible by remember { mutableStateOf(true) }
+    LaunchedEffect(tab) {
+        if (tab != Tab.MUSIC) musicBarsVisible = true
+    }
 
     // 向下滚动时隐藏底部导航，向上滚动时恢复
     val scrollWatcher = remember {
@@ -203,7 +207,15 @@ fun HomeScreen(
         }
         query = ""
         barVisible = true
+        musicBarsVisible = true
     }
+
+    val showBottomNav = if (tab == Tab.MUSIC) musicBarsVisible else barVisible
+    val musicBottomReserve by androidx.compose.animation.core.animateDpAsState(
+        targetValue = if (!wide && glass && showBottomNav) 84.dp else 0.dp,
+        animationSpec = androidx.compose.animation.core.tween(320),
+        label = "musicBottomReserve",
+    )
 
     GlassBackdropBox { backdrop ->
     Scaffold(
@@ -458,7 +470,6 @@ fun HomeScreen(
                 NowPlayingBar(main, bottomPadding = 4.dp, onOpen = { selectTab(Tab.MUSIC) }, navigationBarInset = false)
             }
             // 电视、横屏平板：标签放在左侧竖栏（见下面），底部不放
-            val showBottomNav = barVisible || tab == Tab.MUSIC
             if (!wide) AnimatedVisibility(showBottomNav, enter = slideInVertically { it }, exit = slideOutVertically { it }) {
                 LiquidGlassBottomBar(
                     items = remember {
@@ -567,8 +578,9 @@ fun HomeScreen(
                 Tab.MUSIC -> MusicTabScreen(
                     lib = lib,
                     main = main,
-                    bottomOverlayPadding = if (!wide && glass) 84.dp else 0.dp,
+                    bottomOverlayPadding = musicBottomReserve,
                     applyNavigationBarInset = glass,
+                    onBarsVisibleChange = { musicBarsVisible = it },
                     onRequestPermission = onRequestPermission,
                     onOpenAppSettings = openSettings,
                 )

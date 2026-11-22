@@ -33,6 +33,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -42,9 +43,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -63,8 +61,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -126,6 +126,7 @@ fun MusicTabScreen(
     main: MainViewModel,
     bottomOverlayPadding: Dp = 0.dp,
     applyNavigationBarInset: Boolean = true,
+    onBarsVisibleChange: ((Boolean) -> Unit)? = null,
     onRequestPermission: () -> Unit,
     onOpenAppSettings: () -> Unit,
 ) {
@@ -268,6 +269,13 @@ fun MusicTabScreen(
         }
     }
 
+    val anyOverlayOpen = showSourceSettings ||
+        editingSong ||
+        musicSearchCovers != null ||
+        addingToPlaylist ||
+        activeDialog != null ||
+        addServerFlow != null
+
     Box(Modifier.fillMaxSize()) {
         MusicView(
             vm = main,
@@ -287,8 +295,9 @@ fun MusicTabScreen(
             standbyCover = standbyCover,
             onIdlePlay = handleIdlePlay,
             externalPager = pager,
-            onOpenSourceSettings = { showSourceSettings = true },
-            topLeadingContent = {
+            externalHoldVisible = anyOverlayOpen,
+            onBarsVisibleChange = onBarsVisibleChange,
+            topTrailingContent = {
                 MusicSourcePill(
                     spec = effectiveSpec,
                     server = activeServer,
@@ -551,11 +560,11 @@ private fun MusicSourcePill(
     val pillShape = RoundedCornerShape(50)
     Row(
         modifier = Modifier
-            .widthIn(max = 118.dp)
+            .widthIn(max = 140.dp)
             .tvFocusRing(pillShape, color = Color.White)
-            .liquidGlass(shape = pillShape, style = GlassStyle.Pill, tint = Color(0x2EFFFFFF))
+            .liquidGlass(shape = pillShape, style = GlassStyle.Pill, tint = Color(0x30FFFFFF))
             .clickable(onClick = onClick)
-            .padding(start = 7.dp, end = 10.dp, top = 5.dp, bottom = 5.dp),
+            .padding(start = 9.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (server != null) {
@@ -563,14 +572,22 @@ private fun MusicSourcePill(
         } else {
             SourceBadgeIcon(SourceBadgeKind.LOCAL_MUSIC, size = 18.dp)
         }
-        Spacer(Modifier.width(5.dp))
+        Spacer(Modifier.width(6.dp))
         Text(
             text = if (spec.isLocal) "本机" else server?.name?.ifBlank { server.type.label } ?: spec.label,
             color = Color.White,
-            fontSize = 12.sp,
+            fontSize = 13.sp,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Spacer(Modifier.width(2.dp))
+        Icon(
+            imageVector = AppIcons.ExpandMore,
+            contentDescription = "切换音乐源与设置",
+            tint = Color(0xCCFFFFFF),
+            modifier = Modifier.size(16.dp),
         )
     }
 }
@@ -602,9 +619,9 @@ private fun MusicLibraryBrowser(
             .fillMaxSize()
             .padding(horizontal = 16.dp, vertical = 4.dp),
     ) {
-        // 顶部音源信息条 + 搜索框
+        // 顶部搜索框 + 刷新按钮（采用无默认内边距的 BasicTextField，保证文字完整垂直居中显示不裁切）
         Row(
-            Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            Modifier.fillMaxWidth().padding(bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -614,27 +631,43 @@ private fun MusicLibraryBrowser(
                     .weight(1f)
                     .height(42.dp)
                     .liquidGlass(shape = searchShape, style = GlassStyle.Pill, tint = Color(0x28FFFFFF))
-                    .padding(start = 12.dp, end = 4.dp),
+                    .padding(start = 14.dp, end = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(AppIcons.Search, null, tint = Color(0xB3FFFFFF), modifier = Modifier.size(18.dp))
-                TextField(
+                Spacer(Modifier.width(8.dp))
+                BasicTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
-                    placeholder = { Text("搜索歌曲、歌手、专辑", color = Color(0x88FFFFFF), fontSize = 13.sp, maxLines = 1) },
                     singleLine = true,
-                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = Color.White, fontSize = 14.sp),
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = Color.Transparent,
-                        unfocusedContainerColor = Color.Transparent,
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent,
-                        cursorColor = Orange,
+                    textStyle = TextStyle(
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        lineHeight = 18.sp,
                     ),
+                    cursorBrush = SolidColor(Orange),
                     modifier = Modifier.weight(1f),
+                    decorationBox = { innerTextField ->
+                        Box(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentAlignment = Alignment.CenterStart,
+                        ) {
+                            if (searchQuery.isEmpty()) {
+                                Text(
+                                    text = "搜索歌曲、歌手、专辑",
+                                    color = Color(0x99FFFFFF),
+                                    fontSize = 14.sp,
+                                    lineHeight = 18.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            innerTextField()
+                        }
+                    },
                 )
                 if (searchQuery.isNotEmpty()) {
-                    IconButton(onClick = { searchQuery = "" }, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = { searchQuery = "" }, modifier = Modifier.size(30.dp)) {
                         Icon(AppIcons.Close, "清除", tint = Color(0xCCFFFFFF), modifier = Modifier.size(16.dp))
                     }
                 }
@@ -645,22 +678,11 @@ private fun MusicLibraryBrowser(
                     onShowMessage("正在刷新音乐库…")
                 },
                 modifier = Modifier
-                    .size(40.dp)
+                    .size(42.dp)
                     .liquidGlass(shape = CircleShape, style = GlassStyle.Pill, tint = Color(0x28FFFFFF)),
             ) {
                 Icon(AppIcons.Refresh, "刷新", tint = Color.White, modifier = Modifier.size(19.dp))
             }
-            Text(
-                text = "切换音源",
-                color = Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier
-                    .tvFocusRing(RoundedCornerShape(50), color = Color.White)
-                    .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Orange.copy(alpha = 0.80f))
-                    .clickable(onClick = onOpenSourceSettings)
-                    .padding(horizontal = 12.dp, vertical = 9.dp),
-            )
         }
 
         when {

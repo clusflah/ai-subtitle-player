@@ -155,8 +155,9 @@ fun MusicView(
     standbyTags: com.aisub.player.music.TrackTags? = null,
     standbyCover: android.graphics.Bitmap? = null,
     onIdlePlay: (() -> Unit)? = null,
-    topLeadingContent: (@Composable () -> Unit)? = null,
-    onOpenSourceSettings: (() -> Unit)? = null,
+    topTrailingContent: (@Composable () -> Unit)? = null,
+    externalHoldVisible: Boolean = false,
+    onBarsVisibleChange: ((Boolean) -> Unit)? = null,
     externalPager: androidx.compose.foundation.pager.PagerState? = null,
     libraryTabContent: (@Composable () -> Unit)? = null,
 ) {
@@ -190,19 +191,28 @@ fun MusicView(
     val translations = if (!activeMusic) null else if (music.lyrics != null) music.translations else remember(cues) {
         cues.sortedBy { it.startMs }.map { it.translation }.takeIf { t -> t.any { it != null } }
     }
-    // 竖屏停在歌词页时，一会儿不操作就淡出下方控件，让歌词占满；处于「乐库」页时竖屏收起下方大面板腾出选歌空间
+    // 播放满 3 秒无操作时自动隐藏顶部栏与底部按钮行；暂停、拖动进度或轻点屏幕立即恢复显示
     var touches by remember { mutableIntStateOf(0) }
-    var controlsShown by remember { mutableStateOf(true) }
-    LaunchedEffect(pager.currentPage, touches, landscape, showMenu, showQueue, onLibraryPage) {
-        if (onLibraryPage && !landscape) {
-            controlsShown = false
+    var seekDragging by remember { mutableStateOf(false) }
+    var barsVisible by remember { mutableStateOf(true) }
+    LaunchedEffect(pager.currentPage, touches, effectiveWantsPlay, showMenu, showQueue, seekDragging, externalHoldVisible, onLibraryPage) {
+        if (onLibraryPage) {
+            barsVisible = true
             return@LaunchedEffect
         }
-        controlsShown = true
-        if (onLyricsPage && !landscape && !showMenu && !showQueue) {
-            delay(4_000)
-            controlsShown = false
+        barsVisible = true
+        if (effectiveWantsPlay && !showMenu && !showQueue && !seekDragging && !externalHoldVisible) {
+            delay(3_000)
+            barsVisible = false
         }
+    }
+    LaunchedEffect(barsVisible, onLibraryPage) {
+        onBarsVisibleChange?.invoke(barsVisible || onLibraryPage)
+    }
+    val controlsPanelShown = when {
+        onLibraryPage && !landscape -> false
+        onLyricsPage && !landscape -> barsVisible
+        else -> true
     }
 
     Box(
@@ -229,22 +239,31 @@ fun MusicView(
         }
         val pages: @Composable (Modifier) -> Unit = { mod ->
             Column(mod) {
-                TopTabs(
-                    page = pager.currentPage,
-                    showLibraryTab = libraryTabContent != null,
-                    onBack = onBack,
-                    leadingContent = topLeadingContent,
-                    onOpenSourceSettings = onOpenSourceSettings,
-                ) { scope.launch { pager.animateScrollToPage(it) } }
+                AnimatedVisibility(
+                    visible = barsVisible || onLibraryPage,
+                    enter = fadeIn(tween(220)) + expandVertically(tween(220)),
+                    exit = fadeOut(tween(420)) + shrinkVertically(tween(420)),
+                ) {
+                    TopTabs(
+                        page = pager.currentPage,
+                        showLibraryTab = libraryTabContent != null,
+                        onBack = onBack,
+                        trailingContent = topTrailingContent,
+                    ) {
+                        touches++
+                        scope.launch { pager.animateScrollToPage(it) }
+                    }
+                }
+                val vinylVisible = pager.currentPage == 0 || pager.targetPage == 0
                 HorizontalPager(pager, Modifier.weight(1f).fillMaxWidth(), beyondViewportPageCount = 1) { page ->
                     when (page) {
                         LYRICS_PAGE -> LyricsPage(
                             vm, music, lyrics, translations, positionMs, onSeek, onAction, onMessage,
-                            toolsShown = controlsShown, activeMusic = activeMusic,
+                            toolsShown = barsVisible, activeMusic = activeMusic,
                         )
                         LIBRARY_PAGE -> libraryTabContent?.invoke()
                         else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Vinyl(displayCover, effectiveWantsPlay, Modifier.fillMaxWidth(if (landscape) 0.62f else 0.84f).widthIn(max = 420.dp))
+                            Vinyl(displayCover, effectiveWantsPlay && vinylVisible, Modifier.fillMaxWidth(if (landscape) 0.62f else 0.84f).widthIn(max = 420.dp))
                         }
                     }
                 }
@@ -252,7 +271,7 @@ fun MusicView(
         }
         val controls: @Composable (Modifier) -> Unit = { mod ->
             Column(mod) {
-                SongTitleRow(tags.title, listOfNotNull(tags.artist, tags.album).joinToString(" - "), liked, toggleLike) { showMenu = true }
+                SongTitleRow(tags.title, listOfNotNull(tags.artist, tags.album).joinToString(" - "), liked, { touches++; toggleLike() }) { touches++; showMenu = true }
                 // 歌词页以外，在歌名下面显示正在唱的一句
                 val line = lyrics?.takeIf { it.synced && !onLyricsPage }?.let { l -> l.lines.getOrNull(l.indexAt(positionMs))?.text }
                 if (line != null && !landscape) Text(
@@ -263,17 +282,31 @@ fun MusicView(
                 MusicSeekBar(
                     positionMs = if (activeMusic) positionMs else positionMs.coerceAtMost(effectiveDuration),
                     durationMs = effectiveDuration,
-                    onSeek = { target -> if (activeMusic) onSeek(target) else onIdlePlay?.invoke() },
+                    onSeek = { target ->
+                        touches++
+                        if (activeMusic) onSeek(target) else onIdlePlay?.invoke()
+                    },
+                    onDragActiveChange = { seekDragging = it; touches++ },
                 )
-                PlayControls(
-                    vm = vm,
-                    player = player,
-                    wantsPlay = effectiveWantsPlay,
-                    activeMusic = activeMusic,
-                    onIdlePlay = onIdlePlay,
-                    onMessage = onMessage,
-                    onQueue = { if (activeMusic && vm.queueSize > 0) showQueue = true else if (libraryTabContent != null) scope.launch { pager.animateScrollToPage(LIBRARY_PAGE) } },
-                )
+                AnimatedVisibility(
+                    visible = barsVisible,
+                    enter = fadeIn(tween(220)) + expandVertically(tween(220)),
+                    exit = fadeOut(tween(420)) + shrinkVertically(tween(420)),
+                ) {
+                    PlayControls(
+                        vm = vm,
+                        player = player,
+                        wantsPlay = effectiveWantsPlay,
+                        activeMusic = activeMusic,
+                        onIdlePlay = onIdlePlay,
+                        onMessage = { touches++; onMessage(it) },
+                        onQueue = {
+                            touches++
+                            if (activeMusic && vm.queueSize > 0) showQueue = true
+                            else if (libraryTabContent != null) scope.launch { pager.animateScrollToPage(LIBRARY_PAGE) }
+                        },
+                    )
+                }
             }
         }
         val insetMod = Modifier.fillMaxSize()
@@ -289,9 +322,9 @@ fun MusicView(
             Column(insetMod) {
                 pages(Modifier.weight(1f).fillMaxWidth())
                 AnimatedVisibility(
-                    controlsShown,
+                    controlsPanelShown,
                     enter = fadeIn(tween(250)) + expandVertically(tween(250)),
-                    exit = fadeOut(tween(800)) + shrinkVertically(tween(800)),
+                    exit = fadeOut(tween(500)) + shrinkVertically(tween(500)),
                 ) { controls(Modifier.fillMaxWidth().padding(bottom = if (inHomeTab) 10.dp else 20.dp)) }
             }
         }
@@ -310,11 +343,20 @@ fun MusicView(
     }
 }
 
-/** 背景：封面缩成很小再放大（就是模糊，Modifier.blur 要 Android 12），再压暗 */
+/** 背景：封面缩成很小再放大（就是模糊，Modifier.blur 要 Android 12），再压暗；兼容 HARDWARE 位图防崩溃 */
 @Composable
 private fun Backdrop(bmp: android.graphics.Bitmap?) {
-    if (bmp == null) return
-    val tiny = remember(bmp) { android.graphics.Bitmap.createScaledBitmap(bmp, 16, 16, true).asImageBitmap() }
+    if (bmp == null || bmp.isRecycled || bmp.width <= 0 || bmp.height <= 0) return
+    val tiny = remember(bmp) {
+        runCatching {
+            val safeBmp = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O && bmp.config == android.graphics.Bitmap.Config.HARDWARE) {
+                bmp.copy(android.graphics.Bitmap.Config.ARGB_8888, false) ?: return@runCatching null
+            } else {
+                bmp
+            }
+            android.graphics.Bitmap.createScaledBitmap(safeBmp, 16, 16, true).asImageBitmap()
+        }.getOrNull()
+    } ?: return
     Image(
         tiny, null, contentScale = ContentScale.Crop, filterQuality = androidx.compose.ui.graphics.FilterQuality.High,
         modifier = Modifier.fillMaxSize().alpha(0.7f),
@@ -327,43 +369,61 @@ private fun TopTabs(
     page: Int,
     showLibraryTab: Boolean,
     onBack: (() -> Unit)?,
-    leadingContent: (@Composable () -> Unit)?,
-    onOpenSourceSettings: (() -> Unit)?,
+    trailingContent: (@Composable () -> Unit)?,
     onSelect: (Int) -> Unit,
 ) {
     val tabs = if (showLibraryTab) listOf("歌曲", "歌词", "乐库") else listOf("歌曲", "歌词")
-    Box(Modifier.fillMaxWidth().height(56.dp)) {
-        if (onBack != null) {
-            IconButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterStart).padding(start = 8.dp)) {
-                Icon(AppIcons.ExpandMore, "返回", tint = Color.White, modifier = Modifier.size(30.dp))
-            }
-        } else if (leadingContent != null) {
-            Box(Modifier.align(Alignment.CenterStart).padding(start = 12.dp)) {
-                leadingContent()
-            }
-        }
-        Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(if (showLibraryTab) 20.dp else 28.dp)) {
-            tabs.forEachIndexed { i, label ->
-                Text(
-                    label, color = if (i == page) Color.White else Dim, fontSize = 18.sp,
-                    fontWeight = if (i == page) FontWeight.SemiBold else FontWeight.Normal,
-                    modifier = Modifier
-                        .tvFocusRing(RoundedCornerShape(6.dp), color = Color.White)
-                        .clip(RoundedCornerShape(6.dp))
-                        .clickable { onSelect(i) }
-                        .padding(horizontal = 4.dp, vertical = 6.dp),
-                )
-            }
-        }
-        if (onOpenSourceSettings != null) {
-            IconButton(
-                onClick = onOpenSourceSettings,
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = 8.dp)
-                    .tvFocusRing(CircleShape, color = Color.White),
+    if (onBack == null && trailingContent != null) {
+        Row(
+            Modifier.fillMaxWidth().height(56.dp).padding(start = 22.dp, end = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(24.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(AppIcons.Settings, "音乐源与设置", tint = Color.White, modifier = Modifier.size(24.dp))
+                tabs.forEachIndexed { i, label ->
+                    val selected = i == page
+                    Text(
+                        label,
+                        color = if (selected) Color.White else Dim,
+                        fontSize = if (selected) 19.sp else 17.sp,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier
+                            .tvFocusRing(RoundedCornerShape(6.dp), color = Color.White)
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { onSelect(i) }
+                            .padding(horizontal = 4.dp, vertical = 6.dp),
+                    )
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            trailingContent()
+        }
+    } else {
+        Box(Modifier.fillMaxWidth().height(56.dp)) {
+            if (onBack != null) {
+                IconButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterStart).padding(start = 8.dp)) {
+                    Icon(AppIcons.ExpandMore, "返回", tint = Color.White, modifier = Modifier.size(30.dp))
+                }
+            }
+            Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(if (showLibraryTab) 22.dp else 28.dp)) {
+                tabs.forEachIndexed { i, label ->
+                    Text(
+                        label, color = if (i == page) Color.White else Dim, fontSize = 18.sp,
+                        fontWeight = if (i == page) FontWeight.SemiBold else FontWeight.Normal,
+                        modifier = Modifier
+                            .tvFocusRing(RoundedCornerShape(6.dp), color = Color.White)
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { onSelect(i) }
+                            .padding(horizontal = 4.dp, vertical = 6.dp),
+                    )
+                }
+            }
+            if (trailingContent != null) {
+                Box(Modifier.align(Alignment.CenterEnd).padding(end = 16.dp)) {
+                    trailingContent()
+                }
             }
         }
     }
@@ -434,12 +494,22 @@ private fun SongTitleRow(title: String, subtitle: String, liked: Boolean, onLike
 // ---------------- 进度条 ----------------
 
 @Composable
-private fun MusicSeekBar(positionMs: Long, durationMs: Long, onSeek: (Long) -> Unit) {
+private fun MusicSeekBar(
+    positionMs: Long,
+    durationMs: Long,
+    onSeek: (Long) -> Unit,
+    onDragActiveChange: (Boolean) -> Unit = {},
+) {
     var widthPx by remember { mutableFloatStateOf(1f) }
     var dragging by remember { mutableStateOf<Float?>(null) }
     val currentOnSeek by rememberUpdatedState(onSeek)
+    val currentOnDragActive by rememberUpdatedState(onDragActiveChange)
     val fraction = dragging ?: if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
-    val finish = { dragging?.let { currentOnSeek((it * durationMs).toLong()) }; dragging = null }
+    val finish = {
+        dragging?.let { currentOnSeek((it * durationMs).toLong()) }
+        dragging = null
+        currentOnDragActive(false)
+    }
     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
         Box(
             Modifier.fillMaxWidth().height(32.dp)
@@ -450,7 +520,7 @@ private fun MusicSeekBar(positionMs: Long, durationMs: Long, onSeek: (Long) -> U
                 .pointerInput(durationMs) {
                     if (durationMs <= 0) return@pointerInput
                     detectHorizontalDragGestures(
-                        onDragStart = { o -> dragging = (o.x / widthPx).coerceIn(0f, 1f) },
+                        onDragStart = { o -> dragging = (o.x / widthPx).coerceIn(0f, 1f); currentOnDragActive(true) },
                         onDragEnd = finish, onDragCancel = finish,
                     ) { change, _ -> change.consume(); dragging = (change.position.x / widthPx).coerceIn(0f, 1f) }
                 },
