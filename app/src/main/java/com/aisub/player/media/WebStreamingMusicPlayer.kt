@@ -56,6 +56,10 @@ class WebStreamingMusicPlayer(
     private var seekHoldUntilMs: Long = 0L
     private var launchJob: Job? = null
     private var activePlayGeneration: Long = 0L
+    private var hasStartedCurrentTrackAudio: Boolean = false
+    private var remoteActuallyPlaying: Boolean = false
+    private var lastAnchoredPosMs: Long = 0L
+    private var lastAnchoredElapsedMs: Long = 0L
     private var trackTransitionPending: Boolean = false
     private var lastSyncedMetaKey: String = ""
 
@@ -76,21 +80,80 @@ class WebStreamingMusicPlayer(
         val curService = activeService() ?: return
         if (snap.service != curService) return
         if (playbackState == Player.STATE_IDLE || items.isEmpty()) return
+        // 严格校验播放请求代次，丢弃切歌前残留定时器发来的上一首快照
+        if (snap.playSeq != 0L && snap.playSeq != activePlayGeneration) return
+
+        if (snap.switching) {
+            if (remoteActuallyPlaying || (playWhenReady && playbackState != Player.STATE_BUFFERING)) {
+                remoteActuallyPlaying = false
+                if (playWhenReady) playbackState = Player.STATE_BUFFERING
+                invalidateState()
+            }
+            return
+        }
 
         var changed = false
+        val nowWall = System.currentTimeMillis()
+        val nowElapsed = android.os.SystemClock.elapsedRealtime()
+        val nowFlowing = snap.playing && !snap.buffering && playWhenReady
+
+        if (nowFlowing && !hasStartedCurrentTrackAudio) {
+            hasStartedCurrentTrackAudio = true
+            changed = true
+        }
+
+        // 在当前歌曲尚未真正解码出声前，保持起点进度与初始时长不变，杜绝旧歌残留进度与缓冲期乱跳
+        if (!hasStartedCurrentTrackAudio) {
+            if (remoteActuallyPlaying) {
+                remoteActuallyPlaying = false
+                changed = true
+            }
+            if (playWhenReady && playbackState != Player.STATE_BUFFERING && playbackState != Player.STATE_ENDED) {
+                playbackState = Player.STATE_BUFFERING
+                changed = true
+            }
+            if (changed) invalidateState()
+            return
+        }
+
+        if (nowWall < seekHoldUntilMs && seekHoldTargetMs != C.TIME_UNSET) {
+            if (kotlin.math.abs(snap.positionMs - seekHoldTargetMs) <= 1_200L) {
+                seekHoldUntilMs = 0L
+                seekHoldTargetMs = C.TIME_UNSET
+            }
+        }
+
         if (snap.durationMs > 0L && snap.durationMs != currentDurMs) {
             currentDurMs = snap.durationMs
             changed = true
         }
-        val now = System.currentTimeMillis()
-        if (now >= seekHoldUntilMs) {
+        if (nowWall >= seekHoldUntilMs) {
             currentPosMs = snap.positionMs
             if (snap.positionMs > maxPosReachedMs) maxPosReachedMs = snap.positionMs
         }
 
-        if (playbackState == Player.STATE_BUFFERING && (snap.playing || snap.durationMs > 0L)) {
-            playbackState = Player.STATE_READY
+        if (nowFlowing != remoteActuallyPlaying) {
+            remoteActuallyPlaying = nowFlowing
             changed = true
+        }
+
+        val targetState = when {
+            !playWhenReady -> Player.STATE_READY
+            nowFlowing -> Player.STATE_READY
+            snap.buffering -> Player.STATE_BUFFERING
+            else -> Player.STATE_READY
+        }
+        if (playbackState != targetState && playbackState != Player.STATE_ENDED) {
+            playbackState = targetState
+            changed = true
+        }
+
+        // 外推时钟运行期间，若底层真实进度与外推值偏差超过 400ms 则立即重锚定，防止累积超前或回跳
+        if (!changed && remoteActuallyPlaying && nowWall >= seekHoldUntilMs) {
+            val predicted = lastAnchoredPosMs + ((nowElapsed - lastAnchoredElapsedMs).coerceAtLeast(0L) * speed).toLong()
+            if (kotlin.math.abs(currentPosMs - predicted) > 400L) {
+                changed = true
+            }
         }
 
         // 实时将流媒体播放器解析到的封面、专辑与精确时长回写至 ServerProgress 与 MusicFeatures
@@ -150,6 +213,7 @@ class WebStreamingMusicPlayer(
             invalidateState()
             startCurrentTrack(0L)
         } else {
+            remoteActuallyPlaying = false
             playbackState = Player.STATE_ENDED
             playWhenReady = false
             invalidateState()
@@ -161,8 +225,13 @@ class WebStreamingMusicPlayer(
         val gen = ++activePlayGeneration
         launchJob?.cancel()
         error = null
-        currentPosMs = positionMs.coerceAtLeast(0L)
+        val safeStart = positionMs.coerceAtLeast(0L)
+        currentPosMs = safeStart
+        hasStartedCurrentTrackAudio = false
+        remoteActuallyPlaying = false
         maxPosReachedMs = 0L
+        seekHoldTargetMs = C.TIME_UNSET
+        seekHoldUntilMs = 0L
         trackTransitionPending = false
         val knownDur = ServerProgress.find(uri)?.durationMs?.takeIf { it > 0L } ?: C.TIME_UNSET
         currentDurMs = knownDur
@@ -170,11 +239,15 @@ class WebStreamingMusicPlayer(
         invalidateState()
 
         launchJob = scope.launch {
-            val result = WebStreamingMusic.playUri(appContext, uri, positionMs)
+            val result = WebStreamingMusic.playUri(appContext, uri, safeStart, gen)
             if (gen != activePlayGeneration) return@launch
             result.onSuccess {
                 error = null
-                playbackState = Player.STATE_READY
+                // 保持 STATE_BUFFERING 直至首帧真实音频开始推进，防止缓冲静默期进度条提前空跑
+                if (!playWhenReady) {
+                    playbackState = Player.STATE_READY
+                    remoteActuallyPlaying = false
+                }
                 val svc = activeService()
                 if (svc != null) {
                     if (!playWhenReady) WebStreamingMusic.setPlaying(svc, false)
@@ -183,6 +256,7 @@ class WebStreamingMusicPlayer(
                 }
                 invalidateState()
             }.onFailure { e ->
+                remoteActuallyPlaying = false
                 error = PlaybackException(
                     e.message ?: "流媒体播放失败",
                     e,
@@ -199,6 +273,8 @@ class WebStreamingMusicPlayer(
         activePlayGeneration++
         launchJob?.cancel()
         playWhenReady = false
+        hasStartedCurrentTrackAudio = false
+        remoteActuallyPlaying = false
         playbackState = Player.STATE_IDLE
         items = emptyList()
         currentIndex = 0
@@ -251,7 +327,19 @@ class WebStreamingMusicPlayer(
                 .build()
         }
 
-        val isPlayingNow = playWhenReady && playbackState == Player.STATE_READY
+        val effectivePos = if (System.currentTimeMillis() < seekHoldUntilMs && seekHoldTargetMs != C.TIME_UNSET) {
+            seekHoldTargetMs
+        } else {
+            currentPosMs
+        }
+        val shouldExtrapolate = playWhenReady &&
+            playbackState == Player.STATE_READY &&
+            hasStartedCurrentTrackAudio &&
+            remoteActuallyPlaying
+        if (shouldExtrapolate) {
+            lastAnchoredPosMs = effectivePos
+            lastAnchoredElapsedMs = android.os.SystemClock.elapsedRealtime()
+        }
         return State.Builder()
             .setAvailableCommands(commands)
             .setPlayWhenReady(playWhenReady, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
@@ -263,15 +351,10 @@ class WebStreamingMusicPlayer(
             .setRepeatMode(repeatModeState)
             .setShuffleModeEnabled(shuffleEnabled)
             .setContentPositionMs(
-                if (isPlayingNow) {
-                    PositionSupplier.getExtrapolating(
-                        if (System.currentTimeMillis() < seekHoldUntilMs && seekHoldTargetMs != C.TIME_UNSET) seekHoldTargetMs else currentPosMs,
-                        speed,
-                    )
+                if (shouldExtrapolate) {
+                    PositionSupplier.getExtrapolating(effectivePos, speed)
                 } else {
-                    PositionSupplier.getConstant(
-                        if (System.currentTimeMillis() < seekHoldUntilMs && seekHoldTargetMs != C.TIME_UNSET) seekHoldTargetMs else currentPosMs,
-                    )
+                    PositionSupplier.getConstant(effectivePos)
                 },
             )
             .setPlaybackParameters(PlaybackParameters(speed))
@@ -337,12 +420,19 @@ class WebStreamingMusicPlayer(
 
     override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
         this.playWhenReady = playWhenReady
+        if (!playWhenReady) {
+            remoteActuallyPlaying = false
+            if (playbackState == Player.STATE_BUFFERING && items.isNotEmpty()) {
+                playbackState = Player.STATE_READY
+            }
+        }
         val svc = activeService()
         if (playbackState == Player.STATE_ENDED && playWhenReady) {
             startCurrentTrack(0L)
         } else if (svc != null && playbackState != Player.STATE_IDLE) {
             WebStreamingMusic.setPlaying(svc, playWhenReady)
         }
+        invalidateState()
         return Futures.immediateVoidFuture()
     }
 
@@ -357,11 +447,12 @@ class WebStreamingMusicPlayer(
         } else {
             currentPosMs = targetPos
             seekHoldTargetMs = targetPos
-            seekHoldUntilMs = System.currentTimeMillis() + 900L
+            seekHoldUntilMs = System.currentTimeMillis() + 1_600L
             if (playbackState == Player.STATE_ENDED) {
                 startCurrentTrack(targetPos)
             } else {
                 activeService()?.let { WebStreamingMusic.seekTo(it, targetPos) }
+                invalidateState()
             }
         }
         return Futures.immediateVoidFuture()
@@ -393,6 +484,8 @@ class WebStreamingMusicPlayer(
         activePlayGeneration++
         launchJob?.cancel()
         WebStreamingMusic.stopAll()
+        hasStartedCurrentTrackAudio = false
+        remoteActuallyPlaying = false
         playbackState = Player.STATE_IDLE
         playWhenReady = false
         return Futures.immediateVoidFuture()

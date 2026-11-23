@@ -796,6 +796,9 @@ object SpotifyAppRemoteBridge {
         }
     }
 
+    @Volatile
+    private var startTargetPosMs: Long = 0L
+
     suspend fun tryPlayTrack(
         context: Context,
         trackId: String,
@@ -827,6 +830,7 @@ object SpotifyAppRemoteBridge {
         stalePreviousUri = if (!prevPlayingUri.isNullOrBlank() && prevPlayingUri != spotifyUri) prevPlayingUri else null
         commandSentElapsedMs = SystemClock.elapsedRealtime()
         targetTrackUri = spotifyUri
+        startTargetPosMs = startPositionMs.coerceAtLeast(0L)
         sawTargetTrackPlaying = false
         maxTargetPosMs = 0L
         endedDispatchedForTarget = false
@@ -978,8 +982,10 @@ object SpotifyAppRemoteBridge {
         var naturalEnded = false
         if (wantUri != null) {
             if (curUri == wantUri) {
-                if (!state.isPaused && clampedPos > 200L) sawTargetTrackPlaying = true
-                if (clampedPos > maxTargetPosMs) maxTargetPosMs = clampedPos
+                if (!state.isPaused && (startTargetPosMs > 0L || clampedPos < 2_500L || sinceCmdMs > 1_200L)) {
+                    sawTargetTrackPlaying = true
+                }
+                if (sawTargetTrackPlaying && clampedPos > maxTargetPosMs) maxTargetPosMs = clampedPos
                 if (sawTargetTrackPlaying &&
                     dur > 15_000L &&
                     maxTargetPosMs >= dur - 2_800L &&
@@ -997,6 +1003,21 @@ object SpotifyAppRemoteBridge {
             }
         }
 
+        if (wantUri != null && !sawTargetTrackPlaying && !naturalEnded && sinceCmdMs < 6_000L) {
+            WebStreamingMusic.dispatchSnapshotObj(
+                WebStreamingMusic.PlaybackSnapshot(
+                    service = WebMusicService.SPOTIFY,
+                    playSeq = WebStreamingMusic.activePlaySeq,
+                    switching = false,
+                    playing = false,
+                    buffering = true,
+                    positionMs = startTargetPosMs,
+                    durationMs = if (curUri == wantUri) dur else 0L,
+                ),
+            )
+            return
+        }
+
         val artistNames = tr?.artists
             ?.mapNotNull { it?.name?.trim()?.takeIf(String::isNotEmpty) }
             ?.joinToString(" / ")
@@ -1006,6 +1027,7 @@ object SpotifyAppRemoteBridge {
         val coverUrl = spotifyImageUriToHttps(tr?.imageUri?.raw)
         val snap = WebStreamingMusic.PlaybackSnapshot(
             service = WebMusicService.SPOTIFY,
+            playSeq = WebStreamingMusic.activePlaySeq,
             playing = !state.isPaused && !naturalEnded,
             buffering = false,
             positionMs = if (naturalEnded && dur > 0L) dur else clampedPos,

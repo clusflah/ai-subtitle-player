@@ -118,6 +118,8 @@ object WebStreamingMusic {
 
     data class PlaybackSnapshot(
         val service: WebMusicService,
+        val playSeq: Long = 0L,
+        val switching: Boolean = false,
         val playing: Boolean = false,
         val buffering: Boolean = false,
         val positionMs: Long = 0L,
@@ -135,6 +137,9 @@ object WebStreamingMusic {
 
     private val engines = ConcurrentHashMap<WebMusicService, ServiceWebEngine>()
     private val pendingRpc = ConcurrentHashMap<String, CompletableDeferred<String>>()
+
+    @Volatile
+    internal var activePlaySeq: Long = 0L
 
     @Volatile
     private var snapshotListener: ((PlaybackSnapshot) -> Unit)? = null
@@ -600,17 +605,30 @@ object WebStreamingMusic {
 
     // ---------------- 播放控制入口（供 WebStreamingMusicPlayer 调用） ----------------
 
-    suspend fun playUri(context: Context, uriString: String, startPositionMs: Long = 0L): Result<Unit> {
+    suspend fun playUri(
+        context: Context,
+        uriString: String,
+        startPositionMs: Long = 0L,
+        playSeq: Long = 0L,
+    ): Result<Unit> {
         val service = WebMusicService.fromUri(uriString)
             ?: return Result.failure(IllegalArgumentException("不支持的流媒体协议: $uriString"))
         if (!isLoggedIn(context, service)) {
             return Result.failure(IllegalStateException("请先登录 ${service.label} 账号后再播放"))
         }
+        val effectiveSeq = if (playSeq > 0L) playSeq else (activePlaySeq + 1L)
+        activePlaySeq = effectiveSeq
+
         val parsed = Uri.parse(uriString)
         var trackId = if (parsed.host == "track") parsed.pathSegments.firstOrNull()?.let(::decodeParam).orEmpty() else ""
         val title = parsed.getQueryParameter("title")?.let(::decodeParam).orEmpty()
         val artist = parsed.getQueryParameter("artist")?.let(::decodeParam).orEmpty()
         val webUrl = parsed.getQueryParameter("url")?.let(::decodeParam).orEmpty()
+
+        // 在发起任何网络查询前立即通知后台网页引擎进入切歌冻结态并暂停旧音轨，彻底阻断旧进度上报
+        engines[service]?.evalFireAndForget(
+            "window.__voxBridge && window.__voxBridge.beginSwitch($effectiveSeq, ${JSONObject.quote(trackId)}, ${startPositionMs.coerceAtLeast(0L)})",
+        )
 
         if (service == WebMusicService.SPOTIFY && trackId.isEmpty() && webUrl.contains("open.spotify.com/track/")) {
             trackId = webUrl.substringAfter("open.spotify.com/track/").substringBefore('?').substringBefore('/').trim()
@@ -685,6 +703,7 @@ object WebStreamingMusic {
 
         val engine = ensureEngine(context, service)
         val args = JSONObject()
+            .put("playSeq", effectiveSeq)
             .put("trackId", trackId)
             .put("title", title)
             .put("artist", artist)
@@ -724,6 +743,7 @@ object WebStreamingMusic {
     }
 
     fun stopAll() {
+        activePlaySeq++
         SpotifyAppRemoteBridge.pauseIfActive()
         engines.values.forEach { it.pauseOnly() }
     }
@@ -747,6 +767,8 @@ object WebStreamingMusic {
     }
 
     internal fun dispatchSnapshotObj(snap: PlaybackSnapshot) {
+        val wantSeq = activePlaySeq
+        if (wantSeq > 0L && snap.playSeq != wantSeq) return
         snapshotListener?.invoke(snap)
     }
 
@@ -755,8 +777,14 @@ object WebStreamingMusic {
             return
         }
         val o = runCatching { JSONObject(rawJson) }.getOrNull() ?: return
+        val jsSeq = o.optLong("playSeq", 0L)
+        val wantSeq = activePlaySeq
+        // 丢弃尚未收到最新切歌代次的网页旧定时器快照
+        if (wantSeq <= 0L || jsSeq != wantSeq) return
         val snap = PlaybackSnapshot(
             service = service,
+            playSeq = jsSeq,
+            switching = o.optBoolean("switching", false),
             playing = o.optBoolean("playing", false),
             buffering = o.optBoolean("buffering", false),
             positionMs = o.optLong("posMs", 0L).coerceAtLeast(0L),
@@ -1911,17 +1939,142 @@ object WebStreamingMusic {
     return { ok: true };
   }
 
+  var voxPlaySeq = 0;
+  var voxSwitching = false;
+  var voxSwitchStartedAt = 0;
+  var voxTargetTrackId = '';
+  var voxStalePrevId = '';
+  var voxStartPosMs = 0;
+  var voxSawTargetProgress = false;
+
+  function currentAppleNowPlayingId() {
+    if (!isApple || !window.MusicKit || !window.MusicKit.getInstance) return '';
+    var mk = runSafe(function(){ return window.MusicKit.getInstance(); });
+    var np = mk && mk.nowPlayingItem;
+    if (!np) return '';
+    return String(
+      (np.attributes && np.attributes.playParams && (np.attributes.playParams.catalogId || np.attributes.playParams.id)) ||
+      np.songId || np.id || ''
+    ).trim();
+  }
+
+  function emitHostSnapshot(payload) {
+    if (window.VoxMusicHost && window.VoxMusicHost.onSnapshot) {
+      window.VoxMusicHost.onSnapshot(JSON.stringify(payload));
+    }
+  }
+
+  function markTrackSwitching(seq, trackId, startPosMs) {
+    var incomingSeq = Number(seq) || 0;
+    var isNewSeq = incomingSeq > 0 && incomingSeq !== voxPlaySeq;
+    if (incomingSeq > 0) voxPlaySeq = incomingSeq;
+    var nextTarget = String(trackId || '').trim();
+    if (isNewSeq) {
+      var prevId = currentAppleNowPlayingId();
+      voxStalePrevId = (prevId && prevId !== nextTarget) ? prevId : '';
+    } else if (nextTarget && voxStalePrevId === nextTarget) {
+      voxStalePrevId = '';
+    }
+    if (nextTarget) voxTargetTrackId = nextTarget;
+    voxSwitching = true;
+    voxSwitchStartedAt = Date.now();
+    voxStartPosMs = Math.max(0, Number(startPosMs) || 0);
+    voxSawTargetProgress = false;
+    window.__voxActiveMedia = null;
+    var dom = document.querySelectorAll('audio,video');
+    for (var i = 0; i < dom.length; i++) {
+      try {
+        dom[i].__voxStaleSrc = dom[i].currentSrc || dom[i].src || '__old';
+        dom[i].__voxStaleTime = dom[i].currentTime || 0;
+        if (!dom[i].paused) dom[i].pause();
+      } catch (e) {}
+    }
+    var pool = window.__voxMediaPool || [];
+    for (var j = 0; j < pool.length; j++) {
+      try {
+        pool[j].__voxStaleSrc = pool[j].currentSrc || pool[j].src || '__old';
+        pool[j].__voxStaleTime = pool[j].currentTime || 0;
+        if (!pool[j].paused) pool[j].pause();
+      } catch (e) {}
+    }
+  }
+
   function pushSnapshot(endedFlag) {
     try {
+      if (voxPlaySeq <= 0) return;
+      if (voxSwitching) {
+        emitHostSnapshot({
+          playSeq: voxPlaySeq,
+          switching: true,
+          playing: false,
+          buffering: true,
+          posMs: voxStartPosMs,
+          durMs: 0,
+          title: '',
+          artist: '',
+          album: '',
+          coverUrl: '',
+          ended: false
+        });
+        return;
+      }
+
       var playing = false, buffering = false, posMs = 0, durMs = 0;
       var title = '', artist = '', album = '', coverUrl = '';
+      var ended = !!endedFlag;
+      var usedMusicKit = false;
+
       if (isApple && window.MusicKit && window.MusicKit.getInstance) {
         var mk = runSafe(function(){ return window.MusicKit.getInstance(); });
-        if (mk) {
-          playing = !!mk.isPlaying;
-          posMs = Math.max(0, Math.round((mk.currentPlaybackTime || 0) * 1000));
-          durMs = Math.max(0, Math.round((mk.currentPlaybackDuration || 0) * 1000));
+        if (mk && (mk.nowPlayingItem || typeof mk.playbackState === 'number')) {
+          usedMusicKit = true;
           var np = mk.nowPlayingItem;
+          var npId = currentAppleNowPlayingId();
+          // 切歌初期若 MusicKit 仍停留在切歌前的旧曲目 ID，持续冻结在起点缓冲态（同时兼容跨区自动重链的新曲目 ID）
+          if (!voxSawTargetProgress && voxStalePrevId && npId === voxStalePrevId && (Date.now() - voxSwitchStartedAt) < 8500) {
+            emitHostSnapshot({
+              playSeq: voxPlaySeq,
+              switching: true,
+              playing: false,
+              buffering: true,
+              posMs: voxStartPosMs,
+              durMs: 0,
+              ended: false
+            });
+            return;
+          }
+
+          // MusicKit v3 PlaybackStates: 1=LOADING, 2=PLAYING, 3=PAUSED, 5=ENDED, 6=SEEKING, 8=WAITING, 9=STALLED, 10=COMPLETED
+          var mkState = (typeof mk.playbackState === 'number') ? mk.playbackState : -1;
+          var mkBuffering = (mkState === 1 || mkState === 6 || mkState === 8 || mkState === 9);
+          var mkPlaying = (mkState === 2) || (mkState < 0 && !!mk.isPlaying && !mkBuffering);
+          var rawPos = Math.max(0, Math.round((mk.currentPlaybackTime || 0) * 1000));
+          var rawDur = Math.max(0, Math.round((mk.currentPlaybackDuration || 0) * 1000));
+
+          if (!voxSawTargetProgress) {
+            if (mkPlaying && !mkBuffering && (voxStartPosMs > 0 || rawPos < 2500 || (Date.now() - voxSwitchStartedAt) > 5000)) {
+              voxSawTargetProgress = true;
+            } else {
+              emitHostSnapshot({
+                playSeq: voxPlaySeq,
+                switching: false,
+                playing: false,
+                buffering: true,
+                posMs: voxStartPosMs,
+                durMs: 0,
+                ended: false
+              });
+              return;
+            }
+          } else if (mkState === 5 || mkState === 10) {
+            ended = true;
+          }
+
+          playing = mkPlaying && !ended;
+          buffering = mkBuffering;
+          // 严禁在 posMs===0 时回退读取页面残留的旧 <audio> 节点，彻底消除起播瞬间跳到上一首秒数
+          posMs = rawPos;
+          durMs = rawDur;
           if (np && np.attributes) {
             title = np.attributes.name || '';
             artist = np.attributes.artistName || '';
@@ -1930,15 +2083,62 @@ object WebStreamingMusic {
           }
         }
       }
-      var m = bestMedia();
-      if (m) {
-        if (!playing && !m.paused && m.readyState >= 2) playing = true;
-        if (m.readyState > 0 && m.readyState < 3 && !m.paused) buffering = true;
-        if (posMs <= 0 && !isNaN(m.currentTime)) posMs = Math.round(m.currentTime * 1000);
-        if (durMs <= 0 && !isNaN(m.duration) && isFinite(m.duration)) durMs = Math.round(m.duration * 1000);
+
+      if (!usedMusicKit) {
+        var m = bestMedia();
+        if (m) {
+          if (!m.__voxEndedHooked) {
+            m.__voxEndedHooked = true;
+            m.addEventListener('ended', function() {
+              if (voxSawTargetProgress) pushSnapshot(true);
+            });
+          }
+          var mReady = m.readyState >= 3 && !m.seeking;
+          var mPlaying = !m.paused && !m.ended && mReady;
+          var mBuffering = (!m.paused && !mReady) || !!m.seeking;
+          var mPos = !isNaN(m.currentTime) ? Math.max(0, Math.round(m.currentTime * 1000)) : 0;
+          var mDur = (!isNaN(m.duration) && isFinite(m.duration)) ? Math.max(0, Math.round(m.duration * 1000)) : 0;
+          var curSrc = m.currentSrc || m.src || '';
+          var sameStale = !!(m.__voxStaleSrc && curSrc === m.__voxStaleSrc &&
+                             Math.abs((m.currentTime || 0) - (m.__voxStaleTime || 0)) < 0.08);
+          if (!voxSawTargetProgress) {
+            if (mPlaying && !sameStale && (voxStartPosMs > 0 || mPos < 2500 || (Date.now() - voxSwitchStartedAt) > 5000)) {
+              voxSawTargetProgress = true;
+            } else {
+              emitHostSnapshot({
+                playSeq: voxPlaySeq,
+                switching: false,
+                playing: false,
+                buffering: true,
+                posMs: voxStartPosMs,
+                durMs: 0,
+                ended: false
+              });
+              return;
+            }
+          } else if (m.ended) {
+            ended = true;
+          }
+          playing = mPlaying && !ended;
+          buffering = mBuffering;
+          posMs = mPos;
+          durMs = mDur;
+        } else if (!voxSawTargetProgress) {
+          emitHostSnapshot({
+            playSeq: voxPlaySeq,
+            switching: false,
+            playing: false,
+            buffering: true,
+            posMs: voxStartPosMs,
+            durMs: 0,
+            ended: false
+          });
+          return;
+        }
       }
+
       var ms = navigator.mediaSession && navigator.mediaSession.metadata;
-      if (ms) {
+      if (ms && voxSawTargetProgress) {
         if (!title) title = ms.title || '';
         if (!artist) artist = ms.artist || '';
         if (!album) album = ms.album || '';
@@ -1946,25 +2146,29 @@ object WebStreamingMusic {
           coverUrl = ms.artwork[ms.artwork.length - 1].src || '';
         }
       }
-      if (window.VoxMusicHost && window.VoxMusicHost.onSnapshot) {
-        window.VoxMusicHost.onSnapshot(JSON.stringify({
-          playing: playing,
-          buffering: buffering,
-          posMs: posMs,
-          durMs: durMs,
-          title: title,
-          artist: artist,
-          album: album,
-          coverUrl: coverUrl,
-          ended: !!endedFlag
-        }));
-      }
+      emitHostSnapshot({
+        playSeq: voxPlaySeq,
+        switching: false,
+        playing: playing,
+        buffering: buffering,
+        posMs: posMs,
+        durMs: durMs,
+        title: title,
+        artist: artist,
+        album: album,
+        coverUrl: coverUrl,
+        ended: ended
+      });
     } catch (e) {}
   }
 
-  setInterval(function() { pushSnapshot(false); }, 300);
+  setInterval(function() { pushSnapshot(false); }, 250);
 
   window.__voxBridge = {
+    beginSwitch: function(seq, trackId, startPosMs) {
+      markTrackSwitching(seq, trackId, startPosMs);
+      pushSnapshot(false);
+    },
     resume: function() {
       if (isApple && window.MusicKit) {
         var mk = runSafe(function(){ return window.MusicKit.getInstance(); });
@@ -2013,8 +2217,15 @@ object WebStreamingMusic {
       var out = { ok: false, items: [] };
       try {
         if (method === 'playTrack') {
-          out = isApple ? await playOnApple(args) : await playOnSpotify(args);
-          setTimeout(function(){ pushSnapshot(false); }, 200);
+          markTrackSwitching(args && args.playSeq, args && args.trackId, args && args.startPositionMs);
+          pushSnapshot(false);
+          try {
+            out = isApple ? await playOnApple(args) : await playOnSpotify(args);
+          } finally {
+            voxSwitching = false;
+            voxSwitchStartedAt = Date.now();
+          }
+          setTimeout(function(){ pushSnapshot(false); }, 150);
         } else if (isApple) {
           var mk = window.MusicKit && window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
           var sf = await detectAppleStorefront(mk, args);
