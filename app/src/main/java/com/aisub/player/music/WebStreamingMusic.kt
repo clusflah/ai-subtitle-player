@@ -200,11 +200,11 @@ object WebStreamingMusic {
         val st = SpotifyAppRemoteBridge.refreshStatus(context)
         val webLogged = isWebSpotifyLoggedIn(context)
         return when {
-            st.canAttemptRemotePlayback && webLogged -> "已登录 · 方案3高音质联动（异常时自动网页兜底）"
-            st.canAttemptRemotePlayback -> "已启用方案3高音质联动 · 本机官方客户端发声"
+            st.canAttemptRemotePlayback && webLogged -> "已登录 · 官方客户端联动（异常时自动网页兜底）"
+            st.canAttemptRemotePlayback -> "已启用官方客户端联动 · 本机 Spotify 高音质发声"
             st.hasOAuthToken && !st.spotifyAppInstalled && webLogged -> "已登录 · 未装官方App，已自动回退网页播放"
             logged -> "已登录 · 网页播放（可配置 Client ID 启用高音质）"
-            else -> "支持方案3高音质联动 (Client ID) 与网页直连"
+            else -> "支持官方客户端联动 (高音质) 与网页直连"
         }
     }
 
@@ -215,9 +215,9 @@ object WebStreamingMusic {
         if (service != WebMusicService.SPOTIFY) return ""
         val st = SpotifyAppRemoteBridge.refreshStatus(context)
         return when {
-            st.canAttemptRemotePlayback -> "高音质联动 (方案3) 已启用 · 点击管理 Client ID / 兜底登录"
-            st.isConfigured && !st.spotifyAppInstalled -> "已保存 Client ID · 未装官方App，当前自动使用网页方案"
-            else -> "配置 Client ID 启用方案3高音质/无损联动（不可用时自动回退）"
+            st.canAttemptRemotePlayback -> "官方客户端联动已启用 · 点击管理 Client ID / 兜底登录"
+            st.isConfigured && !st.spotifyAppInstalled -> "已保存 Client ID · 未装官方App，当前自动使用网页播放"
+            else -> "配置 Client ID 启用官方客户端联动（极高 / 无损音质）"
         }
     }
 
@@ -225,7 +225,7 @@ object WebStreamingMusic {
         val app = context.applicationContext
         val prefs = app.getSharedPreferences(AUTH_PREFS, Context.MODE_PRIVATE)
         if (service == WebMusicService.SPOTIFY) {
-            // 仅在确实持有网页 Cookie 时标记网页登录态，纯方案3登录由 SpotifyAppRemoteBridge 独立维护
+            // 仅在确实持有网页 Cookie 时标记网页登录态，纯官方客户端联动登录由 SpotifyAppRemoteBridge 独立维护
             if (!loggedIn || isWebSpotifyLoggedIn(app)) {
                 prefs.edit().putBoolean("logged_SPOTIFY", loggedIn).apply()
             }
@@ -627,7 +627,7 @@ object WebStreamingMusic {
 
         // 在发起任何网络查询前立即通知后台网页引擎进入切歌冻结态并暂停旧音轨，彻底阻断旧进度上报
         engines[service]?.evalFireAndForget(
-            "window.__voxBridge && window.__voxBridge.beginSwitch($effectiveSeq, ${JSONObject.quote(trackId)}, ${startPositionMs.coerceAtLeast(0L)})",
+            "window.__voxBridge && window.__voxBridge.beginSwitch($effectiveSeq, ${JSONObject.quote(trackId)}, ${startPositionMs.coerceAtLeast(0L)}, ${JSONObject.quote(title)})",
         )
 
         if (service == WebMusicService.SPOTIFY && trackId.isEmpty() && webUrl.contains("open.spotify.com/track/")) {
@@ -694,7 +694,7 @@ object WebStreamingMusic {
                     remoteSt.isConfigured && !remoteSt.spotifyAppInstalled ->
                         "未检测到本机安装的官方 Spotify 客户端，且尚未登录网页兜底会话；请在 Spotify 登录页补充网页登录"
                     !fallbackWhy.isNullOrBlank() ->
-                        "方案3高音质联动暂不可用（$fallbackWhy），且尚未登录网页兜底会话；请检查官方客户端或在登录页补充网页登录"
+                        "官方客户端联动暂不可用（$fallbackWhy），且尚未登录网页兜底会话；请检查本机 Spotify 或在登录页补充网页登录"
                     else -> "请先登录 Spotify 账号后再播放"
                 }
                 return Result.failure(IllegalStateException(msg))
@@ -1083,9 +1083,15 @@ object WebStreamingMusic {
   function inspectSpotifyUrlAndBody(url, bodyStr) {
     if (!url) return;
     try {
-      if (/track-playback\/v1\/devices|connect-state\/v1\/devices\/hobs_|player\/command\/from\//i.test(url)) {
+      var spHost = url.match(/^(https:\/\/[a-z0-9-]*spclient\.spotify\.com)/i);
+      if (spHost) window.__voxSpotifySpClientOrigin = spHost[1];
+      if (/track-playback\/v1\/devices|connect-state\/v1\/devices\/|player\/command\/from\//i.test(url)) {
         var m = url.match(/hobs_[A-Za-z0-9_-]+/);
         if (m) window.__voxSpotifyDeviceId = m[0];
+        else {
+          var mDev = url.match(/connect-state\/v1\/devices\/([A-Za-z0-9_-]{12,})/);
+          if (mDev) window.__voxSpotifyDeviceId = mDev[1];
+        }
       }
       if (/\/pathfinder\/v/i.test(url) && typeof bodyStr === 'string' && bodyStr.charAt(0) === '{') {
         var jb = JSON.parse(bodyStr);
@@ -1103,6 +1109,9 @@ object WebStreamingMusic {
         if (j.accessToken) {
           window.__voxSpotifyToken = j.accessToken;
           window.__voxSpotifyAnon = !!j.isAnonymous;
+          if (j.accessTokenExpirationTimestampMs) {
+            window.__voxSpotifyTokenExp = Number(j.accessTokenExpirationTimestampMs) || 0;
+          }
         }
       } else if (/clienttoken\.spotify\.com\/v1\/clienttoken/i.test(rUrl)) {
         var gt = j.granted_token && j.granted_token.token;
@@ -1429,11 +1438,34 @@ object WebStreamingMusic {
   };
 
   async function ensureSpotifyToken(maxWaitMs) {
-    if (window.__voxSpotifyToken) return window.__voxSpotifyToken;
-    var deadline = Date.now() + (maxWaitMs || 11000);
+    var exp = Number(window.__voxSpotifyTokenExp || 0);
+    if (window.__voxSpotifyToken && (!exp || Date.now() < exp - 30000)) {
+      return window.__voxSpotifyToken;
+    }
+    var limit = maxWaitMs || 5500;
+    var deadline = Date.now() + limit;
+    var triedActiveFetch = false;
     while (Date.now() < deadline) {
-      if (window.__voxSpotifyToken) return window.__voxSpotifyToken;
-      await sleep(250);
+      exp = Number(window.__voxSpotifyTokenExp || 0);
+      if (window.__voxSpotifyToken && (!exp || Date.now() < exp - 30000)) {
+        return window.__voxSpotifyToken;
+      }
+      if (!triedActiveFetch && (deadline - Date.now()) < (limit - 1200)) {
+        triedActiveFetch = true;
+        try {
+          var tr = await fetch('https://open.spotify.com/get_access_token?reason=transport&productType=web_player', { credentials: 'include' });
+          if (tr && tr.ok) {
+            var tj = await tr.json();
+            if (tj && tj.accessToken) {
+              window.__voxSpotifyToken = tj.accessToken;
+              window.__voxSpotifyAnon = !!tj.isAnonymous;
+              if (tj.accessTokenExpirationTimestampMs) window.__voxSpotifyTokenExp = Number(tj.accessTokenExpirationTimestampMs) || 0;
+              return tj.accessToken;
+            }
+          }
+        } catch (e) {}
+      }
+      await sleep(180);
     }
     return window.__voxSpotifyToken || '';
   }
@@ -1879,63 +1911,193 @@ object WebStreamingMusic {
     return { ok: false, error: 'Apple Music 播放器尚未就绪，请重试' };
   }
 
+  function normTrackTitle(s) {
+    return String(s || '').toLowerCase().replace(/[\s\-_()（）\[\]【】·.,，。!?！？'"]/g, '');
+  }
+
+  function isPlayCancelled(reqSeq) {
+    return !!(reqSeq && reqSeq > 0 && reqSeq !== voxPlaySeq);
+  }
+
+  async function waitForSpotifyWebDevice(tok, reqSeq, maxWaitMs) {
+    var deadline = Date.now() + (maxWaitMs || 2200);
+    var queriedApi = false;
+    while (Date.now() < deadline) {
+      if (isPlayCancelled(reqSeq)) return '';
+      if (window.__voxSpotifyDeviceId) return window.__voxSpotifyDeviceId;
+      if (!queriedApi && tok && (deadline - Date.now()) < ((maxWaitMs || 2200) - 700)) {
+        queriedApi = true;
+        var devs = await spotifyApi('/me/player/devices');
+        if (isPlayCancelled(reqSeq)) return '';
+        var list = (devs && devs.devices) || [];
+        // 严格只匹配本机隐形 WebView 的 Web Player，绝不误选同一账号下的其他手机或电脑设备
+        var webDev = list.find(function(d){ return d && d.id && /web player/i.test(d.name || ''); });
+        if (webDev && webDev.id) {
+          window.__voxSpotifyDeviceId = webDev.id;
+          return webDev.id;
+        }
+      }
+      await sleep(150);
+    }
+    return window.__voxSpotifyDeviceId || '';
+  }
+
+  async function trySpotifySpClientPlay(tok, devId, trackId, startPosMs, reqSeq) {
+    if (!tok || !devId || !window.__voxSpotifySpClientOrigin) return false;
+    if (isPlayCancelled(reqSeq)) return false;
+    try {
+      var spUrl = window.__voxSpotifySpClientOrigin +
+        '/connect-state/v1/player/command/from/' + encodeURIComponent(devId) +
+        '/to/' + encodeURIComponent(devId);
+      var hdrs = spotifyAuthHeaders(tok);
+      hdrs['Content-Type'] = 'application/json';
+      var cmd = {
+        context: {
+          uri: 'spotify:track:' + trackId,
+          url: 'context://spotify:track:' + trackId,
+          metadata: {}
+        },
+        play_origin: {
+          feature_identifier: 'track',
+          feature_version: 'web-player'
+        },
+        options: {
+          license: 'on-demand',
+          skip_to: { track_uri: 'spotify:track:' + trackId },
+          player_options_override: {
+            shuffling_context: false,
+            repeating_context: false,
+            repeating_track: false
+          }
+        },
+        endpoint: 'play'
+      };
+      if (startPosMs > 1000) cmd.options.seek_to = Math.round(startPosMs);
+      var res = await fetch(spUrl, {
+        method: 'POST',
+        headers: hdrs,
+        body: JSON.stringify({ command: cmd })
+      });
+      if (isPlayCancelled(reqSeq)) return false;
+      return !!(res && (res.ok || res.status === 204));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function trySpotifyWebApiPlay(tok, devId, trackId, startPosMs, reqSeq) {
+    if (!tok || !devId) return false;
+    if (isPlayCancelled(reqSeq)) return false;
+    try {
+      var hdrs = spotifyAuthHeaders(tok);
+      hdrs['Content-Type'] = 'application/json';
+      var playUrl = 'https://api.spotify.com/v1/me/player/play?device_id=' + encodeURIComponent(devId);
+      var playBody = JSON.stringify({ uris: ['spotify:track:' + trackId], position_ms: startPosMs || 0 });
+      var playRes = await fetch(playUrl, { method: 'PUT', headers: hdrs, body: playBody });
+      if (isPlayCancelled(reqSeq)) return false;
+      if (playRes.status === 404) {
+        await fetch('https://api.spotify.com/v1/me/player', {
+          method: 'PUT',
+          headers: hdrs,
+          body: JSON.stringify({ device_ids: [devId], play: false })
+        }).catch(function(){});
+        await sleep(220);
+        if (isPlayCancelled(reqSeq)) return false;
+        playRes = await fetch(playUrl, { method: 'PUT', headers: hdrs, body: playBody });
+      }
+      if (isPlayCancelled(reqSeq)) return false;
+      return !!(playRes && (playRes.ok || playRes.status === 204));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function clickVerifiedSpotifyTrackPlayBtn(expectedTrackId, expectedTitle, reqSeq, timeoutMs) {
+    var deadline = Date.now() + (timeoutMs || 5000);
+    var wantNorm = normTrackTitle(expectedTitle);
+    while (Date.now() < deadline) {
+      if (isPlayCancelled(reqSeq)) return false;
+      if (location.pathname.indexOf('/track/' + expectedTrackId) === 0) {
+        var h1 = document.querySelector('main h1');
+        var h1Norm = normTrackTitle(h1 && h1.textContent);
+        var titleOk = !voxStalePrevTitle || !h1Norm || h1Norm !== voxStalePrevTitle || (wantNorm && h1Norm.indexOf(wantNorm) >= 0);
+        // 严格只定位目标单曲页顶部的 action-bar-row 主播放键，严禁误点首页/推荐卡片或上一首歌残留的按钮
+        var bar = document.querySelector('[data-testid="action-bar-row"]') ||
+                  document.querySelector('main section [data-testid="action-bar-row"]');
+        var btn = bar && bar.querySelector('button[data-testid="play-button"]');
+        if (btn && titleOk) {
+          btn.click();
+          await sleep(220);
+          return true;
+        }
+      }
+      await sleep(200);
+    }
+    return false;
+  }
+
   async function playOnSpotify(args) {
-    var trackId = String(args.trackId || '').trim();
-    var tok = await ensureSpotifyToken(11000);
-    if (!trackId && args.webUrl) {
+    var reqSeq = Number(args && args.playSeq) || voxPlaySeq;
+    var trackId = String((args && args.trackId) || '').trim();
+    var startPosMs = Math.max(0, Number(args && args.startPositionMs) || 0);
+    var tok = await ensureSpotifyToken(4500);
+    if (isPlayCancelled(reqSeq)) return { ok: false, cancelled: true };
+
+    if (!trackId && args && args.webUrl) {
       var m = String(args.webUrl).match(/track\/([A-Za-z0-9]+)/);
       if (m) trackId = m[1];
     }
-    if (!trackId && args.title) {
+    if (!trackId && args && args.title) {
       var q = (args.title + ' ' + (args.artist || '')).trim();
       var hits = await searchSpotifySmart(q);
-      var firstTrack = hits.find(function(h) { return h && h.type === 'track' && h.id; });
+      if (isPlayCancelled(reqSeq)) return { ok: false, cancelled: true };
+      var wantT = normTrackTitle(args.title);
+      var exact = hits.find(function(h) { return h && h.type === 'track' && h.id && normTrackTitle(h.title) === wantT; });
+      var firstTrack = exact || hits.find(function(h) { return h && h.type === 'track' && h.id; });
       if (firstTrack) trackId = firstTrack.id;
     }
     if (!trackId) return { ok: false, error: '未在 Spotify 曲库中找到该歌曲' };
+    voxTargetTrackId = trackId;
 
-    // 1. 优先尝试 Spotify Connect Web Player 设备指令起播
+    // 1. 极速通道 A：直接走 Spotify Web Player 原生 spclient Connect 指令（~250ms 起播且严格锁定指定 trackId）
+    // 2. 极速通道 B：回退官方 Web API PUT /v1/me/player/play（自动 404 激活当前 Web Player 设备）
     if (tok) {
-      var devId = window.__voxSpotifyDeviceId || '';
-      if (!devId) {
-        var devs = await spotifyApi('/me/player/devices');
-        var list = (devs && devs.devices) || [];
-        var webDev = list.find(function(d){ return /web player/i.test(d.name || ''); }) || list[0];
-        if (webDev && webDev.id) devId = webDev.id;
-      }
+      var devId = await waitForSpotifyWebDevice(tok, reqSeq, 2200);
+      if (isPlayCancelled(reqSeq)) return { ok: false, cancelled: true };
       if (devId) {
-        try {
-          var hdrs = spotifyAuthHeaders(tok);
-          hdrs['Content-Type'] = 'application/json';
-          var playRes = await fetch('https://api.spotify.com/v1/me/player/play?device_id=' + encodeURIComponent(devId), {
-            method: 'PUT',
-            headers: hdrs,
-            body: JSON.stringify({ uris: ['spotify:track:' + trackId], position_ms: args.startPositionMs || 0 })
-          });
-          if (playRes.ok || playRes.status === 204) return { ok: true };
-        } catch (e) {}
+        if (await trySpotifySpClientPlay(tok, devId, trackId, startPosMs, reqSeq)) {
+          return { ok: true };
+        }
+        if (isPlayCancelled(reqSeq)) return { ok: false, cancelled: true };
+        if (await trySpotifyWebApiPlay(tok, devId, trackId, startPosMs, reqSeq)) {
+          return { ok: true };
+        }
+        if (isPlayCancelled(reqSeq)) return { ok: false, cancelled: true };
       }
     }
 
-    // 2. 回退路径：SPA 路由跳转至单曲页并自动触发主播放按钮
+    // 3. 页面直达兜底：严禁使用 React Router 无效的 pushState + 盲点旧 play-button，改用精确单曲页跳转并在新页核验主播放键
     var targetPath = '/track/' + trackId;
-    if (location.pathname !== targetPath) {
-      window.history.pushState({}, '', targetPath);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+    if (location.pathname.indexOf(targetPath) === 0) {
+      var clicked = await clickVerifiedSpotifyTrackPlayBtn(trackId, args && args.title, reqSeq, 4200);
+      if (isPlayCancelled(reqSeq)) return { ok: false, cancelled: true };
+      if (clicked) return { ok: true };
     }
-    var deadline = Date.now() + 9500;
-    while (Date.now() < deadline) {
-      await sleep(350);
-      var btn = document.querySelector('main button[data-testid="play-button"]') ||
-                document.querySelector('[data-testid="action-bar-row"] button[data-testid="play-button"]') ||
-                document.querySelector('button[data-testid="play-button"]');
-      if (btn) {
-        btn.click();
-        await sleep(350);
-        return { ok: true };
+
+    try {
+      sessionStorage.setItem('__voxPendingSpotifyPlay', JSON.stringify({
+        trackId: trackId,
+        playSeq: reqSeq || voxPlaySeq,
+        title: String((args && args.title) || ''),
+        startPosMs: startPosMs,
+        ts: Date.now()
+      }));
+    } catch (e) {}
+    setTimeout(function() {
+      if (!isPlayCancelled(reqSeq)) {
+        location.assign('https://open.spotify.com/track/' + trackId);
       }
-    }
-    location.href = 'https://open.spotify.com/track/' + trackId;
+    }, 20);
     return { ok: true };
   }
 
@@ -1943,7 +2105,9 @@ object WebStreamingMusic {
   var voxSwitching = false;
   var voxSwitchStartedAt = 0;
   var voxTargetTrackId = '';
+  var voxTargetTitle = '';
   var voxStalePrevId = '';
+  var voxStalePrevTitle = '';
   var voxStartPosMs = 0;
   var voxSawTargetProgress = false;
 
@@ -1964,18 +2128,23 @@ object WebStreamingMusic {
     }
   }
 
-  function markTrackSwitching(seq, trackId, startPosMs) {
+  function markTrackSwitching(seq, trackId, startPosMs, targetTitle) {
     var incomingSeq = Number(seq) || 0;
     var isNewSeq = incomingSeq > 0 && incomingSeq !== voxPlaySeq;
     if (incomingSeq > 0) voxPlaySeq = incomingSeq;
     var nextTarget = String(trackId || '').trim();
+    var nextTitleNorm = normTrackTitle(targetTitle);
     if (isNewSeq) {
       var prevId = currentAppleNowPlayingId();
       voxStalePrevId = (prevId && prevId !== nextTarget) ? prevId : '';
-    } else if (nextTarget && voxStalePrevId === nextTarget) {
-      voxStalePrevId = '';
+      var msPrev = normTrackTitle(navigator.mediaSession && navigator.mediaSession.metadata && navigator.mediaSession.metadata.title);
+      voxStalePrevTitle = (msPrev && (!nextTitleNorm || msPrev !== nextTitleNorm)) ? msPrev : '';
+    } else {
+      if (nextTarget && voxStalePrevId === nextTarget) voxStalePrevId = '';
+      if (nextTitleNorm && voxStalePrevTitle === nextTitleNorm) voxStalePrevTitle = '';
     }
     if (nextTarget) voxTargetTrackId = nextTarget;
+    if (nextTitleNorm) voxTargetTitle = nextTitleNorm;
     voxSwitching = true;
     voxSwitchStartedAt = Date.now();
     voxStartPosMs = Math.max(0, Number(startPosMs) || 0);
@@ -2085,6 +2254,20 @@ object WebStreamingMusic {
       }
 
       if (!usedMusicKit) {
+        var msNowTitle = normTrackTitle(navigator.mediaSession && navigator.mediaSession.metadata && navigator.mediaSession.metadata.title);
+        // Spotify 切歌初期若 MediaSession 仍指向切歌前的旧歌名，继续冻结在缓冲态，避免旧歌进度串扰到新歌
+        if (!voxSawTargetProgress && voxStalePrevTitle && msNowTitle && msNowTitle === voxStalePrevTitle && (Date.now() - voxSwitchStartedAt) < 7000) {
+          emitHostSnapshot({
+            playSeq: voxPlaySeq,
+            switching: true,
+            playing: false,
+            buffering: true,
+            posMs: voxStartPosMs,
+            durMs: 0,
+            ended: false
+          });
+          return;
+        }
         var m = bestMedia();
         if (m) {
           if (!m.__voxEndedHooked) {
@@ -2164,9 +2347,40 @@ object WebStreamingMusic {
 
   setInterval(function() { pushSnapshot(false); }, 250);
 
+  // 若上一步是通过整页跳转直达 /track/<id>，新页面加载完毕后自动接续执行精确点播
+  if (isSpotify) {
+    (async function resumePendingSpotifyNavPlay() {
+      try {
+        var raw = sessionStorage.getItem('__voxPendingSpotifyPlay');
+        if (!raw) return;
+        sessionStorage.removeItem('__voxPendingSpotifyPlay');
+        var p = JSON.parse(raw);
+        if (!p || !p.trackId || (Date.now() - (p.ts || 0)) > 20000) return;
+        if (location.pathname.indexOf('/track/' + p.trackId) !== 0) return;
+        if (p.playSeq && p.playSeq > voxPlaySeq) {
+          markTrackSwitching(p.playSeq, p.trackId, p.startPosMs || 0, p.title || '');
+        }
+        voxSwitching = false;
+        voxSwitchStartedAt = Date.now();
+        var reqSeq = p.playSeq || voxPlaySeq;
+        var tok = await ensureSpotifyToken(3000);
+        if (isPlayCancelled(reqSeq)) return;
+        if (tok) {
+          var devId = await waitForSpotifyWebDevice(tok, reqSeq, 1800);
+          if (isPlayCancelled(reqSeq)) return;
+          if (devId) {
+            if (await trySpotifySpClientPlay(tok, devId, p.trackId, p.startPosMs || 0, reqSeq)) return;
+            if (await trySpotifyWebApiPlay(tok, devId, p.trackId, p.startPosMs || 0, reqSeq)) return;
+          }
+        }
+        await clickVerifiedSpotifyTrackPlayBtn(p.trackId, p.title || '', reqSeq, 6000);
+      } catch (e) {}
+    })();
+  }
+
   window.__voxBridge = {
-    beginSwitch: function(seq, trackId, startPosMs) {
-      markTrackSwitching(seq, trackId, startPosMs);
+    beginSwitch: function(seq, trackId, startPosMs, title) {
+      markTrackSwitching(seq, trackId, startPosMs, title);
       pushSnapshot(false);
     },
     resume: function() {
@@ -2217,13 +2431,16 @@ object WebStreamingMusic {
       var out = { ok: false, items: [] };
       try {
         if (method === 'playTrack') {
-          markTrackSwitching(args && args.playSeq, args && args.trackId, args && args.startPositionMs);
+          var reqSeq = Number(args && args.playSeq) || (voxPlaySeq + 1);
+          markTrackSwitching(reqSeq, args && args.trackId, args && args.startPositionMs, args && args.title);
           pushSnapshot(false);
           try {
             out = isApple ? await playOnApple(args) : await playOnSpotify(args);
           } finally {
-            voxSwitching = false;
-            voxSwitchStartedAt = Date.now();
+            if (!isPlayCancelled(reqSeq)) {
+              voxSwitching = false;
+              voxSwitchStartedAt = Date.now();
+            }
           }
           setTimeout(function(){ pushSnapshot(false); }, 150);
         } else if (isApple) {
@@ -2638,8 +2855,8 @@ fun WebMusicLoginDialog(
                         )
                         Text(
                             text = when {
-                                pkceWebFlowActive -> "请在下方点击同意授权以启用方案 3 高音质模式"
-                                !showingWebView -> "优先使用方案 3 高音质联动，不可用时自动回退网页方案"
+                                pkceWebFlowActive -> "请在下方点击同意授权以启用官方客户端高音质联动"
+                                !showingWebView -> "优先通过本机官方 Spotify 发声，不可用时自动回退网页播放"
                                 hasPopup -> "请在安全认证窗口完成验证"
                                 else -> pageTitle
                             },
@@ -2678,8 +2895,8 @@ fun WebMusicLoginDialog(
                     ) {
                         val spotifyGreen = Color(0xFF1ED760)
                         listOf(
-                            "高音质联动 (方案3 · Client ID)",
-                            "网页直连 (免配置 / 自动兜底)",
+                            "客户端联动 (高音质)",
+                            "网页直连 (免配置)",
                         ).forEachIndexed { idx, label ->
                             val selected = spotifyTab == idx
                             Box(
@@ -2740,13 +2957,13 @@ fun WebMusicLoginDialog(
                             verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
                             Text(
-                                text = "方案 3：官方客户端极高 / 无损音质联动",
+                                text = "官方客户端联动（极高 / 无损音质）",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.onSurface,
                             )
                             Text(
-                                text = "通过你自己的 Spotify Client ID 遥控手机已安装的官方 Spotify 客户端在后台解码发声，完整享受 320 kbps 极高音质或 24-bit/44.1kHz FLAC 无损音质，同时保留本应用黑胶唱机与双语滚动歌词。当官方客户端未安装、未登录或不可用时，会自动回退至右侧网页播放方案。",
+                                text = "通过你自己的 Spotify Client ID 遥控手机已安装的官方 Spotify 客户端在后台解码发声，完整享受 320 kbps 极高音质或 24-bit/44.1kHz FLAC 无损音质，同时保留本应用黑胶唱机与双语滚动歌词。当官方客户端未安装、未登录或不可用时，会自动回退至右侧网页直连播放。",
                                 fontSize = 12.sp,
                                 lineHeight = 17.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2754,7 +2971,7 @@ fun WebMusicLoginDialog(
                             Spacer(Modifier.height(2.dp))
                             SpotifyStatusLine(
                                 label = "本机官方客户端",
-                                value = if (remoteStatus.spotifyAppInstalled) "已安装 (com.spotify.music)" else "未检测到安装（将自动回退网页方案）",
+                                value = if (remoteStatus.spotifyAppInstalled) "已安装 (com.spotify.music)" else "未检测到安装（将自动回退网页播放）",
                                 ok = remoteStatus.spotifyAppInstalled,
                             )
                             SpotifyStatusLine(
@@ -2764,7 +2981,7 @@ fun WebMusicLoginDialog(
                             )
                             SpotifyStatusLine(
                                 label = "网页自动兜底",
-                                value = if (webFallbackReady) "已就绪（方案 3 不可用时无缝接管）" else "未登录（可切至右侧「网页直连」登录备用）",
+                                value = if (webFallbackReady) "已就绪（客户端联动不可用时自动接管）" else "未登录（可切至右侧「网页直连」登录备用）",
                                 ok = webFallbackReady,
                             )
                             remoteStatus.lastFallbackReason?.takeIf { it.isNotBlank() }?.let { reason ->

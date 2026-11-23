@@ -1,4 +1,14 @@
-## 本版更新（2.10.28）
+## 本版更新（2.10.29）
+
+- **修复 Android 14+ 上 Spotify 官方客户端联动无法拉起授权窗导致超时的问题（Android / TV）**：
+  - 针对 Spotify 官方 `0.8.0` App Remote SDK 内部 `bindService` 缺失 Android 14+（API 34+）`Context.BIND_ALLOW_ACTIVITY_STARTS` 标志导致系统拦截后台拉起授权页的问题，新增 `SpotifyBalContextWrapper` 注入该标志并补齐 PKCE `app-remote-control` 权限范围，确保点击测试连接可正常拉起官方 Spotify 授权确认窗。
+  - 优化官方客户端联动播歌前先等待 `connectSwitchToLocalDevice()` 切回本机设备，并缩短不可用时的回退超时。
+- **修复 Spotify 网页兜底起播耗时近 10 秒与快速搜歌切歌播错歌曲的问题（Android / TV）**：
+  - 优先采用 Spotify Web Player 原生 `spclient` Connect 播放指令与 `/v1/me/player/play`（含 404 自动激活当前 Web Player 设备），移除 9.5 秒无效 `pushState` 盲等；加入 `playSeq` 并发取消、目标单曲页顶部 `action-bar-row` 主播放键严格核验与旧歌名屏蔽，彻底避免误点旧按钮导致实际播放曲目与界面不一致。
+- **优化 Spotify 高音质模式界面文案**：
+  - 将内部代号“方案 3”统一更名为直观易懂的 **「客户端联动 (高音质)」 / 「官方客户端联动」**，同步精简顶部标签文字避免小屏省略号截断。
+
+## 2.10.28 更新
 
 - **修复 Apple Music / Spotify 点击播放后起播前进度条乱跑与回跳的问题（Android / TV）**：
   - 引入播放请求递增代次锁（`playSeq`）与切歌冻结态：点播瞬间立即暂停旧 `<audio>` 节点并丢弃切歌前残留定时器快照，修复 `currentPlaybackTime === 0` 时误读上一首 `<audio>` 节点秒数导致进度条乱跳的问题。

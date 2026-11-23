@@ -1,6 +1,9 @@
 package com.aisub.player.music
 
 import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -59,7 +62,7 @@ object SpotifyAppRemoteBridge {
     private const val KEY_PKCE_STATE = "pkce_state"
 
     private const val OAUTH_SCOPES =
-        "user-library-read playlist-read-private playlist-read-collaborative user-read-recently-played user-top-read user-read-playback-state user-modify-playback-state"
+        "app-remote-control user-library-read playlist-read-private playlist-read-collaborative user-read-recently-played user-top-read user-read-playback-state user-modify-playback-state"
 
     data class Status(
         val clientId: String = "",
@@ -712,11 +715,37 @@ object SpotifyAppRemoteBridge {
 
     // ---------------- SpotifyAppRemote 本机高音质遥控播放 ----------------
 
+    /**
+     * 适配 Android 14+ (API 34+) 后台启动限制（BAL）：
+     * 官方 `spotify-app-remote-release-0.8.0.aar` 内部调用 `getApplicationContext().bindService(..., 65)` 时
+     * 未携带 `Context.BIND_ALLOW_ACTIVITY_STARTS`，导致系统拦截 Spotify 协议服务拉起首次授权页并一直超时。
+     */
+    private class SpotifyBalContextWrapper(private val appBase: Context) : ContextWrapper(appBase) {
+        override fun getApplicationContext(): Context = this
+
+        override fun bindService(service: Intent, conn: ServiceConnection, flags: Int): Boolean {
+            val effectiveFlags = if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+                (service.`package`?.startsWith("com.spotify.") == true ||
+                    service.action?.contains("spotify", ignoreCase = true) == true)
+            ) {
+                flags or Context.BIND_ALLOW_ACTIVITY_STARTS
+            } else {
+                flags
+            }
+            return appBase.bindService(service, conn, effectiveFlags)
+        }
+
+        override fun unbindService(conn: ServiceConnection) {
+            appBase.unbindService(conn)
+        }
+    }
+
     suspend fun testConnectInteractive(context: Context, clientIdOverride: String? = null): Result<Unit> {
         if (!clientIdOverride.isNullOrBlank()) {
             saveClientId(context, clientIdOverride)
         }
-        return connectRemote(context, showAuthView = true, timeoutMs = 20_000L).map { Unit }
+        return connectRemote(context, showAuthView = true, timeoutMs = 25_000L).map { Unit }
     }
 
     private suspend fun connectRemote(
@@ -739,6 +768,7 @@ object SpotifyAppRemoteBridge {
         }
         disconnectInternal()
 
+        val bindContext = SpotifyBalContextWrapper(app)
         val outcome = withContext(Dispatchers.Main.immediate) {
             withTimeoutOrNull(timeoutMs) {
                 suspendCancellableCoroutine<Result<SpotifyAppRemote>> { cont ->
@@ -747,11 +777,15 @@ object SpotifyAppRemoteBridge {
                         .showAuthView(showAuthView)
                         .build()
                     SpotifyAppRemote.connect(
-                        app,
+                        bindContext,
                         params,
                         object : Connector.ConnectionListener {
                             override fun onConnected(remote: SpotifyAppRemote) {
-                                if (cont.isActive) cont.resume(Result.success(remote))
+                                if (cont.isActive) {
+                                    cont.resume(Result.success(remote))
+                                } else {
+                                    runCatching { SpotifyAppRemote.disconnect(remote) }
+                                }
                             }
 
                             override fun onFailure(throwable: Throwable) {
@@ -808,7 +842,7 @@ object SpotifyAppRemoteBridge {
     ): Result<Unit> {
         val statusNow = refreshStatus(context)
         if (!statusNow.canAttemptRemotePlayback) {
-            return Result.failure(IllegalStateException("方案 3 当前未启用或未安装官方客户端"))
+            return Result.failure(IllegalStateException("官方客户端联动当前未启用或未安装本机 Spotify"))
         }
 
         var resolvedId = trackId.trim()
@@ -820,7 +854,7 @@ object SpotifyAppRemoteBridge {
             return Result.failure(IllegalStateException("缺少 Spotify 曲目 ID"))
         }
 
-        val remote = connectRemote(context, showAuthView = true, timeoutMs = 8_500L).getOrElse { err ->
+        val remote = connectRemote(context, showAuthView = true, timeoutMs = 4_500L).getOrElse { err ->
             noteFallback(humanizeRemoteError(err))
             return Result.failure(err)
         }
@@ -836,8 +870,9 @@ object SpotifyAppRemoteBridge {
         endedDispatchedForTarget = false
 
         return withContext(Dispatchers.Main.immediate) {
-            runCatching { remote.connectApi.connectSwitchToLocalDevice() }
-            val playRes = awaitCallResult(remote.playerApi.play(spotifyUri), 6_000L)
+            // 先等待把 Connect 输出切回本机官方客户端（避免沿用旧的 Web Player (Chrome) 设备），再下发播放
+            awaitCallResult(remote.connectApi.connectSwitchToLocalDevice(), 1_500L)
+            val playRes = awaitCallResult(remote.playerApi.play(spotifyUri), 4_500L)
             playRes.onSuccess {
                 if (startPositionMs > 1_000L) {
                     runCatching { remote.playerApi.seekTo(startPositionMs) }
