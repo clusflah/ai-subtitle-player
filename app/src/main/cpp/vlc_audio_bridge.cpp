@@ -598,11 +598,12 @@ static bool openAAudioStreamLocked(BridgeContext* ctx, unsigned* rate, unsigned*
     if (!isAAudioAvailable()) return false;
 
     const int32_t wantCapacityFrames = static_cast<int32_t>((*rate * 400u) / 1000u); // 400ms 容量
-    bool useFloat = true;
-    AAudioStream* stream = tryOpenSingleAAudioStream(*rate, *channels, AAUDIO_FORMAT_PCM_FLOAT, wantCapacityFrames);
+    bool useFloat = false;
+    // 直接使用与 LibVLC 3.0 amem ("S16N") 一致的 PCM_I16，兼顾全机型 HAL 硬件兼容性与零格式错位风险
+    AAudioStream* stream = tryOpenSingleAAudioStream(*rate, *channels, AAUDIO_FORMAT_PCM_I16, wantCapacityFrames);
     if (stream == nullptr) {
-        useFloat = false;
-        stream = tryOpenSingleAAudioStream(*rate, *channels, AAUDIO_FORMAT_PCM_I16, wantCapacityFrames);
+        useFloat = true;
+        stream = tryOpenSingleAAudioStream(*rate, *channels, AAUDIO_FORMAT_PCM_FLOAT, wantCapacityFrames);
     }
     if (stream == nullptr) {
         LOGW("AAudio openStream 失败，回退到 Java AudioTrack");
@@ -753,9 +754,9 @@ static int onVlcAudioSetup(void** data, char* format, unsigned* rate, unsigned* 
     BridgeContext* ctx = static_cast<BridgeContext*>(*data);
     if (__atomic_load_n(&ctx->detached, __ATOMIC_ACQUIRE) != 0) return -1;
 
-    // 统一要求 libVLC 4.0 输出 32-bit 浮点 ("FL32")，绕过 VLC 内部 Fl32toS16 饱和截断与 NaN 爆音，并折叠多声道为立体声/单声道
-    memcpy(format, "FL32", 4);
-    unsigned targetRate = (*rate >= 8000u && *rate <= 192000u) ? *rate : 48000u;
+    // 注意：libvlc-all:3.7.7 内核为 LibVLC 3.0.25，其 amem.c 仅接受 "S16N"（传其它格式会触发 VLC_EGENERIC 无声）！
+    memcpy(format, "S16N", 4);
+    unsigned targetRate = (*rate >= 8000u && *rate <= 96000u) ? *rate : 48000u;
     unsigned targetChannels = (*channels >= 2u) ? 2u : 1u;
 
     pthread_mutex_lock(&ctx->audioMutex);
@@ -831,7 +832,7 @@ static void onVlcAudioPlay(void* data, const void* samples, unsigned count, int6
         return;
     }
 
-    const float* rawFloat = static_cast<const float*>(samples);
+    const int16_t* rawPcm = static_cast<const int16_t*>(samples);
     const int frames = static_cast<int>(count);
     const int ch = static_cast<int>(ctx->channels);
     const int totalSamples = frames * ch;
@@ -841,13 +842,18 @@ static void onVlcAudioPlay(void* data, const void* samples, unsigned count, int6
         return;
     }
 
-    // 0. 净化 NaN/Inf 坏样本并对多声道下混过载峰值做软膝防削波限幅
-    bool sawBadFloat = false;
+    // 0. 将 S16N 转为浮点工作区，同时自动插值消除直播 TS 坏包 NaN 引发的单点满幅脉冲咔哒声
+    const float inv32768 = 1.0f / 32768.0f;
     for (int i = 0; i < totalSamples; ++i) {
-        ctx->floatWorkBuf[i] = sanitizeAndSoftLimitSample(rawFloat[i], &sawBadFloat);
-    }
-    if (sawBadFloat) {
-        armFadeInLocked(ctx, ctx->sampleRate > 0 ? ctx->sampleRate : 48000u, 3);
+        int16_t cur = rawPcm[i];
+        if ((cur == 32767 || cur == -32768) && i >= ch && (i + ch) < totalSamples) {
+            int16_t prev = rawPcm[i - ch];
+            int16_t next = rawPcm[i + ch];
+            if (prev > -4096 && prev < 4096 && next > -4096 && next < 4096) {
+                cur = static_cast<int16_t>((static_cast<int>(prev) + static_cast<int>(next)) / 2);
+            }
+        }
+        ctx->floatWorkBuf[i] = static_cast<float>(cur) * inv32768;
     }
 
     // 1. 分流给识别引擎：使用净化后且未经扬声器音量衰减的 PCM 混音并重采样为 16kHz 单声道 float

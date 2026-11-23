@@ -1,4 +1,10 @@
-## 本版更新（2.10.25）
+## 本版更新（2.10.26）
+
+- **修复安卓端 VLC 内核在 2.10.25 版本出现无声的问题，同时彻底消除 4K 直播电流声（Android / TV）**：
+  - 恢复 `LibVLC 3.0.25` 内存音频模块（`amem`）唯一接受的 `"S16N"` 采样格式与 `:codec=mediacodec_ndk,avcodec,all` 解码链通配符，解决 2.10.25 中因 `"FL32"` 格式被 `amem` 拒绝导致的无声问题。
+  - 完整保留 `AAudio` 标准媒体模式（`400 ms` 容量 / `240 ms` 活跃缓冲）+ 完整分片循环写入 + FFmpeg `avcodec` 优先解码 + 坏包尖峰插值消除与直播禁用 `scaletempo` 时域切片，高码率 4K HDR 直播流（如 Travelxp 4K HDR EU）声音清晰无滋滋电流声。
+
+## 2.10.25 更新
 
 - **Spotify 新增方案 3 高音质 / 无损联动模式（Client ID + App Remote + PKCE），不可用时自动回退（Android / TV）**：
   - 集成官方 `Spotify App Remote SDK` 与 OAuth 2.0 `PKCE`（`S256`）授权及自动续期：填入 `Spotify Client ID` 后可直接联动本机已安装的官方 Spotify 客户端在后台解码发声，完整享受官方客户端开启的 **极高（`320 kbps` Ogg）** 或 **无损（`24-bit/44.1 kHz` FLAC）** 音质，并完整同步至本应用黑胶唱机、双语滚动歌词、播放队列与睡眠定时。

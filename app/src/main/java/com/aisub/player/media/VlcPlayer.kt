@@ -458,18 +458,17 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         when (userForceHwdec) {
             true -> {
                 media.setHWDecoderEnabled(true, true)
-                // 视频保留 MediaCodec 硬解，音频强制优先走 FFmpeg avcodec，绕过 VLC 旧版 faad 在 DVB AAC-LATM 广播流上的电流声以及 spdif 透传误触发
-                media.addOption(":codec=mediacodec_ndk,mediacodec_jni,avcodec,any")
+                // LibVLC 3.0 结尾通配符为 all：视频保留 MediaCodec 硬解，音频优先走 FFmpeg avcodec（绕过旧版 faad 在 DVB AAC-LATM 上的电流声）
+                media.addOption(":codec=mediacodec_ndk,iomx,avcodec,all")
             }
             false -> {
                 media.setHWDecoderEnabled(false, false)
-                media.addOption(":no-hw-dec")
                 media.addOption(":avcodec-hw=none")
-                media.addOption(":codec=avcodec,any")
+                media.addOption(":codec=avcodec,all")
             }
             null -> {
                 media.setHWDecoderEnabled(true, false)
-                media.addOption(":codec=mediacodec_ndk,mediacodec_jni,avcodec,any")
+                media.addOption(":codec=mediacodec_ndk,avcodec,all")
             }
         }
         media.addOption(":no-spdif")
