@@ -1,4 +1,19 @@
-## 本版更新（2.10.24）
+## 本版更新（2.10.25）
+
+- **Spotify 新增方案 3 高音质 / 无损联动模式（Client ID + App Remote + PKCE），不可用时自动回退（Android / TV）**：
+  - 集成官方 `Spotify App Remote SDK` 与 OAuth 2.0 `PKCE`（`S256`）授权及自动续期：填入 `Spotify Client ID` 后可直接联动本机已安装的官方 Spotify 客户端在后台解码发声，完整享受官方客户端开启的 **极高（`320 kbps` Ogg）** 或 **无损（`24-bit/44.1 kHz` FLAC）** 音质，并完整同步至本应用黑胶唱机、双语滚动歌词、播放队列与睡眠定时。
+  - 登录与高音质设置页内置一键粘贴 `Client ID` 以及一键复制 `Redirect URI`、Android 包名、`SHA-1` 签名指纹；当未填写 `Client ID`、未安装官方客户端、未登录或连接异常时，**自动无缝回退至现有的内置 Widevine DRM 网页播放方案**。
+- **修复 VLC 播放高码率 4K HDR 直播流（如 Travelxp 4K HDR EU）出现滋滋电流声的问题（Android / TV）**：
+  - 重构 `libvlc_audio_bridge.so` 原生 C++ 音频输出管线：改为标准媒体模式并扩展至 `400 ms` 容量 / `240 ms` 活跃缓冲与完整分片循环写入，升级为 `"FL32"` 32-bit 浮点直出，内置 IEEE-754 `NaN/Inf` 坏包静默过滤、5.1 下混有理软膝防削波限幅器与切台微淡入，彻底消除 XRun 欠载与破音电流声。
+  - 视频保留 `MediaCodec` 4K HDR 硬解的同时，音频优先采用 FFmpeg `avcodec`（绕过旧版 `faad` 在 DVB `AAC-LATM` 广播流上的高频杂音及 `--no-spdif` 透传误触发），并对直播流禁用 `scaletempo` 时域切片拉伸。
+- **修复 Apple Music 专辑与歌单加载报错、搜索点击专辑不展开及歌手介绍过长问题（Android / TV / Windows）**：
+  - 修复安卓端 Apple Music「专辑」与「歌单」加载为空的问题：适配 `amp-api.music.apple.com` CORS 白名单允许的小写 `media-user-token` 请求头并支持按需加载 `musickit.js`，补齐个人曲库、个性化推荐与地区榜单自动回退。
+  - 修复登录 Spotify 与 Apple Music 后在「乐库」搜索结果中点击专辑或歌单仅闪动无法展开的问题。
+  - 将歌手详情页顶部的歌手介绍按整句智能精简并限制在半个页面高度以内，首屏直接展示专辑与歌曲列表。
+- **GitHub Release 发布页安装包下载直链置顶**：
+  - 在 Release 页面最顶部直接展示各平台安装包下载链接与体积，并将历史版本记录折叠收纳，免去每次滑动到底部查找安装包。
+
+## 2.10.24 更新
 
 - **修复安卓端 Spotify 登录后曲库空白问题（Android / TV）**：
   - 适配 Spotify 网页端新版 TOTP `/api/token` 鉴权与 `client-token` 机制，同时拦截 `fetch`（兼容 `URL` / `Request` 对象）与 `XMLHttpRequest` 自动捕获会话令牌及动态持久化查询哈希。

@@ -255,5 +255,122 @@ class MusicDiscoverTest {
         assertTrue(com.aisub.player.music.WebStreamingMusic.DOCUMENT_START_SCRIPT.contains("XMLHttpRequest"))
         assertTrue(com.aisub.player.music.WebStreamingMusic.DOCUMENT_START_SCRIPT.contains("api\\/token"))
         assertTrue(com.aisub.player.music.WebStreamingMusic.DOCUMENT_START_SCRIPT.contains("clienttoken"))
+        assertTrue(com.aisub.player.music.WebStreamingMusic.DOCUMENT_START_SCRIPT.contains("media-user-token"))
+        assertEquals("token+abc/123==", com.aisub.player.music.WebStreamingMusic.extractCookieValue("itua=cn; media-user-token=token%2Babc%2F123%3D%3D; xp=1", "media-user-token"))
+    }
+
+    @Test
+    fun condenseArtistBioKeepsCompleteSentencesWithinHalfPageBudget() {
+        val arianaBio = """
+            With her four-octave vocal acrobatics and iconic image, American singer, songwriter, and actress Ariana Grande has solidified her place as one of the quintessential pop stars of her generation, racking up stacks of awards and chart records in the process. Emerging in the early 2010s with the hit single "The Way," Grande was primed to follow in the footsteps of her biggest influences, Whitney Houston and Mariah Carey, due in part to her powerhouse vocals. With its Babyface production, her debut, Yours Truly, underscored her debt to '90s R&B, but Grande quickly incorporated hip-hop and EDM into her sound. "Problem," a 2014 smash duet with Iggy Azalea, was the first indication of her development, an evolution reinforced by the hits "Bang Bang" and "Love Me Harder."
+        """.trimIndent()
+
+        val condensedEn = com.aisub.player.ui.condenseArtistBio(arianaBio)
+        assertTrue(condensedEn.length in 120..340)
+        assertTrue(condensedEn.endsWith("in the process."))
+
+        // 含 G.E.M. / U.S. 等缩写句点时不会误截断在缩写中间
+        val gemBio = "Gloria Tang Zhi Kei (鄧紫棋), also known as G.E.M., is a singer-songwriter in Hong Kong and topped U.S. Mandopop charts. " +
+            "She made her debut in 2008 and achieved widespread acclaim across Asia with powerhouse live performances. " +
+            "Later albums expanded into electronic pop, hip-hop, and rock production across multiple world stadium tours and television appearances."
+        val condensedGem = com.aisub.player.ui.condenseArtistBio(gemBio)
+        assertTrue(condensedGem.contains("G.E.M., is a singer-songwriter"))
+        assertTrue(condensedGem.endsWith("performances.") || condensedGem.endsWith("charts."))
+
+        val zhBio = "周杰伦（Jay Chou），1979年1月18日出生于台湾省新北市，华语流行乐男歌手、音乐人、演员、导演。2000年发行首张个人专辑《Jay》，融合R&B、嘻哈与中国风元素，迅速在华语乐坛崭露头角。" +
+            "2001年凭专辑《范特西》奠定个人音乐风格，此后陆续推出《八度空间》《叶惠美》《七里香》《十一月的萧邦》《依然范特西》等多张经典唱片，多次斩获金曲奖最佳专辑与最佳制作人奖，对当代华语流行音乐产生深远影响。"
+        val condensedZh = com.aisub.player.ui.condenseArtistBio(zhBio)
+        assertTrue(condensedZh.length <= 180)
+        assertTrue(condensedZh.endsWith("。"))
+    }
+
+    @Test
+    fun appUpdaterIgnoresTopDownloadLinksAndCollapsedHistoryWrappers() {
+        val composedBody = """
+            ## 安装包下载
+
+            - [📱 Android 标准版 (`Voxtitle-2.10.25-arm64-v8a.apk`)](https://github.com/clusflah/ai-subtitle-player/releases/download/v2.10.25/Voxtitle-2.10.25-arm64-v8a.apk) · `68.4 MB`
+
+            ## 本版更新（2.10.25）
+
+            - 修复搜索后点击专辑无法展开的问题
+
+            ## 历史版本
+
+            <details>
+            <summary>展开查看历史版本更新记录</summary>
+
+            ## 2.10.24 更新
+
+            - 修复 Spotify 登录后曲库空白问题
+
+            ## 
+            </details>
+        """.trimIndent()
+
+        val notesFrom24 = com.aisub.player.update.AppUpdater.notesSince(composedBody, "2.10.24")
+        assertEquals("• 修复搜索后点击专辑无法展开的问题", notesFrom24)
+
+        val notesFrom23 = com.aisub.player.update.AppUpdater.notesSince(composedBody, "2.10.23")
+        assertTrue(notesFrom23.contains("【2.10.25】"))
+        assertTrue(notesFrom23.contains("【2.10.24】"))
+        assertTrue(!notesFrom23.contains("安装包下载"))
+        assertTrue(!notesFrom23.contains("<details>"))
+    }
+
+    @Test
+    fun spotifyAppRemoteSolution3PkceAndFallbackWorkCleanly() {
+        val ctx = RuntimeEnvironment.getApplication()
+        com.aisub.player.music.SpotifyAppRemoteBridge.saveClientId(ctx, "")
+        com.aisub.player.music.SpotifyAppRemoteBridge.logoutAll(ctx)
+
+        // 1. RFC 7636 S256 PKCE 标准向量验证
+        val rfcVerifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        assertEquals(
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+            com.aisub.player.music.SpotifyAppRemoteBridge.sha256Base64Url(rfcVerifier),
+        )
+
+        // 2. SHA-1 格式化、封面 URI 转换与 OAuth 回调协议识别
+        assertEquals(
+            "AA:0B:FF",
+            com.aisub.player.music.SpotifyAppRemoteBridge.formatSha1Bytes(
+                byteArrayOf(0xAA.toByte(), 0x0B.toByte(), 0xFF.toByte()),
+            ),
+        )
+        assertEquals(
+            "https://i.scdn.co/image/ab67616d0000b2731234",
+            com.aisub.player.music.SpotifyAppRemoteBridge.spotifyImageUriToHttps("spotify:image:ab67616d0000b2731234"),
+        )
+        assertTrue(
+            com.aisub.player.music.SpotifyAppRemoteBridge.isCallbackUri(
+                android.net.Uri.parse("voxtitle://spotify-callback?code=test_code_123&state=xyz"),
+            ),
+        )
+
+        // 3. 保存 Client ID 并生成 PKCE 授权 URL；测试环境未装官方 Spotify App 时自动回退，不会误判为可遥控发声
+        val sampleClientId = "0123456789abcdef0123456789abcdef"
+        com.aisub.player.music.SpotifyAppRemoteBridge.saveClientId(ctx, "  $sampleClientId  ")
+        assertEquals(sampleClientId, com.aisub.player.music.SpotifyAppRemoteBridge.getClientId(ctx))
+
+        val authUrl = com.aisub.player.music.SpotifyAppRemoteBridge.buildPkceAuthorizeUrl(ctx)
+        assertNotNull(authUrl)
+        assertTrue(authUrl!!.startsWith("https://accounts.spotify.com/authorize?"))
+        assertTrue(authUrl.contains("client_id=$sampleClientId"))
+        assertTrue(authUrl.contains("code_challenge_method=S256"))
+        assertTrue(authUrl.contains("voxtitle%3A%2F%2Fspotify-callback"))
+
+        val st = com.aisub.player.music.SpotifyAppRemoteBridge.refreshStatus(ctx)
+        assertTrue(st.isConfigured)
+        assertTrue(st.remoteEnabled)
+        assertTrue(!st.spotifyAppInstalled)
+        assertTrue(!st.canAttemptRemotePlayback)
+
+        // 4. 退出登录会关闭高音质自动连接开关，但保留输入框 Client ID 便于下次一键重连
+        com.aisub.player.music.SpotifyAppRemoteBridge.logoutAll(ctx)
+        val afterLogout = com.aisub.player.music.SpotifyAppRemoteBridge.refreshStatus(ctx)
+        assertEquals(sampleClientId, afterLogout.clientId)
+        assertTrue(!afterLogout.remoteEnabled)
+        assertTrue(!com.aisub.player.music.SpotifyAppRemoteBridge.isReadyAsLoggedIn(ctx))
     }
 }

@@ -42,6 +42,7 @@ enum {
     AAUDIO_OK = 0,
     AAUDIO_DIRECTION_OUTPUT = 0,
     AAUDIO_FORMAT_PCM_I16 = 1,
+    AAUDIO_FORMAT_PCM_FLOAT = 2,
     AAUDIO_SHARING_MODE_EXCLUSIVE = 0,
     AAUDIO_SHARING_MODE_SHARED = 1,
     AAUDIO_PERFORMANCE_MODE_NONE = 10,
@@ -54,11 +55,12 @@ enum {
 
 /**
  * VLC 原生音频分流桥（兼容 -DANDROID_STL=none，零 C++ 标准库符号依赖）：
- * 1. 通过 libvlc_audio_set_callbacks + libvlc_audio_set_format_callbacks 接管解码后的 S16N PCM；
+ * 1. 通过 libvlc_audio_set_callbacks + libvlc_audio_set_format_callbacks 接管解码后的 32-bit 浮点 ("FL32") PCM，
+ *    内置 IEEE-754 NaN/Inf 坏包静默过滤与 5.1 下混软膝防削波限幅器，彻底消除高码率 4K 直播与环绕声破音/电流声；
  * 2. 运行时通过 dlopen("libaaudio.so", RTLD_LAZY) 动态探测 AAudio：
- *    - Android 8.1+（API >= 27）且 dlopen 成功：直接在 C++ 层走 AAudio 低延迟直出，不经过 Java AudioTrack；
- *    - Android 6.0 老电视等不支持设备：dlopen 返回空（或打开流失败），自动回退到 Java AudioTrack 播放，
- *      配合 startVlcKernel 中的 --audio-desync=-160（或运行时回退时的 libvlc_audio_set_delay 兜底）抵消环形缓冲延迟；
+ *    - Android 8.1+（API >= 27）且 dlopen 成功：走 C++ AAudio 标准媒体模式（400ms 容量 / 240ms 活跃缓冲 + 完整分片写入循环），
+ *      杜绝 4K 50fps HDR 解码与 HLS 分片抖动导致的 FastMixer XRun 欠载与尾部丢帧电流声；
+ *    - Android 6.0 老电视等不支持设备：自动回退到 Java AudioTrack 播放；
  * 3. 同时在开启 AI 字幕识别时，在 C++ 层将多声道音频混音并抗混叠重采样为 16kHz 单声道 float PCM，
  *    按 100ms（1600 样本）无损分批回调给识别引擎，单连接直播源无需另开第二路连接即可实时出字幕。
  */
@@ -72,7 +74,7 @@ typedef void (*libvlc_audio_pause_cb)(void* data, int64_t pts);
 typedef void (*libvlc_audio_resume_cb)(void* data, int64_t pts);
 typedef void (*libvlc_audio_flush_cb)(void* data, int64_t pts);
 typedef void (*libvlc_audio_drain_cb)(void* data);
-typedef void (*libvlc_audio_set_volume_cb)(void* data, float volume, bool mute);
+typedef int (*libvlc_audio_set_volume_cb)(void* data, float volume, bool mute);
 typedef int (*libvlc_audio_setup_cb)(void** data, char* format, unsigned* rate, unsigned* channels);
 typedef void (*libvlc_audio_cleanup_cb)(void* data);
 
@@ -118,6 +120,7 @@ typedef void (*pfn_AAudioStreamBuilder_setSampleRate)(AAudioStreamBuilder* build
 typedef void (*pfn_AAudioStreamBuilder_setChannelCount)(AAudioStreamBuilder* builder, int32_t channelCount);
 typedef void (*pfn_AAudioStreamBuilder_setFormat)(AAudioStreamBuilder* builder, aaudio_format_t format);
 typedef void (*pfn_AAudioStreamBuilder_setPerformanceMode)(AAudioStreamBuilder* builder, aaudio_performance_mode_t mode);
+typedef void (*pfn_AAudioStreamBuilder_setBufferCapacityInFrames)(AAudioStreamBuilder* builder, int32_t numFrames);
 typedef void (*pfn_AAudioStreamBuilder_setUsage)(AAudioStreamBuilder* builder, aaudio_usage_t usage);
 typedef void (*pfn_AAudioStreamBuilder_setContentType)(AAudioStreamBuilder* builder, aaudio_content_type_t contentType);
 typedef aaudio_result_t (*pfn_AAudioStreamBuilder_openStream)(AAudioStreamBuilder* builder, AAudioStream** stream);
@@ -134,6 +137,9 @@ typedef aaudio_result_t (*pfn_AAudioStream_write)(
 typedef aaudio_result_t (*pfn_AAudioStream_close)(AAudioStream* stream);
 typedef int32_t (*pfn_AAudioStream_getSampleRate)(AAudioStream* stream);
 typedef int32_t (*pfn_AAudioStream_getChannelCount)(AAudioStream* stream);
+typedef aaudio_format_t (*pfn_AAudioStream_getFormat)(AAudioStream* stream);
+typedef int32_t (*pfn_AAudioStream_getBufferCapacityInFrames)(AAudioStream* stream);
+typedef aaudio_result_t (*pfn_AAudioStream_setBufferSizeInFrames)(AAudioStream* stream, int32_t numFrames);
 
 struct AAudioApi {
     bool initialized;
@@ -147,6 +153,7 @@ struct AAudioApi {
     pfn_AAudioStreamBuilder_setChannelCount builderSetChannelCount;
     pfn_AAudioStreamBuilder_setFormat builderSetFormat;
     pfn_AAudioStreamBuilder_setPerformanceMode builderSetPerformanceMode;
+    pfn_AAudioStreamBuilder_setBufferCapacityInFrames builderSetBufferCapacityInFrames;
     pfn_AAudioStreamBuilder_setUsage builderSetUsage;
     pfn_AAudioStreamBuilder_setContentType builderSetContentType;
     pfn_AAudioStreamBuilder_openStream builderOpenStream;
@@ -158,6 +165,9 @@ struct AAudioApi {
     pfn_AAudioStream_close streamClose;
     pfn_AAudioStream_getSampleRate streamGetSampleRate;
     pfn_AAudioStream_getChannelCount streamGetChannelCount;
+    pfn_AAudioStream_getFormat streamGetFormat;
+    pfn_AAudioStream_getBufferCapacityInFrames streamGetBufferCapacityInFrames;
+    pfn_AAudioStream_setBufferSizeInFrames streamSetBufferSizeInFrames;
 };
 
 static pthread_mutex_t g_api_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -169,8 +179,8 @@ static pthread_once_t g_jni_key_once = PTHREAD_ONCE_INIT;
 
 static const int TARGET_ASR_RATE = 16000;
 static const int ASR_BATCH_SAMPLES = 1600; // 100ms @ 16kHz
-static const int64_t AAUDIO_WRITE_TIMEOUT_NS = 100LL * 1000000LL; // 100ms
-static const int64_t AUDIOTRACK_DESYNC_US = -160000LL; // -160ms
+static const int64_t AAUDIO_WRITE_SLICE_NS = 80LL * 1000000LL; // 单次写入分片超时 80ms，循环写满整包，零丢帧且切台秒退
+static const int64_t AUDIOTRACK_DESYNC_US = -180000LL; // -180ms
 
 static void detachCurrentThreadDestructor(void* value) {
     if (value != nullptr && g_jvm != nullptr) {
@@ -247,6 +257,7 @@ static bool ensureAAudioApiLocked() {
     g_aaudio.builderSetChannelCount = reinterpret_cast<pfn_AAudioStreamBuilder_setChannelCount>(dlsym(h, "AAudioStreamBuilder_setChannelCount"));
     g_aaudio.builderSetFormat = reinterpret_cast<pfn_AAudioStreamBuilder_setFormat>(dlsym(h, "AAudioStreamBuilder_setFormat"));
     g_aaudio.builderSetPerformanceMode = reinterpret_cast<pfn_AAudioStreamBuilder_setPerformanceMode>(dlsym(h, "AAudioStreamBuilder_setPerformanceMode"));
+    g_aaudio.builderSetBufferCapacityInFrames = reinterpret_cast<pfn_AAudioStreamBuilder_setBufferCapacityInFrames>(dlsym(h, "AAudioStreamBuilder_setBufferCapacityInFrames"));
     g_aaudio.builderSetUsage = reinterpret_cast<pfn_AAudioStreamBuilder_setUsage>(dlsym(h, "AAudioStreamBuilder_setUsage"));
     g_aaudio.builderSetContentType = reinterpret_cast<pfn_AAudioStreamBuilder_setContentType>(dlsym(h, "AAudioStreamBuilder_setContentType"));
     g_aaudio.builderOpenStream = reinterpret_cast<pfn_AAudioStreamBuilder_openStream>(dlsym(h, "AAudioStreamBuilder_openStream"));
@@ -258,6 +269,9 @@ static bool ensureAAudioApiLocked() {
     g_aaudio.streamClose = reinterpret_cast<pfn_AAudioStream_close>(dlsym(h, "AAudioStream_close"));
     g_aaudio.streamGetSampleRate = reinterpret_cast<pfn_AAudioStream_getSampleRate>(dlsym(h, "AAudioStream_getSampleRate"));
     g_aaudio.streamGetChannelCount = reinterpret_cast<pfn_AAudioStream_getChannelCount>(dlsym(h, "AAudioStream_getChannelCount"));
+    g_aaudio.streamGetFormat = reinterpret_cast<pfn_AAudioStream_getFormat>(dlsym(h, "AAudioStream_getFormat"));
+    g_aaudio.streamGetBufferCapacityInFrames = reinterpret_cast<pfn_AAudioStream_getBufferCapacityInFrames>(dlsym(h, "AAudioStream_getBufferCapacityInFrames"));
+    g_aaudio.streamSetBufferSizeInFrames = reinterpret_cast<pfn_AAudioStream_setBufferSizeInFrames>(dlsym(h, "AAudioStream_setBufferSizeInFrames"));
 
     if (!g_aaudio.createStreamBuilder || !g_aaudio.builderDelete ||
         !g_aaudio.builderSetDirection || !g_aaudio.builderSetSharingMode ||
@@ -276,7 +290,7 @@ static bool ensureAAudioApiLocked() {
     }
 
     g_aaudio.available = true;
-    LOGI("AAudio 动态探测成功（API %d），启用 C++ AAudio 低延迟直出路径", sdk);
+    LOGI("AAudio 动态探测成功（API %d），启用 C++ AAudio 32-bit 浮点防欠载路径", sdk);
     return true;
 }
 
@@ -411,6 +425,9 @@ struct BridgeContext {
     int16_t* scaledPcmBuf;
     int scaledPcmCapacity;
 
+    float* floatWorkBuf;
+    int floatWorkCapacity;
+
     float* monoScratchBuf;
     int monoScratchCapacity;
 
@@ -423,13 +440,17 @@ struct BridgeContext {
 
     AAudioStream* aaudioStream;
     bool aaudioStarted;
+    bool aaudioUsesFloat;
     bool appliedRuntimeDelay;
     OutputBackend backend;
     unsigned sampleRate;
     unsigned channels;
+    int fadeInRemaining;
+    int fadeInTotal;
 
     volatile int asrEnabled;
     volatile int detached;
+    volatile int flushSerial;
     volatile int volumeMilli; // 0..1000 代表 0.0f..1.0f
     volatile int muted;
 };
@@ -446,12 +467,38 @@ static bool ensureShortCapacity(int16_t** buf, int* cap, int needed) {
 
 static bool ensureFloatCapacity(float** buf, int* cap, int needed) {
     if (needed <= *cap) return true;
-    int nextCap = needed < 2048 ? 2048 : needed * 2;
+    int nextCap = needed < 4096 ? 4096 : needed * 2;
     float* next = static_cast<float*>(realloc(*buf, static_cast<size_t>(nextCap) * sizeof(float)));
     if (!next) return false;
     *buf = next;
     *cap = nextCap;
     return true;
+}
+
+static inline float sanitizeAndSoftLimitSample(float s, bool* sawNonFinite) {
+    union {
+        float f;
+        uint32_t u;
+    } bits;
+    bits.f = s;
+    // 拦截直播 TS 丢包/切台首包可能出现的 NaN / Inf，避免转为满幅爆音脉冲
+    if ((bits.u & 0x7F800000u) == 0x7F800000u) {
+        *sawNonFinite = true;
+        return 0.0f;
+    }
+    float a = s < 0.0f ? -s : s;
+    if (a <= 0.88f) return s;
+    // 5.1 / 7.1 下混立体声时常见瞬态超 1.0f 峰值：采用有理软膝压缩至 [-1, 1]，杜绝硬削波谐波电流声
+    float over = a - 0.88f;
+    float compressed = 0.88f + (0.12f * over) / (0.12f + over);
+    return s < 0.0f ? -compressed : compressed;
+}
+
+static inline int16_t floatToClampedI16(float s) {
+    float scaled = s * 32767.0f;
+    if (scaled >= 32767.0f) return 32767;
+    if (scaled <= -32768.0f) return -32768;
+    return static_cast<int16_t>(scaled >= 0.0f ? (scaled + 0.5f) : (scaled - 0.5f));
 }
 
 static jshortArray ensureJavaShortArray(JNIEnv* env, BridgeContext* ctx, int neededShorts) {
@@ -494,6 +541,13 @@ static void flushAsrBatchToJava(JNIEnv* env, BridgeContext* ctx) {
     env->DeleteLocalRef(arr);
 }
 
+static void armFadeInLocked(BridgeContext* ctx, unsigned rate, int durationMs) {
+    int frames = static_cast<int>((rate * static_cast<unsigned>(durationMs)) / 1000u);
+    if (frames < 32) frames = 32;
+    ctx->fadeInTotal = frames;
+    ctx->fadeInRemaining = frames;
+}
+
 static void closeAAudioStreamLocked(BridgeContext* ctx) {
     if (ctx->aaudioStream != nullptr && g_aaudio.available) {
         g_aaudio.streamRequestStop(ctx->aaudioStream);
@@ -503,20 +557,27 @@ static void closeAAudioStreamLocked(BridgeContext* ctx) {
     }
 }
 
-static bool openAAudioStreamLocked(BridgeContext* ctx, unsigned* rate, unsigned* channels) {
-    if (!isAAudioAvailable()) return false;
-
+static AAudioStream* tryOpenSingleAAudioStream(
+    unsigned rate,
+    unsigned channels,
+    aaudio_format_t reqFormat,
+    int32_t capacityFrames
+) {
     AAudioStreamBuilder* builder = nullptr;
     if (g_aaudio.createStreamBuilder(&builder) != AAUDIO_OK || builder == nullptr) {
-        return false;
+        return nullptr;
     }
 
     g_aaudio.builderSetDirection(builder, AAUDIO_DIRECTION_OUTPUT);
     g_aaudio.builderSetSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
-    g_aaudio.builderSetSampleRate(builder, static_cast<int32_t>(*rate));
-    g_aaudio.builderSetChannelCount(builder, static_cast<int32_t>(*channels));
-    g_aaudio.builderSetFormat(builder, AAUDIO_FORMAT_PCM_I16);
-    g_aaudio.builderSetPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    g_aaudio.builderSetSampleRate(builder, static_cast<int32_t>(rate));
+    g_aaudio.builderSetChannelCount(builder, static_cast<int32_t>(channels));
+    g_aaudio.builderSetFormat(builder, reqFormat);
+    // 阻塞式媒体流严禁启用无回调 LOW_LATENCY（FastMixer 默认仅 4~8ms 缓冲，4K HDR 解码抖动必现 XRun 电流声）
+    g_aaudio.builderSetPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_NONE);
+    if (g_aaudio.builderSetBufferCapacityInFrames && capacityFrames > 0) {
+        g_aaudio.builderSetBufferCapacityInFrames(builder, capacityFrames);
+    }
     if (g_aaudio.builderSetUsage) {
         g_aaudio.builderSetUsage(builder, AAUDIO_USAGE_MEDIA);
     }
@@ -527,19 +588,57 @@ static bool openAAudioStreamLocked(BridgeContext* ctx, unsigned* rate, unsigned*
     AAudioStream* stream = nullptr;
     aaudio_result_t res = g_aaudio.builderOpenStream(builder, &stream);
     g_aaudio.builderDelete(builder);
-
     if (res != AAUDIO_OK || stream == nullptr) {
-        LOGW("AAudio openStream 失败（code=%d），回退到 Java AudioTrack", static_cast<int>(res));
+        return nullptr;
+    }
+    return stream;
+}
+
+static bool openAAudioStreamLocked(BridgeContext* ctx, unsigned* rate, unsigned* channels) {
+    if (!isAAudioAvailable()) return false;
+
+    const int32_t wantCapacityFrames = static_cast<int32_t>((*rate * 400u) / 1000u); // 400ms 容量
+    bool useFloat = true;
+    AAudioStream* stream = tryOpenSingleAAudioStream(*rate, *channels, AAUDIO_FORMAT_PCM_FLOAT, wantCapacityFrames);
+    if (stream == nullptr) {
+        useFloat = false;
+        stream = tryOpenSingleAAudioStream(*rate, *channels, AAUDIO_FORMAT_PCM_I16, wantCapacityFrames);
+    }
+    if (stream == nullptr) {
+        LOGW("AAudio openStream 失败，回退到 Java AudioTrack");
         return false;
+    }
+
+    if (g_aaudio.streamGetFormat) {
+        aaudio_format_t actualFmt = g_aaudio.streamGetFormat(stream);
+        if (actualFmt == AAUDIO_FORMAT_PCM_I16) {
+            useFloat = false;
+        } else if (actualFmt == AAUDIO_FORMAT_PCM_FLOAT) {
+            useFloat = true;
+        }
     }
 
     int32_t actualRate = g_aaudio.streamGetSampleRate(stream);
     int32_t actualChannels = g_aaudio.streamGetChannelCount(stream);
-    if (actualRate >= 8000 && actualRate <= 96000) {
+    if (actualRate >= 8000 && actualRate <= 192000) {
         *rate = static_cast<unsigned>(actualRate);
     }
     if (actualChannels == 1 || actualChannels == 2) {
         *channels = static_cast<unsigned>(actualChannels);
+    }
+
+    // 显式将活跃缓冲水位扩至 ~240ms（不超过实际分配容量），彻底吸收 4K 50fps HDR 解码与直播分片抖动
+    if (g_aaudio.streamSetBufferSizeInFrames) {
+        int32_t targetActive = static_cast<int32_t>((*rate * 240u) / 1000u);
+        if (g_aaudio.streamGetBufferCapacityInFrames) {
+            int32_t cap = g_aaudio.streamGetBufferCapacityInFrames(stream);
+            if (cap > 0 && targetActive > cap) {
+                targetActive = cap;
+            }
+        }
+        if (targetActive > 0) {
+            g_aaudio.streamSetBufferSizeInFrames(stream, targetActive);
+        }
     }
 
     aaudio_result_t startRes = g_aaudio.streamRequestStart(stream);
@@ -556,6 +655,7 @@ static bool openAAudioStreamLocked(BridgeContext* ctx, unsigned* rate, unsigned*
 
     ctx->aaudioStream = stream;
     ctx->aaudioStarted = true;
+    ctx->aaudioUsesFloat = useFloat;
     ctx->backend = BACKEND_AAUDIO;
     return true;
 }
@@ -574,14 +674,76 @@ static bool openJavaAudioTrackLocked(BridgeContext* ctx, JNIEnv* env, unsigned r
     }
     if (!ok) return false;
     ctx->backend = BACKEND_JAVA_AUDIOTRACK;
-    // Android 6.0 等无 AAudio 的设备已在 startVlcKernel 的 vlcOptions 中传入 --audio-desync=-160；
-    // 仅当 libaaudio.so 探测成功（故未加启动参数）但 openStream 运行时失败并动态回退到 AudioTrack 时，
-    // 通过 libvlc_audio_set_delay 动态补上 -160ms，避免与 --audio-desync=-160 叠加成 -320ms。
+    // 若启动时探测到 AAudio（已设 --audio-desync=-140），运行时回退到 AudioTrack 仅需补齐差值 -40ms（合计 -180ms）
     if (isAAudioAvailable() && g_vlc.set_delay && ctx->mp) {
-        g_vlc.set_delay(ctx->mp, AUDIOTRACK_DESYNC_US);
+        g_vlc.set_delay(ctx->mp, -40000LL);
         ctx->appliedRuntimeDelay = true;
+    } else if (!isAAudioAvailable()) {
+        (void)AUDIOTRACK_DESYNC_US;
     }
     return true;
+}
+
+static bool writeFullAAudioFramesLocked(BridgeContext* ctx, const float* floatPcm, int frames, int ch) {
+    if (!ctx->aaudioStream || frames <= 0) return false;
+    if (!ctx->aaudioStarted) {
+        g_aaudio.streamRequestStart(ctx->aaudioStream);
+        ctx->aaudioStarted = true;
+    }
+
+    const int16_t* i16Pcm = nullptr;
+    if (!ctx->aaudioUsesFloat) {
+        const int totalSamples = frames * ch;
+        if (!ensureShortCapacity(&ctx->scaledPcmBuf, &ctx->scaledPcmCapacity, totalSamples)) {
+            return false;
+        }
+        for (int i = 0; i < totalSamples; ++i) {
+            ctx->scaledPcmBuf[i] = floatToClampedI16(floatPcm[i]);
+        }
+        i16Pcm = ctx->scaledPcmBuf;
+    }
+
+    const int startSerial = __atomic_load_n(&ctx->flushSerial, __ATOMIC_ACQUIRE);
+    int writtenTotal = 0;
+    int zeroRetries = 0;
+
+    while (writtenTotal < frames) {
+        if (__atomic_load_n(&ctx->detached, __ATOMIC_ACQUIRE) != 0 ||
+            __atomic_load_n(&ctx->flushSerial, __ATOMIC_ACQUIRE) != startSerial) {
+            return true;
+        }
+        const void* ptr = ctx->aaudioUsesFloat
+            ? static_cast<const void*>(floatPcm + writtenTotal * ch)
+            : static_cast<const void*>(i16Pcm + writtenTotal * ch);
+        const int32_t remain = frames - writtenTotal;
+        aaudio_result_t w = g_aaudio.streamWrite(ctx->aaudioStream, ptr, remain, AAUDIO_WRITE_SLICE_NS);
+        if (w > 0) {
+            writtenTotal += static_cast<int>(w);
+            zeroRetries = 0;
+        } else if (w == 0) {
+            if (++zeroRetries > 20) {
+                LOGW("AAudio 连续写入超时（已写 %d/%d 帧）", writtenTotal, frames);
+                return true;
+            }
+        } else {
+            LOGW("AAudio write 返回错误 %d，准备重建输出流", static_cast<int>(w));
+            return false;
+        }
+    }
+    return true;
+}
+
+static void writeJavaAudioTrackFromFloatLocked(BridgeContext* ctx, JNIEnv* env, const float* floatPcm, int totalSamples) {
+    if (!env || !ctx->callbackGlobal || !ctx->midOnAudioWrite || totalSamples <= 0) return;
+    if (!ensureShortCapacity(&ctx->scaledPcmBuf, &ctx->scaledPcmCapacity, totalSamples)) return;
+    for (int i = 0; i < totalSamples; ++i) {
+        ctx->scaledPcmBuf[i] = floatToClampedI16(floatPcm[i]);
+    }
+    jshortArray arr = ensureJavaShortArray(env, ctx, totalSamples);
+    if (!arr) return;
+    env->SetShortArrayRegion(arr, 0, totalSamples, ctx->scaledPcmBuf);
+    env->CallVoidMethod(ctx->callbackGlobal, ctx->midOnAudioWrite, arr, static_cast<jint>(totalSamples));
+    if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
 // ---------------- libVLC 原生回调函数 ----------------
@@ -591,9 +753,9 @@ static int onVlcAudioSetup(void** data, char* format, unsigned* rate, unsigned* 
     BridgeContext* ctx = static_cast<BridgeContext*>(*data);
     if (__atomic_load_n(&ctx->detached, __ATOMIC_ACQUIRE) != 0) return -1;
 
-    // 统一要求 libVLC 输出本机字节序 16-bit 有符号整型 PCM ("S16N")，并折叠多声道（5.1/7.1）为立体声或单声道
-    memcpy(format, "S16N", 4);
-    unsigned targetRate = (*rate >= 8000u && *rate <= 96000u) ? *rate : 48000u;
+    // 统一要求 libVLC 4.0 输出 32-bit 浮点 ("FL32")，绕过 VLC 内部 Fl32toS16 饱和截断与 NaN 爆音，并折叠多声道为立体声/单声道
+    memcpy(format, "FL32", 4);
+    unsigned targetRate = (*rate >= 8000u && *rate <= 192000u) ? *rate : 48000u;
     unsigned targetChannels = (*channels >= 2u) ? 2u : 1u;
 
     pthread_mutex_lock(&ctx->audioMutex);
@@ -624,9 +786,11 @@ static int onVlcAudioSetup(void** data, char* format, unsigned* rate, unsigned* 
     ctx->channels = targetChannels;
     ctx->resampler.reset(static_cast<int>(targetRate));
     ctx->asrBatchCount = 0;
+    armFadeInLocked(ctx, targetRate, 6);
 
-    LOGI("VLC 音频桥已就绪：backend=%s, rate=%uHz, channels=%u",
+    LOGI("VLC 音频桥已就绪：backend=%s(%s), rate=%uHz, channels=%u",
          ctx->backend == BACKEND_AAUDIO ? "AAudio" : "AudioTrack",
+         (ctx->backend == BACKEND_AAUDIO && ctx->aaudioUsesFloat) ? "FL32" : "S16",
          targetRate, targetChannels);
 
     pthread_mutex_unlock(&ctx->audioMutex);
@@ -637,6 +801,7 @@ static void onVlcAudioCleanup(void* data) {
     BridgeContext* ctx = static_cast<BridgeContext*>(data);
     if (!ctx) return;
 
+    __atomic_fetch_add(&ctx->flushSerial, 1, __ATOMIC_RELEASE);
     pthread_mutex_lock(&ctx->audioMutex);
     JNIEnv* env = getThreadEnv();
     if (__atomic_load_n(&ctx->asrEnabled, __ATOMIC_ACQUIRE) != 0 && env) {
@@ -666,29 +831,41 @@ static void onVlcAudioPlay(void* data, const void* samples, unsigned count, int6
         return;
     }
 
-    const int16_t* rawPcm = static_cast<const int16_t*>(samples);
+    const float* rawFloat = static_cast<const float*>(samples);
     const int frames = static_cast<int>(count);
     const int ch = static_cast<int>(ctx->channels);
     const int totalSamples = frames * ch;
 
-    // 1. 分流给识别引擎：使用未经扬声器音量衰减的原始 PCM 混音并重采样为 16kHz 单声道 float
+    if (!ensureFloatCapacity(&ctx->floatWorkBuf, &ctx->floatWorkCapacity, totalSamples)) {
+        pthread_mutex_unlock(&ctx->audioMutex);
+        return;
+    }
+
+    // 0. 净化 NaN/Inf 坏样本并对多声道下混过载峰值做软膝防削波限幅
+    bool sawBadFloat = false;
+    for (int i = 0; i < totalSamples; ++i) {
+        ctx->floatWorkBuf[i] = sanitizeAndSoftLimitSample(rawFloat[i], &sawBadFloat);
+    }
+    if (sawBadFloat) {
+        armFadeInLocked(ctx, ctx->sampleRate > 0 ? ctx->sampleRate : 48000u, 3);
+    }
+
+    // 1. 分流给识别引擎：使用净化后且未经扬声器音量衰减的 PCM 混音并重采样为 16kHz 单声道 float
     if (__atomic_load_n(&ctx->asrEnabled, __ATOMIC_ACQUIRE) != 0) {
         int maxOut = ctx->resampler.maxOutputFor(frames);
         if (ensureFloatCapacity(&ctx->monoScratchBuf, &ctx->monoScratchCapacity, frames) &&
             ensureFloatCapacity(&ctx->resampledScratchBuf, &ctx->resampledScratchCapacity, maxOut)) {
             if (ch == 1) {
-                for (int i = 0; i < frames; ++i) {
-                    ctx->monoScratchBuf[i] = static_cast<float>(rawPcm[i]) * (1.0f / 32768.0f);
-                }
+                memcpy(ctx->monoScratchBuf, ctx->floatWorkBuf, static_cast<size_t>(frames) * sizeof(float));
             } else {
-                const float invScale = 1.0f / (32768.0f * static_cast<float>(ch));
+                const float invCh = 1.0f / static_cast<float>(ch);
                 for (int i = 0; i < frames; ++i) {
-                    int sum = 0;
+                    float sum = 0.0f;
                     const int base = i * ch;
                     for (int c = 0; c < ch; ++c) {
-                        sum += static_cast<int>(rawPcm[base + c]);
+                        sum += ctx->floatWorkBuf[base + c];
                     }
-                    ctx->monoScratchBuf[i] = static_cast<float>(sum) * invScale;
+                    ctx->monoScratchBuf[i] = sum * invCh;
                 }
             }
 
@@ -721,64 +898,55 @@ static void onVlcAudioPlay(void* data, const void* samples, unsigned count, int6
         ctx->asrBatchCount = 0;
     }
 
-    // 2. 扬声器播放路径：应用音量 / 静音（例如朗读译文时的原声压低）
+    // 2. 扬声器播放路径：应用音量 / 静音以及起播或断流恢复时的毫秒级平滑淡入（消除直流阶跃咔哒声）
     const int muted = __atomic_load_n(&ctx->muted, __ATOMIC_RELAXED);
     const int volMilli = muted ? 0 : __atomic_load_n(&ctx->volumeMilli, __ATOMIC_RELAXED);
-    const int16_t* playPcm = rawPcm;
+    const float gain = volMilli <= 0 ? 0.0f : (static_cast<float>(volMilli) * 0.001f);
 
-    if (volMilli != 1000) {
-        if (ensureShortCapacity(&ctx->scaledPcmBuf, &ctx->scaledPcmCapacity, totalSamples)) {
-            if (volMilli <= 0) {
-                memset(ctx->scaledPcmBuf, 0, static_cast<size_t>(totalSamples) * sizeof(int16_t));
-            } else {
-                for (int i = 0; i < totalSamples; ++i) {
-                    int32_t v = (static_cast<int32_t>(rawPcm[i]) * volMilli) / 1000;
-                    if (v > 32767) v = 32767;
-                    else if (v < -32768) v = -32768;
-                    ctx->scaledPcmBuf[i] = static_cast<int16_t>(v);
-                }
+    if (gain <= 0.0f) {
+        memset(ctx->floatWorkBuf, 0, static_cast<size_t>(totalSamples) * sizeof(float));
+        ctx->fadeInRemaining = 0;
+    } else {
+        if (volMilli != 1000) {
+            bool dummy = false;
+            for (int i = 0; i < totalSamples; ++i) {
+                ctx->floatWorkBuf[i] = sanitizeAndSoftLimitSample(ctx->floatWorkBuf[i] * gain, &dummy);
             }
-            playPcm = ctx->scaledPcmBuf;
+        }
+        if (ctx->fadeInRemaining > 0 && ctx->fadeInTotal > 0) {
+            const float invTotal = 1.0f / static_cast<float>(ctx->fadeInTotal);
+            for (int f = 0; f < frames && ctx->fadeInRemaining > 0; ++f) {
+                const int done = ctx->fadeInTotal - ctx->fadeInRemaining;
+                const float ramp = static_cast<float>(done) * invTotal;
+                const int base = f * ch;
+                for (int c = 0; c < ch; ++c) {
+                    ctx->floatWorkBuf[base + c] *= ramp;
+                }
+                ctx->fadeInRemaining--;
+            }
         }
     }
 
     if (ctx->backend == BACKEND_AAUDIO && ctx->aaudioStream != nullptr) {
-        if (!ctx->aaudioStarted) {
-            g_aaudio.streamRequestStart(ctx->aaudioStream);
-            ctx->aaudioStarted = true;
-        }
-        aaudio_result_t written = g_aaudio.streamWrite(ctx->aaudioStream, playPcm, frames, AAUDIO_WRITE_TIMEOUT_NS);
-        if (written < 0) {
+        if (!writeFullAAudioFramesLocked(ctx, ctx->floatWorkBuf, frames, ch)) {
             // 蓝牙耳机插拔等路由变更导致流断开：自动重开 AAudio 流，重开失败则无缝切到 Java AudioTrack
-            LOGW("AAudio write 返回 %d，尝试重建音频输出流", static_cast<int>(written));
             closeAAudioStreamLocked(ctx);
             unsigned r = ctx->sampleRate;
             unsigned c = ctx->channels;
             if (openAAudioStreamLocked(ctx, &r, &c) && r == ctx->sampleRate && c == ctx->channels) {
-                g_aaudio.streamWrite(ctx->aaudioStream, playPcm, frames, AAUDIO_WRITE_TIMEOUT_NS);
+                armFadeInLocked(ctx, r, 6);
+                writeFullAAudioFramesLocked(ctx, ctx->floatWorkBuf, frames, ch);
             } else {
                 closeAAudioStreamLocked(ctx);
                 JNIEnv* env = getThreadEnv();
                 if (openJavaAudioTrackLocked(ctx, env, ctx->sampleRate, ctx->channels)) {
-                    jshortArray arr = ensureJavaShortArray(env, ctx, totalSamples);
-                    if (arr) {
-                        env->SetShortArrayRegion(arr, 0, totalSamples, playPcm);
-                        env->CallVoidMethod(ctx->callbackGlobal, ctx->midOnAudioWrite, arr, static_cast<jint>(totalSamples));
-                        if (env->ExceptionCheck()) env->ExceptionClear();
-                    }
+                    writeJavaAudioTrackFromFloatLocked(ctx, env, ctx->floatWorkBuf, totalSamples);
                 }
             }
         }
     } else if (ctx->backend == BACKEND_JAVA_AUDIOTRACK) {
         JNIEnv* env = getThreadEnv();
-        if (env && ctx->callbackGlobal && ctx->midOnAudioWrite) {
-            jshortArray arr = ensureJavaShortArray(env, ctx, totalSamples);
-            if (arr) {
-                env->SetShortArrayRegion(arr, 0, totalSamples, playPcm);
-                env->CallVoidMethod(ctx->callbackGlobal, ctx->midOnAudioWrite, arr, static_cast<jint>(totalSamples));
-                if (env->ExceptionCheck()) env->ExceptionClear();
-            }
-        }
+        writeJavaAudioTrackFromFloatLocked(ctx, env, ctx->floatWorkBuf, totalSamples);
     }
 
     pthread_mutex_unlock(&ctx->audioMutex);
@@ -789,6 +957,7 @@ static void onVlcAudioPause(void* data, int64_t pts) {
     BridgeContext* ctx = static_cast<BridgeContext*>(data);
     if (!ctx || __atomic_load_n(&ctx->detached, __ATOMIC_ACQUIRE) != 0) return;
 
+    __atomic_fetch_add(&ctx->flushSerial, 1, __ATOMIC_RELEASE);
     pthread_mutex_lock(&ctx->audioMutex);
     if (ctx->backend == BACKEND_AAUDIO && ctx->aaudioStream != nullptr) {
         g_aaudio.streamRequestPause(ctx->aaudioStream);
@@ -809,6 +978,7 @@ static void onVlcAudioResume(void* data, int64_t pts) {
     if (!ctx || __atomic_load_n(&ctx->detached, __ATOMIC_ACQUIRE) != 0) return;
 
     pthread_mutex_lock(&ctx->audioMutex);
+    armFadeInLocked(ctx, ctx->sampleRate > 0 ? ctx->sampleRate : 48000u, 4);
     if (ctx->backend == BACKEND_AAUDIO && ctx->aaudioStream != nullptr) {
         g_aaudio.streamRequestStart(ctx->aaudioStream);
         ctx->aaudioStarted = true;
@@ -827,6 +997,7 @@ static void onVlcAudioFlush(void* data, int64_t pts) {
     BridgeContext* ctx = static_cast<BridgeContext*>(data);
     if (!ctx || __atomic_load_n(&ctx->detached, __ATOMIC_ACQUIRE) != 0) return;
 
+    __atomic_fetch_add(&ctx->flushSerial, 1, __ATOMIC_RELEASE);
     pthread_mutex_lock(&ctx->audioMutex);
     JNIEnv* env = getThreadEnv();
     if (__atomic_load_n(&ctx->asrEnabled, __ATOMIC_ACQUIRE) != 0 && env) {
@@ -838,7 +1009,9 @@ static void onVlcAudioFlush(void* data, int64_t pts) {
     } else {
         ctx->asrBatchCount = 0;
     }
-    ctx->resampler.reset(static_cast<int>(ctx->sampleRate > 0 ? ctx->sampleRate : TARGET_ASR_RATE));
+    unsigned curRate = ctx->sampleRate > 0 ? ctx->sampleRate : static_cast<unsigned>(TARGET_ASR_RATE);
+    ctx->resampler.reset(static_cast<int>(curRate));
+    armFadeInLocked(ctx, curRate, 5);
 
     if (ctx->backend == BACKEND_AAUDIO && ctx->aaudioStream != nullptr) {
         g_aaudio.streamRequestPause(ctx->aaudioStream);
@@ -863,12 +1036,13 @@ static void onVlcAudioDrain(void* data) {
     pthread_mutex_unlock(&ctx->audioMutex);
 }
 
-static void onVlcAudioSetVolume(void* data, float volume, bool mute) {
+static int onVlcAudioSetVolume(void* data, float volume, bool mute) {
     BridgeContext* ctx = static_cast<BridgeContext*>(data);
-    if (!ctx) return;
+    if (!ctx) return 0;
     float clamped = volume < 0.0f ? 0.0f : (volume > 1.5f ? 1.5f : volume);
     __atomic_store_n(&ctx->volumeMilli, static_cast<int>(clamped * 1000.0f + 0.5f), __ATOMIC_RELAXED);
     __atomic_store_n(&ctx->muted, mute ? 1 : 0, __ATOMIC_RELAXED);
+    return 0;
 }
 
 // ---------------- 从 org.videolan.libvlc.MediaPlayer 提取原生 libvlc_media_player_t* ----------------
@@ -1099,6 +1273,7 @@ Java_com_aisub_player_media_VlcAudioBridge_nativeDetach(
 
     __atomic_store_n(&ctx->detached, 1, __ATOMIC_RELEASE);
     __atomic_store_n(&ctx->asrEnabled, 0, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&ctx->flushSerial, 1, __ATOMIC_RELEASE);
 
     if (ctx->mp && g_vlc.available) {
         g_vlc.set_callbacks(ctx->mp, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
@@ -1128,6 +1303,8 @@ Java_com_aisub_player_media_VlcAudioBridge_nativeDetach(
     }
     free(ctx->scaledPcmBuf);
     ctx->scaledPcmBuf = nullptr;
+    free(ctx->floatWorkBuf);
+    ctx->floatWorkBuf = nullptr;
     free(ctx->monoScratchBuf);
     ctx->monoScratchBuf = nullptr;
     free(ctx->resampledScratchBuf);

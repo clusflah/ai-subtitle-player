@@ -65,6 +65,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -1015,6 +1016,11 @@ private fun StructuredServerMusicContent(
 ) {
     var subTab by rememberSaveable(server.id, sectionKey) { mutableIntStateOf(0) } // 0 单曲, 1 专辑, 2 歌手, 3 歌单
     val containerStack = remember(server.id, sectionKey) { mutableStateListOf<ServerItem>() }
+    var lastQuery by remember(server.id, sectionKey) { mutableStateOf(query) }
+    if (query != lastQuery) {
+        lastQuery = query
+        containerStack.clear()
+    }
 
     BackHandler(enabled = containerStack.isNotEmpty()) {
         containerStack.removeAt(containerStack.lastIndex)
@@ -1046,13 +1052,13 @@ private fun StructuredServerMusicContent(
     LaunchedEffect(server.id, server.extra, sectionKey, subTab, topContainer?.ratingKey, query, refreshKey) {
         loading = true
         error = null
-        if (query.isNotEmpty()) delay(280)
+        if (topContainer == null && query.isNotEmpty()) delay(280)
         runCatching {
             withContext(Dispatchers.IO) {
                 val client = lib.client(server)
                 when {
-                    query.isNotEmpty() -> MusicSourceStore.searchServerMusic(client, query)
                     topContainer != null -> MusicSourceStore.loadContainerChildren(client, topContainer)
+                    query.isNotEmpty() -> MusicSourceStore.searchServerMusic(client, query)
                     subTab == 0 -> MusicSourceStore.loadServerTracks(client, sectionKey)
                     subTab == 1 -> MusicSourceStore.loadServerAlbums(client, sectionKey)
                     subTab == 2 -> MusicSourceStore.loadServerArtists(client, sectionKey)
@@ -1098,7 +1104,7 @@ private fun StructuredServerMusicContent(
                 }
             }
         }
-    } else if (topContainer != null && query.isEmpty()) {
+    } else if (topContainer != null) {
         val childPlayable = remember(items, server.id) {
             items.filter { it.playUrl != null }.mapNotNull { it.toMusicMediaEntry(server.id, topContainer.title) }
         }
@@ -1147,7 +1153,7 @@ private fun StructuredServerMusicContent(
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState()),
         ) {
-            if (topContainer != null && query.isEmpty() && detailSummary.isNotBlank()) {
+            if (topContainer != null && detailSummary.isNotBlank()) {
                 ContainerFullDescriptionCard(
                     type = topContainer.type,
                     description = detailSummary,
@@ -1156,14 +1162,14 @@ private fun StructuredServerMusicContent(
             }
             DarkLibraryEmptyBox(
                 title = when {
-                    query.isNotEmpty() -> "没有找到匹配「$query」的音乐"
                     topContainer?.type == "playlist" -> "该歌单里还没有歌曲"
                     topContainer != null -> "该条目下暂无可播放曲目"
+                    query.isNotEmpty() -> "没有找到匹配「$query」的音乐"
                     else -> "该分类下暂无音乐内容"
                 },
                 subtitle = when {
-                    query.isNotEmpty() -> ""
                     topContainer != null -> "可在 ${server.name} 中向此${if (topContainer.type == "playlist") "歌单" else "条目"}添加音乐"
+                    query.isNotEmpty() -> ""
                     else -> "请确认 ${server.name} 中已建立音乐媒体库"
                 },
             )
@@ -1182,7 +1188,7 @@ private fun StructuredServerMusicContent(
                 contentPadding = PaddingValues(bottom = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (topContainer != null && query.isEmpty() && detailSummary.isNotBlank()) {
+                if (topContainer != null && detailSummary.isNotBlank()) {
                     item(key = "intro:${topContainer.ratingKey}") {
                         ContainerFullDescriptionCard(
                             type = topContainer.type,
@@ -1377,6 +1383,11 @@ private fun WebStreamingMusicLibraryContent(
     val context = LocalContext.current
     var subTab by rememberSaveable(service.name) { mutableIntStateOf(0) } // 0 单曲, 1 专辑, 2 歌单
     val containerStack = remember(service.name) { mutableStateListOf<ServerItem>() }
+    var lastQuery by remember(service.name) { mutableStateOf(query) }
+    if (query != lastQuery) {
+        lastQuery = query
+        containerStack.clear()
+    }
     val rootListState = remember(service.name, subTab) { LazyListState() }
     val topContainer = containerStack.lastOrNull()
     val drillListState = remember(topContainer?.ratingKey) { LazyListState() }
@@ -1414,11 +1425,11 @@ private fun WebStreamingMusicLibraryContent(
     LaunchedEffect(service, isLoggedIn, subTab, topContainer?.ratingKey, query, refreshKey) {
         loading = true
         error = null
-        if (query.isNotEmpty()) delay(320)
+        if (topContainer == null && query.isNotEmpty()) delay(320)
         runCatching {
             when {
-                query.isNotEmpty() -> WebStreamingMusic.searchMusic(context, service, query)
                 topContainer != null -> WebStreamingMusic.loadContainerChildren(context, service, topContainer)
+                query.isNotEmpty() -> WebStreamingMusic.searchMusic(context, service, query)
                 subTab == 0 -> WebStreamingMusic.loadLibraryTracks(context, service)
                 subTab == 1 -> WebStreamingMusic.loadLibraryAlbums(context, service)
                 else -> WebStreamingMusic.loadLibraryPlaylists(context, service)
@@ -1461,7 +1472,7 @@ private fun WebStreamingMusicLibraryContent(
             }
             DarkActionChip("退出登录", null, onClick = onLogout)
         }
-    } else if (topContainer != null && query.isEmpty()) {
+    } else if (topContainer != null) {
         val childPlayable = remember(items) {
             items.filter { it.playUrl != null }.mapNotNull { it.toMusicMediaEntry() }
         }
@@ -1506,7 +1517,7 @@ private fun WebStreamingMusicLibraryContent(
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState()),
         ) {
-            if (topContainer != null && query.isEmpty() && detailSummary.isNotBlank()) {
+            if (topContainer != null && detailSummary.isNotBlank()) {
                 ContainerFullDescriptionCard(
                     type = topContainer.type,
                     description = detailSummary,
@@ -1514,10 +1525,19 @@ private fun WebStreamingMusicLibraryContent(
                 )
             }
             DarkLibraryEmptyBox(
-                title = if (query.isNotEmpty()) "未搜到「$query」" else "当前分类暂无收藏内容",
-                subtitle = if (query.isNotEmpty()) "请尝试其他关键词" else "可在上方搜索框直接搜索 ${service.label} 全曲库歌曲点播，或若登录过期可重新登录",
-                primaryLabel = if (query.isEmpty()) "重新验证登录" else null,
-                onPrimary = if (query.isEmpty()) onRequestLogin else null,
+                title = when {
+                    topContainer?.type == "playlist" -> "该歌单里还没有歌曲"
+                    topContainer != null -> "该专辑暂无可播放曲目"
+                    query.isNotEmpty() -> "未搜到「$query」"
+                    else -> "当前分类暂无收藏内容"
+                },
+                subtitle = when {
+                    topContainer != null -> ""
+                    query.isNotEmpty() -> "请尝试其他关键词"
+                    else -> "可在上方搜索框直接搜索 ${service.label} 全曲库歌曲点播，或若登录过期可重新登录"
+                },
+                primaryLabel = if (query.isEmpty() && topContainer == null) "重新验证登录" else null,
+                onPrimary = if (query.isEmpty() && topContainer == null) onRequestLogin else null,
             )
         }
         else -> {
@@ -1534,7 +1554,7 @@ private fun WebStreamingMusicLibraryContent(
                 contentPadding = PaddingValues(bottom = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (topContainer != null && query.isEmpty() && detailSummary.isNotBlank()) {
+                if (topContainer != null && detailSummary.isNotBlank()) {
                     item(key = "web_intro:${topContainer.ratingKey}") {
                         ContainerFullDescriptionCard(
                             type = topContainer.type,
@@ -1648,13 +1668,14 @@ private fun MusicSourceSettingsSheet(
             )
 
             if (WebStreamingMusic.isSupportedOnPlatform) {
+                val sheetContext = LocalContext.current
                 WebMusicService.entries.forEach { svc ->
                     val logged = svc in loggedInWebServices
                     val selected = effectiveSpec.webService == svc
                     HorizontalDivider(Modifier.padding(start = 60.dp), color = MaterialTheme.colorScheme.outlineVariant)
                     SourceOptionRow(
                         title = svc.label,
-                        subtitle = if (logged) "已登录 · 应用内直接播放与同步歌词" else "点击登录账号 · 应用内直接播放",
+                        subtitle = WebStreamingMusic.serviceStatusSubtitle(sheetContext, svc, logged),
                         selected = selected,
                         leading = { WebMusicServiceIcon(svc, size = 34.dp, insetScale = 0.92f) },
                         trailingActionLabel = if (logged) "退出" else "登录",
@@ -1663,6 +1684,31 @@ private fun MusicSourceSettingsSheet(
                         },
                         onClick = { onSelectWebService(svc) },
                     )
+                    if (WebStreamingMusic.hasHighQualityConfigOption(svc)) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable { onLoginWebService(svc) }
+                                .padding(start = 60.dp, end = 16.dp, top = 2.dp, bottom = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = WebStreamingMusic.highQualityConfigBadgeText(sheetContext, svc),
+                                fontSize = 11.sp,
+                                color = Orange,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "高音质设置 ›",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Orange,
+                            )
+                        }
+                    }
                 }
             }
 
@@ -1904,29 +1950,105 @@ private fun DrilldownHeader(
     }
 }
 
+private val NON_TERMINAL_ABBREVS = setOf(
+    "mr", "mrs", "ms", "dr", "st", "jr", "sr", "vs",
+    "no", "vol", "op", "feat", "ft", "inc", "ltd", "co", "etc",
+)
+
+/**
+ * 将超长歌手生平传记按完整句号精简至半屏以内（约 5–7 行），避免占满整屏遮挡下方专辑列表。
+ */
+internal fun condenseArtistBio(raw: String, maxUnits: Int = 330): String {
+    val compact = raw.replace(Regex("\\s+"), " ").trim()
+    if (compact.isEmpty()) return ""
+
+    fun charUnits(c: Char): Int = if (c.code > 0x2E7F) 2 else 1
+
+    var totalUnits = 0
+    for (c in compact) totalUnits += charUnits(c)
+    if (totalUnits <= maxUnits) return compact
+
+    var units = 0
+    var lastSentenceEnd = -1
+    var lastBreakIdx = -1
+    var i = 0
+    while (i < compact.length) {
+        val ch = compact[i]
+        units += charUnits(ch)
+        if (units > maxUnits) break
+
+        if (ch.isWhitespace() || ch == '，' || ch == '；' || ch == ',') {
+            lastBreakIdx = i
+        }
+
+        if (ch == '。' || ch == '！' || ch == '？') {
+            var endIdx = i + 1
+            while (endIdx < compact.length && compact[endIdx] in "\"”'’）)」』") endIdx++
+            if (units >= 70) lastSentenceEnd = endIdx
+        } else if (ch == '.' || ch == '!' || ch == '?') {
+            var endIdx = i + 1
+            while (endIdx < compact.length && compact[endIdx] in "\"”'’)") endIdx++
+            val atEndOrSpace = endIdx >= compact.length || compact[endIdx].isWhitespace()
+            if (atEndOrSpace) {
+                var nextNonSpace = endIdx
+                while (nextNonSpace < compact.length && compact[nextNonSpace].isWhitespace()) nextNonSpace++
+                val validNext = nextNonSpace >= compact.length ||
+                    compact[nextNonSpace].isUpperCase() ||
+                    compact[nextNonSpace].code > 0x2E7F ||
+                    compact[nextNonSpace] in "\"“'‘("
+                var isAbbrev = false
+                if (ch == '.') {
+                    var wb = i - 1
+                    while (wb >= 0 && (compact[wb].isLetter() || compact[wb] == '.')) wb--
+                    val token = compact.substring(wb + 1, i)
+                    if (token.length <= 1 || '.' in token || token.lowercase() in NON_TERMINAL_ABBREVS) {
+                        isAbbrev = true
+                    }
+                }
+                if (validNext && !isAbbrev && units >= 80) {
+                    lastSentenceEnd = endIdx
+                }
+            }
+        }
+        i++
+    }
+
+    if (lastSentenceEnd > 0) {
+        return compact.substring(0, lastSentenceEnd).trim()
+    }
+    val fallbackCut = if (lastBreakIdx > 40) lastBreakIdx else i.coerceAtLeast(1)
+    return compact.substring(0, fallbackCut).trimEnd(',', '，', ';', '；', ' ') + "…"
+}
+
 @Composable
 private fun ContainerFullDescriptionCard(
     type: String,
     description: String,
     modifier: Modifier = Modifier,
 ) {
-    val normalized = remember(description) {
-        description
+    val isArtist = type == "artist"
+    val displayText = remember(type, description) {
+        val clean = description
             .replace("\r\n", "\n")
             .replace('\r', '\n')
             .replace(Regex("\n{3,}"), "\n\n")
             .trim()
+        if (isArtist) condenseArtistBio(clean) else clean
     }
-    if (normalized.isEmpty()) return
+    if (displayText.isEmpty()) return
     val headerLabel = when (type) {
         "artist" -> "歌手介绍"
         "playlist" -> "歌单描述"
         "album" -> "专辑简介"
         else -> "详细介绍"
     }
+    val screenHeightDp = LocalConfiguration.current.screenHeightDp
+    val artistMaxCardHeight = (screenHeightDp * 0.28f).dp.coerceIn(112.dp, 195.dp)
+
     Column(
         modifier
             .fillMaxWidth()
+            .let { if (isArtist) it.heightIn(max = artistMaxCardHeight) else it }
             .liquidGlass(shape = RoundedCornerShape(14.dp), style = GlassStyle.Card, tint = Color(0x20FFFFFF))
             .padding(horizontal = 13.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp),
@@ -1938,10 +2060,12 @@ private fun ContainerFullDescriptionCard(
             fontWeight = FontWeight.SemiBold,
         )
         Text(
-            text = normalized,
+            text = displayText,
             color = Color(0xDDFFFFFF),
             fontSize = 13.sp,
-            lineHeight = 19.sp,
+            lineHeight = 18.5.sp,
+            maxLines = if (isArtist) 7 else Int.MAX_VALUE,
+            overflow = if (isArtist) TextOverflow.Ellipsis else TextOverflow.Clip,
         )
     }
 }

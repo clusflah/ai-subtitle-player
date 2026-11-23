@@ -10,3 +10,7 @@
 # MPV 原生播放桥与 libmpv JNI 回调防混淆
 -keep class com.aisub.player.media.MpvNativeBridge { *; }
 -keep class dev.jdtech.mpv.** { *; }
+
+# Spotify App Remote SDK 协议模型类防混淆
+-keep class com.spotify.protocol.** { *; }
+-keep class com.spotify.android.appremote.** { *; }

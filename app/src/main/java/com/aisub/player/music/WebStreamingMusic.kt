@@ -1,7 +1,10 @@
 package com.aisub.player.music
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -17,38 +20,54 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -72,6 +91,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -83,11 +103,11 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
 
 /**
- * 安卓端 Apple Music / Spotify 应用内登录与后台 Widevine DRM 播放引擎：
- * - 登录态：通过桌面 Chrome 环境伪装 + 多窗口 OAuth 弹窗支持，完成 Apple ID（含双重认证）与 Spotify 账号登录并持久化 Cookie/LocalStorage；
- * - 曲库态：同时适配 Apple Music `MusicKit` API 与 Spotify 新版 TOTP 令牌 + `pathfinder/v2/query` GraphQL 接口（含 Web API 双通道）；
- * - 播放态：维护隐形保活 WebView（自动授予 EME `RESOURCE_PROTECTED_MEDIA_ID` Widevine 硬件解密权限），
- *   将实时播放状态、毫秒级进度、切歌控制与个人曲库桥接至应用原生「音乐」播放界面（MusicView）。
+ * 安卓端 Apple Music / Spotify 应用内登录与多引擎播放调度器：
+ * - Spotify 优先采用方案 3（`Client ID` + OAuth PKCE + `SpotifyAppRemote` 本机官方客户端高音质/无损联动发声）；
+ *   当未配置 `Client ID`、未安装官方客户端、未登录或连接异常时，自动无缝回退至内置隐形 Widevine DRM 网页播放引擎；
+ * - Apple Music 采用 `media-user-token` 直连 `amp-api.music.apple.com` + 内置 Widevine DRM 播放引擎；
+ * - 实时播放进度、封面、切歌与个人曲库统一桥接至应用原生「音乐」播放界面（MusicView）。
  */
 object WebStreamingMusic {
     const val DESKTOP_CHROME_UA =
@@ -125,22 +145,32 @@ object WebStreamingMusic {
         snapshotListener = listener
     }
 
+    fun isWebSpotifyLoggedIn(context: Context): Boolean {
+        val app = context.applicationContext
+        val prefs = app.getSharedPreferences(AUTH_PREFS, Context.MODE_PRIVATE)
+        val cm = runCatching { CookieManager.getInstance() }.getOrNull()
+        val spotifyOpenCookies = runCatching { cm?.getCookie("https://open.spotify.com").orEmpty() }.getOrDefault("")
+        val spotifyAcctCookies = runCatching { cm?.getCookie("https://accounts.spotify.com").orEmpty() }.getOrDefault("")
+        val allSpotifyCookies = "$spotifyOpenCookies; $spotifyAcctCookies"
+        return allSpotifyCookies.contains("sp_dc=") ||
+            (prefs.getBoolean("logged_SPOTIFY", false) && spotifyOpenCookies.isNotBlank())
+    }
+
     fun refreshAuthState(context: Context): Set<WebMusicService> {
         val app = context.applicationContext
         val prefs = app.getSharedPreferences(AUTH_PREFS, Context.MODE_PRIVATE)
         val cm = runCatching { CookieManager.getInstance() }.getOrNull()
         val active = HashSet<WebMusicService>()
 
-        val spotifyOpenCookies = runCatching { cm?.getCookie("https://open.spotify.com").orEmpty() }.getOrDefault("")
-        val spotifyAcctCookies = runCatching { cm?.getCookie("https://accounts.spotify.com").orEmpty() }.getOrDefault("")
-        val allSpotifyCookies = "$spotifyOpenCookies; $spotifyAcctCookies"
-        if (allSpotifyCookies.contains("sp_dc=") ||
-            (prefs.getBoolean("logged_SPOTIFY", false) && spotifyOpenCookies.isNotBlank())
-        ) {
-            active += WebMusicService.SPOTIFY
+        val webSpotify = isWebSpotifyLoggedIn(app)
+        val remoteSpotify = SpotifyAppRemoteBridge.isReadyAsLoggedIn(app)
+        if (webSpotify) {
             prefs.edit().putBoolean("logged_SPOTIFY", true).apply()
-        } else if (!allSpotifyCookies.contains("sp_dc=")) {
+        } else {
             prefs.edit().putBoolean("logged_SPOTIFY", false).apply()
+        }
+        if (webSpotify || remoteSpotify) {
+            active += WebMusicService.SPOTIFY
         }
 
         val appleCookies = runCatching { cm?.getCookie("https://music.apple.com").orEmpty() }.getOrDefault("")
@@ -158,10 +188,45 @@ object WebStreamingMusic {
     fun isLoggedIn(context: Context, service: WebMusicService): Boolean =
         service in refreshAuthState(context)
 
+    fun serviceStatusSubtitle(context: Context, service: WebMusicService, logged: Boolean): String {
+        if (service != WebMusicService.SPOTIFY) {
+            return if (logged) "已登录 · 应用内直接播放与同步歌词" else "点击登录账号 · 应用内直接播放"
+        }
+        val st = SpotifyAppRemoteBridge.refreshStatus(context)
+        val webLogged = isWebSpotifyLoggedIn(context)
+        return when {
+            st.canAttemptRemotePlayback && webLogged -> "已登录 · 方案3高音质联动（异常时自动网页兜底）"
+            st.canAttemptRemotePlayback -> "已启用方案3高音质联动 · 本机官方客户端发声"
+            st.hasOAuthToken && !st.spotifyAppInstalled && webLogged -> "已登录 · 未装官方App，已自动回退网页播放"
+            logged -> "已登录 · 网页播放（可配置 Client ID 启用高音质）"
+            else -> "支持方案3高音质联动 (Client ID) 与网页直连"
+        }
+    }
+
+    fun hasHighQualityConfigOption(service: WebMusicService): Boolean =
+        service == WebMusicService.SPOTIFY
+
+    fun highQualityConfigBadgeText(context: Context, service: WebMusicService): String {
+        if (service != WebMusicService.SPOTIFY) return ""
+        val st = SpotifyAppRemoteBridge.refreshStatus(context)
+        return when {
+            st.canAttemptRemotePlayback -> "高音质联动 (方案3) 已启用 · 点击管理 Client ID / 兜底登录"
+            st.isConfigured && !st.spotifyAppInstalled -> "已保存 Client ID · 未装官方App，当前自动使用网页方案"
+            else -> "配置 Client ID 启用方案3高音质/无损联动（不可用时自动回退）"
+        }
+    }
+
     fun markLoggedIn(context: Context, service: WebMusicService, loggedIn: Boolean) {
         val app = context.applicationContext
         val prefs = app.getSharedPreferences(AUTH_PREFS, Context.MODE_PRIVATE)
-        prefs.edit().putBoolean("logged_${service.name}", loggedIn).apply()
+        if (service == WebMusicService.SPOTIFY) {
+            // 仅在确实持有网页 Cookie 时标记网页登录态，纯方案3登录由 SpotifyAppRemoteBridge 独立维护
+            if (!loggedIn || isWebSpotifyLoggedIn(app)) {
+                prefs.edit().putBoolean("logged_SPOTIFY", loggedIn).apply()
+            }
+        } else {
+            prefs.edit().putBoolean("logged_${service.name}", loggedIn).apply()
+        }
         runCatching { CookieManager.getInstance().flush() }
         if (loggedIn) {
             // 重建后台引擎以确保立即携带最新登录 Cookie 初始化令牌与曲库
@@ -174,35 +239,40 @@ object WebStreamingMusic {
         val app = context.applicationContext
         val prefs = app.getSharedPreferences(AUTH_PREFS, Context.MODE_PRIVATE)
         prefs.edit().putBoolean("logged_${service.name}", false).apply()
+        if (service == WebMusicService.SPOTIFY) {
+            SpotifyAppRemoteBridge.logoutAll(app)
+        }
         mainHandler.post {
             engines.remove(service)?.destroy()
-            val cm = runCatching { CookieManager.getInstance() }.getOrNull() ?: return@post
-            val domains = when (service) {
-                WebMusicService.APPLE_MUSIC -> listOf(
-                    "https://music.apple.com",
-                    "https://authorize.music.apple.com",
-                    "https://idmsa.apple.com",
-                    "https://appleid.apple.com",
-                )
-                WebMusicService.SPOTIFY -> listOf(
-                    "https://open.spotify.com",
-                    "https://accounts.spotify.com",
-                    "https://spotify.com",
-                )
-            }
-            for (d in domains) {
-                val raw = cm.getCookie(d).orEmpty()
-                raw.split(';').forEach { pair ->
-                    val name = pair.substringBefore('=').trim()
-                    if (name.isNotEmpty()) {
-                        cm.setCookie(d, "$name=; Max-Age=0; Path=/")
-                        val host = Uri.parse(d).host.orEmpty()
-                        val baseDomain = host.substringAfter('.', host)
-                        cm.setCookie(d, "$name=; Max-Age=0; Domain=.$baseDomain; Path=/")
+            val cm = runCatching { CookieManager.getInstance() }.getOrNull()
+            if (cm != null) {
+                val domains = when (service) {
+                    WebMusicService.APPLE_MUSIC -> listOf(
+                        "https://music.apple.com",
+                        "https://authorize.music.apple.com",
+                        "https://idmsa.apple.com",
+                        "https://appleid.apple.com",
+                    )
+                    WebMusicService.SPOTIFY -> listOf(
+                        "https://open.spotify.com",
+                        "https://accounts.spotify.com",
+                        "https://spotify.com",
+                    )
+                }
+                for (d in domains) {
+                    val raw = cm.getCookie(d).orEmpty()
+                    raw.split(';').forEach { pair ->
+                        val name = pair.substringBefore('=').trim()
+                        if (name.isNotEmpty()) {
+                            cm.setCookie(d, "$name=; Max-Age=0; Path=/")
+                            val host = Uri.parse(d).host.orEmpty()
+                            val baseDomain = host.substringAfter('.', host)
+                            cm.setCookie(d, "$name=; Max-Age=0; Domain=.$baseDomain; Path=/")
+                        }
                     }
                 }
+                cm.flush()
             }
-            cm.flush()
             refreshAuthState(app)
         }
     }
@@ -320,13 +390,50 @@ object WebStreamingMusic {
     private fun decodeParam(s: String?): String =
         if (s.isNullOrEmpty()) "" else runCatching { URLDecoder.decode(s, "UTF-8") }.getOrDefault(s)
 
+    internal fun extractCookieValue(rawCookies: String, cookieName: String): String? {
+        if (rawCookies.isBlank()) return null
+        for (part in rawCookies.split(';')) {
+            val trimmed = part.trim()
+            val eq = trimmed.indexOf('=')
+            if (eq <= 0) continue
+            val k = trimmed.substring(0, eq).trim()
+            if (k.equals(cookieName, ignoreCase = true)) {
+                val rawVal = trimmed.substring(eq + 1).trim().trim('"')
+                if (rawVal.isEmpty()) continue
+                return if ('%' in rawVal) {
+                    runCatching { URLDecoder.decode(rawVal, "UTF-8") }.getOrDefault(rawVal)
+                } else {
+                    rawVal
+                }
+            }
+        }
+        return null
+    }
+
     // ---------------- 个人曲库浏览与目录搜索（供「音乐 → 乐库」调用） ----------------
 
     suspend fun loadLibraryTracks(context: Context, service: WebMusicService): List<ServerItem> {
-        val engine = ensureEngine(context, service)
-        val raw = engine.callRpc("loadTracks", JSONObject(), timeoutMs = 22_000L)
-        val parsed = parseServerItemsJson(service, raw)
-        if (parsed.isNotEmpty()) return parsed
+        if (service == WebMusicService.SPOTIFY) {
+            val oauthTracks = runCatching { SpotifyAppRemoteBridge.loadTracksViaOAuth(context) }.getOrDefault(emptyList())
+            if (oauthTracks.isNotEmpty()) return oauthTracks
+            if (isWebSpotifyLoggedIn(context)) {
+                val engine = ensureEngine(context, service)
+                val raw = engine.callRpc("loadTracks", JSONObject(), timeoutMs = 22_000L)
+                val parsed = parseServerItemsJson(service, raw)
+                if (parsed.isNotEmpty()) return parsed
+            }
+            if (SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback) {
+                val recTracks = runCatching {
+                    SpotifyAppRemoteBridge.loadRecommendedViaRemote(context).filter { it.type == "track" }
+                }.getOrDefault(emptyList())
+                if (recTracks.isNotEmpty()) return recTracks
+            }
+        } else {
+            val engine = ensureEngine(context, service)
+            val raw = engine.callRpc("loadTracks", JSONObject(), timeoutMs = 22_000L)
+            val parsed = parseServerItemsJson(service, raw)
+            if (parsed.isNotEmpty()) return parsed
+        }
         // 新账号或暂未收藏单曲时，自动兜底加载精选热门单曲列表（点击直接通过当前流媒体服务播放）
         return withContext(Dispatchers.IO) {
             val primaryStore = if (service == WebMusicService.SPOTIFY) "tw" else "cn"
@@ -337,18 +444,56 @@ object WebStreamingMusic {
     }
 
     suspend fun loadLibraryAlbums(context: Context, service: WebMusicService): List<ServerItem> {
+        if (service == WebMusicService.SPOTIFY) {
+            val oauthAlbums = runCatching { SpotifyAppRemoteBridge.loadAlbumsViaOAuth(context) }.getOrDefault(emptyList())
+            if (oauthAlbums.isNotEmpty()) return oauthAlbums
+            if (isWebSpotifyLoggedIn(context)) {
+                val engine = ensureEngine(context, service)
+                val raw = engine.callRpc("loadAlbums", JSONObject(), timeoutMs = 20_000L)
+                val parsed = parseServerItemsJson(service, raw)
+                if (parsed.isNotEmpty()) return parsed
+            }
+            if (SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback) {
+                val recAlbums = runCatching {
+                    SpotifyAppRemoteBridge.loadRecommendedViaRemote(context).filter { it.type == "album" }
+                }.getOrDefault(emptyList())
+                if (recAlbums.isNotEmpty()) return recAlbums
+            }
+            return emptyList()
+        }
         val engine = ensureEngine(context, service)
         val raw = engine.callRpc("loadAlbums", JSONObject(), timeoutMs = 20_000L)
         return parseServerItemsJson(service, raw)
     }
 
     suspend fun loadLibraryPlaylists(context: Context, service: WebMusicService): List<ServerItem> {
+        if (service == WebMusicService.SPOTIFY) {
+            val oauthPlaylists = runCatching { SpotifyAppRemoteBridge.loadPlaylistsViaOAuth(context) }.getOrDefault(emptyList())
+            if (oauthPlaylists.isNotEmpty()) return oauthPlaylists
+            if (isWebSpotifyLoggedIn(context)) {
+                val engine = ensureEngine(context, service)
+                val raw = engine.callRpc("loadPlaylists", JSONObject(), timeoutMs = 20_000L)
+                val parsed = parseServerItemsJson(service, raw)
+                if (parsed.isNotEmpty()) return parsed
+            }
+            if (SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback) {
+                val recPlaylists = runCatching {
+                    SpotifyAppRemoteBridge.loadRecommendedViaRemote(context).filter { it.type == "playlist" }
+                }.getOrDefault(emptyList())
+                if (recPlaylists.isNotEmpty()) return recPlaylists
+            }
+            return emptyList()
+        }
         val engine = ensureEngine(context, service)
         val raw = engine.callRpc("loadPlaylists", JSONObject(), timeoutMs = 20_000L)
         return parseServerItemsJson(service, raw)
     }
 
     suspend fun loadContainerChildren(context: Context, service: WebMusicService, container: ServerItem): List<ServerItem> {
+        if (service == WebMusicService.SPOTIFY) {
+            val oauthChildren = runCatching { SpotifyAppRemoteBridge.loadChildrenViaOAuth(context, container) }.getOrDefault(emptyList())
+            if (oauthChildren.isNotEmpty()) return oauthChildren
+        }
         val engine = ensureEngine(context, service)
         val args = JSONObject()
             .put("ratingKey", container.ratingKey)
@@ -360,6 +505,10 @@ object WebStreamingMusic {
     suspend fun searchMusic(context: Context, service: WebMusicService, query: String): List<ServerItem> {
         val q = query.trim()
         if (q.isEmpty()) return emptyList()
+        if (service == WebMusicService.SPOTIFY) {
+            val oauthHits = runCatching { SpotifyAppRemoteBridge.searchViaOAuth(context, q) }.getOrDefault(emptyList())
+            if (oauthHits.isNotEmpty()) return oauthHits
+        }
         val engine = ensureEngine(context, service)
         val raw = engine.callRpc("search", JSONObject().put("query", q), timeoutMs = 16_000L)
         val parsed = parseServerItemsJson(service, raw)
@@ -463,6 +612,10 @@ object WebStreamingMusic {
         val artist = parsed.getQueryParameter("artist")?.let(::decodeParam).orEmpty()
         val webUrl = parsed.getQueryParameter("url")?.let(::decodeParam).orEmpty()
 
+        if (service == WebMusicService.SPOTIFY && trackId.isEmpty() && webUrl.contains("open.spotify.com/track/")) {
+            trackId = webUrl.substringAfter("open.spotify.com/track/").substringBefore('?').substringBefore('/').trim()
+        }
+
         // Apple Music 若尚未携带数字单曲 ID，先通过 iTunes 免鉴权搜索快速补齐精确 trackId
         if (service == WebMusicService.APPLE_MUSIC && trackId.isEmpty() && title.isNotBlank()) {
             trackId = withContext(Dispatchers.IO) {
@@ -474,9 +627,60 @@ object WebStreamingMusic {
             }
         }
 
-        // Pause the other streaming engine if it was active
+        // 暂停另一流媒体音源的后台引擎
         WebMusicService.entries.filter { it != service }.forEach { other ->
             engines[other]?.pauseOnly()
+        }
+        if (service != WebMusicService.SPOTIFY) {
+            SpotifyAppRemoteBridge.pauseIfActive()
+        }
+
+        // Spotify 优先通道（方案 3）：已配置 Client ID 且安装了官方 Spotify 客户端时，联动本机高音质/无损发声
+        if (service == WebMusicService.SPOTIFY) {
+            val remoteSt = SpotifyAppRemoteBridge.refreshStatus(context)
+            if (remoteSt.canAttemptRemotePlayback) {
+                if (trackId.isEmpty() && title.isNotBlank()) {
+                    val q = listOfNotNull(title, artist.takeIf { it.isNotBlank() }).joinToString(" ")
+                    trackId = runCatching {
+                        SpotifyAppRemoteBridge.searchViaOAuth(context, q).firstOrNull { it.type == "track" }?.ratingKey.orEmpty()
+                    }.getOrDefault("")
+                    if (trackId.isEmpty()) {
+                        trackId = runCatching {
+                            val eng = ensureEngine(context, WebMusicService.SPOTIFY)
+                            val rawSearch = eng.callRpc("search", JSONObject().put("query", q), timeoutMs = 10_000L)
+                            parseServerItemsJson(WebMusicService.SPOTIFY, rawSearch)
+                                .firstOrNull { it.type == "track" }?.ratingKey.orEmpty()
+                        }.getOrDefault("")
+                    }
+                }
+                engines[WebMusicService.SPOTIFY]?.pauseOnly()
+                val remoteRes = SpotifyAppRemoteBridge.tryPlayTrack(
+                    context = context,
+                    trackId = trackId,
+                    title = title,
+                    artist = artist,
+                    startPositionMs = startPositionMs,
+                )
+                if (remoteRes.isSuccess) {
+                    return Result.success(Unit)
+                }
+                // 方案 3 连接或播放不可用时，自动无缝回退至下方现有网页 DRM 播放方案
+            } else {
+                SpotifyAppRemoteBridge.pauseIfActive()
+            }
+
+            // 回退前确认是否具备网页版 Spotify 会话 Cookie
+            if (!isWebSpotifyLoggedIn(context)) {
+                val fallbackWhy = SpotifyAppRemoteBridge.status.value.lastFallbackReason
+                val msg = when {
+                    remoteSt.isConfigured && !remoteSt.spotifyAppInstalled ->
+                        "未检测到本机安装的官方 Spotify 客户端，且尚未登录网页兜底会话；请在 Spotify 登录页补充网页登录"
+                    !fallbackWhy.isNullOrBlank() ->
+                        "方案3高音质联动暂不可用（$fallbackWhy），且尚未登录网页兜底会话；请检查官方客户端或在登录页补充网页登录"
+                    else -> "请先登录 Spotify 账号后再播放"
+                }
+                return Result.failure(IllegalStateException(msg))
+            }
         }
 
         val engine = ensureEngine(context, service)
@@ -499,14 +703,17 @@ object WebStreamingMusic {
     }
 
     fun setPlaying(service: WebMusicService, play: Boolean) {
+        if (service == WebMusicService.SPOTIFY && SpotifyAppRemoteBridge.setPlaying(play)) return
         engines[service]?.evalFireAndForget("window.__voxBridge && window.__voxBridge.${if (play) "resume" else "pause"}()")
     }
 
     fun seekTo(service: WebMusicService, positionMs: Long) {
+        if (service == WebMusicService.SPOTIFY && SpotifyAppRemoteBridge.seekTo(positionMs)) return
         engines[service]?.evalFireAndForget("window.__voxBridge && window.__voxBridge.seek(${positionMs.coerceAtLeast(0L)})")
     }
 
     fun setVolume(service: WebMusicService, volume: Float) {
+        if (service == WebMusicService.SPOTIFY && SpotifyAppRemoteBridge.setVolume(volume)) return
         val v = volume.coerceIn(0f, 1f)
         engines[service]?.evalFireAndForget("window.__voxBridge && window.__voxBridge.setVolume($v)")
     }
@@ -517,6 +724,7 @@ object WebStreamingMusic {
     }
 
     fun stopAll() {
+        SpotifyAppRemoteBridge.pauseIfActive()
         engines.values.forEach { it.pauseOnly() }
     }
 
@@ -538,7 +746,14 @@ object WebStreamingMusic {
         pendingRpc.remove(reqId)?.complete(payload)
     }
 
+    internal fun dispatchSnapshotObj(snap: PlaybackSnapshot) {
+        snapshotListener?.invoke(snap)
+    }
+
     internal fun dispatchSnapshot(service: WebMusicService, rawJson: String) {
+        if (service == WebMusicService.SPOTIFY && SpotifyAppRemoteBridge.status.value.activeForCurrentTrack) {
+            return
+        }
         val o = runCatching { JSONObject(rawJson) }.getOrNull() ?: return
         val snap = PlaybackSnapshot(
             service = service,
@@ -553,7 +768,7 @@ object WebStreamingMusic {
             ended = o.optBoolean("ended", false),
             error = o.optString("error").trim().takeIf { it.isNotEmpty() },
         )
-        snapshotListener?.invoke(snap)
+        dispatchSnapshotObj(snap)
     }
 
     // ---------------- 隐形保活 DRM WebView 宿主 ----------------
@@ -620,6 +835,14 @@ object WebStreamingMusic {
 
         suspend fun callRpc(method: String, args: JSONObject, timeoutMs: Long): String? {
             if (method == "playTrack") keepAwakeForAudio = true
+            if (service == WebMusicService.APPLE_MUSIC) {
+                val rawCookies = runCatching { CookieManager.getInstance().getCookie("https://music.apple.com").orEmpty() }.getOrDefault("")
+                val cookieMut = extractCookieValue(rawCookies, "media-user-token")
+                    ?: extractCookieValue(rawCookies, "music-user-token")
+                if (!cookieMut.isNullOrBlank()) {
+                    args.put("_cookieMut", cookieMut)
+                }
+            }
             val reqId = UUID.randomUUID().toString()
             val deferred = CompletableDeferred<String>()
             pendingRpc[reqId] = deferred
@@ -797,8 +1020,15 @@ object WebStreamingMusic {
     if (!k || !v) return;
     var kl = String(k).toLowerCase();
     var vs = String(v).trim();
+    var onApple = location.hostname.indexOf('apple.com') >= 0;
     if (kl === 'authorization' && vs.indexOf('Bearer ') === 0 && vs.length > 40) {
-      window.__voxSpotifyToken = vs.substring(7).trim();
+      var tok = vs.substring(7).trim();
+      if (onApple) window.__voxAppleDevToken = tok;
+      else window.__voxSpotifyToken = tok;
+    } else if ((kl === 'media-user-token' || kl === 'music-user-token') && vs.length > 20) {
+      window.__voxAppleUserToken = vs;
+    } else if (kl === 'x-apple-client-version' && vs.length > 2) {
+      window.__voxAppleClientVer = vs;
     } else if (kl === 'client-token' && vs.length > 20) {
       window.__voxSpotifyClientToken = vs;
     } else if (kl === 'spotify-app-version' && vs.length > 2) {
@@ -919,7 +1149,7 @@ object WebStreamingMusic {
 """
 
     /**
-     * 运行时控制与曲库读取桥接脚本（同时适配 Apple Music `MusicKit` 与 Spotify 新版 `pathfinder/v2/query` + Web API）。
+     * 运行时控制与曲库读取桥接脚本（同时适配 Apple Music `amp-api` + `MusicKit v3` 与 Spotify `pathfinder/v2/query` + Web API）。
      */
     private const val ENGINE_RUNTIME_SCRIPT = """
 (function() {
@@ -927,7 +1157,10 @@ object WebStreamingMusic {
   var isApple = location.hostname.indexOf('apple.com') >= 0;
   var isSpotify = location.hostname.indexOf('spotify.com') >= 0;
 
+  var APPLE_WEBPLAY_FALLBACK_JWT = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IldlYlBsYXlLaWQifQ.eyJpc3MiOiJBTVBXZWJQbGF5IiwiaWF0IjoxNzkzOTAwNzA4LCJleHAiOjE3OTk5NDg3MDgsInJvb3RfaHR0cHNfb3JpZ2luIjpbImFwcGxlLmNvbSJdfQ.7L-PYJHjO8PpFdhKS-OSkf_snyFvg5cq-JDERUs_N_UcUX9Vk0kf1WLatgDeEvhB_Arg1b5Tl-99G1v6hUwH0A';
+
   function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+  function runSafe(fn) { try { return fn(); } catch (e) { return null; } }
 
   function bestMedia() {
     if (window.__voxActiveMedia && !isNaN(window.__voxActiveMedia.duration)) return window.__voxActiveMedia;
@@ -942,28 +1175,113 @@ object WebStreamingMusic {
     return pool[pool.length - 1] || dom[0] || null;
   }
 
-  async function waitForMusicKit(maxMs) {
-    var deadline = Date.now() + (maxMs || 8000);
-    while (Date.now() < deadline) {
-      var mk = window.MusicKit && window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
-      if (mk && (mk.developerToken || mk.api)) return mk;
-      await sleep(250);
-    }
-    return window.MusicKit && window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
+  function readDocCookie(name) {
+    try {
+      var prefix = name + '=';
+      var parts = (document.cookie || '').split(';');
+      for (var i = 0; i < parts.length; i++) {
+        var c = parts[i].trim();
+        if (c.indexOf(prefix) === 0) {
+          var raw = c.substring(prefix.length).trim().replace(/^"|"$/g, '');
+          if (!raw) continue;
+          return raw.indexOf('%') >= 0 ? decodeURIComponent(raw) : raw;
+        }
+      }
+    } catch (e) {}
+    return '';
   }
 
-  function runSafe(fn) { try { return fn(); } catch (e) { return null; } }
+  function getAppleDevToken(mk) {
+    if (window.__voxAppleDevToken) return window.__voxAppleDevToken;
+    if (mk && mk.developerToken) return mk.developerToken;
+    return APPLE_WEBPLAY_FALLBACK_JWT;
+  }
+
+  function getAppleUserToken(mk, args) {
+    if (window.__voxAppleUserToken) return window.__voxAppleUserToken;
+    var fromCookie = readDocCookie('media-user-token') || readDocCookie('music-user-token');
+    if (fromCookie) {
+      window.__voxAppleUserToken = fromCookie;
+      return fromCookie;
+    }
+    if (args && args._cookieMut) {
+      window.__voxAppleUserToken = String(args._cookieMut);
+      return window.__voxAppleUserToken;
+    }
+    if (mk && mk.musicUserToken) return mk.musicUserToken;
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i) || '';
+        var v = localStorage.getItem(k) || '';
+        if ((/media-user-token|music-user-token/i.test(k) || (k.indexOf('music.') === 0 && /\.u$/.test(k))) && v.length > 25) {
+          return v.replace(/^"|"$/g, '');
+        }
+      }
+    } catch (e) {}
+    return '';
+  }
+
+  async function ensureAppleMusicKit(sf, args) {
+    var existing = window.MusicKit && window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
+    if (existing && (existing.developerToken || existing.api)) return existing;
+
+    // music.apple.com 默认按需懒加载 MusicKit；播放时若尚未加载则主动从同源路径挂载
+    if (!window.MusicKit) {
+      await new Promise(function(resolve) {
+        var s = document.createElement('script');
+        s.src = '/includes/js-cdn/musickit/v3/musickit.js';
+        s.async = true;
+        s.onload = function() { resolve(true); };
+        s.onerror = function() { resolve(false); };
+        (document.head || document.documentElement).appendChild(s);
+        setTimeout(function() { resolve(false); }, 6500);
+      });
+    }
+    var deadline = Date.now() + 4500;
+    while (Date.now() < deadline && !window.MusicKit) {
+      await sleep(200);
+    }
+    if (window.MusicKit) {
+      var inst = window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
+      if (!inst && typeof window.MusicKit.configure === 'function') {
+        try {
+          var cfgRes = await window.MusicKit.configure({
+            developerToken: getAppleDevToken(null),
+            app: { name: 'Apple Music', build: '2646.4.0' },
+            bitrate: 256,
+            persist: 'cookie',
+            storefrontId: sf || 'cn'
+          });
+          inst = cfgRes || (window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null);
+        } catch (e) {
+          inst = window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
+        }
+      }
+      var mut = getAppleUserToken(inst, args);
+      if (inst && mut && !inst.musicUserToken) {
+        try { inst.musicUserToken = mut; } catch (e) {}
+      }
+      return inst;
+    }
+    return null;
+  }
 
   function formatAppleArtwork(art, size) {
     if (!art || !art.url) return '';
-    return String(art.url).replace('{w}', String(size || 500)).replace('{h}', String(size || 500)).replace('{f}', 'jpg');
+    return String(art.url)
+      .replace('{w}', String(size || 500))
+      .replace('{h}', String(size || 500))
+      .replace('{c}', 'bb')
+      .replace('{f}', 'jpg');
   }
 
-  async function appleApi(mk, path, queryObj) {
-    if (mk && mk.api && typeof mk.api.music === 'function') {
-      var res = await mk.api.music(path, queryObj || {});
-      return res && res.data ? res.data : res;
-    }
+  /**
+   * 直接请求 `https://amp-api.music.apple.com`：
+   * 注意 Apple CORS `Access-Control-Allow-Headers` 仅允许小写 `authorization, media-user-token, x-apple-client-version`。
+   */
+  async function appleApi(mk, path, queryObj, args) {
+    var devTok = getAppleDevToken(mk);
+    var mut = getAppleUserToken(mk, args);
     var qs = '';
     if (queryObj) {
       var parts = [];
@@ -974,38 +1292,100 @@ object WebStreamingMusic {
       });
       if (parts.length) qs = '?' + parts.join('&');
     }
-    var headers = { 'Authorization': 'Bearer ' + (mk ? mk.developerToken : '') };
-    if (mk && mk.musicUserToken) headers['Music-User-Token'] = mk.musicUserToken;
-    var r = await fetch('https://amp-api.music.apple.com' + path + qs, { headers: headers });
-    return await r.json();
+    var headers = { 'authorization': 'Bearer ' + devTok };
+    if (mut) headers['media-user-token'] = mut;
+    if (window.__voxAppleClientVer) headers['x-apple-client-version'] = window.__voxAppleClientVer;
+    try {
+      var r = await fetch('https://amp-api.music.apple.com' + path + qs, { headers: headers });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function detectAppleStorefront(mk, args) {
+    if (window.__voxAppleStorefront) return window.__voxAppleStorefront;
+    if (mk && mk.storefrontId) {
+      window.__voxAppleStorefront = mk.storefrontId;
+      return mk.storefrontId;
+    }
+    var seg = (location.pathname || '').split('/').filter(Boolean)[0] || '';
+    if (/^[a-z]{2}$/i.test(seg) && seg.toLowerCase() !== 'library') {
+      window.__voxAppleStorefront = seg.toLowerCase();
+      return window.__voxAppleStorefront;
+    }
+    var sfData = await appleApi(mk, '/v1/me/storefront', { platform: 'web' }, args);
+    var sfId = sfData && sfData.data && sfData.data[0] && sfData.data[0].id;
+    if (sfId) {
+      window.__voxAppleStorefront = String(sfId).toLowerCase();
+      return window.__voxAppleStorefront;
+    }
+    var itua = readDocCookie('itua');
+    if (itua && /^[a-z]{2,3}$/i.test(itua)) {
+      window.__voxAppleStorefront = itua.toLowerCase();
+      return window.__voxAppleStorefront;
+    }
+    return 'cn';
   }
 
   function mapAppleResource(r) {
     if (!r || !r.attributes) return null;
     var a = r.attributes;
+    var catRel = r.relationships && r.relationships.catalog && r.relationships.catalog.data && r.relationships.catalog.data[0];
+    var ca = (catRel && catRel.attributes) || {};
     var t = r.type || '';
     var itemType = 'track';
-    if (t.indexOf('playlists') >= 0) itemType = 'playlist';
-    else if (t.indexOf('albums') >= 0) itemType = 'album';
-    else if (t.indexOf('artists') >= 0) itemType = 'artist';
-    var playId = (a.playParams && (a.playParams.catalogId || a.playParams.id)) || r.id;
-    var desc = '';
-    if (a.description) desc = a.description.standard || a.description.short || '';
-    else if (a.editorialNotes) desc = a.editorialNotes.standard || a.editorialNotes.short || '';
-    var yr = a.releaseDate ? parseInt(String(a.releaseDate).substring(0, 4), 10) : 0;
+    if (t.indexOf('playlist') >= 0) itemType = 'playlist';
+    else if (t.indexOf('album') >= 0) itemType = 'album';
+    else if (t.indexOf('artist') >= 0) itemType = 'artist';
+    var playId = (a.playParams && (a.playParams.catalogId || a.playParams.id)) || (catRel && catRel.id) || r.id;
+    var descObj = a.description || a.editorialNotes || ca.description || ca.editorialNotes || null;
+    var desc = descObj ? (descObj.standard || descObj.short || '') : '';
+    var rawDate = a.releaseDate || ca.releaseDate || '';
+    var yr = rawDate ? parseInt(String(rawDate).substring(0, 4), 10) : 0;
+    var art = a.artwork || ca.artwork || null;
+    var title = a.name || ca.name || '';
+    if (!title) return null;
     return {
-      id: itemType === 'track' ? String(playId) : (r.type + '|' + r.id),
+      id: itemType === 'track' ? String(playId) : (t + '|' + r.id),
       type: itemType,
-      title: a.name || '',
-      artist: a.artistName || a.curatorName || '',
-      album: a.albumName || '',
+      title: title,
+      artist: a.artistName || a.curatorName || ca.artistName || ca.curatorName || '',
+      album: a.albumName || ca.albumName || '',
       summary: String(desc || '').replace(/<[^>]+>/g, ''),
-      cover: formatAppleArtwork(a.artwork, 500),
-      durationMs: a.durationInMillis || 0,
-      count: a.trackCount || 0,
+      cover: formatAppleArtwork(art, 500),
+      durationMs: a.durationInMillis || ca.durationInMillis || 0,
+      count: a.trackCount || ca.trackCount || 0,
       year: yr > 1900 ? yr : 0,
-      webUrl: a.url || ''
+      webUrl: a.url || ca.url || ''
     };
+  }
+
+  function dedupeAppleItems(list) {
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var it = list[i];
+      if (!it || !it.id || seen[it.id]) continue;
+      seen[it.id] = true;
+      out.push(it);
+    }
+    return out;
+  }
+
+  function extractAppleRecommendations(recJson, wantType) {
+    var list = [];
+    var groups = (recJson && recJson.data) || [];
+    for (var i = 0; i < groups.length; i++) {
+      var contents = groups[i] && groups[i].relationships && groups[i].relationships.contents && groups[i].relationships.contents.data;
+      if (!Array.isArray(contents)) continue;
+      for (var j = 0; j < contents.length; j++) {
+        var mapped = mapAppleResource(contents[j]);
+        if (mapped && mapped.type === wantType) list.push(mapped);
+      }
+    }
+    return dedupeAppleItems(list);
   }
 
   // ---------------- Spotify 新版 TOTP 会话令牌与 Pathfinder v2 GraphQL 引擎 ----------------
@@ -1427,27 +1807,48 @@ object WebStreamingMusic {
   }
 
   async function playOnApple(args) {
-    var mk = await waitForMusicKit(9000);
-    if (!mk) return { ok: false, error: 'Apple Music 网页组件尚未就绪，请稍后重试' };
-    if (!mk.isAuthorized && !mk.musicUserToken) {
+    var sf = await detectAppleStorefront(null, args);
+    var mk = await ensureAppleMusicKit(sf, args);
+    var mut = getAppleUserToken(mk, args);
+    if (!mut && (!mk || !mk.isAuthorized)) {
       return { ok: false, error: 'Apple Music 登录状态已失效，请在音源设置中重新登录' };
     }
     var trackId = String(args.trackId || '').trim();
-    var storefront = mk.storefrontId || 'cn';
     if (!trackId && args.title) {
       var q = (args.title + ' ' + (args.artist || '')).trim();
-      var sData = await appleApi(mk, '/v1/catalog/' + storefront + '/search', { term: q, types: 'songs', limit: 5 });
+      var sData = await appleApi(mk, '/v1/catalog/' + sf + '/search', { term: q, types: 'songs', limit: 5 }, args);
       var songs = (((sData || {}).results || {}).songs || {}).data || [];
       if (songs.length) trackId = songs[0].id;
     }
     if (!trackId) return { ok: false, error: '未在 Apple Music 曲库中找到该歌曲' };
-    var queueArg = trackId.indexOf('i.') === 0 ? { librarySong: trackId, startPlaying: true } : { song: trackId, startPlaying: true };
-    await mk.setQueue(queueArg);
-    await mk.play();
-    if (args.startPositionMs > 1000 && typeof mk.seekToTime === 'function') {
-      mk.seekToTime(args.startPositionMs / 1000.0);
+
+    if (mk && typeof mk.setQueue === 'function') {
+      var queueArg = trackId.indexOf('i.') === 0 ? { librarySong: trackId, startPlaying: true } : { song: trackId, startPlaying: true };
+      await mk.setQueue(queueArg);
+      await mk.play();
+      if (args.startPositionMs > 1000 && typeof mk.seekToTime === 'function') {
+        mk.seekToTime(args.startPositionMs / 1000.0);
+      }
+      return { ok: true };
     }
-    return { ok: true };
+
+    // 回退路径：通过 Apple Music SPA 跳转单曲页触发官方页面播放器加载并起播
+    var targetPath = '/' + sf + '/song/' + trackId;
+    window.history.pushState({}, '', targetPath);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    var deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      await sleep(350);
+      var btn = document.querySelector('button[data-testid="click-action"]') ||
+                document.querySelector('.headings__subtitles button') ||
+                document.querySelector('main button[aria-label*="播放"], main button[aria-label*="Play"]');
+      if (btn) {
+        btn.click();
+        await sleep(300);
+        return { ok: true };
+      }
+    }
+    return { ok: false, error: 'Apple Music 播放器尚未就绪，请重试' };
   }
 
   async function playOnSpotify(args) {
@@ -1615,29 +2016,92 @@ object WebStreamingMusic {
           out = isApple ? await playOnApple(args) : await playOnSpotify(args);
           setTimeout(function(){ pushSnapshot(false); }, 200);
         } else if (isApple) {
-          var mk = await waitForMusicKit(8000);
-          var sf = (mk && mk.storefrontId) || 'cn';
+          var mk = window.MusicKit && window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
+          var sf = await detectAppleStorefront(mk, args);
           if (method === 'loadTracks') {
-            var d = await appleApi(mk, '/v1/me/library/songs', { limit: 100 });
-            out = { ok: true, items: ((d && d.data) || []).map(mapAppleResource).filter(Boolean) };
+            var d = await appleApi(mk, '/v1/me/library/songs', { platform: 'web', 'include[library-songs]': 'catalog', limit: 100 }, args);
+            var tList = ((d && d.data) || []).map(mapAppleResource).filter(Boolean);
+            if (!tList.length) {
+              var rp = await appleApi(mk, '/v1/me/recent/played/tracks', { platform: 'web', limit: 40 }, args);
+              tList = ((rp && rp.data) || []).map(mapAppleResource).filter(Boolean);
+            }
+            if (!tList.length) {
+              var cs = await appleApi(mk, '/v1/catalog/' + sf + '/charts', { types: 'songs', limit: 40 }, args);
+              var sChart = cs && cs.results && cs.results.songs && cs.results.songs[0] && cs.results.songs[0].data;
+              tList = (sChart || []).map(mapAppleResource).filter(Boolean);
+            }
+            out = { ok: true, items: dedupeAppleItems(tList) };
           } else if (method === 'loadAlbums') {
-            var da = await appleApi(mk, '/v1/me/library/albums', { limit: 80 });
-            out = { ok: true, items: ((da && da.data) || []).map(mapAppleResource).filter(Boolean) };
+            var da = await appleApi(mk, '/v1/me/library/albums', { platform: 'web', include: 'catalog', limit: 100 }, args);
+            var aList = ((da && da.data) || []).map(mapAppleResource).filter(Boolean);
+            if (!aList.length) {
+              var hr = await appleApi(mk, '/v1/me/history/heavy-rotation', { platform: 'web', limit: 25 }, args);
+              aList = ((hr && hr.data) || []).map(mapAppleResource).filter(function(x) { return x && x.type === 'album'; });
+            }
+            if (!aList.length) {
+              var recA = await appleApi(mk, '/v1/me/recommendations', { platform: 'web', limit: 15 }, args);
+              aList = extractAppleRecommendations(recA, 'album');
+            }
+            if (!aList.length) {
+              var caChart = await appleApi(mk, '/v1/catalog/' + sf + '/charts', { types: 'albums', limit: 30 }, args);
+              var cAlbums = caChart && caChart.results && caChart.results.albums && caChart.results.albums[0] && caChart.results.albums[0].data;
+              aList = (cAlbums || []).map(mapAppleResource).filter(Boolean);
+            }
+            out = { ok: true, items: dedupeAppleItems(aList) };
           } else if (method === 'loadPlaylists') {
-            var dp = await appleApi(mk, '/v1/me/library/playlists', { limit: 80 });
-            out = { ok: true, items: ((dp && dp.data) || []).map(mapAppleResource).filter(Boolean) };
+            var dp = await appleApi(mk, '/v1/me/library/playlists', { platform: 'web', include: 'catalog', limit: 100 }, args);
+            var df = await appleApi(mk, '/v1/me/library/playlist-folders/p.playlistsroot/children', { platform: 'web', include: 'catalog', limit: 100 }, args);
+            var dm = await appleApi(mk, '/v1/me/library/playlists', { platform: 'web', 'filter[featured]': 'made-for-you', include: 'catalog', limit: 25 }, args);
+            var pList = []
+              .concat(((dp && dp.data) || []).map(mapAppleResource))
+              .concat(((df && df.data) || []).map(mapAppleResource))
+              .concat(((dm && dm.data) || []).map(mapAppleResource))
+              .filter(Boolean);
+            pList = dedupeAppleItems(pList);
+            if (!pList.length) {
+              var recP = await appleApi(mk, '/v1/me/recommendations', { platform: 'web', limit: 15 }, args);
+              pList = extractAppleRecommendations(recP, 'playlist');
+            }
+            if (!pList.length) {
+              var cpChart = await appleApi(mk, '/v1/catalog/' + sf + '/charts', { types: 'playlists', limit: 30 }, args);
+              var cPlaylists = cpChart && cpChart.results && cpChart.results.playlists && cpChart.results.playlists[0] && cpChart.results.playlists[0].data;
+              pList = (cPlaylists || []).map(mapAppleResource).filter(Boolean);
+            }
+            out = { ok: true, items: dedupeAppleItems(pList) };
           } else if (method === 'loadChildren') {
             var parts = String(args.ratingKey || '').split('|');
             var rType = parts[0] || '';
             var rId = parts[1] || parts[0] || '';
-            var path = rType.indexOf('library-playlists') >= 0 ? ('/v1/me/library/playlists/' + rId + '/tracks')
-                     : rType.indexOf('library-albums') >= 0 ? ('/v1/me/library/albums/' + rId + '/tracks')
-                     : rType.indexOf('playlists') >= 0 ? ('/v1/catalog/' + sf + '/playlists/' + rId + '/tracks')
-                     : ('/v1/catalog/' + sf + '/albums/' + rId + '/tracks');
-            var dc = await appleApi(mk, path, { limit: 100 });
-            out = { ok: true, items: ((dc && dc.data) || []).map(mapAppleResource).filter(Boolean) };
+            var cItems = [];
+            if (rType.indexOf('library-playlist-folders') >= 0) {
+              var fch = await appleApi(mk, '/v1/me/library/playlist-folders/' + rId + '/children', { platform: 'web', include: 'catalog', limit: 100 }, args);
+              cItems = ((fch && fch.data) || []).map(mapAppleResource).filter(Boolean);
+            } else if (rType.indexOf('library-playlists') >= 0) {
+              var lpt = await appleApi(mk, '/v1/me/library/playlists/' + rId + '/tracks', { platform: 'web', 'include[library-songs]': 'catalog', limit: 100 }, args);
+              cItems = ((lpt && lpt.data) || []).map(mapAppleResource).filter(Boolean);
+            } else if (rType.indexOf('library-albums') >= 0) {
+              var lat = await appleApi(mk, '/v1/me/library/albums/' + rId + '/tracks', { platform: 'web', 'include[library-songs]': 'catalog', limit: 100 }, args);
+              cItems = ((lat && lat.data) || []).map(mapAppleResource).filter(Boolean);
+            } else if (rType.indexOf('playlist') >= 0) {
+              var cpt = await appleApi(mk, '/v1/catalog/' + sf + '/playlists/' + rId + '/tracks', { limit: 100 }, args);
+              cItems = ((cpt && cpt.data) || []).map(mapAppleResource).filter(Boolean);
+              if (!cItems.length) {
+                var cpFull = await appleApi(mk, '/v1/catalog/' + sf + '/playlists/' + rId, { include: 'tracks' }, args);
+                var relT = cpFull && cpFull.data && cpFull.data[0] && cpFull.data[0].relationships && cpFull.data[0].relationships.tracks && cpFull.data[0].relationships.tracks.data;
+                cItems = (relT || []).map(mapAppleResource).filter(Boolean);
+              }
+            } else {
+              var cat = await appleApi(mk, '/v1/catalog/' + sf + '/albums/' + rId + '/tracks', { limit: 100 }, args);
+              cItems = ((cat && cat.data) || []).map(mapAppleResource).filter(Boolean);
+              if (!cItems.length) {
+                var caFull = await appleApi(mk, '/v1/catalog/' + sf + '/albums/' + rId, { include: 'tracks' }, args);
+                var relAT = caFull && caFull.data && caFull.data[0] && caFull.data[0].relationships && caFull.data[0].relationships.tracks && caFull.data[0].relationships.tracks.data;
+                cItems = (relAT || []).map(mapAppleResource).filter(Boolean);
+              }
+            }
+            out = { ok: true, items: cItems };
           } else if (method === 'search') {
-            var ds = await appleApi(mk, '/v1/catalog/' + sf + '/search', { term: args.query, types: 'songs,albums,playlists', limit: 25 });
+            var ds = await appleApi(mk, '/v1/catalog/' + sf + '/search', { term: args.query, types: 'songs,albums,playlists', limit: 25 }, args);
             var res = (ds && ds.results) || {};
             var merged = []
               .concat(((res.songs && res.songs.data) || []).map(mapAppleResource))
@@ -1721,9 +2185,10 @@ object WebStreamingMusic {
 }
 
 /**
- * Apple Music / Spotify 应用内账号登录全屏弹窗：
+ * Apple Music / Spotify 应用内账号登录与高音质配置全屏弹窗：
+ * - Spotify 同时提供「方案 3 高音质联动（Client ID + PKCE + 官方客户端发声）」与「网页直连（免配置 / 自动兜底）」双通道；
  * - 支持多窗口 `window.open` 认证子窗口（保留 `window.opener` 以支持 Apple ID 双重认证回调）；
- * - 实时自动检测登录完成状态，确保会话 Cookie 同步到主站点后自动关闭并回调 [onLoggedIn]。
+ * - 实时自动检测登录与 PKCE 授权回调状态，完成后自动同步会话并回调 [onLoggedIn]。
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -1733,6 +2198,32 @@ fun WebMusicLoginDialog(
     onLoggedIn: () -> Unit,
 ) {
     val context = LocalContext.current
+    val uiScope = rememberCoroutineScope()
+    val remoteStatus by SpotifyAppRemoteBridge.status.collectAsState()
+    val initialRemoteStatus = remember(service) {
+        if (service == WebMusicService.SPOTIFY) SpotifyAppRemoteBridge.refreshStatus(context) else SpotifyAppRemoteBridge.Status()
+    }
+    val wasWebLoggedOnOpen = remember(service) {
+        service == WebMusicService.SPOTIFY && WebStreamingMusic.isWebSpotifyLoggedIn(context)
+    }
+
+    // Spotify：0 = 方案3高音质联动 (Client ID)，1 = 网页直连 (免配置 / 自动兜底)
+    var spotifyTab by remember(service) {
+        mutableIntStateOf(
+            if (service == WebMusicService.SPOTIFY && (initialRemoteStatus.isConfigured || initialRemoteStatus.spotifyAppInstalled)) 0 else 1,
+        )
+    }
+    var pkceWebFlowActive by remember { mutableStateOf(false) }
+    var pendingWebUrl by remember { mutableStateOf<String?>(null) }
+    var clientIdInput by remember(service) { mutableStateOf(initialRemoteStatus.clientId) }
+    var busyConnecting by remember { mutableStateOf(false) }
+    var configFeedback by remember { mutableStateOf<String?>(null) }
+    var configFeedbackIsError by remember { mutableStateOf(false) }
+    val appPackageName = remember { context.packageName }
+    val appSha1 = remember {
+        if (service == WebMusicService.SPOTIFY) SpotifyAppRemoteBridge.getAppSigningSha1(context) else ""
+    }
+
     var progress by remember { mutableIntStateOf(0) }
     var pageTitle by remember { mutableStateOf("正在加载 ${service.label} 登录页…") }
     var mainWebView by remember { mutableStateOf<WebView?>(null) }
@@ -1749,13 +2240,57 @@ fun WebMusicLoginDialog(
         }
     }
 
-    // 轮询检测 Cookie / MusicKit 授权状态，登录成功后完成会话落盘并回调
-    LaunchedEffect(service, mainWebView) {
+    val handlePkceCallbackUri: (Uri) -> Unit = { cbUri ->
+        uiScope.launch {
+            busyConnecting = true
+            configFeedback = "正在验证 PKCE 授权令牌…"
+            configFeedbackIsError = false
+            val res = SpotifyAppRemoteBridge.completeOAuthCallbackSuspend(context, cbUri)
+            res.onSuccess {
+                if (SpotifyAppRemoteBridge.isSpotifyAppInstalled(context)) {
+                    SpotifyAppRemoteBridge.testConnectInteractive(context, clientIdInput)
+                }
+                busyConnecting = false
+                pkceWebFlowActive = false
+                Toast.makeText(context, "Spotify 高音质联动已授权启用", Toast.LENGTH_SHORT).show()
+                finishLogin()
+            }.onFailure { err ->
+                busyConnecting = false
+                pkceWebFlowActive = false
+                spotifyTab = 0
+                configFeedback = err.message ?: "PKCE 授权失败"
+                configFeedbackIsError = true
+            }
+        }
+    }
+
+    val copyToClipboard: (String, String) -> Unit = { label, value ->
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        cm?.setPrimaryClip(ClipData.newPlainText(label, value))
+        Toast.makeText(context, "已复制 $label", Toast.LENGTH_SHORT).show()
+    }
+
+    // 当切换到 WebView 或触发 PKCE 授权链接时，加载目标地址
+    LaunchedEffect(pendingWebUrl, mainWebView) {
+        val url = pendingWebUrl
+        val wv = mainWebView
+        if (!url.isNullOrBlank() && wv != null) {
+            pendingWebUrl = null
+            wv.loadUrl(url)
+        }
+    }
+
+    // 轮询检测网页 Cookie / MusicKit 授权状态，登录成功后完成会话落盘并回调
+    LaunchedEffect(service, mainWebView, spotifyTab, pkceWebFlowActive) {
+        if (service == WebMusicService.SPOTIFY && (spotifyTab == 0 || pkceWebFlowActive)) {
+            return@LaunchedEffect
+        }
         var redirectedSpotifyHome = false
         while (!completed) {
             delay(900L)
             val cm = runCatching { CookieManager.getInstance() }.getOrNull()
             if (service == WebMusicService.SPOTIFY) {
+                if (wasWebLoggedOnOpen) continue
                 val openCookies = cm?.getCookie("https://open.spotify.com").orEmpty()
                 val acctCookies = cm?.getCookie("https://accounts.spotify.com").orEmpty()
                 val hasSpDc = openCookies.contains("sp_dc=") || acctCookies.contains("sp_dc=")
@@ -1810,9 +2345,16 @@ fun WebMusicLoginDialog(
         }
     }
 
+    val showingWebView = service != WebMusicService.SPOTIFY || spotifyTab == 1 || pkceWebFlowActive
+
     BackHandler {
+        if (pkceWebFlowActive) {
+            pkceWebFlowActive = false
+            spotifyTab = 0
+            return@BackHandler
+        }
         val container = popupContainer
-        if (container != null && container.childCount > 1) {
+        if (showingWebView && container != null && container.childCount > 1) {
             val topChild = container.getChildAt(container.childCount - 1) as? WebView
             if (topChild?.canGoBack() == true) {
                 topChild.goBack()
@@ -1821,15 +2363,21 @@ fun WebMusicLoginDialog(
                 topChild?.destroy()
                 hasPopup = container.childCount > 1
             }
-        } else if (mainWebView?.canGoBack() == true) {
+        } else if (showingWebView && mainWebView?.canGoBack() == true) {
             mainWebView?.goBack()
         } else {
             onDismiss()
         }
     }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(service) {
+        if (service == WebMusicService.SPOTIFY) {
+            SpotifyAppRemoteBridge.onOAuthCompleted = { finishLogin() }
+        }
         onDispose {
+            if (service == WebMusicService.SPOTIFY) {
+                SpotifyAppRemoteBridge.onOAuthCompleted = null
+            }
             runCatching { CookieManager.getInstance().flush() }
             popupContainer?.let { root ->
                 for (i in root.childCount - 1 downTo 0) {
@@ -1855,41 +2403,102 @@ fun WebMusicLoginDialog(
                         .padding(horizontal = 8.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconButton(onClick = onDismiss) {
+                    IconButton(
+                        onClick = {
+                            if (pkceWebFlowActive) {
+                                pkceWebFlowActive = false
+                                spotifyTab = 0
+                            } else {
+                                onDismiss()
+                            }
+                        },
+                    ) {
                         Icon(AppIcons.Close, contentDescription = "关闭")
                     }
                     WebMusicServiceIcon(service = service, size = 24.dp)
                     Spacer(Modifier.width(9.dp))
                     Column(Modifier.weight(1f)) {
                         Text(
-                            text = "登录 ${service.label}",
+                            text = if (service == WebMusicService.SPOTIFY) "Spotify 登录与高音质设置" else "登录 ${service.label}",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = if (hasPopup) "请在安全认证窗口完成验证" else pageTitle,
+                            text = when {
+                                pkceWebFlowActive -> "请在下方点击同意授权以启用方案 3 高音质模式"
+                                !showingWebView -> "优先使用方案 3 高音质联动，不可用时自动回退网页方案"
+                                hasPopup -> "请在安全认证窗口完成验证"
+                                else -> pageTitle
+                            },
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    IconButton(onClick = { mainWebView?.reload() }) {
-                        Icon(AppIcons.Refresh, contentDescription = "刷新")
-                    }
-                    Button(
-                        onClick = { finishLogin() },
-                        colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier.height(34.dp),
-                    ) {
-                        Text("我已登录", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    if (showingWebView) {
+                        IconButton(onClick = { mainWebView?.reload() }) {
+                            Icon(AppIcons.Refresh, contentDescription = "刷新")
+                        }
+                        if (!pkceWebFlowActive) {
+                            Button(
+                                onClick = { finishLogin() },
+                                colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier.height(34.dp),
+                            ) {
+                                Text("我已登录", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
                     }
                 }
 
-                if (progress in 1..99) {
+                if (service == WebMusicService.SPOTIFY && !pkceWebFlowActive) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
+                            .padding(3.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        val spotifyGreen = Color(0xFF1ED760)
+                        listOf(
+                            "高音质联动 (方案3 · Client ID)",
+                            "网页直连 (免配置 / 自动兜底)",
+                        ).forEachIndexed { idx, label ->
+                            val selected = spotifyTab == idx
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) spotifyGreen.copy(alpha = 0.22f) else Color.Transparent)
+                                    .clickable {
+                                        spotifyTab = idx
+                                        if (idx == 1 && mainWebView?.url.isNullOrBlank()) {
+                                            pendingWebUrl = "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
+                                        }
+                                    }
+                                    .padding(vertical = 8.dp, horizontal = 6.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = label,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (selected) spotifyGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (showingWebView && progress in 1..99) {
                     LinearProgressIndicator(
                         progress = { progress / 100f },
                         modifier = Modifier.fillMaxWidth().height(2.dp),
@@ -1897,109 +2506,447 @@ fun WebMusicLoginDialog(
                     )
                 }
 
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { ctx ->
-                            val container = FrameLayout(ctx)
-                            val wv = WebView(ctx).apply {
-                                layoutParams = FrameLayout.LayoutParams(
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                if (!showingWebView) {
+                    val webFallbackReady = remember(spotifyTab, completed) {
+                        WebStreamingMusic.isWebSpotifyLoggedIn(context)
+                    }
+                    val spotifyGreen = Color(0xFF1ED760)
+                    Column(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        // 1. 当前状态与自动回退说明
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                                .padding(13.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = "方案 3：官方客户端极高 / 无损音质联动",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "通过你自己的 Spotify Client ID 遥控手机已安装的官方 Spotify 客户端在后台解码发声，完整享受 320 kbps 极高音质或 24-bit/44.1kHz FLAC 无损音质，同时保留本应用黑胶唱机与双语滚动歌词。当官方客户端未安装、未登录或不可用时，会自动回退至右侧网页播放方案。",
+                                fontSize = 12.sp,
+                                lineHeight = 17.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            SpotifyStatusLine(
+                                label = "本机官方客户端",
+                                value = if (remoteStatus.spotifyAppInstalled) "已安装 (com.spotify.music)" else "未检测到安装（将自动回退网页方案）",
+                                ok = remoteStatus.spotifyAppInstalled,
+                            )
+                            SpotifyStatusLine(
+                                label = "PKCE 曲库授权",
+                                value = if (remoteStatus.hasOAuthToken) "已授权（原生 API 秒级读取曲库）" else "待授权",
+                                ok = remoteStatus.hasOAuthToken,
+                            )
+                            SpotifyStatusLine(
+                                label = "网页自动兜底",
+                                value = if (webFallbackReady) "已就绪（方案 3 不可用时无缝接管）" else "未登录（可切至右侧「网页直连」登录备用）",
+                                ok = webFallbackReady,
+                            )
+                            remoteStatus.lastFallbackReason?.takeIf { it.isNotBlank() }?.let { reason ->
+                                Text(
+                                    text = "上次自动回退原因：$reason",
+                                    fontSize = 11.sp,
+                                    color = Orange,
                                 )
-                                WebStreamingMusic.configureDrmWebView(this, allowPopups = true)
-                                if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-                                    WebViewCompat.addDocumentStartJavaScript(this, WebStreamingMusic.DOCUMENT_START_SCRIPT, setOf("*"))
+                            }
+                        }
+
+                        // 2. Client ID 输入框
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "Spotify Client ID",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(28.dp),
+                                    onClick = {
+                                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                        val pasted = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim().orEmpty()
+                                        if (pasted.isNotEmpty()) {
+                                            clientIdInput = pasted
+                                            configFeedback = null
+                                        } else {
+                                            Toast.makeText(context, "剪贴板为空", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                ) {
+                                    Text("粘贴", fontSize = 12.sp, color = Orange)
                                 }
-                                webViewClient = object : WebViewClient() {
-                                    override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
-                                        super.onPageStarted(view, url, favicon)
-                                        view.evaluateJavascript(WebStreamingMusic.DOCUMENT_START_SCRIPT, null)
-                                    }
-
-                                    override fun onPageFinished(view: WebView, url: String?) {
-                                        super.onPageFinished(view, url)
-                                        CookieManager.getInstance().flush()
-                                    }
-
-                                    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                                        val scheme = request.url.scheme?.lowercase().orEmpty()
-                                        // 阻止跳出到外部官方客户端，强制留在内置页面完成网页登录
-                                        return scheme != "http" && scheme != "https"
+                                if (clientIdInput.isNotEmpty()) {
+                                    TextButton(
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                        modifier = Modifier.height(28.dp),
+                                        onClick = {
+                                            clientIdInput = ""
+                                            SpotifyAppRemoteBridge.saveClientId(context, "")
+                                            configFeedback = "已清空 Client ID，当前使用网页播放方案"
+                                            configFeedbackIsError = false
+                                        },
+                                    ) {
+                                        Text("清空", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                 }
-                                webChromeClient = object : WebChromeClient() {
-                                    override fun onProgressChanged(view: WebView, newProgress: Int) {
-                                        progress = newProgress
+                            }
+                            OutlinedTextField(
+                                value = clientIdInput,
+                                onValueChange = {
+                                    clientIdInput = it.trim()
+                                    configFeedback = null
+                                },
+                                placeholder = { Text("粘贴 32 位 Spotify Client ID", fontSize = 13.sp) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp),
+                            )
+                        }
+
+                        if (!configFeedback.isNullOrBlank()) {
+                            Text(
+                                text = configFeedback.orEmpty(),
+                                fontSize = 12.sp,
+                                color = if (configFeedbackIsError) MaterialTheme.colorScheme.error else spotifyGreen,
+                            )
+                        }
+
+                        // 3. 操作按钮
+                        Button(
+                            enabled = !busyConnecting,
+                            onClick = {
+                                val cid = clientIdInput.trim()
+                                if (cid.length < 16) {
+                                    configFeedback = "请先填入有效的 Spotify Client ID"
+                                    configFeedbackIsError = true
+                                    return@Button
+                                }
+                                SpotifyAppRemoteBridge.saveClientId(context, cid)
+                                val authUrl = SpotifyAppRemoteBridge.buildPkceAuthorizeUrl(context, cid)
+                                if (authUrl != null) {
+                                    configFeedback = null
+                                    pkceWebFlowActive = true
+                                    pendingWebUrl = authUrl
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = spotifyGreen, contentColor = Color.Black),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth().height(44.dp),
+                        ) {
+                            Text(
+                                text = if (busyConnecting) "正在连接授权…" else "保存并授权高音质模式（推荐）",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+
+                        if (remoteStatus.spotifyAppInstalled) {
+                            OutlinedButton(
+                                enabled = !busyConnecting,
+                                onClick = {
+                                    val cid = clientIdInput.trim()
+                                    if (cid.length < 16) {
+                                        configFeedback = "请先填入有效的 Spotify Client ID"
+                                        configFeedbackIsError = true
+                                        return@OutlinedButton
                                     }
-
-                                    override fun onReceivedTitle(view: WebView, title: String?) {
-                                        if (!title.isNullOrBlank()) pageTitle = title
+                                    uiScope.launch {
+                                        busyConnecting = true
+                                        configFeedback = "正在唤醒并连接本机官方 Spotify 客户端…"
+                                        configFeedbackIsError = false
+                                        val res = SpotifyAppRemoteBridge.testConnectInteractive(context, cid)
+                                        busyConnecting = false
+                                        res.onSuccess {
+                                            Toast.makeText(context, "已成功连接本机 Spotify 客户端", Toast.LENGTH_SHORT).show()
+                                            finishLogin()
+                                        }.onFailure {
+                                            val why = SpotifyAppRemoteBridge.status.value.lastFallbackReason ?: it.message ?: "连接失败"
+                                            configFeedback = "连接未通过：$why（请核对下方包名与 SHA-1 指纹，并确保手机 Spotify 已登录账号）"
+                                            configFeedbackIsError = true
+                                        }
                                     }
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth().height(40.dp),
+                            ) {
+                                Text("仅保存并测试直连本机 Spotify 客户端", fontSize = 13.sp)
+                            }
+                        }
 
-                                    override fun onPermissionRequest(request: PermissionRequest) {
-                                        val allowed = request.resources.filter {
-                                            it == PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID
-                                        }.toTypedArray()
-                                        if (allowed.isNotEmpty()) request.grant(allowed) else request.deny()
-                                    }
-
-                                    override fun onCreateWindow(
-                                        view: WebView,
-                                        isDialog: Boolean,
-                                        isUserGesture: Boolean,
-                                        resultMsg: Message,
-                                    ): Boolean {
-                                        val child = WebView(ctx).apply {
-                                            layoutParams = FrameLayout.LayoutParams(
-                                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                            )
-                                            WebStreamingMusic.configureDrmWebView(this, allowPopups = true)
-                                            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-                                                WebViewCompat.addDocumentStartJavaScript(this, WebStreamingMusic.DOCUMENT_START_SCRIPT, setOf("*"))
-                                            }
-                                            webViewClient = object : WebViewClient() {
-                                                override fun shouldOverrideUrlLoading(v: WebView, req: WebResourceRequest): Boolean {
-                                                    val s = req.url.scheme?.lowercase().orEmpty()
-                                                    return s != "http" && s != "https"
-                                                }
-
-                                                override fun onPageFinished(v: WebView, url: String?) {
-                                                    CookieManager.getInstance().flush()
-                                                }
-                                            }
-                                            webChromeClient = object : WebChromeClient() {
-                                                override fun onCloseWindow(window: WebView) {
-                                                    container.removeView(window)
-                                                    window.destroy()
-                                                    hasPopup = container.childCount > 1
-                                                    CookieManager.getInstance().flush()
-                                                }
+                        // 4. Spotify Developer 后台必填参数一键复制卡片
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp))
+                                .padding(13.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "Spotify 开发者后台必填参数",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    text = "打开开发者后台 ↗",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Orange,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable {
+                                            runCatching {
+                                                context.startActivity(
+                                                    Intent(Intent.ACTION_VIEW, Uri.parse("https://developer.spotify.com/dashboard"))
+                                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                                )
                                             }
                                         }
-                                        container.addView(child)
-                                        hasPopup = true
-                                        val transport = resultMsg.obj as? WebView.WebViewTransport
-                                        transport?.webView = child
-                                        resultMsg.sendToTarget()
-                                        return true
-                                    }
-                                }
-                                val entryUrl = when (service) {
-                                    WebMusicService.SPOTIFY -> "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
-                                    WebMusicService.APPLE_MUSIC -> "https://music.apple.com/"
-                                }
-                                loadUrl(entryUrl)
+                                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                                )
                             }
-                            container.addView(wv)
-                            mainWebView = wv
-                            popupContainer = container
-                            container
-                        },
-                    )
+                            Text(
+                                text = "在 developer.spotify.com/dashboard 创建应用 → 进入 Settings：填入下方 Redirect URI，并在 Android Packages 中填入包名与 SHA-1 指纹后点击 Save。",
+                                fontSize = 11.sp,
+                                lineHeight = 16.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            SpotifyCopyParamRow(
+                                title = "Redirect URI",
+                                value = SpotifyAppRemoteBridge.REDIRECT_URI,
+                                onCopy = { copyToClipboard("Redirect URI", SpotifyAppRemoteBridge.REDIRECT_URI) },
+                            )
+                            SpotifyCopyParamRow(
+                                title = "Package Name (Android 包名)",
+                                value = appPackageName,
+                                onCopy = { copyToClipboard("Android 包名", appPackageName) },
+                            )
+                            SpotifyCopyParamRow(
+                                title = "SHA-1 签名指纹",
+                                value = appSha1.ifBlank { "未读取到签名指纹" },
+                                onCopy = {
+                                    if (appSha1.isNotBlank()) copyToClipboard("SHA-1 指纹", appSha1)
+                                },
+                            )
+                        }
+
+                        Spacer(Modifier.height(12.dp))
+                    }
+                } else {
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        AndroidView(
+                            modifier = Modifier.fillMaxSize(),
+                            factory = { ctx ->
+                                val container = FrameLayout(ctx)
+                                val wv = WebView(ctx).apply {
+                                    layoutParams = FrameLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                    )
+                                    WebStreamingMusic.configureDrmWebView(this, allowPopups = true)
+                                    if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                                        WebViewCompat.addDocumentStartJavaScript(this, WebStreamingMusic.DOCUMENT_START_SCRIPT, setOf("*"))
+                                    }
+                                    webViewClient = object : WebViewClient() {
+                                        override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                                            super.onPageStarted(view, url, favicon)
+                                            if (url != null && SpotifyAppRemoteBridge.isCallbackUri(Uri.parse(url))) {
+                                                handlePkceCallbackUri(Uri.parse(url))
+                                                return
+                                            }
+                                            view.evaluateJavascript(WebStreamingMusic.DOCUMENT_START_SCRIPT, null)
+                                        }
+
+                                        override fun onPageFinished(view: WebView, url: String?) {
+                                            super.onPageFinished(view, url)
+                                            CookieManager.getInstance().flush()
+                                        }
+
+                                        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                                            if (SpotifyAppRemoteBridge.isCallbackUri(request.url)) {
+                                                handlePkceCallbackUri(request.url)
+                                                return true
+                                            }
+                                            val scheme = request.url.scheme?.lowercase().orEmpty()
+                                            // 阻止跳出到外部官方客户端，强制留在内置页面完成网页登录或 PKCE 回调
+                                            return scheme != "http" && scheme != "https"
+                                        }
+                                    }
+                                    webChromeClient = object : WebChromeClient() {
+                                        override fun onProgressChanged(view: WebView, newProgress: Int) {
+                                            progress = newProgress
+                                        }
+
+                                        override fun onReceivedTitle(view: WebView, title: String?) {
+                                            if (!title.isNullOrBlank()) pageTitle = title
+                                        }
+
+                                        override fun onPermissionRequest(request: PermissionRequest) {
+                                            val allowed = request.resources.filter {
+                                                it == PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID
+                                            }.toTypedArray()
+                                            if (allowed.isNotEmpty()) request.grant(allowed) else request.deny()
+                                        }
+
+                                        override fun onCreateWindow(
+                                            view: WebView,
+                                            isDialog: Boolean,
+                                            isUserGesture: Boolean,
+                                            resultMsg: Message,
+                                        ): Boolean {
+                                            val child = WebView(ctx).apply {
+                                                layoutParams = FrameLayout.LayoutParams(
+                                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                                )
+                                                WebStreamingMusic.configureDrmWebView(this, allowPopups = true)
+                                                if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                                                    WebViewCompat.addDocumentStartJavaScript(this, WebStreamingMusic.DOCUMENT_START_SCRIPT, setOf("*"))
+                                                }
+                                                webViewClient = object : WebViewClient() {
+                                                    override fun shouldOverrideUrlLoading(v: WebView, req: WebResourceRequest): Boolean {
+                                                        if (SpotifyAppRemoteBridge.isCallbackUri(req.url)) {
+                                                            handlePkceCallbackUri(req.url)
+                                                            return true
+                                                        }
+                                                        val s = req.url.scheme?.lowercase().orEmpty()
+                                                        return s != "http" && s != "https"
+                                                    }
+
+                                                    override fun onPageFinished(v: WebView, url: String?) {
+                                                        CookieManager.getInstance().flush()
+                                                    }
+                                                }
+                                                webChromeClient = object : WebChromeClient() {
+                                                    override fun onCloseWindow(window: WebView) {
+                                                        container.removeView(window)
+                                                        window.destroy()
+                                                        hasPopup = container.childCount > 1
+                                                        CookieManager.getInstance().flush()
+                                                    }
+                                                }
+                                            }
+                                            container.addView(child)
+                                            hasPopup = true
+                                            val transport = resultMsg.obj as? WebView.WebViewTransport
+                                            transport?.webView = child
+                                            resultMsg.sendToTarget()
+                                            return true
+                                        }
+                                    }
+                                    val entryUrl = pendingWebUrl ?: when (service) {
+                                        WebMusicService.SPOTIFY -> "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
+                                        WebMusicService.APPLE_MUSIC -> "https://music.apple.com/"
+                                    }
+                                    pendingWebUrl = null
+                                    loadUrl(entryUrl)
+                                }
+                                container.addView(wv)
+                                mainWebView = wv
+                                popupContainer = container
+                                container
+                            },
+                        )
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SpotifyStatusLine(
+    label: String,
+    value: String,
+    ok: Boolean,
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(
+            Modifier
+                .size(7.dp)
+                .clip(RoundedCornerShape(50))
+                .background(if (ok) Color(0xFF1ED760) else Orange),
+        )
+        Text(
+            text = "$label：",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = value,
+            fontSize = 11.sp,
+            color = if (ok) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun SpotifyCopyParamRow(
+    title: String,
+    value: String,
+    onCopy: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+            .clickable(onClick = onCopy)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = title,
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = value,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = "复制",
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Orange,
+        )
     }
 }

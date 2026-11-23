@@ -25,6 +25,13 @@ object WebStreamingMusic {
 
     fun logout(context: Context, service: WebMusicService) {}
 
+    fun serviceStatusSubtitle(context: Context, service: WebMusicService, logged: Boolean): String =
+        if (logged) "已登录 · 应用内直接播放" else "点击登录账号 · 应用内直接播放"
+
+    fun hasHighQualityConfigOption(service: WebMusicService): Boolean = false
+
+    fun highQualityConfigBadgeText(context: Context, service: WebMusicService): String = ""
+
     fun isStreamingUri(uri: String?): Boolean = WebMusicService.fromUri(uri) != null
 
     fun buildTrackEntry(

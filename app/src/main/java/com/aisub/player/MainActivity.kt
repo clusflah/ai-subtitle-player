@@ -489,6 +489,10 @@ class MainActivity : ComponentActivity() {
         }
         if (intent?.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
+        if (uri.scheme == "voxtitle" && uri.host == "spotify-callback") {
+            com.aisub.player.music.SpotifyAppRemoteBridge.handleOAuthCallback(this, uri)
+            return
+        }
         val name = mangaFileName(uri)
         val lowerName = name?.lowercase().orEmpty()
         if (main.state.value.videoUri != null &&

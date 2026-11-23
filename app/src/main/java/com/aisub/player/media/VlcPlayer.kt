@@ -89,22 +89,26 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
     private fun startVlcKernel(): Pair<LibVLC, MediaPlayer> {
         val useAAudio = VlcAudioBridge.isAAudioSupported()
         val vlcOptions = if (useAAudio) {
+            // AAudio 标准媒体缓冲约 240ms，提前 140ms 送出音频抵消硬件与环形缓冲延迟，同时彻底杜绝 4K 直播 XRun 电流声
             arrayListOf(
-                "--network-caching=1200",
-                "--live-caching=1200",
+                "--network-caching=1500",
+                "--live-caching=1800",
                 "--prefetch-buffer-size=16384",
+                "--audio-desync=-140",
+                "--no-spdif",
                 "--avcodec-skiploopfilter=1",
                 "--input-fast-seek",
                 "--http-reconnect",
                 "--audio-time-stretch",
             )
         } else {
-            // Android 6.0 老电视等走 Java AudioTrack 回退路径：提前 160ms 送出音频，刚好抵消 AudioTrack 环形缓冲延迟，嘴型瞬间对齐
+            // Android 6.0 老电视等走 Java AudioTrack 回退路径：提前 180ms 送出音频抵消环形缓冲延迟，嘴型对齐
             arrayListOf(
-                "--network-caching=1200",
-                "--live-caching=1200",
+                "--network-caching=1500",
+                "--live-caching=1800",
                 "--prefetch-buffer-size=16384",
-                "--audio-desync=-160",
+                "--audio-desync=-180",
+                "--no-spdif",
                 "--avcodec-skiploopfilter=1",
                 "--input-fast-seek",
                 "--http-reconnect",
@@ -452,12 +456,26 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         lastDirectReadBytes = -1L
 
         when (userForceHwdec) {
-            true -> media.setHWDecoderEnabled(true, true)
+            true -> {
+                media.setHWDecoderEnabled(true, true)
+                // 视频保留 MediaCodec 硬解，音频强制优先走 FFmpeg avcodec，绕过 VLC 旧版 faad 在 DVB AAC-LATM 广播流上的电流声以及 spdif 透传误触发
+                media.addOption(":codec=mediacodec_ndk,mediacodec_jni,avcodec,any")
+            }
             false -> {
                 media.setHWDecoderEnabled(false, false)
+                media.addOption(":no-hw-dec")
                 media.addOption(":avcodec-hw=none")
+                media.addOption(":codec=avcodec,any")
             }
-            null -> media.setHWDecoderEnabled(true, false)
+            null -> {
+                media.setHWDecoderEnabled(true, false)
+                media.addOption(":codec=mediacodec_ndk,mediacodec_jni,avcodec,any")
+            }
+        }
+        media.addOption(":no-spdif")
+        if (isLive) {
+            // 直播倍速恒为 1.0x，禁用 scaletempo 时域切片拉伸，避免网络 PCR 微调触发 WSOLA 颗粒电流声
+            media.addOption(":no-audio-time-stretch")
         }
         // 光盘镜像不进菜单，直接播放正片（应用里没有光盘菜单的操作界面）
         media.addOption(":no-dvdnav-menu")

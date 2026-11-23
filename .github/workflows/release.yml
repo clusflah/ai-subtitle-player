@@ -274,9 +274,70 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then TAG="$GITHUB_REF_NAME"; else TAG="v$VERSION"; fi
           EXTRA_FLAGS=""
           if [[ "$TAG" == *-* ]]; then EXTRA_FLAGS="--prerelease"; fi
+
+          TAG="$TAG" VERSION="$VERSION" REPO="${{ github.repository }}" python3 - <<'PY'
+          import os, pathlib, re
+
+          tag = os.environ["TAG"]
+          ver = os.environ["VERSION"]
+          repo = os.environ["REPO"]
+          base_url = f"https://github.com/{repo}/releases/download/{tag}"
+          dist = pathlib.Path("dist")
+
+          def link_if_exists(filename: str, label: str) -> str | None:
+              p = dist / filename
+              if not p.is_file():
+                  return None
+              mb = p.stat().st_size / 1048576.0
+              return f"- [{label} (`{filename}`)]({base_url}/{filename}) · `{mb:.1f} MB`"
+
+          dl_lines = ["## 安装包下载", ""]
+          primary = [
+              link_if_exists(f"Voxtitle-{ver}-arm64-v8a.apk", "📱 Android 标准版（64位推荐，主流手机/平板/新电视）"),
+              link_if_exists(f"Voxtitle-dl-{ver}-arm64-v8a.apk", "📥 Android 下载增强版（内置 yt-dlp 视频嗅探下载）"),
+              link_if_exists(f"Voxtitle-{ver}-windows-x64-Setup.exe", "💻 Windows 64位桌面安装版（Setup.exe）"),
+              link_if_exists(f"Voxtitle-{ver}-windows-x64-portable.zip", "🗂️ Windows 64位免安装便携版（Portable.zip）"),
+          ]
+          dl_lines.extend([x for x in primary if x])
+
+          more = [
+              link_if_exists(f"Voxtitle-{ver}-armeabi-v7a.apk", "Android 32位老设备/电视盒 标准版"),
+              link_if_exists(f"Voxtitle-dl-{ver}-armeabi-v7a.apk", "Android 32位老设备/电视盒 下载增强版"),
+              link_if_exists(f"Voxtitle-{ver}-universal.apk", "Android 全架构通用标准版"),
+              link_if_exists(f"Voxtitle-{ver}-x86_64.apk", "Android x86_64 标准版"),
+              link_if_exists(f"Voxtitle-dl-{ver}-x86_64.apk", "Android x86_64 下载增强版"),
+              link_if_exists(f"Voxtitle-{ver}-windows-x64.msi", "Windows 64位 MSI 安装包"),
+          ]
+          more = [x for x in more if x]
+          if more:
+              dl_lines.extend([
+                  "",
+                  "<details>",
+                  "<summary>更多架构安装包（32位电视盒 armv7 / 通用包 / x86_64 / MSI）</summary>",
+                  "",
+                  *more,
+                  "",
+                  "</details>",
+              ])
+          dl_lines.append("")
+
+          raw_notes = pathlib.Path(".github/release-notes.md").read_text(encoding="utf-8").strip()
+          # 将第二节及之后的历史版本折叠起来，使页面首屏即是下载直链与本版更新，底部原始 Assets 区也紧随其后无需长距离滚动
+          headings = list(re.finditer(r"(?m)^##\s+", raw_notes))
+          if len(headings) >= 2:
+              split_idx = headings[1].start()
+              latest_part = raw_notes[:split_idx].strip()
+              history_part = raw_notes[split_idx:].strip()
+              composed = "\n".join(dl_lines) + "\n" + latest_part + "\n\n## 历史版本\n\n<details>\n<summary>展开查看历史版本更新记录</summary>\n\n" + history_part + "\n\n## \n</details>\n"
+          else:
+              composed = "\n".join(dl_lines) + "\n" + raw_notes + "\n"
+
+          pathlib.Path(os.environ["RUNNER_TEMP"], "release-body.md").write_text(composed, encoding="utf-8")
+          PY
+
           gh release create "$TAG" dist/* \
             --target "$GITHUB_SHA" \
             --title "译幕 Voxtitle $TAG" \
-            --notes-file .github/release-notes.md \
+            --notes-file "$RUNNER_TEMP/release-body.md" \
             ${EXTRA_FLAGS:+$EXTRA_FLAGS} || \
-          gh release upload "$TAG" dist/* --clobber
+          (gh release upload "$TAG" dist/* --clobber && gh release edit "$TAG" --notes-file "$RUNNER_TEMP/release-body.md")

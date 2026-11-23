@@ -46,6 +46,8 @@
         </intent>
         <!-- 离线翻译：绑定 Offline Translator App 的翻译服务 -->
         <package android:name="dev.davidv.translator" />
+        <!-- Spotify App Remote 高音质联动：查询并绑定本机官方 Spotify 客户端 -->
+        <package android:name="com.spotify.music" />
     </queries>
 
     <application
@@ -107,6 +109,15 @@
                 <data android:scheme="content" />
                 <data android:scheme="file" />
                 <data android:mimeType="application/x-iso9660-image" />
+            </intent-filter>
+            <!-- Spotify OAuth PKCE 与 App Remote 授权回调 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="voxtitle"
+                    android:host="spotify-callback" />
             </intent-filter>
         </activity>
 

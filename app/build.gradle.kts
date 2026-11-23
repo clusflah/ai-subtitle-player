@@ -113,8 +113,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 23
         targetSdk = 36
-        versionCode = 188
-        versionName = "2.10.24"
+        versionCode = 189
+        versionName = "2.10.25"
 
         ndk {
             // 真机基本都是 arm64；armeabi-v7a 给 32 位老电视用；x86_64 给模拟器用
@@ -239,6 +239,9 @@ dependencies {
 
     // 语音识别 + VAD（k2-fsa/sherpa-onnx 官方发布的 AAR）
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
+    // Spotify 官方 Android App Remote SDK（联动本机 Spotify 官方客户端输出 320kbps / Lossless 无损音质）
+    implementation(files("libs/spotify-app-remote-release-0.8.0.aar"))
+    implementation("com.google.code.gson:gson:2.11.0")
 
     implementation("androidx.core:core-ktx:1.15.0")
     // 网页：把读取视频声音的脚本注入到每个框架（含 iframe 里的播放器）

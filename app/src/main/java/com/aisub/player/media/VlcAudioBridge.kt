@@ -82,9 +82,9 @@ class VlcAudioBridge {
         val h = nativeHandle
         if (h == 0L) return "libVLC 默认"
         return when (nativeActiveBackend(h)) {
-            1 -> "AAudio C++ 低延迟直出"
-            2 -> "AudioTrack（-160ms 唇形同步补偿）"
-            else -> if (isAAudioSupported()) "AAudio 低延迟待命" else "AudioTrack 待命（-160ms 补偿）"
+            1 -> "AAudio C++ 32-bit 浮点直出"
+            2 -> "AudioTrack（-180ms 唇形同步补偿）"
+            else -> if (isAAudioSupported()) "AAudio 待命" else "AudioTrack 待命（-180ms 补偿）"
         }
     }
 
@@ -112,9 +112,9 @@ class VlcAudioBridge {
             return false
         }
         val bytesPerFrame = (if (channels >= 2) 2 else 1) * 2
-        // 目标环形缓冲约 120ms，配合 --audio-desync=-160 恰好抵消缓冲与 HAL 延迟，同时兼顾 32 位老电视稳定性
-        val targetBytes = (sampleRate * bytesPerFrame * 120) / 1000
-        val maxBytes = maxOf(minBuf * 4, (sampleRate * bytesPerFrame) / 2)
+        // 目标环形缓冲约 220ms，吸收高码率 4K 直播解码抖动，配合 --audio-desync=-180 保持嘴型对齐
+        val targetBytes = (sampleRate * bytesPerFrame * 220) / 1000
+        val maxBytes = maxOf(minBuf * 6, (sampleRate * bytesPerFrame * 3) / 4)
         val bufferSize = maxOf(minBuf * 2, targetBytes).coerceAtMost(maxBytes)
 
         return try {

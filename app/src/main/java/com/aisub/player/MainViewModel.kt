@@ -212,6 +212,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val exoPlayer: ExoPlayer = run {
         val assParsers = AssSubtitleParserFactory(assHandler)
         val extractors = DefaultExtractorsFactory()
+            .setTsExtractorFlags(
+                androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
+                    androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS,
+            )
             .withAssMkvSupport(assParsers, assHandler)
             .withAiff()
             .withLegacyDolbyExoSupport(
