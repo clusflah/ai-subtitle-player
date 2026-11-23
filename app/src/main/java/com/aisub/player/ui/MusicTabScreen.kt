@@ -630,68 +630,44 @@ fun MusicTabScreen(
 }
 
 @Composable
-private fun WebServiceBadgeIcon(service: WebMusicService, size: Dp = 18.dp) {
-    val shape = RoundedCornerShape((size.value * 0.28f).dp)
-    Box(
-        Modifier
-            .size(size)
-            .clip(shape)
-            .background(Color(service.accentHex)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = service.badge,
-            color = Color.White,
-            fontSize = (size.value * 0.42f).sp,
-            fontWeight = FontWeight.ExtraBold,
-            maxLines = 1,
-        )
-    }
-}
-
-@Composable
 private fun MusicSourcePill(
     spec: MusicSourceSpec,
     server: Server?,
     onClick: () -> Unit,
 ) {
-    val pillShape = RoundedCornerShape(50)
     val webSvc = spec.webService
-    Row(
+    val hitShape = RoundedCornerShape(10.dp)
+    Box(
         modifier = Modifier
-            .widthIn(max = 150.dp)
-            .tvFocusRing(pillShape, color = Color.White)
-            .liquidGlass(shape = pillShape, style = GlassStyle.Pill, tint = Color(0x30FFFFFF))
-            .clickable(onClick = onClick)
-            .padding(start = 9.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .size(38.dp)
+            .tvFocusRing(hitShape, color = Color.White)
+            .clip(hitShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
     ) {
         when {
-            webSvc != null -> WebServiceBadgeIcon(webSvc, size = 18.dp)
-            server != null -> ServerSourceIcon(server, size = 18.dp)
-            else -> SourceBadgeIcon(SourceBadgeKind.LOCAL_MUSIC, size = 18.dp)
+            webSvc != null -> WebMusicServiceIcon(webSvc, size = 28.dp)
+            server != null -> {
+                if (server.type.hasSolidIconBackdrop()) {
+                    ServerSourceIcon(server, size = 30.dp)
+                } else {
+                    Box(
+                        Modifier
+                            .size(28.dp)
+                            .liquidGlass(
+                                shape = RoundedCornerShape(7.dp),
+                                style = GlassStyle.Pill,
+                                tint = Color(0x2EFFFFFF),
+                                enableBackdrop = false,
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        ServerSourceIcon(server, size = 22.dp)
+                    }
+                }
+            }
+            else -> SourceBadgeIcon(SourceBadgeKind.LOCAL_MUSIC, size = 28.dp)
         }
-        Spacer(Modifier.width(6.dp))
-        Text(
-            text = when {
-                webSvc != null -> webSvc.label
-                spec.isLocal -> "本机"
-                else -> server?.name?.ifBlank { server.type.label } ?: spec.label
-            },
-            color = Color.White,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false),
-        )
-        Spacer(Modifier.width(2.dp))
-        Icon(
-            imageVector = AppIcons.ExpandMore,
-            contentDescription = "切换音乐源与设置",
-            tint = Color(0xCCFFFFFF),
-            modifier = Modifier.size(16.dp),
-        )
     }
 }
 
@@ -1680,7 +1656,7 @@ private fun MusicSourceSettingsSheet(
                         title = svc.label,
                         subtitle = if (logged) "已登录 · 应用内直接播放与同步歌词" else "点击登录账号 · 应用内直接播放",
                         selected = selected,
-                        leading = { WebServiceBadgeIcon(svc, size = 34.dp) },
+                        leading = { WebMusicServiceIcon(svc, size = 34.dp, insetScale = 0.92f) },
                         trailingActionLabel = if (logged) "退出" else "登录",
                         onTrailingAction = {
                             if (logged) onLogoutWebService(svc) else onLoginWebService(svc)

@@ -1,4 +1,13 @@
-## 本版更新（2.10.23）
+## 本版更新（2.10.24）
+
+- **修复安卓端 Spotify 登录后曲库空白问题（Android / TV）**：
+  - 适配 Spotify 网页端新版 TOTP `/api/token` 鉴权与 `client-token` 机制，同时拦截 `fetch`（兼容 `URL` / `Request` 对象）与 `XMLHttpRequest` 自动捕获会话令牌及动态持久化查询哈希。
+  - 全面接入 Spotify 原生 `pathfinder/v2/query` GraphQL 接口（含已点赞歌曲 `fetchLibraryTracks`、个人歌单与专辑 `libraryV3`、歌单/专辑详情与 `searchV2` 全曲库搜索），优化登录完成后主站 Cookie 同步时机，并为未单独点赞单曲的账号提供最近播放、首个歌单及个性化推荐曲目的多级自动回退。
+- **音乐源切换控件精简为纯图标，更正全套官方品牌图标（Android / TV / Windows）**：
+  - 移除「音乐」页顶部栏右侧音源按钮的文字标签与下拉箭头，精简为纯图标按钮。
+  - 将 Apple Music、Spotify、Plex、Navidrome / Subsonic、Emby、Jellyfin、OpenList 以及音乐发现页播放菜单内的网易云音乐、YouTube Music、QQ音乐全部更正为官方品牌矢量图标。
+
+## 2.10.23 更新
 
 - **安卓端新增 Apple Music 与 Spotify 应用内登录直接播放（Android / TV）**：
   - 在「音乐 → 右上角音源」及歌曲详情页「跳转播放」弹窗中新增 **Apple Music** 与 **Spotify** 应用内账号登录与直连播放音源（支持 Apple ID 双重认证弹窗与 Cookie 持久化记忆）。

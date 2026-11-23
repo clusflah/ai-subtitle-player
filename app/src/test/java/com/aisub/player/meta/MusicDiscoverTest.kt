@@ -233,4 +233,27 @@ class MusicDiscoverTest {
         assertTrue(com.aisub.player.music.WebStreamingMusic.isStreamingUri(spotifyEntry.uri))
         assertTrue(spotifyEntry.uri.startsWith("spotify://track/3DYVWvPh3kGwPasp7yjahc"))
     }
+
+    @Test
+    fun officialSourceVectorIconsAndSpotifyPathfinderHookBuildCleanly() {
+        val vectors = listOf(
+            com.aisub.player.ui.buildAppleMusicOfficialVector(),
+            com.aisub.player.ui.buildSpotifyOfficialVector(),
+            com.aisub.player.ui.buildPlexOfficialVector(),
+            com.aisub.player.ui.buildNavidromeOfficialVector(),
+            com.aisub.player.ui.buildEmbyOfficialVector(),
+            com.aisub.player.ui.buildJellyfinOfficialVector(),
+            com.aisub.player.ui.buildOpenListOfficialVector(),
+            com.aisub.player.ui.buildNetEaseMusicOfficialVector(),
+            com.aisub.player.ui.buildYouTubeMusicOfficialVector(),
+            com.aisub.player.ui.buildQqMusicOfficialVector(),
+        )
+        vectors.forEach { vec ->
+            assertTrue(vec.root.size > 0)
+        }
+        assertTrue(com.aisub.player.music.WebStreamingMusic.DOCUMENT_START_SCRIPT.contains("pathfinder"))
+        assertTrue(com.aisub.player.music.WebStreamingMusic.DOCUMENT_START_SCRIPT.contains("XMLHttpRequest"))
+        assertTrue(com.aisub.player.music.WebStreamingMusic.DOCUMENT_START_SCRIPT.contains("api\\/token"))
+        assertTrue(com.aisub.player.music.WebStreamingMusic.DOCUMENT_START_SCRIPT.contains("clienttoken"))
+    }
 }

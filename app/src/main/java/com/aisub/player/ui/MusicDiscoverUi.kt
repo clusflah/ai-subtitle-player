@@ -1549,14 +1549,7 @@ private fun MusicDiscoverPlayDialog(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                Box(
-                                    Modifier
-                                        .clip(RoundedCornerShape(5.dp))
-                                        .background(Color(svc.accentHex))
-                                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                                ) {
-                                    Text(svc.badge, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
-                                }
+                                WebMusicServiceIcon(svc, size = 26.dp)
                                 Column(Modifier.weight(1f)) {
                                     Text(
                                         text = svc.label,
@@ -1609,7 +1602,7 @@ private fun MusicDiscoverPlayDialog(
                     )
                     platforms.forEach { p ->
                         val targetUrl = MusicPlatformCatalog.resolvePlayUrl(p, item)
-                        val accent = Color(MusicPlatformCatalog.accentHex(p.name))
+                        val accentHex = MusicPlatformCatalog.accentHex(p.name)
                         val badge = MusicPlatformCatalog.specFor(p.name)?.badge ?: p.name.take(2)
                         val hasDirectLink = p.url != null ||
                             (p.name == "网易云音乐" && !item.neteaseId.isNullOrBlank()) ||
@@ -1625,14 +1618,12 @@ private fun MusicDiscoverPlayDialog(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Box(
-                                Modifier
-                                    .clip(RoundedCornerShape(5.dp))
-                                    .background(accent)
-                                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                            ) {
-                                Text(badge, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
-                            }
+                            MusicPlatformIcon(
+                                platformName = p.name,
+                                accentHex = accentHex,
+                                fallbackBadge = badge,
+                                size = 24.dp,
+                            )
                             Column(Modifier.weight(1f)) {
                                 Text(
                                     text = p.name,

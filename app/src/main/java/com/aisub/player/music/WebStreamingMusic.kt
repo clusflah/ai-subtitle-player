@@ -18,8 +18,6 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,20 +26,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -52,7 +47,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -71,6 +65,7 @@ import com.aisub.player.remote.cloud.ServerItem
 import com.aisub.player.remote.cloud.ServerProgress
 import com.aisub.player.ui.AppIcons
 import com.aisub.player.ui.Orange
+import com.aisub.player.ui.WebMusicServiceIcon
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -80,7 +75,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -91,7 +85,8 @@ import kotlin.coroutines.resume
 /**
  * 安卓端 Apple Music / Spotify 应用内登录与后台 Widevine DRM 播放引擎：
  * - 登录态：通过桌面 Chrome 环境伪装 + 多窗口 OAuth 弹窗支持，完成 Apple ID（含双重认证）与 Spotify 账号登录并持久化 Cookie/LocalStorage；
- * - 播放态：维护 1×1 隐形保活 WebView（自动授予 EME `RESOURCE_PROTECTED_MEDIA_ID` Widevine 硬件解密权限），
+ * - 曲库态：同时适配 Apple Music `MusicKit` API 与 Spotify 新版 TOTP 令牌 + `pathfinder/v2/query` GraphQL 接口（含 Web API 双通道）；
+ * - 播放态：维护隐形保活 WebView（自动授予 EME `RESOURCE_PROTECTED_MEDIA_ID` Widevine 硬件解密权限），
  *   将实时播放状态、毫秒级进度、切歌控制与个人曲库桥接至应用原生「音乐」播放界面（MusicView）。
  */
 object WebStreamingMusic {
@@ -136,11 +131,15 @@ object WebStreamingMusic {
         val cm = runCatching { CookieManager.getInstance() }.getOrNull()
         val active = HashSet<WebMusicService>()
 
-        val spotifyCookies = runCatching { cm?.getCookie("https://open.spotify.com").orEmpty() }.getOrDefault("")
-        if (spotifyCookies.contains("sp_dc=") || prefs.getBoolean("logged_SPOTIFY", false) && spotifyCookies.isNotBlank()) {
+        val spotifyOpenCookies = runCatching { cm?.getCookie("https://open.spotify.com").orEmpty() }.getOrDefault("")
+        val spotifyAcctCookies = runCatching { cm?.getCookie("https://accounts.spotify.com").orEmpty() }.getOrDefault("")
+        val allSpotifyCookies = "$spotifyOpenCookies; $spotifyAcctCookies"
+        if (allSpotifyCookies.contains("sp_dc=") ||
+            (prefs.getBoolean("logged_SPOTIFY", false) && spotifyOpenCookies.isNotBlank())
+        ) {
             active += WebMusicService.SPOTIFY
             prefs.edit().putBoolean("logged_SPOTIFY", true).apply()
-        } else if (!spotifyCookies.contains("sp_dc=")) {
+        } else if (!allSpotifyCookies.contains("sp_dc=")) {
             prefs.edit().putBoolean("logged_SPOTIFY", false).apply()
         }
 
@@ -162,10 +161,10 @@ object WebStreamingMusic {
     fun markLoggedIn(context: Context, service: WebMusicService, loggedIn: Boolean) {
         val app = context.applicationContext
         val prefs = app.getSharedPreferences(AUTH_PREFS, Context.MODE_PRIVATE)
-        val wasLogged = prefs.getBoolean("logged_${service.name}", false)
         prefs.edit().putBoolean("logged_${service.name}", loggedIn).apply()
         runCatching { CookieManager.getInstance().flush() }
-        if (loggedIn && !wasLogged) {
+        if (loggedIn) {
+            // 重建后台引擎以确保立即携带最新登录 Cookie 初始化令牌与曲库
             mainHandler.post { engines.remove(service)?.destroy() }
         }
         refreshAuthState(app)
@@ -173,7 +172,8 @@ object WebStreamingMusic {
 
     fun logout(context: Context, service: WebMusicService) {
         val app = context.applicationContext
-        markLoggedIn(app, service, false)
+        val prefs = app.getSharedPreferences(AUTH_PREFS, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("logged_${service.name}", false).apply()
         mainHandler.post {
             engines.remove(service)?.destroy()
             val cm = runCatching { CookieManager.getInstance() }.getOrNull() ?: return@post
@@ -324,28 +324,27 @@ object WebStreamingMusic {
 
     suspend fun loadLibraryTracks(context: Context, service: WebMusicService): List<ServerItem> {
         val engine = ensureEngine(context, service)
-        val raw = engine.callRpc("loadTracks", JSONObject(), timeoutMs = 15_000L)
+        val raw = engine.callRpc("loadTracks", JSONObject(), timeoutMs = 22_000L)
         val parsed = parseServerItemsJson(service, raw)
         if (parsed.isNotEmpty()) return parsed
-        if (service == WebMusicService.APPLE_MUSIC) {
-            return withContext(Dispatchers.IO) {
-                MusicDiscoverRepository.fetchAppleMostPlayed("cn", 40)
-                    .ifEmpty { MusicDiscoverRepository.fetchAppleMostPlayed("tw", 40) }
-                    .map { discoverToServerItem(service, it) }
-            }
+        // 新账号或暂未收藏单曲时，自动兜底加载精选热门单曲列表（点击直接通过当前流媒体服务播放）
+        return withContext(Dispatchers.IO) {
+            val primaryStore = if (service == WebMusicService.SPOTIFY) "tw" else "cn"
+            MusicDiscoverRepository.fetchAppleMostPlayed(primaryStore, 40)
+                .ifEmpty { MusicDiscoverRepository.fetchAppleMostPlayed("us", 40) }
+                .map { discoverToServerItem(service, it) }
         }
-        return emptyList()
     }
 
     suspend fun loadLibraryAlbums(context: Context, service: WebMusicService): List<ServerItem> {
         val engine = ensureEngine(context, service)
-        val raw = engine.callRpc("loadAlbums", JSONObject(), timeoutMs = 15_000L)
+        val raw = engine.callRpc("loadAlbums", JSONObject(), timeoutMs = 20_000L)
         return parseServerItemsJson(service, raw)
     }
 
     suspend fun loadLibraryPlaylists(context: Context, service: WebMusicService): List<ServerItem> {
         val engine = ensureEngine(context, service)
-        val raw = engine.callRpc("loadPlaylists", JSONObject(), timeoutMs = 15_000L)
+        val raw = engine.callRpc("loadPlaylists", JSONObject(), timeoutMs = 20_000L)
         return parseServerItemsJson(service, raw)
     }
 
@@ -354,7 +353,7 @@ object WebStreamingMusic {
         val args = JSONObject()
             .put("ratingKey", container.ratingKey)
             .put("type", container.type)
-        val raw = engine.callRpc("loadChildren", args, timeoutMs = 15_000L)
+        val raw = engine.callRpc("loadChildren", args, timeoutMs = 20_000L)
         return parseServerItemsJson(service, raw)
     }
 
@@ -362,15 +361,12 @@ object WebStreamingMusic {
         val q = query.trim()
         if (q.isEmpty()) return emptyList()
         val engine = ensureEngine(context, service)
-        val raw = engine.callRpc("search", JSONObject().put("query", q), timeoutMs = 12_000L)
+        val raw = engine.callRpc("search", JSONObject().put("query", q), timeoutMs = 16_000L)
         val parsed = parseServerItemsJson(service, raw)
         if (parsed.isNotEmpty()) return parsed
-        if (service == WebMusicService.APPLE_MUSIC) {
-            return withContext(Dispatchers.IO) {
-                MusicDiscoverRepository.fetchItunesSearch(q, 25).map { discoverToServerItem(service, it) }
-            }
+        return withContext(Dispatchers.IO) {
+            MusicDiscoverRepository.fetchItunesSearch(q, 25).map { discoverToServerItem(service, it) }
         }
-        return emptyList()
     }
 
     private fun discoverToServerItem(service: WebMusicService, item: DiscoverItem): ServerItem {
@@ -490,7 +486,7 @@ object WebStreamingMusic {
             .put("artist", artist)
             .put("webUrl", webUrl)
             .put("startPositionMs", startPositionMs.coerceAtLeast(0L))
-        val resp = engine.callRpc("playTrack", args, timeoutMs = 22_000L)
+        val resp = engine.callRpc("playTrack", args, timeoutMs = 24_000L)
             ?: return Result.failure(IllegalStateException("${service.label} 播放器响应超时，请检查网络或重新登录"))
         val obj = runCatching { JSONObject(resp) }.getOrNull()
         val ok = obj?.optBoolean("ok", false) == true
@@ -616,7 +612,7 @@ object WebStreamingMusic {
         }
 
         suspend fun awaitReady() {
-            withTimeoutOrNull(12_000L) { readySignal.await() }
+            withTimeoutOrNull(14_000L) { readySignal.await() }
             withContext(Dispatchers.Main.immediate) {
                 webView.evaluateJavascript(ENGINE_RUNTIME_SCRIPT, null)
             }
@@ -693,7 +689,6 @@ object WebStreamingMusic {
         with(webView.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
-            databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             useWideViewPort = true
@@ -718,7 +713,8 @@ object WebStreamingMusic {
      * 页面最早时机注入：
      * 1. 伪装桌面 Windows Chrome 的 `navigator.userAgentData` 与 `navigator.platform`，防止 Spotify/Apple Music 识别为手机端而禁用网页播放器；
      * 2. 拦截离屏创建的 `<audio>`/`<video>` EME 元素与 `navigator.mediaSession`，拿到毫秒级进度和播放控制权；
-     * 3. 捕获 Spotify Web Player 请求头中的实时 Bearer Token 与 Device ID。
+     * 3. 同时拦截 `fetch`（兼容 `URL` / `Request` 对象）与 `XMLHttpRequest`，捕获 Spotify 新版 TOTP `/api/token`、
+     *    `client-token`、`spotify-app-version`、Device ID 以及 `pathfinder/v2/query` 持久化查询哈希与响应缓存。
      */
     internal const val DOCUMENT_START_SCRIPT = """
 (function() {
@@ -757,6 +753,8 @@ object WebStreamingMusic {
 
   window.__voxMediaPool = window.__voxMediaPool || [];
   window.__voxActionHandlers = window.__voxActionHandlers || {};
+  window.__voxSpotifyHashes = window.__voxSpotifyHashes || {};
+  window.__voxPathfinderCache = window.__voxPathfinderCache || {};
 
   function trackMediaEl(el) {
     if (!el || el.__voxTracked) return;
@@ -795,36 +793,92 @@ object WebStreamingMusic {
     }
   } catch (e) {}
 
+  function inspectHeaderPair(k, v) {
+    if (!k || !v) return;
+    var kl = String(k).toLowerCase();
+    var vs = String(v).trim();
+    if (kl === 'authorization' && vs.indexOf('Bearer ') === 0 && vs.length > 40) {
+      window.__voxSpotifyToken = vs.substring(7).trim();
+    } else if (kl === 'client-token' && vs.length > 20) {
+      window.__voxSpotifyClientToken = vs;
+    } else if (kl === 'spotify-app-version' && vs.length > 2) {
+      window.__voxSpotifyAppVer = vs;
+    }
+  }
+
+  function scanHeadersObj(hdrs) {
+    if (!hdrs) return;
+    try {
+      if (typeof hdrs.forEach === 'function') {
+        hdrs.forEach(function(val, key) { inspectHeaderPair(key, val); });
+      } else if (Array.isArray(hdrs)) {
+        for (var i = 0; i < hdrs.length; i++) {
+          if (hdrs[i] && hdrs[i].length >= 2) inspectHeaderPair(hdrs[i][0], hdrs[i][1]);
+        }
+      } else if (typeof hdrs === 'object') {
+        var keys = Object.keys(hdrs);
+        for (var j = 0; j < keys.length; j++) inspectHeaderPair(keys[j], hdrs[keys[j]]);
+      }
+    } catch (e) {}
+  }
+
+  function inspectSpotifyUrlAndBody(url, bodyStr) {
+    if (!url) return;
+    try {
+      if (/track-playback\/v1\/devices|connect-state\/v1\/devices\/hobs_|player\/command\/from\//i.test(url)) {
+        var m = url.match(/hobs_[A-Za-z0-9_-]+/);
+        if (m) window.__voxSpotifyDeviceId = m[0];
+      }
+      if (/\/pathfinder\/v/i.test(url) && typeof bodyStr === 'string' && bodyStr.charAt(0) === '{') {
+        var jb = JSON.parse(bodyStr);
+        var op = jb && jb.operationName;
+        var hash = jb && jb.extensions && jb.extensions.persistedQuery && jb.extensions.persistedQuery.sha256Hash;
+        if (op && hash) window.__voxSpotifyHashes[op] = hash;
+      }
+    } catch (e) {}
+  }
+
+  function inspectSpotifyResponseJson(rUrl, j) {
+    if (!j || typeof j !== 'object') return;
+    try {
+      if (/\/api\/token|get_access_token/i.test(rUrl)) {
+        if (j.accessToken) {
+          window.__voxSpotifyToken = j.accessToken;
+          window.__voxSpotifyAnon = !!j.isAnonymous;
+        }
+      } else if (/clienttoken\.spotify\.com\/v1\/clienttoken/i.test(rUrl)) {
+        var gt = j.granted_token && j.granted_token.token;
+        if (gt) window.__voxSpotifyClientToken = gt;
+      } else if (/track-playback\/v1\/devices/i.test(rUrl)) {
+        if (j.device_id) window.__voxSpotifyDeviceId = j.device_id;
+      } else if (/\/pathfinder\/v/i.test(rUrl) && j.data) {
+        if (j.data.me && j.data.me.libraryV3) window.__voxPathfinderCache.libraryV3 = j;
+        if (j.data.home) window.__voxPathfinderCache.home = j;
+        if (j.data.me && j.data.me.library && j.data.me.library.tracks) window.__voxPathfinderCache.fetchLibraryTracks = j;
+      }
+    } catch (e) {}
+  }
+
   try {
     var origFetch = window.fetch;
     if (origFetch) {
       window.fetch = function(input, init) {
+        var url = '';
         try {
-          var url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
-          var hdrs = (init && init.headers) || (input && input.headers);
-          var auth = null;
-          if (hdrs) {
-            if (typeof hdrs.get === 'function') auth = hdrs.get('Authorization') || hdrs.get('authorization');
-            else auth = hdrs['Authorization'] || hdrs['authorization'];
-          }
-          if (auth && auth.indexOf('Bearer ') === 0 && /spotify\.com/i.test(url) && auth.length > 40) {
-            window.__voxSpotifyToken = auth.substring(7).trim();
-          }
-          if (/track-playback\/v1\/devices|connect-state\/v1\/devices\/hobs_/i.test(url)) {
-            var m = url.match(/hobs_[A-Za-z0-9]+/);
-            if (m) window.__voxSpotifyDeviceId = m[0];
-          }
+          if (typeof input === 'string') url = input;
+          else if (input && typeof input.href === 'string') url = input.href;
+          else if (input && typeof input.url === 'string') url = input.url;
+          else if (input) url = String(input);
+          if (input && input.headers) scanHeadersObj(input.headers);
+          if (init && init.headers) scanHeadersObj(init.headers);
+          inspectSpotifyUrlAndBody(url, init && init.body);
         } catch (e) {}
         return origFetch.apply(this, arguments).then(function(resp) {
           try {
-            var rUrl = resp && resp.url ? resp.url : '';
-            if (/track-playback\/v1\/devices/i.test(rUrl)) {
+            var rUrl = (resp && resp.url) || url || '';
+            if (/\/api\/token|get_access_token|clienttoken\.spotify\.com|track-playback\/v1\/devices|\/pathfinder\/v/i.test(rUrl)) {
               resp.clone().json().then(function(j) {
-                if (j && j.device_id) window.__voxSpotifyDeviceId = j.device_id;
-              }).catch(function(){});
-            } else if (/get_access_token|api\/token/i.test(rUrl)) {
-              resp.clone().json().then(function(j) {
-                if (j && j.accessToken) window.__voxSpotifyToken = j.accessToken;
+                inspectSpotifyResponseJson(rUrl, j);
               }).catch(function(){});
             }
           } catch (e) {}
@@ -833,11 +887,39 @@ object WebStreamingMusic {
       };
     }
   } catch (e) {}
+
+  try {
+    var origXhrOpen = XMLHttpRequest.prototype.open;
+    var origXhrSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+    var origXhrSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url) {
+      this.__voxUrl = typeof url === 'string' ? url : (url && url.href ? url.href : String(url || ''));
+      return origXhrOpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+      inspectHeaderPair(name, value);
+      return origXhrSetHeader.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function(body) {
+      var u = this.__voxUrl || '';
+      inspectSpotifyUrlAndBody(u, body);
+      if (/\/api\/token|get_access_token|clienttoken\.spotify\.com|track-playback\/v1\/devices|\/pathfinder\/v/i.test(u)) {
+        this.addEventListener('load', function() {
+          try {
+            if (typeof this.responseText === 'string' && this.responseText.charAt(0) === '{') {
+              inspectSpotifyResponseJson(u, JSON.parse(this.responseText));
+            }
+          } catch (e) {}
+        });
+      }
+      return origXhrSend.apply(this, arguments);
+    };
+  } catch (e) {}
 })();
 """
 
     /**
-     * 运行时控制与曲库读取桥接脚本（同时适配 Apple Music `MusicKit` 与 Spotify Web Player）。
+     * 运行时控制与曲库读取桥接脚本（同时适配 Apple Music `MusicKit` 与 Spotify 新版 `pathfinder/v2/query` + Web API）。
      */
     private const val ENGINE_RUNTIME_SCRIPT = """
 (function() {
@@ -926,30 +1008,91 @@ object WebStreamingMusic {
     };
   }
 
-  async function ensureSpotifyToken() {
+  // ---------------- Spotify 新版 TOTP 会话令牌与 Pathfinder v2 GraphQL 引擎 ----------------
+
+  var SPOTIFY_HASHES = {
+    fetchLibraryTracks: '087278b20b743578a6262c2b0b4bcd20d879c503cc359a2285baf083ef944240',
+    libraryV3: '390c78e5b951029bad359785e69b07b536a509c581cbcd0aded5e5067f187455',
+    fetchPlaylist: '21ea11a6ac75a5f3e01fd365d29c18e0a4a8b7dc09f89bbb5d73910190c6acaf',
+    getAlbum: '0b6ce3511e1b02e4a40fa95440f992acbe85080eb308af9194322d708fc1914f',
+    searchSuggestions: 'f244254b94c0e824d458ac216e0f8406a73f2f69a9ff52831a2f78fa774ff6ce',
+    assistedCurationSearch: 'f78953bf9207d73493c27284103f5aeb6e728876d5793851bf79bc706127ff70',
+    home: '5fb7da7a03ee2776c0670856609cb85a189a3cecc36cc160b91cde79063b9cf1'
+  };
+
+  async function ensureSpotifyToken(maxWaitMs) {
     if (window.__voxSpotifyToken) return window.__voxSpotifyToken;
-    try {
-      var r = await fetch('https://open.spotify.com/get_access_token?reason=transport&productType=web_player', { credentials: 'include' });
-      if (r.ok) {
-        var j = await r.json();
-        if (j && j.accessToken) {
-          window.__voxSpotifyToken = j.accessToken;
-          return j.accessToken;
-        }
-      }
-    } catch (e) {}
-    for (var i = 0; i < 12 && !window.__voxSpotifyToken; i++) await sleep(300);
+    var deadline = Date.now() + (maxWaitMs || 11000);
+    while (Date.now() < deadline) {
+      if (window.__voxSpotifyToken) return window.__voxSpotifyToken;
+      await sleep(250);
+    }
     return window.__voxSpotifyToken || '';
   }
 
+  function spotifyAuthHeaders(tok) {
+    var h = {
+      'Authorization': 'Bearer ' + tok,
+      'app-platform': 'WebPlayer',
+      'spotify-app-version': window.__voxSpotifyAppVer || '896000000'
+    };
+    if (window.__voxSpotifyClientToken) h['client-token'] = window.__voxSpotifyClientToken;
+    return h;
+  }
+
   async function spotifyApi(path) {
-    var tok = await ensureSpotifyToken();
+    var tok = await ensureSpotifyToken(10000);
     if (!tok) return null;
-    var r = await fetch('https://api.spotify.com/v1' + path, {
-      headers: { 'Authorization': 'Bearer ' + tok }
-    });
-    if (!r.ok) return null;
-    return await r.json();
+    try {
+      var r = await fetch('https://api.spotify.com/v1' + path, {
+        headers: spotifyAuthHeaders(tok)
+      });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function spotifyPathfinder(opName, variables) {
+    var tok = await ensureSpotifyToken(11000);
+    if (!tok) return null;
+    var hash = (window.__voxSpotifyHashes && window.__voxSpotifyHashes[opName]) || SPOTIFY_HASHES[opName];
+    if (!hash) return null;
+    try {
+      var hdrs = spotifyAuthHeaders(tok);
+      hdrs['Content-Type'] = 'application/json;charset=UTF-8';
+      var r = await fetch('https://api-partner.spotify.com/pathfinder/v2/query', {
+        method: 'POST',
+        headers: hdrs,
+        body: JSON.stringify({
+          variables: variables || {},
+          operationName: opName,
+          extensions: { persistedQuery: { version: 1, sha256Hash: hash } }
+        })
+      });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function bestSpotifyCover(sources) {
+    if (!Array.isArray(sources) || !sources.length) return '';
+    var best = sources[0];
+    for (var i = 1; i < sources.length; i++) {
+      var w = sources[i].width || sources[i].maxWidth || 0;
+      var bw = best.width || best.maxWidth || 0;
+      if (w > bw && w <= 640) best = sources[i];
+    }
+    return (best && best.url) || '';
+  }
+
+  function spotifyUriId(uri) {
+    if (!uri || typeof uri !== 'string') return '';
+    var parts = uri.split(':');
+    return parts[parts.length - 1] || '';
   }
 
   function mapSpotifyTrack(t, albumFallback) {
@@ -970,6 +1113,317 @@ object WebStreamingMusic {
       year: yr > 1900 ? yr : 0,
       webUrl: 'https://open.spotify.com/track/' + t.id
     };
+  }
+
+  function mapPathfinderTrackNode(node, albumFallback) {
+    if (!node || typeof node !== 'object') return null;
+    var t = node;
+    if (t.itemV2 && t.itemV2.data) t = t.itemV2.data;
+    else if (t.track && t.track.data) t = t.track.data;
+    else if (t.track && t.track.uri) t = t.track;
+    else if (t.item && t.item.data) t = t.item.data;
+    else if (t.data && (t.data.__typename === 'Track' || t.data.uri)) t = t.data;
+
+    var uri = t.uri || t._uri || (node.track && node.track._uri) || '';
+    if (uri.indexOf('spotify:track:') !== 0 && t.__typename !== 'Track') return null;
+    var id = spotifyUriId(uri) || t.id || '';
+    var name = t.name || '';
+    if (!id || !name) return null;
+
+    var artistNames = [];
+    var aItems = (t.artists && t.artists.items) || (Array.isArray(t.artists) ? t.artists : []);
+    for (var i = 0; i < aItems.length; i++) {
+      var an = (aItems[i] && aItems[i].profile && aItems[i].profile.name) || (aItems[i] && aItems[i].name) || '';
+      if (an) artistNames.push(an);
+    }
+
+    var alb = t.albumOfTrack || albumFallback || {};
+    var albName = alb.name || '';
+    var cover = '';
+    if (alb.coverArt && alb.coverArt.sources) cover = bestSpotifyCover(alb.coverArt.sources);
+    else if (alb.images && alb.images.length) cover = alb.images[0].url || '';
+
+    var dur = (t.duration && t.duration.totalMilliseconds) ||
+              (t.trackDuration && t.trackDuration.totalMilliseconds) ||
+              t.duration_ms || 0;
+    var yr = (alb.date && alb.date.year) || 0;
+    return {
+      id: id,
+      type: 'track',
+      title: name,
+      artist: artistNames.join(' / '),
+      album: albName,
+      cover: cover,
+      durationMs: dur,
+      year: yr > 1900 ? yr : 0,
+      webUrl: 'https://open.spotify.com/track/' + id
+    };
+  }
+
+  function mapPathfinderContainerNode(rawWrapper) {
+    if (!rawWrapper || typeof rawWrapper !== 'object') return null;
+    var d = rawWrapper;
+    if (d.item && d.item.data) d = d.item.data;
+    else if (d.data) d = d.data;
+
+    var uri = d.uri || d._uri || (rawWrapper.item && rawWrapper.item._uri) || '';
+    var tn = d.__typename || '';
+    if (tn === 'LibraryPseudoPlaylist' || uri === 'spotify:collection:tracks') {
+      var imgP = (d.image && d.image.sources && bestSpotifyCover(d.image.sources)) || '';
+      return {
+        id: 'playlist|liked',
+        type: 'playlist',
+        title: d.name || '我喜欢的音乐',
+        summary: 'Spotify 已点赞收藏的歌曲',
+        cover: imgP,
+        count: d.count || 0
+      };
+    }
+    if (tn === 'Playlist' || uri.indexOf('spotify:playlist:') === 0) {
+      var pid = spotifyUriId(uri);
+      if (!pid || !d.name) return null;
+      var pSources = (d.images && d.images.items && d.images.items[0] && d.images.items[0].sources) ||
+                     (d.coverArt && d.coverArt.sources) || [];
+      return {
+        id: 'playlist|' + pid,
+        type: 'playlist',
+        title: d.name,
+        artist: (d.ownerV2 && d.ownerV2.data && d.ownerV2.data.name) || '',
+        summary: String(d.description || '').replace(/<[^>]+>/g, ''),
+        cover: bestSpotifyCover(pSources),
+        count: (d.attributes && d.attributes.length) || 0
+      };
+    }
+    if (tn === 'Album' || uri.indexOf('spotify:album:') === 0) {
+      var aid = spotifyUriId(uri);
+      if (!aid || !d.name) return null;
+      var aArtists = ((d.artists && d.artists.items) || []).map(function(a) {
+        return (a && a.profile && a.profile.name) || (a && a.name) || '';
+      }).filter(Boolean).join(' / ');
+      var aSources = (d.coverArt && d.coverArt.sources) || [];
+      var yr = (d.date && d.date.year) || 0;
+      return {
+        id: 'album|' + aid,
+        type: 'album',
+        title: d.name,
+        artist: aArtists,
+        cover: bestSpotifyCover(aSources),
+        year: yr > 1900 ? yr : 0,
+        count: 0
+      };
+    }
+    return null;
+  }
+
+  function collectDeepEntities(root, wantType, limit) {
+    var results = [];
+    var seen = {};
+    function walk(obj, depth) {
+      if (!obj || typeof obj !== 'object' || depth > 14 || results.length >= limit) return;
+      if (wantType === 'track') {
+        var tr = mapPathfinderTrackNode(obj);
+        if (tr && !seen[tr.id]) {
+          seen[tr.id] = true;
+          results.push(tr);
+          return;
+        }
+      } else {
+        var ct = mapPathfinderContainerNode(obj);
+        if (ct && ct.type === wantType && !seen[ct.id]) {
+          seen[ct.id] = true;
+          results.push(ct);
+          return;
+        }
+      }
+      if (Array.isArray(obj)) {
+        for (var i = 0; i < obj.length && results.length < limit; i++) walk(obj[i], depth + 1);
+      } else {
+        var keys = Object.keys(obj);
+        for (var j = 0; j < keys.length && results.length < limit; j++) {
+          var k = keys[j];
+          if (k === 'extensions') continue;
+          walk(obj[k], depth + 1);
+        }
+      }
+    }
+    walk(root, 0);
+    return results;
+  }
+
+  async function getSpotifyLibraryV3(filterName) {
+    if (!filterName && window.__voxPathfinderCache && window.__voxPathfinderCache.libraryV3) {
+      return window.__voxPathfinderCache.libraryV3;
+    }
+    var vars = {
+      filters: filterName ? [filterName] : [],
+      order: null,
+      textFilter: null,
+      features: ['LIKED_SONGS', 'YOUR_EPISODES_V2', 'PRERELEASES', 'EVENTS'],
+      limit: 50,
+      offset: 0,
+      flatten: false,
+      expandedFolders: [],
+      folderUri: null,
+      includeFoldersWhenFlattening: true
+    };
+    var res = await spotifyPathfinder('libraryV3', vars);
+    if (res && res.data && res.data.me && res.data.me.libraryV3) return res;
+    return (window.__voxPathfinderCache && window.__voxPathfinderCache.libraryV3) || null;
+  }
+
+  async function loadSpotifyPlaylistTracks(playlistId) {
+    if (playlistId === 'liked') {
+      var fl = await spotifyPathfinder('fetchLibraryTracks', { offset: 0, limit: 80 });
+      var flItems = fl && fl.data && fl.data.me && fl.data.me.library && fl.data.me.library.tracks && fl.data.me.library.tracks.items;
+      if (Array.isArray(flItems) && flItems.length) {
+        return flItems.map(function(x) { return mapPathfinderTrackNode(x); }).filter(Boolean);
+      }
+      var st = await spotifyApi('/me/tracks?limit=50');
+      return (((st && st.items) || []).map(function(x) { return mapSpotifyTrack(x && x.track); })).filter(Boolean);
+    }
+    var pf = await spotifyPathfinder('fetchPlaylist', {
+      uri: 'spotify:playlist:' + playlistId,
+      offset: 0,
+      limit: 100,
+      enableWatchFeedEntrypoint: false,
+      includeEpisodeContentRatingsV2: false
+    });
+    var pItems = pf && pf.data && pf.data.playlistV2 && pf.data.playlistV2.content && pf.data.playlistV2.content.items;
+    if (Array.isArray(pItems) && pItems.length) {
+      var mapped = pItems.map(function(x) { return mapPathfinderTrackNode(x); }).filter(Boolean);
+      if (mapped.length) return mapped;
+    }
+    var ptr = await spotifyApi('/playlists/' + playlistId + '/tracks?limit=100');
+    return (((ptr && ptr.items) || []).map(function(x) { return mapSpotifyTrack(x && x.track); })).filter(Boolean);
+  }
+
+  async function loadSpotifyAlbumTracks(albumId) {
+    var pf = await spotifyPathfinder('getAlbum', {
+      uri: 'spotify:album:' + albumId,
+      locale: '',
+      offset: 0,
+      limit: 50
+    });
+    var au = pf && pf.data && pf.data.albumUnion;
+    if (au && au.tracksV2 && Array.isArray(au.tracksV2.items)) {
+      var mapped = au.tracksV2.items.map(function(x) { return mapPathfinderTrackNode(x, au); }).filter(Boolean);
+      if (mapped.length) return mapped;
+    }
+    var albInfo = await spotifyApi('/albums/' + albumId);
+    return ((((albInfo && albInfo.tracks) || {}).items || []).map(function(t) { return mapSpotifyTrack(t, albInfo); })).filter(Boolean);
+  }
+
+  async function loadSpotifyTracksSmart() {
+    // 1. Pathfinder v2: 已点赞收藏歌曲 (Liked Songs)
+    var fl = (window.__voxPathfinderCache && window.__voxPathfinderCache.fetchLibraryTracks) ||
+             await spotifyPathfinder('fetchLibraryTracks', { offset: 0, limit: 60 });
+    var flItems = fl && fl.data && fl.data.me && fl.data.me.library && fl.data.me.library.tracks && fl.data.me.library.tracks.items;
+    if (Array.isArray(flItems) && flItems.length) {
+      var list1 = flItems.map(function(x) { return mapPathfinderTrackNode(x); }).filter(Boolean);
+      if (list1.length) return list1;
+    }
+
+    // 2. Web API: /me/tracks 或最近播放
+    var st = await spotifyApi('/me/tracks?limit=50');
+    if (st && Array.isArray(st.items) && st.items.length) {
+      var list2 = st.items.map(function(x) { return mapSpotifyTrack(x && x.track); }).filter(Boolean);
+      if (list2.length) return list2;
+    }
+    var recent = await spotifyApi('/me/player/recently-played?limit=40');
+    if (recent && Array.isArray(recent.items) && recent.items.length) {
+      var seenR = {};
+      var listR = [];
+      for (var r = 0; r < recent.items.length; r++) {
+        var tr = mapSpotifyTrack(recent.items[r] && recent.items[r].track);
+        if (tr && !seenR[tr.id]) { seenR[tr.id] = true; listR.push(tr); }
+      }
+      if (listR.length) return listR;
+    }
+
+    // 3. 若账号未单独点赞歌曲，自动展开用户首个歌单中的歌曲
+    var lib = await getSpotifyLibraryV3('Playlists');
+    var playlists = collectDeepEntities(lib, 'playlist', 10);
+    for (var p = 0; p < playlists.length; p++) {
+      var pid = String(playlists[p].id || '').split('|')[1] || '';
+      if (pid && pid !== 'liked') {
+        var pTracks = await loadSpotifyPlaylistTracks(pid);
+        if (pTracks.length) return pTracks;
+      }
+    }
+
+    // 4. 从首页个性化推荐缓存或首个推荐歌单中提取可播放曲目
+    var homeData = (window.__voxPathfinderCache && window.__voxPathfinderCache.home) ||
+                   await spotifyPathfinder('home', { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai', sp_t: '', country: '' });
+    if (homeData) {
+      var hTracks = collectDeepEntities(homeData, 'track', 40);
+      if (hTracks.length) return hTracks;
+      var hPlaylists = collectDeepEntities(homeData, 'playlist', 5);
+      for (var hp = 0; hp < hPlaylists.length; hp++) {
+        var hpid = String(hPlaylists[hp].id || '').split('|')[1] || '';
+        if (hpid) {
+          var hpTracks = await loadSpotifyPlaylistTracks(hpid);
+          if (hpTracks.length) return hpTracks;
+        }
+      }
+    }
+    return [];
+  }
+
+  async function searchSpotifySmart(query) {
+    var pf = await spotifyPathfinder('searchSuggestions', {
+      query: query,
+      limit: 30,
+      numberOfTopResults: 30,
+      offset: 0,
+      includeAuthors: false,
+      includeAlbumPreReleases: true,
+      includeEpisodeContentRatingsV2: false
+    });
+    if (pf && pf.data && pf.data.searchV2) {
+      var sv = pf.data.searchV2;
+      var tracks = collectDeepEntities(sv.tracksV2 || sv.topResultsV2 || sv, 'track', 25);
+      var albums = collectDeepEntities(sv.albumsV2 || sv.topResultsV2 || sv, 'album', 10);
+      var playlists = collectDeepEntities(sv.playlists || sv.topResultsV2 || sv, 'playlist', 10);
+      var combined = tracks.concat(albums).concat(playlists);
+      if (combined.length) return combined;
+    }
+    var ac = await spotifyPathfinder('assistedCurationSearch', { searchTerm: query, limit: 25, offset: 0 });
+    if (ac && ac.data) {
+      var acTracks = collectDeepEntities(ac.data, 'track', 25);
+      if (acTracks.length) return acTracks;
+    }
+    var sq = encodeURIComponent(query || '');
+    var ss = await spotifyApi('/search?type=track,album,playlist&limit=20&q=' + sq);
+    var sOut = [];
+    if (ss && ss.tracks && ss.tracks.items) {
+      sOut = sOut.concat(ss.tracks.items.map(function(t){ return mapSpotifyTrack(t); }));
+    }
+    if (ss && ss.albums && ss.albums.items) {
+      sOut = sOut.concat(ss.albums.items.map(function(al){
+        return {
+          id: 'album|' + al.id,
+          type: 'album',
+          title: al.name || '',
+          artist: (al.artists || []).map(function(a){ return a.name; }).join(' / '),
+          cover: (al.images && al.images[0] && al.images[0].url) || '',
+          count: al.total_tracks || 0
+        };
+      }));
+    }
+    if (ss && ss.playlists && ss.playlists.items) {
+      sOut = sOut.concat(ss.playlists.items.map(function(pl){
+        if (!pl || !pl.id) return null;
+        return {
+          id: 'playlist|' + pl.id,
+          type: 'playlist',
+          title: pl.name || '',
+          summary: String(pl.description || '').replace(/<[^>]+>/g, ''),
+          cover: (pl.images && pl.images[0] && pl.images[0].url) || '',
+          count: (pl.tracks && pl.tracks.total) || 0
+        };
+      }));
+    }
+    return sOut.filter(Boolean);
   }
 
   async function playOnApple(args) {
@@ -998,20 +1452,20 @@ object WebStreamingMusic {
 
   async function playOnSpotify(args) {
     var trackId = String(args.trackId || '').trim();
-    var tok = await ensureSpotifyToken();
-    if (!trackId && args.title && tok) {
-      var q = encodeURIComponent((args.title + ' ' + (args.artist || '')).trim());
-      var sr = await spotifyApi('/search?type=track&limit=5&q=' + q);
-      var items = (((sr || {}).tracks || {}).items) || [];
-      if (items.length) trackId = items[0].id;
-    }
+    var tok = await ensureSpotifyToken(11000);
     if (!trackId && args.webUrl) {
       var m = String(args.webUrl).match(/track\/([A-Za-z0-9]+)/);
       if (m) trackId = m[1];
     }
+    if (!trackId && args.title) {
+      var q = (args.title + ' ' + (args.artist || '')).trim();
+      var hits = await searchSpotifySmart(q);
+      var firstTrack = hits.find(function(h) { return h && h.type === 'track' && h.id; });
+      if (firstTrack) trackId = firstTrack.id;
+    }
     if (!trackId) return { ok: false, error: '未在 Spotify 曲库中找到该歌曲' };
 
-    // 优先通过 Spotify Web Playback Connect API 直接在当前 Web Player 设备起播（无需整页刷新）
+    // 1. 优先尝试 Spotify Connect Web Player 设备指令起播
     if (tok) {
       var devId = window.__voxSpotifyDeviceId || '';
       if (!devId) {
@@ -1021,29 +1475,34 @@ object WebStreamingMusic {
         if (webDev && webDev.id) devId = webDev.id;
       }
       if (devId) {
-        var playRes = await fetch('https://api.spotify.com/v1/me/player/play?device_id=' + encodeURIComponent(devId), {
-          method: 'PUT',
-          headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uris: ['spotify:track:' + trackId], position_ms: args.startPositionMs || 0 })
-        });
-        if (playRes.ok || playRes.status === 204) return { ok: true };
+        try {
+          var hdrs = spotifyAuthHeaders(tok);
+          hdrs['Content-Type'] = 'application/json';
+          var playRes = await fetch('https://api.spotify.com/v1/me/player/play?device_id=' + encodeURIComponent(devId), {
+            method: 'PUT',
+            headers: hdrs,
+            body: JSON.stringify({ uris: ['spotify:track:' + trackId], position_ms: args.startPositionMs || 0 })
+          });
+          if (playRes.ok || playRes.status === 204) return { ok: true };
+        } catch (e) {}
       }
     }
 
-    // 回退路径：SPA 路由跳转至单曲页并自动点击主播放按钮
+    // 2. 回退路径：SPA 路由跳转至单曲页并自动触发主播放按钮
     var targetPath = '/track/' + trackId;
     if (location.pathname !== targetPath) {
       window.history.pushState({}, '', targetPath);
       window.dispatchEvent(new PopStateEvent('popstate'));
     }
-    var deadline = Date.now() + 9000;
+    var deadline = Date.now() + 9500;
     while (Date.now() < deadline) {
       await sleep(350);
       var btn = document.querySelector('main button[data-testid="play-button"]') ||
+                document.querySelector('[data-testid="action-bar-row"] button[data-testid="play-button"]') ||
                 document.querySelector('button[data-testid="play-button"]');
       if (btn) {
         btn.click();
-        await sleep(300);
+        await sleep(350);
         return { ok: true };
       }
     }
@@ -1189,86 +1648,64 @@ object WebStreamingMusic {
           }
         } else if (isSpotify) {
           if (method === 'loadTracks') {
-            var st = await spotifyApi('/me/tracks?limit=50');
-            var sItems = ((st && st.items) || []).map(function(x){ return mapSpotifyTrack(x.track); }).filter(Boolean);
-            out = { ok: true, items: sItems };
+            var sTracks = await loadSpotifyTracksSmart();
+            out = { ok: true, items: sTracks };
           } else if (method === 'loadAlbums') {
-            var sa = await spotifyApi('/me/albums?limit=50');
-            var aItems = ((sa && sa.items) || []).map(function(x) {
-              var al = x.album;
-              if (!al) return null;
-              var artists = (al.artists || []).map(function(a){ return a.name; }).join(' / ');
-              return {
-                id: 'album|' + al.id,
-                type: 'album',
-                title: al.name || '',
-                artist: artists,
-                cover: (al.images && al.images[0] && al.images[0].url) || '',
-                count: al.total_tracks || 0,
-                year: al.release_date ? parseInt(String(al.release_date).substring(0, 4), 10) : 0
-              };
-            }).filter(Boolean);
+            var libA = await getSpotifyLibraryV3('Albums');
+            var aItems = collectDeepEntities(libA, 'album', 60);
+            if (!aItems.length) {
+              var sa = await spotifyApi('/me/albums?limit=50');
+              aItems = (((sa && sa.items) || []).map(function(x) {
+                var al = x && x.album;
+                if (!al) return null;
+                var artists = (al.artists || []).map(function(a){ return a.name; }).join(' / ');
+                return {
+                  id: 'album|' + al.id,
+                  type: 'album',
+                  title: al.name || '',
+                  artist: artists,
+                  cover: (al.images && al.images[0] && al.images[0].url) || '',
+                  count: al.total_tracks || 0,
+                  year: al.release_date ? parseInt(String(al.release_date).substring(0, 4), 10) : 0
+                };
+              })).filter(Boolean);
+            }
+            if (!aItems.length && window.__voxPathfinderCache && window.__voxPathfinderCache.home) {
+              aItems = collectDeepEntities(window.__voxPathfinderCache.home, 'album', 30);
+            }
             out = { ok: true, items: aItems };
           } else if (method === 'loadPlaylists') {
-            var sp = await spotifyApi('/me/playlists?limit=50');
-            var pItems = ((sp && sp.items) || []).map(function(pl) {
-              if (!pl || !pl.id) return null;
-              return {
-                id: 'playlist|' + pl.id,
-                type: 'playlist',
-                title: pl.name || '歌单',
-                summary: String(pl.description || '').replace(/<[^>]+>/g, ''),
-                cover: (pl.images && pl.images[0] && pl.images[0].url) || '',
-                count: (pl.tracks && pl.tracks.total) || 0
-              };
-            }).filter(Boolean);
+            var libP = await getSpotifyLibraryV3('Playlists');
+            var pItems = collectDeepEntities(libP, 'playlist', 60);
+            if (!pItems.length) {
+              var sp = await spotifyApi('/me/playlists?limit=50');
+              pItems = (((sp && sp.items) || []).map(function(pl) {
+                if (!pl || !pl.id) return null;
+                return {
+                  id: 'playlist|' + pl.id,
+                  type: 'playlist',
+                  title: pl.name || '歌单',
+                  summary: String(pl.description || '').replace(/<[^>]+>/g, ''),
+                  cover: (pl.images && pl.images[0] && pl.images[0].url) || '',
+                  count: (pl.tracks && pl.tracks.total) || 0
+                };
+              })).filter(Boolean);
+            }
+            if (!pItems.length && window.__voxPathfinderCache && window.__voxPathfinderCache.home) {
+              pItems = collectDeepEntities(window.__voxPathfinderCache.home, 'playlist', 30);
+            }
             out = { ok: true, items: pItems };
           } else if (method === 'loadChildren') {
             var spParts = String(args.ratingKey || '').split('|');
             var kind = spParts[0];
             var cid = spParts[1] || spParts[0];
             if (kind === 'playlist') {
-              var ptr = await spotifyApi('/playlists/' + cid + '/tracks?limit=100');
-              var listP = ((ptr && ptr.items) || []).map(function(x){ return mapSpotifyTrack(x && x.track); }).filter(Boolean);
-              out = { ok: true, items: listP };
+              out = { ok: true, items: await loadSpotifyPlaylistTracks(cid) };
             } else {
-              var albInfo = await spotifyApi('/albums/' + cid);
-              var listA = (((albInfo && albInfo.tracks) || {}).items || []).map(function(t){ return mapSpotifyTrack(t, albInfo); }).filter(Boolean);
-              out = { ok: true, items: listA };
+              out = { ok: true, items: await loadSpotifyAlbumTracks(cid) };
             }
           } else if (method === 'search') {
-            var sq = encodeURIComponent(args.query || '');
-            var ss = await spotifyApi('/search?type=track,album,playlist&limit=20&q=' + sq);
-            var sOut = [];
-            if (ss && ss.tracks && ss.tracks.items) {
-              sOut = sOut.concat(ss.tracks.items.map(function(t){ return mapSpotifyTrack(t); }));
-            }
-            if (ss && ss.albums && ss.albums.items) {
-              sOut = sOut.concat(ss.albums.items.map(function(al){
-                return {
-                  id: 'album|' + al.id,
-                  type: 'album',
-                  title: al.name || '',
-                  artist: (al.artists || []).map(function(a){ return a.name; }).join(' / '),
-                  cover: (al.images && al.images[0] && al.images[0].url) || '',
-                  count: al.total_tracks || 0
-                };
-              }));
-            }
-            if (ss && ss.playlists && ss.playlists.items) {
-              sOut = sOut.concat(ss.playlists.items.map(function(pl){
-                if (!pl || !pl.id) return null;
-                return {
-                  id: 'playlist|' + pl.id,
-                  type: 'playlist',
-                  title: pl.name || '',
-                  summary: String(pl.description || '').replace(/<[^>]+>/g, ''),
-                  cover: (pl.images && pl.images[0] && pl.images[0].url) || '',
-                  count: (pl.tracks && pl.tracks.total) || 0
-                };
-              }));
-            }
-            out = { ok: true, items: sOut.filter(Boolean) };
+            out = { ok: true, items: await searchSpotifySmart(args.query || '') };
           }
         }
       } catch (err) {
@@ -1286,7 +1723,7 @@ object WebStreamingMusic {
 /**
  * Apple Music / Spotify 应用内账号登录全屏弹窗：
  * - 支持多窗口 `window.open` 认证子窗口（保留 `window.opener` 以支持 Apple ID 双重认证回调）；
- * - 实时自动检测登录完成状态，保存 Cookie 后自动关闭并回调 [onLoggedIn]。
+ * - 实时自动检测登录完成状态，确保会话 Cookie 同步到主站点后自动关闭并回调 [onLoggedIn]。
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -1306,19 +1743,33 @@ fun WebMusicLoginDialog(
     val finishLogin = {
         if (!completed) {
             completed = true
+            runCatching { CookieManager.getInstance().flush() }
             WebStreamingMusic.markLoggedIn(context, service, true)
             onLoggedIn()
         }
     }
 
-    // 轮询检测 Cookie / MusicKit 授权状态，登录成功后自动完成绑定
+    // 轮询检测 Cookie / MusicKit 授权状态，登录成功后完成会话落盘并回调
     LaunchedEffect(service, mainWebView) {
+        var redirectedSpotifyHome = false
         while (!completed) {
-            delay(1_000L)
+            delay(900L)
             val cm = runCatching { CookieManager.getInstance() }.getOrNull()
             if (service == WebMusicService.SPOTIFY) {
-                val cookies = cm?.getCookie("https://open.spotify.com").orEmpty()
-                if (cookies.contains("sp_dc=")) {
+                val openCookies = cm?.getCookie("https://open.spotify.com").orEmpty()
+                val acctCookies = cm?.getCookie("https://accounts.spotify.com").orEmpty()
+                val hasSpDc = openCookies.contains("sp_dc=") || acctCookies.contains("sp_dc=")
+                if (hasSpDc) {
+                    val wv = mainWebView
+                    val curUrl = wv?.url.orEmpty()
+                    if (wv != null && !curUrl.contains("open.spotify.com") && !redirectedSpotifyHome) {
+                        redirectedSpotifyHome = true
+                        wv.loadUrl("https://open.spotify.com/")
+                        delay(1_400L)
+                    } else {
+                        delay(600L)
+                    }
+                    runCatching { cm?.flush() }
                     finishLogin()
                     break
                 }
@@ -1407,15 +1858,8 @@ fun WebMusicLoginDialog(
                     IconButton(onClick = onDismiss) {
                         Icon(AppIcons.Close, contentDescription = "关闭")
                     }
-                    Box(
-                        Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(Color(service.accentHex))
-                            .padding(horizontal = 7.dp, vertical = 2.dp),
-                    ) {
-                        Text(service.badge, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
-                    }
-                    Spacer(Modifier.width(8.dp))
+                    WebMusicServiceIcon(service = service, size = 24.dp)
+                    Spacer(Modifier.width(9.dp))
                     Column(Modifier.weight(1f)) {
                         Text(
                             text = "登录 ${service.label}",
