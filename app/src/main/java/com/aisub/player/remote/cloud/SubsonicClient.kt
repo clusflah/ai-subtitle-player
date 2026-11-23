@@ -167,12 +167,24 @@ class SubsonicClient(server: Server) : CloudClient(server), MediaBrowser {
     override suspend fun item(ratingKey: String): ServerItem? = withContext(Dispatchers.IO) {
         when {
             ratingKey.startsWith("al:") -> {
-                val a = getSubsonic("getAlbum.view", mapOf("id" to ratingKey.removePrefix("al:"))).optJSONObject("album")
-                a?.let(::parseAlbum)
+                val id = ratingKey.removePrefix("al:")
+                val a = getSubsonic("getAlbum.view", mapOf("id" to id)).optJSONObject("album") ?: return@withContext null
+                val notes = runCatching {
+                    getSubsonic("getAlbumInfo2.view", mapOf("id" to id)).optJSONObject("albumInfo")?.optString("notes")
+                }.getOrNull()?.let(::stripSimpleHtml).orEmpty()
+                parseAlbum(a).let { if (notes.isNotBlank()) it.copy(summary = notes) else it }
             }
             ratingKey.startsWith("ar:") -> {
-                val ar = getSubsonic("getArtist.view", mapOf("id" to ratingKey.removePrefix("ar:"))).optJSONObject("artist")
-                ar?.let(::parseArtist)
+                val id = ratingKey.removePrefix("ar:")
+                val ar = getSubsonic("getArtist.view", mapOf("id" to id)).optJSONObject("artist") ?: return@withContext null
+                val bio = runCatching {
+                    getSubsonic("getArtistInfo2.view", mapOf("id" to id)).optJSONObject("artistInfo2")?.optString("biography")
+                }.getOrNull()?.let(::stripSimpleHtml).orEmpty()
+                parseArtist(ar).let { if (bio.isNotBlank()) it.copy(summary = bio) else it }
+            }
+            ratingKey.startsWith("pl:") -> {
+                val pl = getSubsonic("getPlaylist.view", mapOf("id" to ratingKey.removePrefix("pl:"))).optJSONObject("playlist")
+                pl?.let(::parsePlaylist)
             }
             else -> {
                 val s = getSubsonic("getSong.view", mapOf("id" to ratingKey.removePrefix("tr:"))).optJSONObject("song")
@@ -454,6 +466,18 @@ class SubsonicClient(server: Server) : CloudClient(server), MediaBrowser {
 
         private fun JSONArray?.objects(): List<JSONObject> =
             if (this == null) emptyList() else (0 until length()).mapNotNull { optJSONObject(it) }
+
+        internal fun stripSimpleHtml(raw: String): String =
+            raw.replace(Regex("""<a\b[^>]*>.*?</a>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), "")
+                .replace(Regex("""<br\s*/?>""", RegexOption.IGNORE_CASE), "\n")
+                .replace(Regex("""<[^>]+>"""), "")
+                .replace("&amp;", "&")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace("&apos;", "'")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .trim()
 
         internal fun parseSubsonicResponse(rawBody: String): JSONObject {
             val root = try {

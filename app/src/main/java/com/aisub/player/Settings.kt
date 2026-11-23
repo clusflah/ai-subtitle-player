@@ -143,6 +143,26 @@ enum class AppBackground(
     fun colorCode(dark: Boolean): String = if (dark) darkColorCode else lightColorCode
 }
 
+/** 发现页「音乐」榜单与相似推荐数据源偏好（可在「我的 → 设置 → 影音信息」手动切换） */
+enum class MusicDiscoverSource(
+    val label: String,
+    val shortLabel: String,
+    val description: String,
+) {
+    AUTO("自动融合（推荐）", "自动融合", "融合网易云音乐、QQ音乐与 Apple Music 多源榜单与推荐，任一源受限时自动回退"),
+    NETEASE("网易云音乐", "网易云音乐", "流行榜单、新音乐、搜索与相似歌曲优先采用网易云音乐"),
+    QQ("QQ音乐", "QQ音乐", "流行榜单、新音乐、搜索与推荐优先采用 QQ 音乐巅峰榜"),
+    APPLE("Apple Music / iTunes", "Apple Music", "榜单、搜索与相似推荐优先采用 Apple Music 热播榜与 iTunes 曲库"),
+    ;
+
+    companion object {
+        fun fromStored(raw: String?, default: MusicDiscoverSource = AUTO): MusicDiscoverSource {
+            val clean = raw?.trim()?.uppercase() ?: return default
+            return entries.firstOrNull { it.name == clean } ?: default
+        }
+    }
+}
+
 data class AppSettings(
     // 手机与桌面端默认语音识别为本地离线模型、翻译为 Index-Translate；电视端在 SettingsRepository 中默认火山豆包
     val provider: Provider = Provider.INDEX_TRANSLATE,
@@ -243,6 +263,8 @@ data class AppSettings(
     val tvdbPin: String = "",
     /** Fanart.tv 个人 API Key：透明标题图、高清背景图 */
     val fanartKey: String = "",
+    /** 音乐发现页推荐源（自动融合 / 网易云音乐 / QQ音乐 / Apple Music） */
+    val musicDiscoverSource: MusicDiscoverSource = MusicDiscoverSource.AUTO,
     /** 主界面背景方案、深色模式策略与液态玻璃效果开关 */
     val appBackground: AppBackground = AppBackground.AURORA_GRAY_WHITE_GRADIENT,
     val appDarkMode: AppDarkMode = AppDarkMode.SYSTEM,
@@ -501,6 +523,10 @@ class SettingsRepository(context: Context) {
             tvdbKey = prefs.getString("tvdbKey", "")!!,
             tvdbPin = prefs.getString("tvdbPin", "")!!,
             fanartKey = prefs.getString("fanartKey", "")!!,
+            musicDiscoverSource = MusicDiscoverSource.fromStored(
+                prefs.getString("musicDiscoverSource", null),
+                d.musicDiscoverSource,
+            ),
             appBackground = prefs.getString("appBackground", null).let { raw ->
                 when (raw) {
                     null, "SYSTEM", "DARK" -> d.appBackground
@@ -583,6 +609,7 @@ class SettingsRepository(context: Context) {
             .putString("tvdbKey", s.tvdbKey)
             .putString("tvdbPin", s.tvdbPin)
             .putString("fanartKey", s.fanartKey)
+            .putString("musicDiscoverSource", s.musicDiscoverSource.name)
             .putString("appBackground", s.appBackground.name)
             .putString("appDarkMode", s.appDarkMode.name)
             .putBoolean("liquidGlass", s.liquidGlass)

@@ -515,16 +515,38 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 }
             }
 
-            // ---------------- 影视信息 ----------------
+            // ---------------- 影音信息 ----------------
             CollapsibleCard(
-                "影视信息",
-                if (!s.metaOnline) "在线识别已关闭 · 视频用自己的画面做封面" else
-                "主数据源：" + (com.aisub.player.meta.MetaSource.entries.firstOrNull { it.name == s.metaPrimary }?.label ?: s.metaPrimary) +
+                "影音信息",
+                (if (!s.metaOnline) "影视识别已关闭" else
+                "影视主源：" + (com.aisub.player.meta.MetaSource.entries.firstOrNull { it.name == s.metaPrimary }?.label ?: s.metaPrimary) +
                     " · 已开启：" + listOfNotNull(
                         "TMDB".takeIf { s.tmdbKey.isNotBlank() }, "豆瓣".takeIf { s.doubanEnabled }, "Bangumi".takeIf { s.bangumiEnabled },
                         "TheTVDB".takeIf { s.tvdbKey.isNotBlank() }, "Fanart".takeIf { s.fanartKey.isNotBlank() },
-                    ).ifEmpty { listOf("无") }.joinToString("、"),
+                    ).ifEmpty { listOf("无") }.joinToString("、")) +
+                    " · 音乐推荐：${s.musicDiscoverSource.shortLabel}",
             ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("音乐推荐源", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        s.musicDiscoverSource.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        com.aisub.player.MusicDiscoverSource.entries.forEach { src ->
+                            FilterChip(
+                                selected = s.musicDiscoverSource == src,
+                                onClick = { s = s.copy(musicDiscoverSource = src) },
+                                label = { Text(src.label) },
+                            )
+                        }
+                    }
+                }
+                CardDivider()
                 ListRow(
                     title = "在线识别影视信息",
                     subtitle = "按文件名到网上匹配简介、评分和封面。看的多是录像、教程、短视频等非影视内容时可以关掉，" +
@@ -534,7 +556,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 )
                 CardDivider()
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("主数据源", style = MaterialTheme.typography.bodyLarge)
+                    Text("影视主数据源", style = MaterialTheme.typography.bodyLarge)
                     Text(
                         "详情页先读视频旁边的 NFO 和图片，缺的内容从主数据源取，再用其他已开启的来源补全",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,

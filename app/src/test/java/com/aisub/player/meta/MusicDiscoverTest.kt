@@ -1,6 +1,8 @@
 package com.aisub.player.meta
 
 import android.app.Application
+import com.aisub.player.MusicDiscoverSource
+import com.aisub.player.SettingsRepository
 import com.aisub.player.media.MediaEntry
 import com.aisub.player.web.WebAppWhitelist
 import org.json.JSONArray
@@ -127,5 +129,108 @@ class MusicDiscoverTest {
         assertEquals("https://y.music.163.com/m/song?id=186016", neteaseJump)
         assertTrue(WebAppWhitelist.isPlayPlatformDomain(neteaseJump))
         assertTrue(WebAppWhitelist.shouldAllowAppLaunch("orpheus://song/186016", neteaseJump, fromDiscoverPlay = true))
+    }
+
+    @Test
+    fun musicDiscoverSourcePersistsInSettingsAndParsesQqSongs() {
+        val ctx = RuntimeEnvironment.getApplication()
+        ctx.getSharedPreferences("settings", Application.MODE_PRIVATE).edit().clear().commit()
+        val repo = SettingsRepository(ctx)
+
+        assertEquals(MusicDiscoverSource.AUTO, repo.load().musicDiscoverSource)
+        for (src in listOf(MusicDiscoverSource.QQ, MusicDiscoverSource.NETEASE, MusicDiscoverSource.APPLE, MusicDiscoverSource.AUTO)) {
+            repo.save(repo.load().copy(musicDiscoverSource = src))
+            assertEquals(src, SettingsRepository(ctx).load().musicDiscoverSource)
+        }
+
+        val qqJson = JSONObject()
+            .put("mid", "0039MnYb0qxYhV")
+            .put("id", 97773L)
+            .put("title", "晴天")
+            .put("interval", 269L)
+            .put("time_public", "2003-07-31")
+            .put("singer", JSONArray().put(JSONObject().put("name", "周杰伦")))
+            .put(
+                "album",
+                JSONObject()
+                    .put("name", "叶惠美")
+                    .put("mid", "000MkMni19ClKG"),
+            )
+
+        val qqSong = MusicDiscoverRepository.parseQqSongJson(qqJson)
+        assertNotNull(qqSong)
+        assertEquals("qq:0039MnYb0qxYhV", qqSong!!.id)
+        assertEquals("晴天", qqSong.title)
+        assertEquals("周杰伦", qqSong.artist)
+        assertEquals("叶惠美", qqSong.album)
+        assertEquals(269_000L, qqSong.durationMs)
+        assertEquals(2003, qqSong.year)
+        assertEquals("https://y.gtimg.cn/music/photo_new/T002R500x500M000000MkMni19ClKG.jpg", qqSong.posterUrl)
+
+        val qqPlatform = MusicPlatformCatalog.platformsForItem(qqSong).first { it.name == "QQ音乐" }
+        val qqJump = MusicPlatformCatalog.resolvePlayUrl(qqPlatform, qqSong)
+        assertEquals("https://y.qq.com/n/ryqq/songDetail/0039MnYb0qxYhV", qqJump)
+        assertTrue(WebAppWhitelist.isPlayPlatformDomain(qqJump))
+
+        val rawBio = """G.E.M. (鄧紫棋) is a singer-songwriter.<br/>Famous for powerhouse vocals. <a target="_blank" href="https://last.fm">Read more on Last.fm</a>"""
+        assertEquals(
+            "G.E.M. (鄧紫棋) is a singer-songwriter.\nFamous for powerhouse vocals.",
+            com.aisub.player.remote.cloud.SubsonicClient.stripSimpleHtml(rawBio),
+        )
+    }
+
+    @Test
+    fun appleMusicAndSpotifySourceSelectionAndStreamingEntryBuildWork() {
+        val ctx = RuntimeEnvironment.getApplication()
+        ctx.getSharedPreferences("music_source", Application.MODE_PRIVATE).edit().clear().commit()
+
+        for (svc in com.aisub.player.music.WebMusicService.entries) {
+            com.aisub.player.music.MusicSourceStore.selectWebService(ctx, svc)
+            val active = com.aisub.player.music.MusicSourceStore.active(ctx)
+            assertEquals(svc, active.webService)
+            assertTrue(!active.isLocal && active.isWebStreaming)
+            val (resolved, srv) = com.aisub.player.music.MusicSourceStore.resolveEffective(active, emptyList())
+            assertEquals(svc, resolved.webService)
+            assertEquals(null, srv)
+        }
+
+        val appleDiscover = DiscoverItem(
+            id = "itunes:1440857781",
+            kind = "music",
+            title = "Blank Space",
+            artist = "Taylor Swift",
+            album = "1989",
+            durationMs = 231_000L,
+            posterUrl = "https://is1-ssl.mzstatic.com/image/thumb/800x800bb.jpg",
+            appleUrl = "https://music.apple.com/us/album/1989/1440857105?i=1440857781",
+        )
+        assertEquals("1440857781", com.aisub.player.music.WebStreamingMusic.extractAppleSongId(appleDiscover))
+
+        val appleEntry = com.aisub.player.music.WebStreamingMusic.buildEntryFromDiscoverItem(
+            com.aisub.player.music.WebMusicService.APPLE_MUSIC,
+            appleDiscover,
+        )
+        assertTrue(com.aisub.player.music.WebStreamingMusic.isStreamingUri(appleEntry.uri))
+        assertTrue(appleEntry.uri.startsWith("applemusic://track/1440857781"))
+        val spMeta = com.aisub.player.remote.cloud.ServerProgress.find(appleEntry.uri)
+        assertNotNull(spMeta)
+        assertEquals("Blank Space", spMeta!!.title)
+        assertEquals("Taylor Swift", spMeta.artist)
+        assertEquals("1989", spMeta.album)
+
+        val spotifyDiscover = DiscoverItem(
+            id = "netease:186016",
+            kind = "music",
+            title = "晴天",
+            artist = "周杰伦",
+            platforms = listOf(PlatformSource("Spotify", "https://open.spotify.com/track/3DYVWvPh3kGwPasp7yjahc?si=abc")),
+        )
+        assertEquals("3DYVWvPh3kGwPasp7yjahc", com.aisub.player.music.WebStreamingMusic.extractSpotifyTrackId(spotifyDiscover))
+        val spotifyEntry = com.aisub.player.music.WebStreamingMusic.buildEntryFromDiscoverItem(
+            com.aisub.player.music.WebMusicService.SPOTIFY,
+            spotifyDiscover,
+        )
+        assertTrue(com.aisub.player.music.WebStreamingMusic.isStreamingUri(spotifyEntry.uri))
+        assertTrue(spotifyEntry.uri.startsWith("spotify://track/3DYVWvPh3kGwPasp7yjahc"))
     }
 }

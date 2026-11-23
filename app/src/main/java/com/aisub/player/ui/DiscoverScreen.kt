@@ -1185,6 +1185,7 @@ fun DiscoverChartScreen(
     if (initialChartId != null && com.aisub.player.meta.MusicDiscoverCharts.findChart(initialChartId) != null) {
         MusicDiscoverChartScreen(
             initialChartId = initialChartId,
+            settings = settings,
             onBack = onBack,
             onOpenDetail = onOpenDetail,
         )
@@ -1646,47 +1647,12 @@ fun DiscoverDetailScreen(
                 }
             }
 
-            // 来源平台展示栏 + 主播放按钮 & 二级菜单「搜索片源」按钮
+            // 主播放按钮（来源平台与本地/远程播放统一收进二级弹窗） & 二级菜单「搜索片源」按钮
             SurfaceCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                 Column(
                     Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(
-                            "来源平台",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        if (detectedPlatforms.isNotEmpty()) {
-                            FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
-                                modifier = Modifier.weight(1f),
-                            ) {
-                                detectedPlatforms.forEach { platform ->
-                                    PlatformBadgeChip(
-                                        platform = platform,
-                                        onClick = {
-                                            onOpenPlayWeb(PlatformCatalog.resolvePlayUrl(platform, displayTitle))
-                                        },
-                                    )
-                                }
-                            }
-                        } else {
-                            Text(
-                                text = if (detail.loading) "正在识别播出平台…" else "院线 / 暂未标注网播平台",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                    }
-
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -1912,48 +1878,6 @@ fun DiscoverDetailScreen(
                 pasteMagnetDialog = false
                 onOpenMagnet(magnet)
             },
-        )
-    }
-}
-
-@Composable
-private fun PlatformBadgeChip(
-    platform: PlatformSource,
-    onClick: () -> Unit,
-) {
-    val spec = PlatformCatalog.specFor(platform.name)
-    val accent = Color(PlatformCatalog.accentHex(platform.name))
-    Row(
-        Modifier
-            .tvFocusRing(RoundedCornerShape(7.dp))
-            .clip(RoundedCornerShape(7.dp))
-            .background(accent.copy(alpha = 0.14f))
-            .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(7.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 7.dp, vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Box(
-            Modifier
-                .clip(RoundedCornerShape(4.dp))
-                .background(accent)
-                .padding(horizontal = 4.dp, vertical = 1.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                spec?.badge ?: platform.name.take(2),
-                color = Color.White,
-                fontSize = 9.sp,
-                fontWeight = FontWeight.ExtraBold,
-            )
-        }
-        Text(
-            platform.name,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
         )
     }
 }
@@ -2190,11 +2114,15 @@ private fun DiscoverPlaySourceDialog(
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-                // 3. 原平台播放
+                // 3. 来源平台 / 原平台播放
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Icon(AppIcons.Live, null, tint = Orange, modifier = Modifier.size(18.dp))
-                        Text("原平台播放", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (detectedPlatforms.isNotEmpty()) "来源平台 · 原平台播放" else "原平台播放",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
                     }
                     Text(
                         "点平台名称使用内置浏览器打开（支持实时生成 AI 字幕），点右侧图标唤起外部原平台 App 或浏览器。",

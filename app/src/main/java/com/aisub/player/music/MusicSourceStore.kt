@@ -19,12 +19,52 @@ import kotlinx.coroutines.flow.asStateFlow
 enum class MusicSourceKind {
     LOCAL,
     SERVER,
+    APPLE_MUSIC,
+    SPOTIFY,
+}
+
+enum class WebMusicService(
+    val sourceKind: MusicSourceKind,
+    val label: String,
+    val badge: String,
+    val accentHex: Long,
+    val homeUrl: String,
+    val uriScheme: String,
+) {
+    APPLE_MUSIC(
+        sourceKind = MusicSourceKind.APPLE_MUSIC,
+        label = "Apple Music",
+        badge = "AM",
+        accentHex = 0xFFFA243C,
+        homeUrl = "https://music.apple.com/",
+        uriScheme = "applemusic",
+    ),
+    SPOTIFY(
+        sourceKind = MusicSourceKind.SPOTIFY,
+        label = "Spotify",
+        badge = "SP",
+        accentHex = 0xFF1DB954,
+        homeUrl = "https://open.spotify.com/",
+        uriScheme = "spotify",
+    ),
+    ;
+
+    companion object {
+        fun fromSourceKind(kind: MusicSourceKind): WebMusicService? =
+            entries.firstOrNull { it.sourceKind == kind }
+
+        fun fromUri(uri: String?): WebMusicService? {
+            val scheme = uri?.substringBefore("://", "")?.lowercase().orEmpty()
+            return entries.firstOrNull { it.uriScheme == scheme }
+        }
+    }
 }
 
 /**
  * 音乐页当前选中的音乐源：
  * - [MusicSourceKind.LOCAL]：本机音乐库；
- * - [MusicSourceKind.SERVER]：Plex、Navidrome / Subsonic、Emby、Jellyfin 音乐库，或 WebDAV / OpenList / 网盘音乐目录。
+ * - [MusicSourceKind.SERVER]：Plex、Navidrome / Subsonic、Emby、Jellyfin 音乐库，或 WebDAV / OpenList / 网盘音乐目录；
+ * - [MusicSourceKind.APPLE_MUSIC] / [MusicSourceKind.SPOTIFY]：应用内登录直连流媒体音乐源。
  */
 data class MusicSourceSpec(
     val kind: MusicSourceKind = MusicSourceKind.LOCAL,
@@ -33,7 +73,9 @@ data class MusicSourceSpec(
     val folderPath: String = "",
     val label: String = "本机音乐",
 ) {
-    val isLocal: Boolean get() = kind == MusicSourceKind.LOCAL || serverId.isNullOrBlank()
+    val webService: WebMusicService? get() = WebMusicService.fromSourceKind(kind)
+    val isWebStreaming: Boolean get() = webService != null
+    val isLocal: Boolean get() = kind == MusicSourceKind.LOCAL || (kind == MusicSourceKind.SERVER && serverId.isNullOrBlank())
 }
 
 object MusicSourceStore {
@@ -75,6 +117,10 @@ object MusicSourceStore {
         save(context, MusicSourceSpec(kind = MusicSourceKind.LOCAL, label = "本机音乐"))
     }
 
+    fun selectWebService(context: Context, service: WebMusicService) {
+        save(context, MusicSourceSpec(kind = service.sourceKind, label = service.label))
+    }
+
     fun selectServer(
         context: Context,
         server: Server,
@@ -103,6 +149,8 @@ object MusicSourceStore {
     }
 
     fun resolveEffective(spec: MusicSourceSpec, servers: List<Server>): Pair<MusicSourceSpec, Server?> {
+        val web = spec.webService
+        if (web != null) return MusicSourceSpec(kind = web.sourceKind, label = web.label) to null
         if (spec.isLocal) return MusicSourceSpec(kind = MusicSourceKind.LOCAL, label = "本机音乐") to null
         val srv = servers.firstOrNull { it.id == spec.serverId }
             ?: return MusicSourceSpec(kind = MusicSourceKind.LOCAL, label = "本机音乐") to null
@@ -113,6 +161,10 @@ object MusicSourceStore {
         val p = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val kind = runCatching { MusicSourceKind.valueOf(p.getString(KEY_KIND, null) ?: "LOCAL") }
             .getOrDefault(MusicSourceKind.LOCAL)
+        val web = WebMusicService.fromSourceKind(kind)
+        if (web != null) {
+            return MusicSourceSpec(kind = web.sourceKind, label = web.label)
+        }
         val serverId = p.getString(KEY_SERVER_ID, null)?.takeIf { it.isNotBlank() }
         if (kind == MusicSourceKind.LOCAL || serverId == null) {
             return MusicSourceSpec(kind = MusicSourceKind.LOCAL, label = "本机音乐")
@@ -215,6 +267,12 @@ object MusicSourceStore {
         container.type == "playlist" && client is SubsonicClient -> client.playlistTracks(container.ratingKey)
         client is MediaBrowser -> client.children(container.ratingKey)
         else -> emptyList()
+    }
+
+    suspend fun loadContainerDetail(client: RemoteClient, container: ServerItem): ServerItem? = when {
+        container.type == "playlist" && client is PlexClient -> client.playlistDetail(container.ratingKey)
+        client is MediaBrowser -> client.item(container.ratingKey)
+        else -> null
     }
 
     suspend fun searchServerMusic(client: RemoteClient, query: String): List<ServerItem> = when (client) {

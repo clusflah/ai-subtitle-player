@@ -2,6 +2,7 @@ package com.aisub.player.meta
 
 import android.content.Context
 import com.aisub.player.AppSettings
+import com.aisub.player.MusicDiscoverSource
 import com.aisub.player.media.MediaEntry
 import com.aisub.player.music.Lyrics
 import com.aisub.player.music.MusicLookup
@@ -18,7 +19,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -161,6 +164,7 @@ object MusicPlatformCatalog {
 enum class MusicChartSource {
     NETEASE_TOPLIST,
     NETEASE_NEW_EXPRESS,
+    QQ_TOPLIST,
     APPLE_MOST_PLAYED,
 }
 
@@ -177,6 +181,8 @@ data class MusicChartDef(
     val subtitle: String,
     val source: MusicChartSource,
     val remoteId: String,
+    val neteasePlaylistId: String = "",
+    val qqTopId: Int = 26,
     val fallbackAppleCountry: String = "tw",
     val fallbackKeyword: String = "流行",
 )
@@ -209,7 +215,9 @@ object MusicDiscoverCharts {
             subtitle = "当下全网高热度热门流行单曲",
             source = MusicChartSource.NETEASE_TOPLIST,
             remoteId = "3778678",
-            fallbackAppleCountry = "tw",
+            neteasePlaylistId = "3778678",
+            qqTopId = 26,
+            fallbackAppleCountry = "cn",
             fallbackKeyword = "热门华语流行",
         ),
         MusicChartDef(
@@ -218,7 +226,9 @@ object MusicDiscoverCharts {
             subtitle = "近期最新上架与编辑推荐新歌",
             source = MusicChartSource.NETEASE_NEW_EXPRESS,
             remoteId = "newsong",
-            fallbackAppleCountry = "tw",
+            neteasePlaylistId = "3779629",
+            qqTopId = 4,
+            fallbackAppleCountry = "hk",
             fallbackKeyword = "${Calendar.getInstance().get(Calendar.YEAR)} 新歌",
         ),
         MusicChartDef(
@@ -227,6 +237,8 @@ object MusicDiscoverCharts {
             subtitle = "近期收听热度快速飙升的流行单曲",
             source = MusicChartSource.NETEASE_TOPLIST,
             remoteId = "19723756",
+            neteasePlaylistId = "19723756",
+            qqTopId = 62,
             fallbackAppleCountry = "hk",
             fallbackKeyword = "飙升热歌",
         ),
@@ -234,27 +246,33 @@ object MusicDiscoverCharts {
             id = "music_new_chart",
             title = "新歌排行榜",
             subtitle = "近期新发行的高人气热门单曲",
-            source = MusicChartSource.NETEASE_TOPLIST,
-            remoteId = "3779629",
-            fallbackAppleCountry = "tw",
+            source = MusicChartSource.QQ_TOPLIST,
+            remoteId = "27",
+            neteasePlaylistId = "3779629",
+            qqTopId = 27,
+            fallbackAppleCountry = "sg",
             fallbackKeyword = "华语新歌",
         ),
         MusicChartDef(
             id = "music_apple_tw",
-            title = "Apple 华语热播榜",
-            subtitle = "Apple Music 实时高频播放华语单曲",
+            title = "华语流行热播榜",
+            subtitle = "实时高频播放华语流行单曲",
             source = MusicChartSource.APPLE_MOST_PLAYED,
             remoteId = "tw",
-            fallbackAppleCountry = "hk",
+            neteasePlaylistId = "6723173524",
+            qqTopId = 5,
+            fallbackAppleCountry = "tw",
             fallbackKeyword = "周杰伦 林俊杰 邓紫棋",
         ),
         MusicChartDef(
             id = "music_apple_us",
             title = "全球欧美热播榜",
-            subtitle = "Apple Music 欧美流行热播趋势单曲",
+            subtitle = "欧美流行热播趋势单曲",
             source = MusicChartSource.APPLE_MOST_PLAYED,
             remoteId = "us",
-            fallbackAppleCountry = "gb",
+            neteasePlaylistId = "2809577409",
+            qqTopId = 3,
+            fallbackAppleCountry = "us",
             fallbackKeyword = "Pop Hits",
         ),
         MusicChartDef(
@@ -263,6 +281,8 @@ object MusicDiscoverCharts {
             subtitle = "独立音乐人与原创音乐口碑新作",
             source = MusicChartSource.NETEASE_TOPLIST,
             remoteId = "2884035",
+            neteasePlaylistId = "2884035",
+            qqTopId = 52,
             fallbackAppleCountry = "tw",
             fallbackKeyword = "独立民谣摇滚",
         ),
@@ -275,6 +295,8 @@ object MusicDiscoverCharts {
             subtitle = "公告牌全球热门单曲风向标",
             source = MusicChartSource.NETEASE_TOPLIST,
             remoteId = "60198",
+            neteasePlaylistId = "60198",
+            qqTopId = 108,
             fallbackAppleCountry = "us",
             fallbackKeyword = "Billboard Hot",
         ),
@@ -284,6 +306,8 @@ object MusicDiscoverCharts {
             subtitle = "日本公信榜与 J-Pop / 动漫热门单曲",
             source = MusicChartSource.APPLE_MOST_PLAYED,
             remoteId = "jp",
+            neteasePlaylistId = "60131",
+            qqTopId = 17,
             fallbackAppleCountry = "jp",
             fallbackKeyword = "YOASOBI 米津玄師",
         ),
@@ -293,6 +317,8 @@ object MusicDiscoverCharts {
             subtitle = "近期热门韩语流行单曲",
             source = MusicChartSource.NETEASE_TOPLIST,
             remoteId = "745956260",
+            neteasePlaylistId = "745956260",
+            qqTopId = 16,
             fallbackAppleCountry = "kr",
             fallbackKeyword = "K-Pop",
         ),
@@ -302,6 +328,8 @@ object MusicDiscoverCharts {
             subtitle = "英伦流行与电子摇滚热单",
             source = MusicChartSource.APPLE_MOST_PLAYED,
             remoteId = "gb",
+            neteasePlaylistId = "180106",
+            qqTopId = 107,
             fallbackAppleCountry = "gb",
             fallbackKeyword = "UK Pop",
         ),
@@ -366,7 +394,7 @@ object MusicDiscoverSearchStore {
 
 /**
  * 音乐发现数据仓库：
- * - 融合网易云音乐热门榜单 / 新音乐速递与 Apple Music 官方免鉴权榜单 / iTunes Search API；
+ * - 支持手动切换推荐源（自动融合 / 网易云音乐 / QQ音乐 / Apple Music），任一源受限时自动回退；
  * - 内置内存与本地磁盘快照持久化缓存，冷启动或弱网切回秒开。
  */
 object MusicDiscoverRepository {
@@ -374,6 +402,7 @@ object MusicDiscoverRepository {
     private const val DISK_CACHE_FILE = "discover_music_cache_v1.json"
     private const val BROWSER_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+    private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
     private data class CacheEntry<T>(val value: T, val expiresAt: Long)
 
@@ -382,13 +411,11 @@ object MusicDiscoverRepository {
     private val lyricsCache = ConcurrentHashMap<String, String>()
     private val persistedCharts = ConcurrentHashMap<String, List<DiscoverItem>>()
     private val sessionAutoRefreshed = ConcurrentHashMap.newKeySet<String>()
+    private val cachedHomeSectionsBySource = ConcurrentHashMap<MusicDiscoverSource, List<MusicHomeSection>>()
     private val diskLock = Any()
 
     @Volatile
     private var loadedDiskPath: String? = null
-
-    @Volatile
-    private var cachedHomeSections: List<MusicHomeSection> = emptyList()
 
     @Volatile
     var sessionQueryInput: String = ""
@@ -400,51 +427,72 @@ object MusicDiscoverRepository {
         Thread(r, "voxtitle-music-discover").apply { isDaemon = true }
     }
 
-    fun consumeFirstVisitAutoRefresh(): Boolean = sessionAutoRefreshed.add("music_home")
+    fun consumeFirstVisitAutoRefresh(sourcePref: MusicDiscoverSource = MusicDiscoverSource.AUTO): Boolean =
+        sessionAutoRefreshed.add("music_home:${sourcePref.name}")
 
     fun clearCache() {
         listCache.clear()
         searchCache.clear()
-        cachedHomeSections = emptyList()
+        cachedHomeSectionsBySource.clear()
     }
 
-    fun peekHomeSections(context: Context? = null): List<MusicHomeSection> {
+    private fun persistedKey(sourcePref: MusicDiscoverSource, chartId: String): String =
+        "${sourcePref.name}:$chartId"
+
+    private fun persistedFor(sourcePref: MusicDiscoverSource, chartId: String): List<DiscoverItem>? =
+        persistedCharts[persistedKey(sourcePref, chartId)]
+            ?: if (sourcePref == MusicDiscoverSource.AUTO) persistedCharts[chartId] else null
+
+    fun peekHomeSections(
+        context: Context? = null,
+        sourcePref: MusicDiscoverSource = MusicDiscoverSource.AUTO,
+    ): List<MusicHomeSection> {
         ensureDiskLoaded(context?.filesDir)
-        if (cachedHomeSections.isNotEmpty()) return cachedHomeSections
+        cachedHomeSectionsBySource[sourcePref]?.takeIf { it.isNotEmpty() }?.let { return it }
         val built = MusicDiscoverCharts.homeCharts.mapNotNull { chart ->
-            val items = persistedCharts[chart.id]
+            val items = persistedFor(sourcePref, chart.id)
             if (items.isNullOrEmpty()) null else MusicHomeSection(chart, items)
         }
-        if (built.isNotEmpty()) cachedHomeSections = built
+        if (built.isNotEmpty()) cachedHomeSectionsBySource[sourcePref] = built
         return built
     }
 
-    fun peekChartPage(chart: MusicChartDef, context: Context? = null): MusicChartPage? {
+    fun peekChartPage(
+        chart: MusicChartDef,
+        context: Context? = null,
+        sourcePref: MusicDiscoverSource = MusicDiscoverSource.AUTO,
+    ): MusicChartPage? {
         ensureDiskLoaded(context?.filesDir)
-        cached("chart:${chart.id}")?.takeIf { it.isNotEmpty() }?.let { return MusicChartPage(chart, it) }
-        persistedCharts[chart.id]?.takeIf { it.isNotEmpty() }?.let { return MusicChartPage(chart, it) }
+        cached("chart:${sourcePref.name}:${chart.id}")?.takeIf { it.isNotEmpty() }?.let { return MusicChartPage(chart, it) }
+        persistedFor(sourcePref, chart.id)?.takeIf { it.isNotEmpty() }?.let { return MusicChartPage(chart, it) }
         return null
     }
 
-    fun peekSearchResults(query: String): List<DiscoverItem>? {
+    fun peekSearchResults(
+        query: String,
+        sourcePref: MusicDiscoverSource = MusicDiscoverSource.AUTO,
+    ): List<DiscoverItem>? {
         val q = query.trim()
         if (q.isEmpty()) return emptyList()
-        return searchCache[q]
+        return searchCache["${sourcePref.name}:$q"]
     }
 
     fun loadHomeSections(
         forceRefresh: Boolean = false,
         context: Context? = null,
+        sourcePref: MusicDiscoverSource = MusicDiscoverSource.AUTO,
     ): List<MusicHomeSection> {
         ensureDiskLoaded(context?.filesDir)
-        val previous = peekHomeSections(context)
-        if (!forceRefresh && cachedHomeSections.isNotEmpty()) {
-            return cachedHomeSections
+        val previous = peekHomeSections(context, sourcePref)
+        if (!forceRefresh) {
+            cachedHomeSectionsBySource[sourcePref]?.takeIf { it.isNotEmpty() }?.let { return it }
         }
         val charts = MusicDiscoverCharts.homeCharts
         val futures = charts.map { chart ->
             chart.id to CompletableFuture.supplyAsync({
-                runCatching { fetchChartItems(chart, count = 24, forceRefresh = forceRefresh) }.getOrDefault(emptyList())
+                runCatching {
+                    fetchChartItems(chart, count = 24, forceRefresh = forceRefresh, sourcePref = sourcePref)
+                }.getOrDefault(emptyList())
             }, fetchPool)
         }
         val freshMap = LinkedHashMap<String, List<DiscoverItem>>()
@@ -452,7 +500,7 @@ object MusicDiscoverRepository {
             val list = runCatching { fut.get() }.getOrDefault(emptyList())
             if (list.isNotEmpty()) {
                 freshMap[id] = list
-                persistedCharts[id] = list
+                persistedCharts[persistedKey(sourcePref, id)] = list
             }
         }
         if (freshMap.isEmpty()) return previous
@@ -462,7 +510,7 @@ object MusicDiscoverRepository {
             else previous.firstOrNull { it.chart.id == chart.id }
         }
         if (merged.isNotEmpty()) {
-            cachedHomeSections = merged
+            cachedHomeSectionsBySource[sourcePref] = merged
             saveDiskCache(context?.filesDir)
         }
         return merged
@@ -473,39 +521,74 @@ object MusicDiscoverRepository {
         count: Int = 50,
         forceRefresh: Boolean = false,
         context: Context? = null,
+        sourcePref: MusicDiscoverSource = MusicDiscoverSource.AUTO,
     ): MusicChartPage {
         ensureDiskLoaded(context?.filesDir)
-        val items = fetchChartItems(chart, count = count, forceRefresh = forceRefresh)
+        val items = fetchChartItems(chart, count = count, forceRefresh = forceRefresh, sourcePref = sourcePref)
         if (items.isNotEmpty()) {
-            persistedCharts[chart.id] = items
+            persistedCharts[persistedKey(sourcePref, chart.id)] = items
             saveDiskCache(context?.filesDir)
             return MusicChartPage(chart, items)
         }
-        persistedCharts[chart.id]?.takeIf { it.isNotEmpty() }?.let { return MusicChartPage(chart, it) }
+        persistedFor(sourcePref, chart.id)?.takeIf { it.isNotEmpty() }?.let { return MusicChartPage(chart, it) }
         return MusicChartPage(chart, emptyList())
     }
 
-    /** 搜索歌曲：融合网易云音乐与 iTunes 双源，去重并保留高清正方形封面。 */
-    fun search(query: String, limit: Int = 30): List<DiscoverItem> {
+    /** 搜索歌曲：支持按指定推荐源优先检索，自动融合多源直达链接与高清正方形封面。 */
+    fun search(
+        query: String,
+        limit: Int = 30,
+        sourcePref: MusicDiscoverSource = MusicDiscoverSource.AUTO,
+    ): List<DiscoverItem> {
         val q = query.trim()
         if (q.isEmpty()) return emptyList()
-        searchCache[q]?.let { return it }
-        cached("search:$q")?.let {
-            searchCache[q] = it
+        val cacheKey = "${sourcePref.name}:$q"
+        searchCache[cacheKey]?.let { return it }
+        cached("search:$cacheKey")?.let {
+            searchCache[cacheKey] = it
             return it
         }
-        val neteaseFut = CompletableFuture.supplyAsync({
-            runCatching { fetchNeteaseSearch(q, limit) }.getOrDefault(emptyList())
-        }, fetchPool)
-        val itunesFut = CompletableFuture.supplyAsync({
-            runCatching { fetchItunesSearch(q, limit) }.getOrDefault(emptyList())
-        }, fetchPool)
 
-        val combined = neteaseFut.get() + itunesFut.get()
+        val combined: List<DiscoverItem> = when (sourcePref) {
+            MusicDiscoverSource.NETEASE -> {
+                val primary = runCatching { fetchNeteaseSearch(q, limit) }.getOrDefault(emptyList())
+                if (primary.size >= 5) primary
+                else primary +
+                    runCatching { fetchQqSearch(q, limit) }.getOrDefault(emptyList()) +
+                    runCatching { fetchItunesSearch(q, limit) }.getOrDefault(emptyList())
+            }
+            MusicDiscoverSource.QQ -> {
+                val primary = runCatching { fetchQqSearch(q, limit) }.getOrDefault(emptyList())
+                if (primary.size >= 5) primary
+                else primary +
+                    runCatching { fetchNeteaseSearch(q, limit) }.getOrDefault(emptyList()) +
+                    runCatching { fetchItunesSearch(q, limit) }.getOrDefault(emptyList())
+            }
+            MusicDiscoverSource.APPLE -> {
+                val primary = runCatching { fetchItunesSearch(q, limit) }.getOrDefault(emptyList())
+                if (primary.size >= 5) primary
+                else primary +
+                    runCatching { fetchNeteaseSearch(q, limit) }.getOrDefault(emptyList()) +
+                    runCatching { fetchQqSearch(q, limit) }.getOrDefault(emptyList())
+            }
+            MusicDiscoverSource.AUTO -> {
+                val neteaseFut = CompletableFuture.supplyAsync({
+                    runCatching { fetchNeteaseSearch(q, limit) }.getOrDefault(emptyList())
+                }, fetchPool)
+                val qqFut = CompletableFuture.supplyAsync({
+                    runCatching { fetchQqSearch(q, limit) }.getOrDefault(emptyList())
+                }, fetchPool)
+                val itunesFut = CompletableFuture.supplyAsync({
+                    runCatching { fetchItunesSearch(q, limit) }.getOrDefault(emptyList())
+                }, fetchPool)
+                neteaseFut.get() + qqFut.get() + itunesFut.get()
+            }
+        }
+
         val merged = deduplicateSongs(combined).take(limit)
         if (merged.isNotEmpty()) {
-            putCache("search:$q", merged)
-            searchCache[q] = merged
+            putCache("search:$cacheKey", merged)
+            searchCache[cacheKey] = merged
         }
         return merged
     }
@@ -535,33 +618,90 @@ object MusicDiscoverRepository {
         return plain.ifBlank { null }
     }
 
-    private fun fetchChartItems(chart: MusicChartDef, count: Int, forceRefresh: Boolean): List<DiscoverItem> {
-        val key = "chart:${chart.id}"
+    private fun fetchNeteaseForChart(chart: MusicChartDef, count: Int): List<DiscoverItem> {
+        if (chart.source == MusicChartSource.NETEASE_NEW_EXPRESS) {
+            val express = runCatching { fetchNeteaseNewExpress(count) }.getOrDefault(emptyList())
+            if (express.size >= 12) return express
+            return deduplicateSongs(express + runCatching { fetchNeteaseToplist("3779629", count) }.getOrDefault(emptyList()))
+        }
+        val pid = chart.neteasePlaylistId.ifBlank { chart.remoteId }
+        val primary = runCatching { fetchNeteaseToplist(pid, count) }.getOrDefault(emptyList())
+        if (primary.isNotEmpty()) return primary
+        if (chart.id == "music_apple_us") {
+            return runCatching { fetchNeteaseToplist("60198", count) }.getOrDefault(emptyList())
+        }
+        return emptyList()
+    }
+
+    private fun fetchQqForChart(chart: MusicChartDef, count: Int): List<DiscoverItem> =
+        runCatching { fetchQqToplist(chart.qqTopId, count) }.getOrDefault(emptyList())
+
+    private fun fetchAppleForChart(chart: MusicChartDef, count: Int): List<DiscoverItem> {
+        if (chart.id == "music_new_express" || chart.id == "music_original") {
+            val searched = runCatching { fetchItunesSearch(chart.fallbackKeyword, count) }.getOrDefault(emptyList())
+            if (searched.isNotEmpty()) return searched
+        }
+        val country = if (chart.source == MusicChartSource.APPLE_MOST_PLAYED) chart.remoteId else chart.fallbackAppleCountry
+        val primary = runCatching { fetchAppleMostPlayed(country, count) }.getOrDefault(emptyList())
+        if (primary.isNotEmpty()) return primary
+        if (country != "tw") {
+            val tw = runCatching { fetchAppleMostPlayed("tw", count) }.getOrDefault(emptyList())
+            if (tw.isNotEmpty()) return tw
+        }
+        return runCatching { fetchItunesSearch(chart.fallbackKeyword, count) }.getOrDefault(emptyList())
+    }
+
+    private fun fetchChartItems(
+        chart: MusicChartDef,
+        count: Int,
+        forceRefresh: Boolean,
+        sourcePref: MusicDiscoverSource,
+    ): List<DiscoverItem> {
+        val key = "chart:${sourcePref.name}:${chart.id}"
         if (!forceRefresh) {
             cached(key)?.takeIf { it.size >= minOf(count, 12) }?.let { return it.take(count) }
         }
-        val primary = when (chart.source) {
-            MusicChartSource.NETEASE_TOPLIST -> {
-                runCatching { fetchNeteaseToplist(chart.remoteId, count) }.getOrDefault(emptyList())
-            }
-            MusicChartSource.NETEASE_NEW_EXPRESS -> {
-                val express = runCatching { fetchNeteaseNewExpress(count) }.getOrDefault(emptyList())
-                if (express.size >= 12) express
-                else deduplicateSongs(express + runCatching { fetchNeteaseToplist("3779629", count) }.getOrDefault(emptyList()))
-            }
-            MusicChartSource.APPLE_MOST_PLAYED -> {
-                val apple = runCatching { fetchAppleMostPlayed(chart.remoteId, count) }.getOrDefault(emptyList())
-                if (apple.isNotEmpty()) apple
-                else if (chart.remoteId == "jp") runCatching { fetchNeteaseToplist("60131", count) }.getOrDefault(emptyList())
-                else emptyList()
+        val attempts: List<() -> List<DiscoverItem>> = when (sourcePref) {
+            MusicDiscoverSource.NETEASE -> listOf(
+                { fetchNeteaseForChart(chart, count) },
+                { fetchQqForChart(chart, count) },
+                { fetchAppleForChart(chart, count) },
+            )
+            MusicDiscoverSource.QQ -> listOf(
+                { fetchQqForChart(chart, count) },
+                { fetchNeteaseForChart(chart, count) },
+                { fetchAppleForChart(chart, count) },
+            )
+            MusicDiscoverSource.APPLE -> listOf(
+                { fetchAppleForChart(chart, count) },
+                { fetchNeteaseForChart(chart, count) },
+                { fetchQqForChart(chart, count) },
+            )
+            MusicDiscoverSource.AUTO -> when (chart.source) {
+                MusicChartSource.NETEASE_TOPLIST, MusicChartSource.NETEASE_NEW_EXPRESS -> listOf(
+                    { fetchNeteaseForChart(chart, count) },
+                    { fetchQqForChart(chart, count) },
+                    { fetchAppleForChart(chart, count) },
+                )
+                MusicChartSource.QQ_TOPLIST -> listOf(
+                    { fetchQqForChart(chart, count) },
+                    { fetchNeteaseForChart(chart, count) },
+                    { fetchAppleForChart(chart, count) },
+                )
+                MusicChartSource.APPLE_MOST_PLAYED -> listOf(
+                    { fetchAppleForChart(chart, count) },
+                    { fetchQqForChart(chart, count) },
+                    { fetchNeteaseForChart(chart, count) },
+                )
             }
         }
-        val result = if (primary.isNotEmpty()) {
-            primary.take(count)
-        } else {
-            val appleFallback = runCatching { fetchAppleMostPlayed(chart.fallbackAppleCountry, count) }.getOrDefault(emptyList())
-            if (appleFallback.isNotEmpty()) appleFallback.take(count)
-            else runCatching { fetchItunesSearch(chart.fallbackKeyword, count) }.getOrDefault(emptyList()).take(count)
+        var result: List<DiscoverItem> = emptyList()
+        for (attempt in attempts) {
+            val candidate = attempt()
+            if (candidate.isNotEmpty()) {
+                result = candidate.take(count)
+                break
+            }
         }
         if (result.isNotEmpty()) {
             putCache(key, result)
@@ -790,6 +930,116 @@ object MusicDiscoverRepository {
         )
     }
 
+    internal fun fetchQqToplist(topId: Int, limit: Int = 40): List<DiscoverItem> {
+        val payload = JSONObject()
+            .put(
+                "detail",
+                JSONObject()
+                    .put("module", "musicToplist.ToplistInfoServer")
+                    .put("method", "GetDetail")
+                    .put(
+                        "param",
+                        JSONObject()
+                            .put("topId", topId)
+                            .put("offset", 0)
+                            .put("num", limit.coerceIn(10, 100))
+                            .put("period", ""),
+                    ),
+            )
+            .put("comm", JSONObject().put("ct", 24).put("cv", 0))
+            .toString()
+        val req = Request.Builder()
+            .url("https://u.y.qq.com/cgi-bin/musicu.fcg")
+            .header("User-Agent", BROWSER_UA)
+            .header("Referer", "https://y.qq.com/")
+            .header("Origin", "https://y.qq.com")
+            .post(payload.toRequestBody(JSON_MEDIA))
+            .build()
+        val text = httpText(req) ?: return emptyList()
+        val root = runCatching { JSONObject(text) }.getOrNull() ?: return emptyList()
+        val dataObj = root.optJSONObject("detail")?.optJSONObject("data")
+        val songArr = dataObj?.optJSONArray("songInfoList")
+            ?: dataObj?.optJSONObject("data")?.optJSONArray("songInfoList")
+        return songArr.objects().mapNotNull(::parseQqSongJson).take(limit)
+    }
+
+    internal fun fetchQqSearch(query: String, limit: Int = 24): List<DiscoverItem> {
+        val payload = JSONObject()
+            .put(
+                "req_1",
+                JSONObject()
+                    .put("module", "music.search.SearchCgiService")
+                    .put("method", "DoSearchForQQMusicDesktop")
+                    .put(
+                        "param",
+                        JSONObject()
+                            .put("num_per_page", limit.coerceIn(1, 50))
+                            .put("page_num", 1)
+                            .put("query", query)
+                            .put("search_type", 0),
+                    ),
+            )
+            .put("comm", JSONObject().put("ct", 24).put("cv", 0))
+            .toString()
+        val req = Request.Builder()
+            .url("https://u.y.qq.com/cgi-bin/musicu.fcg")
+            .header("User-Agent", BROWSER_UA)
+            .header("Referer", "https://y.qq.com/")
+            .header("Origin", "https://y.qq.com")
+            .post(payload.toRequestBody(JSON_MEDIA))
+            .build()
+        val text = httpText(req) ?: return emptyList()
+        val root = runCatching { JSONObject(text) }.getOrNull() ?: return emptyList()
+        val dataObj = root.optJSONObject("req_1")?.optJSONObject("data")
+        val songArr = dataObj?.optJSONObject("body")?.optJSONObject("song")?.optJSONArray("list")
+            ?: dataObj?.optJSONArray("list")
+        return songArr.objects().mapNotNull(::parseQqSongJson).take(limit)
+    }
+
+    internal fun parseQqSongJson(s: JSONObject): DiscoverItem? {
+        val mid = s.optString("mid").ifBlank { s.optString("songmid") }.trim()
+        val numericId = s.optLong("id", 0L).takeIf { it > 0L } ?: s.optLong("songid", 0L)
+        if (mid.isEmpty() && numericId <= 0L) return null
+        val title = s.optString("title")
+            .ifBlank { s.optString("name") }
+            .ifBlank { s.optString("songname") }
+            .trim()
+        if (title.isEmpty()) return null
+        val artist = s.optJSONArray("singer").objects()
+            .mapNotNull { it.optString("name").ifBlank { it.optString("title") }.trim().takeIf(String::isNotEmpty) }
+            .joinToString(" / ")
+        val al = s.optJSONObject("album")
+        val album = al?.optString("name")?.ifBlank { al.optString("title") }?.trim().orEmpty()
+            .ifBlank { s.optString("albumname").trim() }
+        val albumMid = al?.optString("mid")?.ifBlank { al.optString("pmid") }?.trim().orEmpty()
+            .ifBlank { s.optString("albummid").trim() }
+        val vsMid = s.optJSONArray("vs")?.optString(0)?.trim().orEmpty()
+        val cover = when {
+            albumMid.isNotEmpty() -> "https://y.gtimg.cn/music/photo_new/T002R500x500M000$albumMid.jpg"
+            vsMid.isNotEmpty() -> "https://y.gtimg.cn/music/photo_new/T062R500x500M000$vsMid.jpg"
+            else -> null
+        }
+        val durationMs = s.optLong("interval", 0L).coerceAtLeast(0L) * 1000L
+        val year = s.optString("time_public").trim().take(4).toIntOrNull()?.takeIf { it in 1950..2100 }
+        val subtitle = s.optString("subtitle").trim()
+        val songKey = mid.ifEmpty { numericId.toString() }
+        val qqUrl = "https://y.qq.com/n/ryqq/songDetail/$songKey"
+        return DiscoverItem(
+            id = "qq:$songKey",
+            kind = "music",
+            title = title,
+            originalTitle = artist,
+            year = year,
+            overview = subtitle,
+            posterUrl = cover,
+            backdropUrl = cover,
+            artist = artist,
+            album = album,
+            durationMs = durationMs,
+            platforms = listOf(PlatformSource("QQ音乐", qqUrl)),
+        )
+    }
+
     private fun fetchNeteaseLyricText(songId: String): String? {
         val req = Request.Builder()
             .url("https://music.163.com/api/song/lyric?id=$songId&lv=1&kv=1&tv=-1")
@@ -847,7 +1097,7 @@ object MusicDiscoverRepository {
             .replace(Regex("""[(（\[【].*?[)）\]】]"""), "")
             .replace(Regex("""[\s·・:：\-—_!！?？.'"`()\[\]【】《》,，/\\&]"""), "")
 
-    private fun mergeMusicPlatforms(a: List<PlatformSource>, b: List<PlatformSource>): List<PlatformSource> {
+    internal fun mergeMusicPlatforms(a: List<PlatformSource>, b: List<PlatformSource>): List<PlatformSource> {
         val map = LinkedHashMap<String, PlatformSource>()
         for (p in a + b) {
             if (p.name.isBlank()) continue
@@ -949,7 +1199,7 @@ enum class MusicAiRecommendAngle(val label: String, val promptInstruction: Strin
 
 /**
  * 音乐详情页「相似歌曲推荐」与「AI 音乐推荐」引擎：
- * - 相似歌曲：优先使用网易云 simiSong 相似算法，并自动融合同歌手 / 同专辑 / 同流派代表作兜底，保证稳定丰富；
+ * - 相似歌曲：按所选音乐推荐源优先匹配相似歌曲与同歌手/同风格代表作，并支持多源互备；
  * - AI 推荐：复用应用内已配置的任意对话大模型推荐契合曲风与心境的歌曲，自动匹配高清封面与本机可播状态。
  */
 object MusicRecommendationEngine {
@@ -989,44 +1239,76 @@ object MusicRecommendationEngine {
         }.sortedByDescending { it.second }.map { it.first }.take(6)
     }
 
-    /** 获取相似歌曲推荐列表。 */
+    /** 获取相似歌曲推荐列表（遵循设置中的音乐推荐源偏好）。 */
     suspend fun fetchSimilarSongs(
         item: DiscoverItem,
+        sourcePref: MusicDiscoverSource = MusicDiscoverSource.AUTO,
         forceRefresh: Boolean = false,
     ): List<DiscoverItem> = withContext(Dispatchers.IO) {
-        val cacheKey = "${item.id}|${item.title}|${item.artist}"
+        val cacheKey = "${sourcePref.name}|${item.id}|${item.title}|${item.artist}"
         if (!forceRefresh) {
             similarCache[cacheKey]?.takeIf { it.isNotEmpty() }?.let { return@withContext it }
         }
 
         val collected = ArrayList<DiscoverItem>()
+        val primaryArtist = item.artist.split('/', '、', ',', '&', '，').firstOrNull()?.trim().orEmpty()
 
-        // 1. 解析或补全网易云歌曲 ID，调用 simiSong 相似歌曲接口
-        val resolvedNeteaseId = item.neteaseId?.takeIf { it.isNotBlank() } ?: runCatching {
-            val q = listOfNotNull(item.title, item.artist.takeIf { it.isNotBlank() }).joinToString(" ")
-            MusicDiscoverRepository.fetchNeteaseSearch(q, 5).firstOrNull { cand ->
-                MusicDiscoverRepository.normMusicText(cand.title) == MusicDiscoverRepository.normMusicText(item.title)
-            }?.neteaseId
-        }.getOrNull()
-
-        if (!resolvedNeteaseId.isNullOrBlank()) {
-            collected += fetchNeteaseSimiSongs(resolvedNeteaseId)
+        fun appendNeteaseSimilar() {
+            val resolvedNeteaseId = item.neteaseId?.takeIf { it.isNotBlank() } ?: runCatching {
+                val q = listOfNotNull(item.title, item.artist.takeIf { it.isNotBlank() }).joinToString(" ")
+                MusicDiscoverRepository.fetchNeteaseSearch(q, 5).firstOrNull { cand ->
+                    MusicDiscoverRepository.normMusicText(cand.title) == MusicDiscoverRepository.normMusicText(item.title)
+                }?.neteaseId
+            }.getOrNull()
+            if (!resolvedNeteaseId.isNullOrBlank()) {
+                collected += fetchNeteaseSimiSongs(resolvedNeteaseId)
+            }
+            if (collected.size < 10 && primaryArtist.isNotEmpty()) {
+                runCatching { MusicDiscoverRepository.fetchNeteaseSearch(primaryArtist, 14) }
+                    .getOrNull()?.let { collected += it }
+            }
         }
 
-        // 2. 若相似结果不足，补充同歌手其他热门代表作及同风格曲目
-        val primaryArtist = item.artist.split('/', '、', ',', '&', '，').firstOrNull()?.trim().orEmpty()
-        if (collected.size < 10 && primaryArtist.isNotEmpty()) {
-            runCatching { MusicDiscoverRepository.fetchNeteaseSearch(primaryArtist, 14) }
-                .getOrNull()?.let { collected += it }
-            if (collected.size < 10) {
-                runCatching { MusicDiscoverRepository.fetchItunesSearch(primaryArtist, 12) }
-                    .getOrNull()?.let { collected += it }
+        when (sourcePref) {
+            MusicDiscoverSource.QQ -> {
+                if (primaryArtist.isNotEmpty()) {
+                    runCatching { MusicDiscoverRepository.fetchQqSearch(primaryArtist, 14) }
+                        .getOrNull()?.let { collected += it }
+                }
+                if (item.album.isNotBlank()) {
+                    runCatching { MusicDiscoverRepository.fetchQqSearch("${item.album} $primaryArtist".trim(), 8) }
+                        .getOrNull()?.let { collected += it }
+                }
+                if (collected.size < 10) appendNeteaseSimilar()
+            }
+            MusicDiscoverSource.APPLE -> {
+                if (primaryArtist.isNotEmpty()) {
+                    runCatching { MusicDiscoverRepository.fetchItunesSearch(primaryArtist, 14) }
+                        .getOrNull()?.let { collected += it }
+                }
+                val genreKw = item.genres.firstOrNull()?.takeIf { it.isNotBlank() }
+                if (collected.size < 10 && !genreKw.isNullOrBlank()) {
+                    runCatching { MusicDiscoverRepository.fetchItunesSearch("$genreKw $primaryArtist".trim(), 10) }
+                        .getOrNull()?.let { collected += it }
+                }
+                if (collected.size < 10) appendNeteaseSimilar()
+            }
+            MusicDiscoverSource.NETEASE, MusicDiscoverSource.AUTO -> {
+                appendNeteaseSimilar()
+                if (collected.size < 10 && primaryArtist.isNotEmpty()) {
+                    runCatching { MusicDiscoverRepository.fetchQqSearch(primaryArtist, 10) }
+                        .getOrNull()?.let { collected += it }
+                    if (collected.size < 10) {
+                        runCatching { MusicDiscoverRepository.fetchItunesSearch(primaryArtist, 10) }
+                            .getOrNull()?.let { collected += it }
+                    }
+                }
             }
         }
 
         if (collected.size < 8) {
             val fallbackKw = item.genres.firstOrNull()?.takeIf { it.isNotBlank() } ?: item.title
-            runCatching { MusicDiscoverRepository.search(fallbackKw, 14) }
+            runCatching { MusicDiscoverRepository.search(fallbackKw, 14, sourcePref) }
                 .getOrNull()?.let { collected += it }
         }
 
@@ -1081,7 +1363,7 @@ object MusicRecommendationEngine {
             ?: throw IllegalStateException("尚未配置可用的 AI 模型，请先在设置中配置 DeepSeek / Gemini / 通义千问 / 豆包 / 本地模型")
         val (modelLabel, translator) = resolved
 
-        val cacheKey = "song_ai|${item.title}|${item.artist}|${angle.name}|${customRequirement.trim()}"
+        val cacheKey = "song_ai|${settings.musicDiscoverSource.name}|${item.title}|${item.artist}|${angle.name}|${customRequirement.trim()}"
         if (!forceRefresh && excludeTitles.isEmpty()) {
             aiCache[cacheKey]?.takeIf { it.isNotEmpty() }?.let { return@withContext modelLabel to it }
         }
@@ -1118,6 +1400,7 @@ object MusicRecommendationEngine {
         val enriched = enrichAiSongs(
             rawSongs.filterNot { MusicDiscoverRepository.normMusicText(it.title) == selfNorm }.take(6),
             localAudios,
+            settings.musicDiscoverSource,
         )
         if (excludeTitles.isEmpty()) aiCache[cacheKey] = enriched
         modelLabel to enriched
@@ -1139,7 +1422,7 @@ object MusicRecommendationEngine {
             ?: throw IllegalStateException("尚未配置可用的 AI 模型，请先配置 DeepSeek / Gemini / 通义千问 / 豆包 / Claude / 本地模型")
         val (modelLabel, translator) = resolved
 
-        val cacheKey = "music_desc|$cleanReq"
+        val cacheKey = "music_desc|${settings.musicDiscoverSource.name}|$cleanReq"
         if (!forceRefresh && excludeTitles.isEmpty()) {
             aiCache[cacheKey]?.takeIf { it.isNotEmpty() }?.let { return@withContext modelLabel to it }
         }
@@ -1172,7 +1455,7 @@ object MusicRecommendationEngine {
         val filtered = rawSongs.filterNot { MusicDiscoverRepository.normMusicText(it.title) in excludedNorm }
             .ifEmpty { rawSongs }
             .take(8)
-        val enriched = enrichAiSongs(filtered, localAudios)
+        val enriched = enrichAiSongs(filtered, localAudios, settings.musicDiscoverSource)
         if (excludeTitles.isEmpty()) aiCache[cacheKey] = enriched
         modelLabel to enriched
     }
@@ -1180,11 +1463,12 @@ object MusicRecommendationEngine {
     private suspend fun enrichAiSongs(
         rawList: List<RawAiSong>,
         localAudios: List<MediaEntry>,
+        sourcePref: MusicDiscoverSource,
     ): List<AiRecommendedItem> = coroutineScope {
         rawList.map { rec ->
             async {
                 val query = listOfNotNull(rec.title, rec.artist.takeIf { it.isNotBlank() }).joinToString(" ")
-                val hits = runCatching { MusicDiscoverRepository.search(query, 8) }.getOrDefault(emptyList())
+                val hits = runCatching { MusicDiscoverRepository.search(query, 8, sourcePref) }.getOrDefault(emptyList())
                 val wantT = MusicDiscoverRepository.normMusicText(rec.title)
                 val wantA = MusicDiscoverRepository.normMusicText(rec.artist)
                 val matched = hits.firstOrNull { h ->

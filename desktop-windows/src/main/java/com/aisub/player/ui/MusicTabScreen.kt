@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -27,6 +28,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.rememberPagerState
@@ -86,6 +88,9 @@ import com.aisub.player.music.MusicSourceKind
 import com.aisub.player.music.MusicSourceSpec
 import com.aisub.player.music.MusicSourceStore
 import com.aisub.player.music.TrackTags
+import com.aisub.player.music.WebMusicLoginDialog
+import com.aisub.player.music.WebMusicService
+import com.aisub.player.music.WebStreamingMusic
 import com.aisub.player.music.toMusicMediaEntry
 import com.aisub.player.remote.RemoteItem
 import com.aisub.player.remote.Server
@@ -158,9 +163,23 @@ fun MusicTabScreen(
     }
 
     // 当前音源预加载的首批曲目（用于空闲状态下点播放键直接开播）
+    val loggedInWebServices by WebStreamingMusic.loggedInServices.collectAsStateWithLifecycle()
+    LaunchedEffect(context) { WebStreamingMusic.refreshAuthState(context) }
+
     var cachedRemoteTracks by remember(effectiveSpec) { mutableStateOf<List<MediaEntry>>(emptyList()) }
     var reloadNonce by remember { mutableIntStateOf(0) }
-    LaunchedEffect(effectiveSpec, activeServer?.id, activeServer?.extra, reloadNonce) {
+    LaunchedEffect(effectiveSpec, activeServer?.id, activeServer?.extra, reloadNonce, loggedInWebServices) {
+        val webSvc = effectiveSpec.webService
+        if (webSvc != null) {
+            if (webSvc in loggedInWebServices) {
+                cachedRemoteTracks = runCatching {
+                    WebStreamingMusic.loadLibraryTracks(context, webSvc).mapNotNull { it.toMusicMediaEntry() }
+                }.getOrDefault(emptyList())
+            } else {
+                cachedRemoteTracks = emptyList()
+            }
+            return@LaunchedEffect
+        }
         val srv = activeServer ?: return@LaunchedEffect
         cachedRemoteTracks = withContext(Dispatchers.IO) {
             runCatching {
@@ -226,6 +245,7 @@ fun MusicTabScreen(
     val showToast: (String) -> Unit = { msg -> toastMessage = msg }
 
     var showSourceSettings by remember { mutableStateOf(false) }
+    var loginWebService by remember { mutableStateOf<WebMusicService?>(null) }
     var editingSong by remember { mutableStateOf(false) }
     var musicSearchCovers by remember { mutableStateOf<Boolean?>(null) }
     var addingToPlaylist by remember { mutableStateOf(false) }
@@ -252,7 +272,9 @@ fun MusicTabScreen(
     }
 
     val handleIdlePlay: () -> Unit = {
+        val webSvc = effectiveSpec.webService
         when {
+            webSvc != null && webSvc !in loggedInWebServices -> loginWebService = webSvc
             activeSourceTracks.isNotEmpty() -> {
                 val idx = standbyEntry?.let { s -> activeSourceTracks.indexOfFirst { it.uri == s.uri } }
                     ?.takeIf { it >= 0 } ?: 0
@@ -270,6 +292,7 @@ fun MusicTabScreen(
     }
 
     val anyOverlayOpen = showSourceSettings ||
+        loginWebService != null ||
         editingSong ||
         musicSearchCovers != null ||
         addingToPlaylist ||
@@ -310,10 +333,17 @@ fun MusicTabScreen(
                     libState = libState,
                     spec = effectiveSpec,
                     server = activeServer,
+                    loggedInWebServices = loggedInWebServices,
                     currentPlayingUri = mainState.current?.takeIf { music.tags != null }?.uri,
                     reloadNonce = reloadNonce,
                     onRequestPermission = onRequestPermission,
                     onOpenSourceSettings = { showSourceSettings = true },
+                    onRequestWebLogin = { svc -> loginWebService = svc },
+                    onLogoutWebService = { svc ->
+                        WebStreamingMusic.logout(context, svc)
+                        reloadNonce++
+                        showToast("已退出 ${svc.label} 账号")
+                    },
                     onReauthServer = { srv ->
                         addServerFlow = if (srv.type.isCloud) AddMusicServerFlow.Cloud(srv.type, srv) else AddMusicServerFlow.Storage(srv)
                     },
@@ -335,7 +365,13 @@ fun MusicTabScreen(
                     MusicAction.IMPORT_LYRICS -> if (music.tags != null) lyricsImportLauncher.launch(arrayOf("*/*")) else showToast("开始播放歌曲后可导入歌词")
                     MusicAction.SLEEP -> activeDialog = MusicTabDialog.SLEEP
                     MusicAction.SPEED -> activeDialog = MusicTabDialog.SPEED
-                    MusicAction.EQUALIZER -> activeDialog = MusicTabDialog.EQUALIZER
+                    MusicAction.EQUALIZER -> {
+                        if (WebStreamingMusic.isStreamingUri(mainState.current?.uri)) {
+                            showToast("流媒体加密音频由系统 DRM 直出，暂不支持内置均衡器")
+                        } else {
+                            activeDialog = MusicTabDialog.EQUALIZER
+                        }
+                    }
                     MusicAction.INFO -> if (music.tags != null) activeDialog = MusicTabDialog.INFO else showToast("当前暂无正在播放的歌曲")
                     MusicAction.TRACKS -> showToast("当前为纯音频播放模式")
                     MusicAction.ADD_TO_PLAYLIST -> if (music.tags != null) addingToPlaylist = true else showToast("开始播放歌曲后可加入歌单")
@@ -376,10 +412,31 @@ fun MusicTabScreen(
                 libState = libState,
                 settings = mainState.settings,
                 effectiveSpec = effectiveSpec,
+                loggedInWebServices = loggedInWebServices,
                 onSelectLocal = {
                     MusicSourceStore.selectLocal(context)
                     showSourceSettings = false
                     showToast("已切换至本机音乐")
+                },
+                onSelectWebService = { svc ->
+                    showSourceSettings = false
+                    if (svc in loggedInWebServices) {
+                        MusicSourceStore.selectWebService(context, svc)
+                        reloadNonce++
+                        scope.launch { pager.animateScrollToPage(2) }
+                        showToast("已切换音乐源：${svc.label}")
+                    } else {
+                        loginWebService = svc
+                    }
+                },
+                onLoginWebService = { svc ->
+                    showSourceSettings = false
+                    loginWebService = svc
+                },
+                onLogoutWebService = { svc ->
+                    WebStreamingMusic.logout(context, svc)
+                    reloadNonce++
+                    showToast("已退出 ${svc.label} 账号")
                 },
                 onSelectServer = { srv, sectionKey, folderPath, customLabel ->
                     MusicSourceStore.selectServer(
@@ -428,6 +485,20 @@ fun MusicTabScreen(
                 },
             )
         }
+    }
+
+    loginWebService?.let { targetService ->
+        WebMusicLoginDialog(
+            service = targetService,
+            onDismiss = { loginWebService = null },
+            onLoggedIn = {
+                loginWebService = null
+                MusicSourceStore.selectWebService(context, targetService)
+                reloadNonce++
+                scope.launch { pager.animateScrollToPage(2) }
+                showToast("${targetService.label} 登录成功，已切换为当前音源")
+            },
+        )
     }
 
     // ---- 添加音乐服务器 / 网盘对话框 ----
@@ -559,29 +630,54 @@ fun MusicTabScreen(
 }
 
 @Composable
+private fun WebServiceBadgeIcon(service: WebMusicService, size: Dp = 18.dp) {
+    val shape = RoundedCornerShape((size.value * 0.28f).dp)
+    Box(
+        Modifier
+            .size(size)
+            .clip(shape)
+            .background(Color(service.accentHex)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = service.badge,
+            color = Color.White,
+            fontSize = (size.value * 0.42f).sp,
+            fontWeight = FontWeight.ExtraBold,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
 private fun MusicSourcePill(
     spec: MusicSourceSpec,
     server: Server?,
     onClick: () -> Unit,
 ) {
     val pillShape = RoundedCornerShape(50)
+    val webSvc = spec.webService
     Row(
         modifier = Modifier
-            .widthIn(max = 140.dp)
+            .widthIn(max = 150.dp)
             .tvFocusRing(pillShape, color = Color.White)
             .liquidGlass(shape = pillShape, style = GlassStyle.Pill, tint = Color(0x30FFFFFF))
             .clickable(onClick = onClick)
             .padding(start = 9.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (server != null) {
-            ServerSourceIcon(server, size = 18.dp)
-        } else {
-            SourceBadgeIcon(SourceBadgeKind.LOCAL_MUSIC, size = 18.dp)
+        when {
+            webSvc != null -> WebServiceBadgeIcon(webSvc, size = 18.dp)
+            server != null -> ServerSourceIcon(server, size = 18.dp)
+            else -> SourceBadgeIcon(SourceBadgeKind.LOCAL_MUSIC, size = 18.dp)
         }
         Spacer(Modifier.width(6.dp))
         Text(
-            text = if (spec.isLocal) "本机" else server?.name?.ifBlank { server.type.label } ?: spec.label,
+            text = when {
+                webSvc != null -> webSvc.label
+                spec.isLocal -> "本机"
+                else -> server?.name?.ifBlank { server.type.label } ?: spec.label
+            },
             color = Color.White,
             fontSize = 13.sp,
             fontWeight = FontWeight.Medium,
@@ -600,7 +696,7 @@ private fun MusicSourcePill(
 }
 
 // ============================================================================
-// 「乐库」内嵌浏览页（统一适配本机、Plex/Subsonic/Emby/Jellyfin 音乐库、NAS/网盘目录）
+// 「乐库」内嵌浏览页（统一适配本机、Apple Music / Spotify、Plex/Subsonic/Emby、NAS/网盘目录）
 // ============================================================================
 
 @Composable
@@ -609,17 +705,20 @@ private fun MusicLibraryBrowser(
     libState: LibraryState,
     spec: MusicSourceSpec,
     server: Server?,
+    loggedInWebServices: Set<WebMusicService>,
     currentPlayingUri: String?,
     reloadNonce: Int,
     onRequestPermission: () -> Unit,
     onOpenSourceSettings: () -> Unit,
+    onRequestWebLogin: (WebMusicService) -> Unit,
+    onLogoutWebService: (WebMusicService) -> Unit,
     onReauthServer: (Server) -> Unit,
     onOpenLocalFilter: () -> Unit,
     onPlayQueue: (List<MediaEntry>, Int) -> Unit,
     onTracksLoaded: (List<MediaEntry>) -> Unit,
     onShowMessage: (String) -> Unit,
 ) {
-    var searchQuery by rememberSaveable(spec.serverId, spec.sectionKey) { mutableStateOf("") }
+    var searchQuery by rememberSaveable(spec.kind, spec.serverId, spec.sectionKey) { mutableStateOf("") }
     var refreshTick by remember { mutableIntStateOf(0) }
 
     Column(
@@ -693,7 +792,20 @@ private fun MusicLibraryBrowser(
             }
         }
 
+        val webSvc = spec.webService
         when {
+            webSvc != null -> WebStreamingMusicLibraryContent(
+                service = webSvc,
+                isLoggedIn = webSvc in loggedInWebServices,
+                query = searchQuery.trim(),
+                currentPlayingUri = currentPlayingUri,
+                refreshKey = reloadNonce + refreshTick,
+                onRequestLogin = { onRequestWebLogin(webSvc) },
+                onLogout = { onLogoutWebService(webSvc) },
+                onOpenSourceSettings = onOpenSourceSettings,
+                onPlayQueue = onPlayQueue,
+                onTracksLoaded = onTracksLoaded,
+            )
             spec.isLocal || server == null -> LocalMusicLibraryContent(
                 libState = libState,
                 query = searchQuery.trim(),
@@ -937,6 +1049,24 @@ private fun StructuredServerMusicContent(
     var items by remember { mutableStateOf<List<ServerItem>>(emptyList()) }
 
     val topContainer = containerStack.lastOrNull()
+    val rootListState = remember(subTab) { LazyListState() }
+    val drillListState = remember(topContainer?.ratingKey) { LazyListState() }
+    var detailSummary by remember(server.id, topContainer?.ratingKey) {
+        mutableStateOf(topContainer?.summary?.trim().orEmpty())
+    }
+
+    LaunchedEffect(server.id, server.extra, topContainer?.ratingKey) {
+        val target = topContainer ?: return@LaunchedEffect
+        detailSummary = target.summary.trim()
+        val fetched = withContext(Dispatchers.IO) {
+            runCatching { MusicSourceStore.loadContainerDetail(lib.client(server), target) }.getOrNull()
+        }
+        val richer = fetched?.summary?.trim().orEmpty()
+        if (richer.length > detailSummary.length) {
+            detailSummary = richer
+        }
+    }
+
     LaunchedEffect(server.id, server.extra, sectionKey, subTab, topContainer?.ratingKey, query, refreshKey) {
         loading = true
         error = null
@@ -996,18 +1126,26 @@ private fun StructuredServerMusicContent(
         val childPlayable = remember(items, server.id) {
             items.filter { it.playUrl != null }.mapNotNull { it.toMusicMediaEntry(server.id, topContainer.title) }
         }
+        val childFolderCount = remember(items) { items.count { it.isFolder && it.playUrl == null } }
         val headerSub = when (topContainer.type) {
-            "playlist" -> listOfNotNull(
-                (childPlayable.size.takeIf { it > 0 } ?: topContainer.leafCount.takeIf { it > 0 })?.let { "$it 首歌曲" },
-                topContainer.summary.trim().replace(Regex("\\s+"), " ").takeIf { it.isNotEmpty() },
-            ).joinToString(" · ")
-            else -> listOfNotNull(topContainer.grandparentTitle, topContainer.parentTitle, topContainer.year?.toString())
-                .filter { it.isNotBlank() }
-                .joinToString(" · ")
+            "playlist" -> (childPlayable.size.takeIf { it > 0 } ?: topContainer.leafCount.takeIf { it > 0 })
+                ?.let { "$it 首歌曲" }
+                .orEmpty()
+            "artist" -> (childFolderCount.takeIf { it > 0 } ?: topContainer.childCount.takeIf { it > 0 })
+                ?.let { "$it 张专辑" }
+                .orEmpty()
+            else -> listOfNotNull(
+                topContainer.grandparentTitle,
+                topContainer.parentTitle,
+                topContainer.year?.toString(),
+                childPlayable.size.takeIf { it > 0 }?.let { "$it 首" },
+            ).filter { it.isNotBlank() }.distinct().joinToString(" · ")
         }.ifBlank { server.name }
         DrilldownHeader(
             title = topContainer.title,
             subtitle = headerSub,
+            thumbUrl = topContainer.thumb ?: topContainer.showThumb,
+            isArtist = topContainer.type == "artist",
             onBack = { if (containerStack.isNotEmpty()) containerStack.removeAt(containerStack.lastIndex) },
             onPlayAll = if (childPlayable.isNotEmpty()) ({ onPlayQueue(childPlayable, 0) }) else null,
         )
@@ -1028,19 +1166,32 @@ private fun StructuredServerMusicContent(
                 onSecondary = if (authExpired) onRetry else onOpenSourceSettings,
             )
         }
-        items.isEmpty() -> DarkLibraryEmptyBox(
-            title = when {
-                query.isNotEmpty() -> "没有找到匹配「$query」的音乐"
-                topContainer?.type == "playlist" -> "该歌单里还没有歌曲"
-                topContainer != null -> "该条目下暂无可播放曲目"
-                else -> "该分类下暂无音乐内容"
-            },
-            subtitle = when {
-                query.isNotEmpty() -> ""
-                topContainer != null -> topContainer.summary.trim().ifBlank { "可在 ${server.name} 中向此${if (topContainer.type == "playlist") "歌单" else "条目"}添加音乐" }
-                else -> "请确认 ${server.name} 中已建立音乐媒体库"
-            },
-        )
+        items.isEmpty() -> Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState()),
+        ) {
+            if (topContainer != null && query.isEmpty() && detailSummary.isNotBlank()) {
+                ContainerFullDescriptionCard(
+                    type = topContainer.type,
+                    description = detailSummary,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
+            DarkLibraryEmptyBox(
+                title = when {
+                    query.isNotEmpty() -> "没有找到匹配「$query」的音乐"
+                    topContainer?.type == "playlist" -> "该歌单里还没有歌曲"
+                    topContainer != null -> "该条目下暂无可播放曲目"
+                    else -> "该分类下暂无音乐内容"
+                },
+                subtitle = when {
+                    query.isNotEmpty() -> ""
+                    topContainer != null -> "可在 ${server.name} 中向此${if (topContainer.type == "playlist") "歌单" else "条目"}添加音乐"
+                    else -> "请确认 ${server.name} 中已建立音乐媒体库"
+                },
+            )
+        }
         else -> {
             val containers = remember(items) { items.filter { it.isFolder && it.playUrl == null } }
             val trackItems = remember(items) { items.filter { it.playUrl != null } }
@@ -1050,10 +1201,20 @@ private fun StructuredServerMusicContent(
             val queue = remember(trackEntries) { trackEntries.map { it.second } }
 
             LazyColumn(
-                Modifier.fillMaxSize(),
+                state = if (topContainer == null) rootListState else drillListState,
+                modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
+                if (topContainer != null && query.isEmpty() && detailSummary.isNotBlank()) {
+                    item(key = "intro:${topContainer.ratingKey}") {
+                        ContainerFullDescriptionCard(
+                            type = topContainer.type,
+                            description = detailSummary,
+                            modifier = Modifier.padding(bottom = 2.dp),
+                        )
+                    }
+                }
                 items(containers, key = { "c:${it.ratingKey}" }) { c ->
                     val cleanSummary = c.summary.trim().replace(Regex("\\s+"), " ").takeIf { it.isNotEmpty() }
                     val sub = when (c.type) {
@@ -1224,6 +1385,217 @@ private fun StorageFolderMusicContent(
     }
 }
 
+@Composable
+private fun WebStreamingMusicLibraryContent(
+    service: WebMusicService,
+    isLoggedIn: Boolean,
+    query: String,
+    currentPlayingUri: String?,
+    refreshKey: Int,
+    onRequestLogin: () -> Unit,
+    onLogout: () -> Unit,
+    onOpenSourceSettings: () -> Unit,
+    onPlayQueue: (List<MediaEntry>, Int) -> Unit,
+    onTracksLoaded: (List<MediaEntry>) -> Unit,
+) {
+    val context = LocalContext.current
+    var subTab by rememberSaveable(service.name) { mutableIntStateOf(0) } // 0 单曲, 1 专辑, 2 歌单
+    val containerStack = remember(service.name) { mutableStateListOf<ServerItem>() }
+    val rootListState = remember(service.name, subTab) { LazyListState() }
+    val topContainer = containerStack.lastOrNull()
+    val drillListState = remember(topContainer?.ratingKey) { LazyListState() }
+
+    BackHandler(enabled = containerStack.isNotEmpty()) {
+        containerStack.removeAt(containerStack.lastIndex)
+    }
+
+    if (!WebStreamingMusic.isSupportedOnPlatform) {
+        DarkLibraryEmptyBox(
+            title = "当前桌面平台暂不支持内置 DRM 解码",
+            subtitle = "安卓端支持登录 ${service.label} 直接播放",
+            primaryLabel = "切换音源",
+            onPrimary = onOpenSourceSettings,
+        )
+        return
+    }
+
+    if (!isLoggedIn) {
+        DarkLibraryEmptyBox(
+            title = "尚未登录 ${service.label}",
+            subtitle = "登录账号后即可在当前播放界面浏览你的曲库、歌单并全曲播放（需账号已开通会员）",
+            primaryLabel = "登录 ${service.label}",
+            onPrimary = onRequestLogin,
+            secondaryLabel = "切换音源",
+            onSecondary = onOpenSourceSettings,
+        )
+        return
+    }
+
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var items by remember { mutableStateOf<List<ServerItem>>(emptyList()) }
+
+    LaunchedEffect(service, isLoggedIn, subTab, topContainer?.ratingKey, query, refreshKey) {
+        loading = true
+        error = null
+        if (query.isNotEmpty()) delay(320)
+        runCatching {
+            when {
+                query.isNotEmpty() -> WebStreamingMusic.searchMusic(context, service, query)
+                topContainer != null -> WebStreamingMusic.loadContainerChildren(context, service, topContainer)
+                subTab == 0 -> WebStreamingMusic.loadLibraryTracks(context, service)
+                subTab == 1 -> WebStreamingMusic.loadLibraryAlbums(context, service)
+                else -> WebStreamingMusic.loadLibraryPlaylists(context, service)
+            }
+        }.onSuccess { list ->
+            items = list
+            if (query.isEmpty() && topContainer == null && subTab == 0) {
+                onTracksLoaded(list.mapNotNull { it.toMusicMediaEntry() })
+            }
+        }.onFailure { e ->
+            error = e.message ?: "读取 ${service.label} 曲库失败"
+        }
+        loading = false
+    }
+
+    if (query.isEmpty() && topContainer == null) {
+        val playableNow = remember(items) {
+            items.filter { it.playUrl != null }.mapNotNull { it.toMusicMediaEntry() }
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            listOf("单曲", "专辑", "歌单").forEachIndexed { idx, label ->
+                DarkSubTabChip(
+                    label = label,
+                    selected = subTab == idx,
+                    onClick = {
+                        subTab = idx
+                        containerStack.clear()
+                    },
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            if (playableNow.isNotEmpty() && subTab == 0) {
+                DarkActionChip("随机", AppIcons.Shuffle) {
+                    onPlayQueue(playableNow.shuffled(), 0)
+                }
+            }
+            DarkActionChip("退出登录", null, onClick = onLogout)
+        }
+    } else if (topContainer != null && query.isEmpty()) {
+        val childPlayable = remember(items) {
+            items.filter { it.playUrl != null }.mapNotNull { it.toMusicMediaEntry() }
+        }
+        val headerSub = when (topContainer.type) {
+            "playlist" -> (childPlayable.size.takeIf { it > 0 } ?: topContainer.leafCount.takeIf { it > 0 })
+                ?.let { "$it 首歌曲" }
+                .orEmpty()
+            else -> listOfNotNull(
+                topContainer.grandparentTitle,
+                topContainer.parentTitle,
+                topContainer.year?.toString(),
+                childPlayable.size.takeIf { it > 0 }?.let { "$it 首" },
+            ).filter { it.isNotBlank() }.distinct().joinToString(" · ")
+        }.ifBlank { service.label }
+
+        DrilldownHeader(
+            title = topContainer.title,
+            subtitle = headerSub,
+            thumbUrl = topContainer.thumb ?: topContainer.showThumb,
+            isArtist = topContainer.type == "artist",
+            onBack = { if (containerStack.isNotEmpty()) containerStack.removeAt(containerStack.lastIndex) },
+            onPlayAll = if (childPlayable.isNotEmpty()) ({ onPlayQueue(childPlayable, 0) }) else null,
+        )
+    }
+
+    val detailSummary = topContainer?.summary?.trim().orEmpty()
+
+    when {
+        loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(color = Orange)
+        }
+        error != null -> DarkLibraryEmptyBox(
+            title = "读取 ${service.label} 失败",
+            subtitle = error.orEmpty(),
+            primaryLabel = "重新登录",
+            onPrimary = onRequestLogin,
+            secondaryLabel = "切换音源",
+            onSecondary = onOpenSourceSettings,
+        )
+        items.isEmpty() -> Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState()),
+        ) {
+            if (topContainer != null && query.isEmpty() && detailSummary.isNotBlank()) {
+                ContainerFullDescriptionCard(
+                    type = topContainer.type,
+                    description = detailSummary,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
+            DarkLibraryEmptyBox(
+                title = if (query.isNotEmpty()) "未搜到「$query」" else "当前分类暂无收藏内容",
+                subtitle = if (query.isNotEmpty()) "请尝试其他关键词" else "可在上方搜索框直接搜索 ${service.label} 全曲库歌曲点播，或若登录过期可重新登录",
+                primaryLabel = if (query.isEmpty()) "重新验证登录" else null,
+                onPrimary = if (query.isEmpty()) onRequestLogin else null,
+            )
+        }
+        else -> {
+            val containers = remember(items) { items.filter { it.isFolder && it.playUrl == null } }
+            val trackItems = remember(items) { items.filter { it.playUrl != null } }
+            val trackEntries = remember(trackItems) {
+                trackItems.mapNotNull { item -> item.toMusicMediaEntry()?.let { item to it } }
+            }
+            val queue = remember(trackEntries) { trackEntries.map { it.second } }
+
+            LazyColumn(
+                state = if (topContainer == null) rootListState else drillListState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (topContainer != null && query.isEmpty() && detailSummary.isNotBlank()) {
+                    item(key = "web_intro:${topContainer.ratingKey}") {
+                        ContainerFullDescriptionCard(
+                            type = topContainer.type,
+                            description = detailSummary,
+                            modifier = Modifier.padding(bottom = 2.dp),
+                        )
+                    }
+                }
+                items(containers, key = { "wc:${it.ratingKey}" }) { c ->
+                    val cleanSummary = c.summary.trim().replace(Regex("\\s+"), " ").takeIf { it.isNotEmpty() }
+                    val sub = when (c.type) {
+                        "album" -> listOfNotNull(c.parentTitle, c.year?.toString(), c.leafCount.takeIf { it > 0 }?.let { "$it 首" }).joinToString(" · ")
+                        "playlist" -> listOfNotNull(c.leafCount.takeIf { it > 0 }?.let { "$it 首歌曲" }, cleanSummary).joinToString(" · ")
+                        else -> c.parentTitle.orEmpty()
+                    }
+                    DarkServerContainerRow(
+                        item = c,
+                        subtitle = sub.ifBlank { service.label },
+                        onClick = { containerStack.add(c) },
+                    )
+                }
+                itemsIndexed(trackEntries, key = { i, (item, _) -> "wt:$i:${item.ratingKey}" }) { idx, (item, entry) ->
+                    DarkTrackRow(
+                        title = item.title,
+                        subtitle = entry.folder.ifBlank { service.label },
+                        durationMs = entry.durationMs,
+                        thumbUrl = item.thumb,
+                        entryForThumb = entry,
+                        active = entry.uri == currentPlayingUri,
+                        onClick = { onPlayQueue(queue, idx) },
+                    )
+                }
+            }
+        }
+    }
+}
+
 // ============================================================================
 // 右上角「音乐源切换与音乐设置」底部弹窗
 // ============================================================================
@@ -1234,7 +1606,11 @@ private fun MusicSourceSettingsSheet(
     libState: LibraryState,
     settings: com.aisub.player.AppSettings,
     effectiveSpec: MusicSourceSpec,
+    loggedInWebServices: Set<WebMusicService>,
     onSelectLocal: () -> Unit,
+    onSelectWebService: (WebMusicService) -> Unit,
+    onLoginWebService: (WebMusicService) -> Unit,
+    onLogoutWebService: (WebMusicService) -> Unit,
     onSelectServer: (Server, sectionKey: String?, folderPath: String, customLabel: String?) -> Unit,
     onAddServerType: (ServerType) -> Unit,
     onUpdateSettings: (com.aisub.player.AppSettings) -> Unit,
@@ -1294,6 +1670,25 @@ private fun MusicSourceSettingsSheet(
                 leading = { SourceBadgeIcon(SourceBadgeKind.LOCAL_MUSIC, size = 34.dp) },
                 onClick = onSelectLocal,
             )
+
+            if (WebStreamingMusic.isSupportedOnPlatform) {
+                WebMusicService.entries.forEach { svc ->
+                    val logged = svc in loggedInWebServices
+                    val selected = effectiveSpec.webService == svc
+                    HorizontalDivider(Modifier.padding(start = 60.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    SourceOptionRow(
+                        title = svc.label,
+                        subtitle = if (logged) "已登录 · 应用内直接播放与同步歌词" else "点击登录账号 · 应用内直接播放",
+                        selected = selected,
+                        leading = { WebServiceBadgeIcon(svc, size = 34.dp) },
+                        trailingActionLabel = if (logged) "退出" else "登录",
+                        onTrailingAction = {
+                            if (logged) onLogoutWebService(svc) else onLoginWebService(svc)
+                        },
+                        onClick = { onSelectWebService(svc) },
+                    )
+                }
+            }
 
             structuredServers.forEach { srv ->
                 val secs = sectionsByServer[srv.id].orEmpty()
@@ -1487,6 +1882,8 @@ private fun DarkActionChip(
 private fun DrilldownHeader(
     title: String,
     subtitle: String,
+    thumbUrl: String? = null,
+    isArtist: Boolean = false,
     onBack: () -> Unit,
     onPlayAll: (() -> Unit)?,
 ) {
@@ -1500,16 +1897,76 @@ private fun DrilldownHeader(
     ) {
         DarkActionChip("← 返回", null, onClick = onBack)
         Spacer(Modifier.width(10.dp))
+        if (!thumbUrl.isNullOrBlank()) {
+            Box(
+                Modifier
+                    .size(36.dp)
+                    .clip(if (isArtist) CircleShape else RoundedCornerShape(8.dp))
+                    .background(Color(0x33000000)),
+                contentAlignment = Alignment.Center,
+            ) {
+                NetImage(
+                    url = thumbUrl,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                    fallback = if (isArtist) AppIcons.Person else AppIcons.MusicNote,
+                )
+            }
+            Spacer(Modifier.width(9.dp))
+        }
         Column(Modifier.weight(1f)) {
             Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (subtitle.isNotEmpty()) {
                 Spacer(Modifier.height(2.dp))
-                Text(subtitle, color = Color(0x99FFFFFF), fontSize = 12.sp, lineHeight = 16.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                Text(subtitle, color = Color(0x99FFFFFF), fontSize = 12.sp, lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
         if (onPlayAll != null) {
+            Spacer(Modifier.width(8.dp))
             DarkActionChip("播放全部", AppIcons.PlayArrow, onClick = onPlayAll)
         }
+    }
+}
+
+@Composable
+private fun ContainerFullDescriptionCard(
+    type: String,
+    description: String,
+    modifier: Modifier = Modifier,
+) {
+    val normalized = remember(description) {
+        description
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .replace(Regex("\n{3,}"), "\n\n")
+            .trim()
+    }
+    if (normalized.isEmpty()) return
+    val headerLabel = when (type) {
+        "artist" -> "歌手介绍"
+        "playlist" -> "歌单描述"
+        "album" -> "专辑简介"
+        else -> "详细介绍"
+    }
+    Column(
+        modifier
+            .fillMaxWidth()
+            .liquidGlass(shape = RoundedCornerShape(14.dp), style = GlassStyle.Card, tint = Color(0x20FFFFFF))
+            .padding(horizontal = 13.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Text(
+            text = headerLabel,
+            color = Orange,
+            fontSize = 11.5.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = normalized,
+            color = Color(0xDDFFFFFF),
+            fontSize = 13.sp,
+            lineHeight = 19.sp,
+        )
     }
 }
 
@@ -1611,6 +2068,7 @@ private fun DarkTrackRow(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DarkServerContainerRow(
     item: ServerItem,
@@ -1618,10 +2076,11 @@ private fun DarkServerContainerRow(
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(12.dp)
-    val subtitleMaxLines = if (item.type == "playlist") 5 else 2
+    val isPlaylist = item.type == "playlist"
     Row(
         Modifier
             .fillMaxWidth()
+            .let { if (isPlaylist) it.height(68.dp) else it }
             .tvFocusRing(shape, color = Color.White)
             .clip(shape)
             .background(Color(0x1FFFFFFF))
@@ -1648,14 +2107,32 @@ private fun DarkServerContainerRow(
             Text(item.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (subtitle.isNotBlank()) {
                 Spacer(Modifier.height(2.dp))
-                Text(
-                    subtitle,
-                    color = Color(0x99FFFFFF),
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp,
-                    maxLines = subtitleMaxLines,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (isPlaylist) {
+                    Text(
+                        text = subtitle,
+                        color = Color(0x99FFFFFF),
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Clip,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .basicMarquee(
+                                iterations = Int.MAX_VALUE,
+                                initialDelayMillis = 1_200,
+                                repeatDelayMillis = 1_800,
+                            ),
+                    )
+                } else {
+                    Text(
+                        text = subtitle,
+                        color = Color(0x99FFFFFF),
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
         Spacer(Modifier.width(6.dp))
@@ -1663,6 +2140,7 @@ private fun DarkServerContainerRow(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DarkFolderOrContainerRow(
     title: String,
@@ -1675,6 +2153,7 @@ private fun DarkFolderOrContainerRow(
     Row(
         Modifier
             .fillMaxWidth()
+            .height(62.dp)
             .tvFocusRing(shape, color = Color.White)
             .clip(shape)
             .background(Color(0x1FFFFFFF))
@@ -1694,7 +2173,21 @@ private fun DarkFolderOrContainerRow(
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(subtitle, color = Color(0x99FFFFFF), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                text = subtitle,
+                color = Color(0x99FFFFFF),
+                fontSize = 12.sp,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Clip,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .basicMarquee(
+                        iterations = Int.MAX_VALUE,
+                        initialDelayMillis = 1_200,
+                        repeatDelayMillis = 1_800,
+                    ),
+            )
         }
         Icon(AppIcons.ChevronRight, null, tint = Color(0x88FFFFFF), modifier = Modifier.size(20.dp))
     }
@@ -1750,6 +2243,8 @@ private fun SourceOptionRow(
     subtitle: String,
     selected: Boolean,
     leading: @Composable () -> Unit,
+    trailingActionLabel: String? = null,
+    onTrailingAction: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val c = LocalPopupColors.current
@@ -1782,7 +2277,25 @@ private fun SourceOptionRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        if (trailingActionLabel != null && onTrailingAction != null) {
+            Spacer(Modifier.width(8.dp))
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(c.button)
+                    .clickable(onClick = onTrailingAction)
+                    .padding(horizontal = 11.dp, vertical = 5.dp),
+            ) {
+                Text(
+                    text = trailingActionLabel,
+                    color = if (trailingActionLabel == "登录") Orange else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
         if (selected) {
+            Spacer(Modifier.width(6.dp))
             Icon(AppIcons.Check, "当前音乐源", tint = c.selectedText, modifier = Modifier.size(20.dp))
         }
     }

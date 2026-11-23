@@ -249,6 +249,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** VLC 内核：ISO 光盘镜像、单连接直播音频分流，或兼容回退。用到时才创建。 */
     private var vlcPlayer: VlcPlayer? = null
+
+    /** Apple Music / Spotify 应用内登录流媒体播放内核（基于后台 Widevine DRM WebView）。用到时才创建。 */
+    private var webMusicPlayer: com.aisub.player.media.WebStreamingMusicPlayer? = null
     private var proxyInstance: MediaProxy? = null
     private fun mediaProxy(): MediaProxy =
         proxyInstance ?: MediaProxy(authDataSourceFactory(getApplication(), wrapCloudSingleConn = false)).also { proxyInstance = it }
@@ -539,7 +542,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) _state.value.current?.let { prev ->
                 ServerProgress.find(prev.uri)?.let { p -> reportPlex(prev.uri, "stopped", p.durationMs, p.durationMs) }
             }
-            if (!usingExternalKernel) queue.getOrNull(exoPlayer.currentMediaItemIndex)?.let(::onEntryChanged)
+            if (!usingExternalKernel) {
+                queue.getOrNull(exoPlayer.currentMediaItemIndex)?.let(::onEntryChanged)
+            } else if (webMusicPlayer != null && player === webMusicPlayer) {
+                queue.getOrNull(player.currentMediaItemIndex)?.let(::onEntryChanged)
+            }
             if (counting) _state.value.current?.let { library.recordPlayback(it, 0, started = true) }
         }
 
@@ -761,6 +768,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         vlcPlayer = it
     }
 
+    private fun webMusic(): com.aisub.player.media.WebStreamingMusicPlayer =
+        webMusicPlayer ?: com.aisub.player.media.WebStreamingMusicPlayer(
+            context = getApplication(),
+            onLiveMetadata = { uri, title, artist, album, durMs, coverUrl ->
+                music.onStreamingMetadataUpdated(uri, title, artist, album, durMs, coverUrl)
+            },
+        ).also {
+            it.addListener(listener)
+            webMusicPlayer = it
+        }
+
     private fun itemOf(e: MediaEntry) = MediaItem.Builder()
         .setUri(e.uri)
         .setMediaId(e.uri)
@@ -918,6 +936,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
         vlcPlayer?.deactivateForKernelSwitch()
+        webMusicPlayer?.deactivateForKernelSwitch()
         queue = entries ?: listOf(entry)
         isCurrentDolbyShunted = dolbyP5Hint
         val m = mpv()
@@ -947,6 +966,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
         mpvPlayer?.deactivateForKernelSwitch()
+        webMusicPlayer?.deactivateForKernelSwitch()
         queue = channels ?: listOf(entry)
         isCurrentDolbyShunted = false
         val v = vlc()
@@ -961,6 +981,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         v.prepare()
         startPlaybackService()
         if (entry.isLive) watchVlcLive(entry)
+    }
+
+    /** 用 Apple Music / Spotify 应用内流媒体内核播放曲目队列，复用原生音乐播放界面与歌词同步。 */
+    private fun playWithWebMusic(
+        start: MediaEntry,
+        entries: List<MediaEntry>,
+        positionMs: Long,
+    ) {
+        vlcLiveWatch?.cancel()
+        LegacyDolbyExoBridge.reset()
+        exoPlayer.stop()
+        exoPlayer.clearMediaItems()
+        mpvPlayer?.deactivateForKernelSwitch()
+        vlcPlayer?.deactivateForKernelSwitch()
+        isCurrentDolbyShunted = false
+        val streamQueue = entries.filter { com.aisub.player.music.WebStreamingMusic.isStreamingUri(it.uri) }
+            .ifEmpty { listOf(start) }
+        val startIdx = streamQueue.indexOfFirst { it.uri == start.uri }.coerceAtLeast(0)
+        queue = streamQueue
+        val w = webMusic()
+        w.setMediaItems(streamQueue.map(::itemOf), startIdx, positionMs)
+        _state.update { it.copy(playbackError = null, videoProblem = null) }
+        _player.value = w
+        onEntryChanged(start)
+        w.playWhenReady = true
+        w.prepare()
+        startPlaybackService()
     }
 
     private var vlcLiveWatch: Job? = null
@@ -1206,6 +1253,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         savePosition()
         val start = entries[index.coerceIn(entries.indices)]
         val resume = resumePosition(start)
+        if (com.aisub.player.music.WebStreamingMusic.isStreamingUri(start.uri)) {
+            playWithWebMusic(start, entries, resume)
+            return
+        }
         // 光盘镜像只能用 VLC 内核播放
         if (VlcPlayer.needsVlc(start.title)) {
             playWithVlc(start, resume, entries)
@@ -1252,6 +1303,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         vlcLiveWatch?.cancel()
         mpvPlayer?.deactivateForKernelSwitch()
         vlcPlayer?.deactivateForKernelSwitch()
+        webMusicPlayer?.deactivateForKernelSwitch()
         isCurrentDolbyShunted = false
         pendingExoUri = start.uri
         LegacyDolbyExoBridge.reset()
@@ -3804,6 +3856,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         assHandler.release()
         mpvPlayer?.release()
         vlcPlayer?.release()
+        webMusicPlayer?.release()
         proxyInstance?.close()
         proxyInstance = null
     }
@@ -3960,7 +4013,7 @@ internal fun describePlaybackError(
     activeKernel: PlayerKernel = PlayerKernel.MEDIA3,
 ): String {
     val explicitExternalReason = e.message?.takeIf {
-        activeKernel != PlayerKernel.MEDIA3 &&
+        (activeKernel != PlayerKernel.MEDIA3 || e.cause is IllegalStateException || e.cause is IllegalArgumentException) &&
             it.isNotBlank() &&
             e.errorCode in setOf(
                 PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,

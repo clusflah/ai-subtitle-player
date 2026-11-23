@@ -364,6 +364,10 @@ class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
         merged
     }
 
+    suspend fun playlistDetail(ratingKey: String): ServerItem? = withContext(Dispatchers.IO) {
+        get("/playlists/$ratingKey").optJSONArray("Metadata").objects().firstOrNull()?.let(::item)
+    }
+
     suspend fun playlistTracks(ratingKey: String, maxItems: Int = 10_000): List<ServerItem> = withContext(Dispatchers.IO) {
         val pageSize = 500
         val out = ArrayList<ServerItem>()

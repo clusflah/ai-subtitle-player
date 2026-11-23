@@ -268,19 +268,7 @@ fun HomeScreen(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        text = when (tab) {
-                            Tab.HOME -> "译幕"
-                            Tab.DISCOVER -> discoverMode.label
-                            else -> tab.label
-                        },
-                        fontSize = if (isDiscover) 22.sp else 28.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        modifier = if (isDiscover) Modifier else Modifier.weight(1f),
-                    )
                     if (isDiscover) {
-                        Spacer(Modifier.width(12.dp))
                         DiscoverModeSwitch(
                             mode = discoverMode,
                             onSelect = { nextMode ->
@@ -292,6 +280,17 @@ fun HomeScreen(
                             },
                         )
                         Spacer(Modifier.weight(1f))
+                    } else {
+                        Text(
+                            text = when (tab) {
+                                Tab.HOME -> "译幕"
+                                else -> tab.label
+                            },
+                            fontSize = 28.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            modifier = Modifier.weight(1f),
+                        )
                     }
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(if (glass) 10.dp else 4.dp),
@@ -680,6 +679,7 @@ fun HomeScreen(
                 )
                 Tab.DISCOVER -> if (discoverMode == com.aisub.player.meta.DiscoverMode.MUSIC) {
                     MusicDiscoverTab(
+                        settings = mainUi.settings,
                         lib = lib,
                         listState = lib.listState("discover.music.home"),
                         searchExpanded = discoverSearching,

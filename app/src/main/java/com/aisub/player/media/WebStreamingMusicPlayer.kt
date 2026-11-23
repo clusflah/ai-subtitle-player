@@ -1,0 +1,407 @@
+package com.aisub.player.media
+
+import android.content.Context
+import android.net.Uri
+import android.os.Looper
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
+import androidx.media3.common.SimpleBasePlayer
+import androidx.media3.common.Tracks
+import androidx.media3.common.util.UnstableApi
+import com.aisub.player.music.WebMusicService
+import com.aisub.player.music.WebStreamingMusic
+import com.aisub.player.remote.cloud.ServerProgress
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlin.random.Random
+
+/**
+ * 基于 Media3 [SimpleBasePlayer] 封装的 Apple Music / Spotify 应用内流媒体播放器：
+ * 对外完整实现 [Player] 接口，无缝复用现有的黑胶唱机页（MusicView）、逐行滚动歌词、播放队列抽屉、
+ * 底部迷你播放条（NowPlayingBar）、睡眠定时以及系统通知栏 / 锁屏媒体控制（MediaSession）。
+ */
+@UnstableApi
+class WebStreamingMusicPlayer(
+    context: Context,
+    private val onLiveMetadata: ((uri: String, title: String, artist: String, album: String, durationMs: Long, coverUrl: String?) -> Unit)? = null,
+) : SimpleBasePlayer(Looper.getMainLooper()) {
+
+    private val appContext = context.applicationContext
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    private var items: List<MediaItem> = emptyList()
+    private var currentIndex: Int = 0
+    private var startPositionMs: Long = 0L
+    private var playWhenReady: Boolean = false
+    private var playbackState: Int = Player.STATE_IDLE
+    private var repeatModeState: Int = Player.REPEAT_MODE_OFF
+    private var shuffleEnabled: Boolean = false
+    private var speed: Float = 1f
+    private var volume: Float = 1f
+    private var error: PlaybackException? = null
+
+    private var currentPosMs: Long = 0L
+    private var currentDurMs: Long = C.TIME_UNSET
+    private var maxPosReachedMs: Long = 0L
+    private var seekHoldTargetMs: Long = C.TIME_UNSET
+    private var seekHoldUntilMs: Long = 0L
+    private var launchJob: Job? = null
+    private var activePlayGeneration: Long = 0L
+    private var trackTransitionPending: Boolean = false
+    private var lastSyncedMetaKey: String = ""
+
+    init {
+        WebStreamingMusic.setSnapshotListener { snap ->
+            scope.launch { onSnapshot(snap) }
+        }
+    }
+
+    private fun currentUriString(): String? =
+        items.getOrNull(currentIndex)?.localConfiguration?.uri?.toString()
+            ?: items.getOrNull(currentIndex)?.mediaId?.takeIf { it.isNotBlank() }
+
+    private fun activeService(): WebMusicService? =
+        WebMusicService.fromUri(currentUriString())
+
+    private fun onSnapshot(snap: WebStreamingMusic.PlaybackSnapshot) {
+        val curService = activeService() ?: return
+        if (snap.service != curService) return
+        if (playbackState == Player.STATE_IDLE || items.isEmpty()) return
+
+        var changed = false
+        if (snap.durationMs > 0L && snap.durationMs != currentDurMs) {
+            currentDurMs = snap.durationMs
+            changed = true
+        }
+        val now = System.currentTimeMillis()
+        if (now >= seekHoldUntilMs) {
+            currentPosMs = snap.positionMs
+            if (snap.positionMs > maxPosReachedMs) maxPosReachedMs = snap.positionMs
+        }
+
+        if (playbackState == Player.STATE_BUFFERING && (snap.playing || snap.durationMs > 0L)) {
+            playbackState = Player.STATE_READY
+            changed = true
+        }
+
+        // 实时将流媒体播放器解析到的封面、专辑与精确时长回写至 ServerProgress 与 MusicFeatures
+        val curUri = currentUriString()
+        if (curUri != null && snap.title.isNotEmpty()) {
+            val metaKey = "$curUri|${snap.title}|${snap.artist}|${snap.album}|${snap.coverUrl}|${snap.durationMs}"
+            if (metaKey != lastSyncedMetaKey) {
+                lastSyncedMetaKey = metaKey
+                val prev = ServerProgress.find(curUri)
+                ServerProgress.register(
+                    curUri,
+                    ServerProgress.Entry(
+                        serverId = prev?.serverId ?: "web:${curService.name}",
+                        ratingKey = prev?.ratingKey ?: snap.title,
+                        durationMs = if (snap.durationMs > 0L) snap.durationMs else (prev?.durationMs ?: 0L),
+                        viewOffsetMs = 0L,
+                        title = prev?.title?.takeIf { it.isNotBlank() } ?: snap.title,
+                        artist = prev?.artist?.takeIf { it.isNotBlank() } ?: snap.artist.ifBlank { null },
+                        album = prev?.album?.takeIf { it.isNotBlank() } ?: snap.album.ifBlank { null },
+                        coverUrl = prev?.coverUrl ?: snap.coverUrl,
+                    ),
+                )
+                onLiveMetadata?.invoke(curUri, snap.title, snap.artist, snap.album, snap.durationMs, snap.coverUrl)
+            }
+        }
+
+        // 检测单曲自然播完并自动切入队列下一首
+        val naturalEnd = snap.ended ||
+            (snap.durationMs > 15_000L && maxPosReachedMs > 5_000L && snap.positionMs >= snap.durationMs - 650L && !snap.playing)
+        if (naturalEnd && !trackTransitionPending && playWhenReady) {
+            trackTransitionPending = true
+            advanceOnTrackEnd()
+            return
+        }
+
+        if (changed) invalidateState()
+    }
+
+    private fun advanceOnTrackEnd() {
+        if (items.isEmpty()) return
+        if (repeatModeState == Player.REPEAT_MODE_ONE) {
+            startCurrentTrack(0L)
+            return
+        }
+        val nextIdx = when {
+            shuffleEnabled && items.size > 1 -> {
+                val candidates = items.indices.filter { it != currentIndex }
+                candidates[Random.nextInt(candidates.size)]
+            }
+            currentIndex + 1 < items.size -> currentIndex + 1
+            repeatModeState == Player.REPEAT_MODE_ALL -> 0
+            else -> -1
+        }
+        if (nextIdx in items.indices) {
+            currentIndex = nextIdx
+            startPositionMs = 0L
+            invalidateState()
+            startCurrentTrack(0L)
+        } else {
+            playbackState = Player.STATE_ENDED
+            playWhenReady = false
+            invalidateState()
+        }
+    }
+
+    private fun startCurrentTrack(positionMs: Long) {
+        val uri = currentUriString() ?: return
+        val gen = ++activePlayGeneration
+        launchJob?.cancel()
+        error = null
+        currentPosMs = positionMs.coerceAtLeast(0L)
+        maxPosReachedMs = 0L
+        trackTransitionPending = false
+        val knownDur = ServerProgress.find(uri)?.durationMs?.takeIf { it > 0L } ?: C.TIME_UNSET
+        currentDurMs = knownDur
+        playbackState = Player.STATE_BUFFERING
+        invalidateState()
+
+        launchJob = scope.launch {
+            val result = WebStreamingMusic.playUri(appContext, uri, positionMs)
+            if (gen != activePlayGeneration) return@launch
+            result.onSuccess {
+                error = null
+                playbackState = Player.STATE_READY
+                val svc = activeService()
+                if (svc != null) {
+                    if (!playWhenReady) WebStreamingMusic.setPlaying(svc, false)
+                    if (speed != 1f) WebStreamingMusic.setSpeed(svc, speed)
+                    if (volume != 1f) WebStreamingMusic.setVolume(svc, volume)
+                }
+                invalidateState()
+            }.onFailure { e ->
+                error = PlaybackException(
+                    e.message ?: "流媒体播放失败",
+                    e,
+                    PlaybackException.ERROR_CODE_UNSPECIFIED,
+                )
+                playbackState = Player.STATE_IDLE
+                playWhenReady = false
+                invalidateState()
+            }
+        }
+    }
+
+    fun deactivateForKernelSwitch() {
+        activePlayGeneration++
+        launchJob?.cancel()
+        playWhenReady = false
+        playbackState = Player.STATE_IDLE
+        items = emptyList()
+        currentIndex = 0
+        currentPosMs = 0L
+        currentDurMs = C.TIME_UNSET
+        error = null
+        WebStreamingMusic.stopAll()
+        invalidateState()
+    }
+
+    override fun getState(): State {
+        val commands = Player.Commands.Builder().addAll(
+            Player.COMMAND_PLAY_PAUSE,
+            Player.COMMAND_PREPARE,
+            Player.COMMAND_STOP,
+            Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM,
+            Player.COMMAND_SEEK_TO_DEFAULT_POSITION,
+            Player.COMMAND_SEEK_TO_MEDIA_ITEM,
+            Player.COMMAND_SEEK_TO_NEXT,
+            Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+            Player.COMMAND_SEEK_TO_PREVIOUS,
+            Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
+            Player.COMMAND_SET_REPEAT_MODE,
+            Player.COMMAND_SET_SHUFFLE_MODE,
+            Player.COMMAND_SET_SPEED_AND_PITCH,
+            Player.COMMAND_GET_CURRENT_MEDIA_ITEM,
+            Player.COMMAND_GET_TIMELINE,
+            Player.COMMAND_GET_METADATA,
+            Player.COMMAND_SET_MEDIA_ITEM,
+            Player.COMMAND_CHANGE_MEDIA_ITEMS,
+            Player.COMMAND_GET_TRACKS,
+            Player.COMMAND_SET_VOLUME,
+            Player.COMMAND_GET_VOLUME,
+            Player.COMMAND_RELEASE,
+        ).build()
+
+        val playlist = items.mapIndexed { idx, item ->
+            val u = item.localConfiguration?.uri?.toString().orEmpty()
+            val itemDurMs = if (idx == currentIndex && currentDurMs != C.TIME_UNSET) {
+                currentDurMs
+            } else {
+                ServerProgress.find(u)?.durationMs?.takeIf { it > 0L } ?: C.TIME_UNSET
+            }
+            MediaItemData.Builder(item.mediaId.ifEmpty { "web_$idx:$u" })
+                .setMediaItem(item)
+                .setMediaMetadata(item.mediaMetadata)
+                .setDurationUs(if (itemDurMs == C.TIME_UNSET) C.TIME_UNSET else itemDurMs * 1_000L)
+                .setIsSeekable(true)
+                .setTracks(Tracks.EMPTY)
+                .build()
+        }
+
+        val isPlayingNow = playWhenReady && playbackState == Player.STATE_READY
+        return State.Builder()
+            .setAvailableCommands(commands)
+            .setPlayWhenReady(playWhenReady, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+            .setPlaybackState(if (items.isEmpty()) Player.STATE_IDLE else playbackState)
+            .setIsLoading(playbackState == Player.STATE_BUFFERING)
+            .setPlayerError(error)
+            .setPlaylist(playlist)
+            .setCurrentMediaItemIndex(if (playlist.isEmpty()) C.INDEX_UNSET else currentIndex.coerceIn(playlist.indices))
+            .setRepeatMode(repeatModeState)
+            .setShuffleModeEnabled(shuffleEnabled)
+            .setContentPositionMs(
+                if (isPlayingNow) {
+                    PositionSupplier.getExtrapolating(
+                        if (System.currentTimeMillis() < seekHoldUntilMs && seekHoldTargetMs != C.TIME_UNSET) seekHoldTargetMs else currentPosMs,
+                        speed,
+                    )
+                } else {
+                    PositionSupplier.getConstant(
+                        if (System.currentTimeMillis() < seekHoldUntilMs && seekHoldTargetMs != C.TIME_UNSET) seekHoldTargetMs else currentPosMs,
+                    )
+                },
+            )
+            .setPlaybackParameters(PlaybackParameters(speed))
+            .setVolume(volume)
+            .build()
+    }
+
+    override fun handleSetMediaItems(
+        mediaItems: List<MediaItem>,
+        startIndex: Int,
+        startPositionMs: Long,
+    ): ListenableFuture<*> {
+        items = mediaItems.toList()
+        currentIndex = if (items.isEmpty()) 0 else startIndex.coerceIn(items.indices)
+        this.startPositionMs = startPositionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0L) ?: 0L
+        currentPosMs = this.startPositionMs
+        currentDurMs = C.TIME_UNSET
+        error = null
+        if (items.isEmpty()) {
+            WebStreamingMusic.stopAll()
+            playbackState = Player.STATE_IDLE
+        }
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleAddMediaItems(index: Int, mediaItems: List<MediaItem>): ListenableFuture<*> {
+        if (mediaItems.isEmpty()) return Futures.immediateVoidFuture()
+        val mutable = items.toMutableList()
+        val insertAt = index.coerceIn(0, mutable.size)
+        mutable.addAll(insertAt, mediaItems)
+        if (items.isNotEmpty() && insertAt <= currentIndex) {
+            currentIndex += mediaItems.size
+        }
+        items = mutable
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleRemoveMediaItems(fromIndex: Int, toIndex: Int): ListenableFuture<*> {
+        if (items.isEmpty()) return Futures.immediateVoidFuture()
+        val safeFrom = fromIndex.coerceIn(0, items.size)
+        val safeTo = toIndex.coerceIn(safeFrom, items.size)
+        if (safeFrom >= safeTo) return Futures.immediateVoidFuture()
+        val mutable = items.toMutableList()
+        mutable.subList(safeFrom, safeTo).clear()
+        items = mutable
+        if (items.isEmpty()) {
+            deactivateForKernelSwitch()
+        } else if (currentIndex >= items.size) {
+            currentIndex = items.lastIndex
+        }
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleMoveMediaItems(fromIndex: Int, toIndex: Int, newIndex: Int): ListenableFuture<*> =
+        Futures.immediateVoidFuture()
+
+    override fun handlePrepare(): ListenableFuture<*> {
+        if (items.isNotEmpty()) {
+            startCurrentTrack(startPositionMs)
+        }
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
+        this.playWhenReady = playWhenReady
+        val svc = activeService()
+        if (playbackState == Player.STATE_ENDED && playWhenReady) {
+            startCurrentTrack(0L)
+        } else if (svc != null && playbackState != Player.STATE_IDLE) {
+            WebStreamingMusic.setPlaying(svc, playWhenReady)
+        }
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleSeek(mediaItemIndex: Int, positionMs: Long, seekCommand: Int): ListenableFuture<*> {
+        if (items.isEmpty()) return Futures.immediateVoidFuture()
+        val targetIdx = if (mediaItemIndex == C.INDEX_UNSET) currentIndex else mediaItemIndex.coerceIn(items.indices)
+        val targetPos = positionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0L) ?: 0L
+        if (targetIdx != currentIndex) {
+            currentIndex = targetIdx
+            startPositionMs = targetPos
+            startCurrentTrack(targetPos)
+        } else {
+            currentPosMs = targetPos
+            seekHoldTargetMs = targetPos
+            seekHoldUntilMs = System.currentTimeMillis() + 900L
+            if (playbackState == Player.STATE_ENDED) {
+                startCurrentTrack(targetPos)
+            } else {
+                activeService()?.let { WebStreamingMusic.seekTo(it, targetPos) }
+            }
+        }
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleSetRepeatMode(repeatMode: Int): ListenableFuture<*> {
+        repeatModeState = repeatMode
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleSetShuffleModeEnabled(shuffleModeEnabled: Boolean): ListenableFuture<*> {
+        shuffleEnabled = shuffleModeEnabled
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleSetPlaybackParameters(playbackParameters: PlaybackParameters): ListenableFuture<*> {
+        speed = playbackParameters.speed
+        activeService()?.let { WebStreamingMusic.setSpeed(it, speed) }
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleSetVolume(volume: Float, volumeOperationType: Int): ListenableFuture<*> {
+        this.volume = volume.coerceIn(0f, 1f)
+        activeService()?.let { WebStreamingMusic.setVolume(it, this.volume) }
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleStop(): ListenableFuture<*> {
+        activePlayGeneration++
+        launchJob?.cancel()
+        WebStreamingMusic.stopAll()
+        playbackState = Player.STATE_IDLE
+        playWhenReady = false
+        return Futures.immediateVoidFuture()
+    }
+
+    override fun handleRelease(): ListenableFuture<*> {
+        deactivateForKernelSwitch()
+        scope.cancel()
+        WebStreamingMusic.setSnapshotListener(null)
+        return Futures.immediateVoidFuture()
+    }
+}

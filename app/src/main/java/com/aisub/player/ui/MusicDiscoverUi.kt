@@ -86,6 +86,9 @@ import com.aisub.player.meta.MusicRecommendationEngine
 import com.aisub.player.meta.PlatformSource
 import com.aisub.player.meta.RecommendationEngine
 import com.aisub.player.music.MusicSourceStore
+import com.aisub.player.music.WebMusicLoginDialog
+import com.aisub.player.music.WebMusicService
+import com.aisub.player.music.WebStreamingMusic
 import com.aisub.player.music.toMusicMediaEntry
 import com.aisub.player.remote.OpenListClient
 import com.aisub.player.remote.RemoteItem
@@ -122,7 +125,7 @@ fun DiscoverModeSwitch(
 
     Row(
         modifier = modifier
-            .height(34.dp)
+            .height(36.dp)
             .clip(outerShape)
             .background(containerBg)
             .border(1.dp, borderColor, outerShape)
@@ -135,14 +138,14 @@ fun DiscoverModeSwitch(
             val itemShape = RoundedCornerShape(50)
             Row(
                 modifier = Modifier
-                    .height(28.dp)
+                    .height(30.dp)
                     .tvFocusRing(itemShape, color = if (selected) Color.White else Orange)
                     .clip(itemShape)
                     .background(if (selected) Orange else Color.Transparent)
                     .clickable {
                         if (!selected) onSelect(entry)
                     }
-                    .padding(horizontal = 11.dp),
+                    .padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
@@ -150,11 +153,11 @@ fun DiscoverModeSwitch(
                     imageVector = if (entry == DiscoverMode.VIDEO) AppIcons.Movie else AppIcons.MusicNote,
                     contentDescription = null,
                     tint = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(13.dp),
+                    modifier = Modifier.size(14.dp),
                 )
                 Text(
                     text = entry.label,
-                    fontSize = 12.5.sp,
+                    fontSize = 13.sp,
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                     color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -167,11 +170,12 @@ fun DiscoverModeSwitch(
 
 /**
  * 发现页「音乐」模式主视图：
- * 展示流行热歌榜、新音乐速递、飙升趋势榜、华语与欧美热播榜、原创音乐等，并支持双源搜歌与平台直达。
+ * 展示流行热歌榜、新音乐速递、飙升趋势榜、华语与欧美热播榜、原创音乐等，并支持按设置中的音乐推荐源切换。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MusicDiscoverTab(
+    settings: AppSettings = AppSettings(),
     lib: LibraryViewModel,
     listState: LazyListState,
     searchExpanded: Boolean = false,
@@ -185,21 +189,22 @@ fun MusicDiscoverTab(
     val focusManager = LocalFocusManager.current
     val wide = LocalWideLayout.current
     val tv = LocalTv.current
+    val sourcePref = settings.musicDiscoverSource
 
     var queryInput by remember { mutableStateOf(MusicDiscoverRepository.sessionQueryInput) }
     var appliedQuery by remember { mutableStateOf(MusicDiscoverRepository.sessionAppliedQuery) }
     var reloadNonce by remember { mutableIntStateOf(0) }
 
-    val initialSections = remember { MusicDiscoverRepository.peekHomeSections(context) }
-    var sections by remember { mutableStateOf(initialSections) }
-    var homeLoading by remember { mutableStateOf(initialSections.isEmpty()) }
-    var homeRefreshing by remember { mutableStateOf(false) }
-    var homeError by remember { mutableStateOf<String?>(null) }
+    val initialSections = remember(sourcePref) { MusicDiscoverRepository.peekHomeSections(context, sourcePref) }
+    var sections by remember(sourcePref) { mutableStateOf(initialSections) }
+    var homeLoading by remember(sourcePref) { mutableStateOf(initialSections.isEmpty()) }
+    var homeRefreshing by remember(sourcePref) { mutableStateOf(false) }
+    var homeError by remember(sourcePref) { mutableStateOf<String?>(null) }
 
-    val initialSearch = remember(appliedQuery) {
-        MusicDiscoverRepository.peekSearchResults(appliedQuery)
+    val initialSearch = remember(appliedQuery, sourcePref) {
+        MusicDiscoverRepository.peekSearchResults(appliedQuery, sourcePref)
     }
-    var searchResults by remember { mutableStateOf(initialSearch.orEmpty()) }
+    var searchResults by remember(sourcePref) { mutableStateOf(initialSearch.orEmpty()) }
     var searchLoading by remember { mutableStateOf(false) }
     var searchError by remember { mutableStateOf<String?>(null) }
     var history by remember { mutableStateOf(MusicDiscoverSearchStore.history(context)) }
@@ -220,12 +225,12 @@ fun MusicDiscoverTab(
         onSearchExpandedChange(false)
     }
 
-    LaunchedEffect(reloadNonce) {
-        val cached = MusicDiscoverRepository.peekHomeSections(context)
+    LaunchedEffect(reloadNonce, sourcePref) {
+        val cached = MusicDiscoverRepository.peekHomeSections(context, sourcePref)
         if (cached.isNotEmpty() && sections.isEmpty()) {
             sections = cached
         }
-        val firstAutoRefresh = reloadNonce == 0 && MusicDiscoverRepository.consumeFirstVisitAutoRefresh()
+        val firstAutoRefresh = reloadNonce == 0 && MusicDiscoverRepository.consumeFirstVisitAutoRefresh(sourcePref)
         if (reloadNonce == 0 && !firstAutoRefresh && cached.isNotEmpty()) {
             sections = cached
             homeLoading = false
@@ -241,6 +246,7 @@ fun MusicDiscoverTab(
                 MusicDiscoverRepository.loadHomeSections(
                     forceRefresh = firstAutoRefresh || reloadNonce > 0,
                     context = context,
+                    sourcePref = sourcePref,
                 )
             }
         }.onSuccess { loaded ->
@@ -259,7 +265,7 @@ fun MusicDiscoverTab(
         homeRefreshing = false
     }
 
-    LaunchedEffect(appliedQuery) {
+    LaunchedEffect(appliedQuery, sourcePref) {
         val q = appliedQuery.trim()
         MusicDiscoverRepository.sessionAppliedQuery = q
         if (q.isEmpty()) {
@@ -268,7 +274,7 @@ fun MusicDiscoverTab(
             searchLoading = false
             return@LaunchedEffect
         }
-        MusicDiscoverRepository.peekSearchResults(q)?.let { cached ->
+        MusicDiscoverRepository.peekSearchResults(q, sourcePref)?.let { cached ->
             searchResults = cached
             searchError = null
             searchLoading = false
@@ -278,7 +284,7 @@ fun MusicDiscoverTab(
         searchError = null
         runCatching {
             withContext(Dispatchers.IO) {
-                MusicDiscoverRepository.search(q)
+                MusicDiscoverRepository.search(q, sourcePref = sourcePref)
             }
         }.onSuccess { list ->
             searchResults = list
@@ -582,7 +588,11 @@ fun MusicDiscoverTab(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            text = "音乐风向榜",
+                            text = if (sourcePref == com.aisub.player.MusicDiscoverSource.AUTO) {
+                                "音乐风向榜"
+                            } else {
+                                "音乐风向榜 · ${sourcePref.shortLabel}"
+                            },
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -912,12 +922,14 @@ fun MusicSquareCard(
 @Composable
 fun MusicDiscoverChartScreen(
     initialChartId: String?,
+    settings: AppSettings = AppSettings(),
     onBack: () -> Unit,
     onOpenDetail: (DiscoverItem) -> Unit,
 ) {
     val context = LocalContext.current
     val wide = LocalWideLayout.current
     val tv = LocalTv.current
+    val sourcePref = settings.musicDiscoverSource
 
     val defaultId = initialChartId?.takeIf { MusicDiscoverCharts.findChart(it) != null }
         ?: MusicDiscoverCharts.allCharts.first().id
@@ -926,15 +938,15 @@ fun MusicDiscoverChartScreen(
         MusicDiscoverCharts.findChart(selectedChartId) ?: MusicDiscoverCharts.allCharts.first()
     }
 
-    val cachedPage = remember(selectedChartId) {
-        MusicDiscoverRepository.peekChartPage(chart, context)
+    val cachedPage = remember(selectedChartId, sourcePref) {
+        MusicDiscoverRepository.peekChartPage(chart, context, sourcePref)
     }
-    var items by remember(selectedChartId) { mutableStateOf(cachedPage?.items.orEmpty()) }
-    var loading by remember(selectedChartId) { mutableStateOf(cachedPage == null) }
-    var reloadNonce by remember(selectedChartId) { mutableIntStateOf(0) }
-    var error by remember(selectedChartId) { mutableStateOf<String?>(null) }
+    var items by remember(selectedChartId, sourcePref) { mutableStateOf(cachedPage?.items.orEmpty()) }
+    var loading by remember(selectedChartId, sourcePref) { mutableStateOf(cachedPage == null) }
+    var reloadNonce by remember(selectedChartId, sourcePref) { mutableIntStateOf(0) }
+    var error by remember(selectedChartId, sourcePref) { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(selectedChartId, reloadNonce) {
+    LaunchedEffect(selectedChartId, reloadNonce, sourcePref) {
         if (reloadNonce == 0 && items.isNotEmpty()) {
             loading = false
             return@LaunchedEffect
@@ -948,6 +960,7 @@ fun MusicDiscoverChartScreen(
                     count = 50,
                     forceRefresh = reloadNonce > 0,
                     context = context,
+                    sourcePref = sourcePref,
                 )
             }
         }.onSuccess { page ->
@@ -1043,12 +1056,14 @@ fun MusicDiscoverDetailScreen(
     var playDialogOpen by remember { mutableStateOf(false) }
     var statusTip by remember { mutableStateOf<String?>(null) }
 
-    // 后台补全缺失的专辑/时长/双平台链接与歌词摘要
-    LaunchedEffect(item.id) {
+    // 后台补全缺失的专辑/时长/多平台链接与歌词摘要
+    LaunchedEffect(item.id, settings.musicDiscoverSource) {
         withContext(Dispatchers.IO) {
             if (item.album.isBlank() || item.durationMs <= 0L || item.neteaseId == null || item.appleUrl == null) {
                 val q = listOfNotNull(item.title, item.artist.takeIf { it.isNotBlank() }).joinToString(" ")
-                val hits = runCatching { MusicDiscoverRepository.search(q, 6) }.getOrDefault(emptyList())
+                val hits = runCatching {
+                    MusicDiscoverRepository.search(q, 6, settings.musicDiscoverSource)
+                }.getOrDefault(emptyList())
                 val wantKey = MusicDiscoverRepository.songNormKey(item.title, item.artist)
                 val match = hits.firstOrNull { MusicDiscoverRepository.songNormKey(it.title, it.artist) == wantKey }
                     ?: hits.firstOrNull { MusicDiscoverRepository.normMusicText(it.title) == MusicDiscoverRepository.normMusicText(item.title) }
@@ -1063,6 +1078,7 @@ fun MusicDiscoverDetailScreen(
                         genres = if (enriched.genres.isNotEmpty()) enriched.genres else match.genres,
                         neteaseId = enriched.neteaseId ?: match.neteaseId,
                         appleUrl = enriched.appleUrl ?: match.appleUrl,
+                        platforms = MusicDiscoverRepository.mergeMusicPlatforms(enriched.platforms, match.platforms),
                     )
                 }
             }
@@ -1084,8 +1100,6 @@ fun MusicDiscoverDetailScreen(
             .distinct()
             .take(8)
     }
-
-    val platformList = remember(enriched) { MusicPlatformCatalog.platformsForItem(enriched) }
 
     fun openExternalUrl(url: String) {
         runCatching {
@@ -1198,38 +1212,12 @@ fun MusicDiscoverDetailScreen(
                 }
             }
 
-            // 跳转播放卡片（音乐平台快捷徽标 + 主「跳转播放」按钮）
+            // 跳转播放卡片（来源与收听平台统一收进点击「跳转播放」后的二级弹窗）
             SurfaceCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                 Column(
                     Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(
-                            "收听平台",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            platformList.take(5).forEach { platform ->
-                                MusicPlatformBadgeChip(
-                                    platform = platform,
-                                    onClick = {
-                                        onOpenPlayWeb(MusicPlatformCatalog.resolvePlayUrl(platform, enriched))
-                                    },
-                                )
-                            }
-                        }
-                    }
-
                     Button(
                         onClick = { playDialogOpen = true },
                         colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
@@ -1338,48 +1326,6 @@ fun MusicDiscoverDetailScreen(
                 playDialogOpen = false
                 openExternalUrl(url)
             },
-        )
-    }
-}
-
-@Composable
-private fun MusicPlatformBadgeChip(
-    platform: PlatformSource,
-    onClick: () -> Unit,
-) {
-    val spec = MusicPlatformCatalog.specFor(platform.name)
-    val accent = Color(MusicPlatformCatalog.accentHex(platform.name))
-    Row(
-        Modifier
-            .tvFocusRing(RoundedCornerShape(7.dp))
-            .clip(RoundedCornerShape(7.dp))
-            .background(accent.copy(alpha = 0.14f))
-            .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(7.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 7.dp, vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Box(
-            Modifier
-                .clip(RoundedCornerShape(4.dp))
-                .background(accent)
-                .padding(horizontal = 4.dp, vertical = 1.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                spec?.badge ?: platform.name.take(2),
-                color = Color.White,
-                fontSize = 9.sp,
-                fontWeight = FontWeight.ExtraBold,
-            )
-        }
-        Text(
-            platform.name,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
         )
     }
 }
@@ -1566,11 +1512,95 @@ private fun MusicDiscoverPlayDialog(
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-                // 3. 音乐流媒体平台直达播放
+                // 2.5. 流媒体账号应用内播放（Apple Music / Spotify）
+                if (WebStreamingMusic.isSupportedOnPlatform) {
+                    val context = LocalContext.current
+                    val loggedServices by WebStreamingMusic.loggedInServices.collectAsStateWithLifecycle()
+                    LaunchedEffect(context) { WebStreamingMusic.refreshAuthState(context) }
+                    var pendingLoginService by remember { mutableStateOf<WebMusicService?>(null) }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Icon(AppIcons.MusicNote, null, tint = Orange, modifier = Modifier.size(18.dp))
+                            Text("应用内账号直接播放", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        }
+                        Text(
+                            "登录 Apple Music 或 Spotify 会员账号后，可直接在应用自带音乐播放页播放并同步歌词。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        WebMusicService.entries.forEach { svc ->
+                            val isLogged = svc in loggedServices
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.75f))
+                                    .tvFocusRing(RoundedCornerShape(10.dp))
+                                    .clickable {
+                                        if (isLogged) {
+                                            val entry = WebStreamingMusic.buildEntryFromDiscoverItem(svc, item)
+                                            onPlayEntries(listOf(entry), 0)
+                                        } else {
+                                            pendingLoginService = svc
+                                        }
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Box(
+                                    Modifier
+                                        .clip(RoundedCornerShape(5.dp))
+                                        .background(Color(svc.accentHex))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                ) {
+                                    Text(svc.badge, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+                                }
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        text = svc.label,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                    )
+                                    Text(
+                                        text = if (isLogged) "已登录 · 在应用音乐页直接播放" else "未登录 · 点击登录并直接播放",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                    )
+                                }
+                                Text(
+                                    text = if (isLogged) "直接播放" else "登录播放",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Orange,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+                        }
+                    }
+
+                    pendingLoginService?.let { svc ->
+                        WebMusicLoginDialog(
+                            service = svc,
+                            onDismiss = { pendingLoginService = null },
+                            onLoggedIn = {
+                                pendingLoginService = null
+                                val entry = WebStreamingMusic.buildEntryFromDiscoverItem(svc, item)
+                                onPlayEntries(listOf(entry), 0)
+                            },
+                        )
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                }
+
+                // 3. 来源与收听平台直达播放
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Icon(AppIcons.Live, null, tint = Orange, modifier = Modifier.size(18.dp))
-                        Text("音乐平台跳转播放", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        Text("来源与收听平台", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     }
                     Text(
                         "点平台名称在内置网页打开（支持拉起已安装的音乐 App），点右侧图标直接用系统外部打开。",
@@ -1652,14 +1682,18 @@ fun MusicRecommendationsSection(
     val wide = LocalWideLayout.current
     val cardWidth = if (tv) 140.dp else if (wide) 132.dp else 112.dp
 
-    var similarSongs by remember(item.id) { mutableStateOf<List<DiscoverItem>>(emptyList()) }
-    var similarLoading by remember(item.id) { mutableStateOf(true) }
+    var similarSongs by remember(item.id, settings.musicDiscoverSource) { mutableStateOf<List<DiscoverItem>>(emptyList()) }
+    var similarLoading by remember(item.id, settings.musicDiscoverSource) { mutableStateOf(true) }
     var similarNonce by remember(item.id) { mutableIntStateOf(0) }
 
-    LaunchedEffect(item.id, item.neteaseId, item.artist, similarNonce) {
+    LaunchedEffect(item.id, item.neteaseId, item.artist, settings.musicDiscoverSource, similarNonce) {
         similarLoading = true
         similarSongs = runCatching {
-            MusicRecommendationEngine.fetchSimilarSongs(item, forceRefresh = similarNonce > 0)
+            MusicRecommendationEngine.fetchSimilarSongs(
+                item = item,
+                sourcePref = settings.musicDiscoverSource,
+                forceRefresh = similarNonce > 0,
+            )
         }.getOrDefault(emptyList())
         similarLoading = false
     }

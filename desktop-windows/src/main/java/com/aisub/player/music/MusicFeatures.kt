@@ -79,15 +79,16 @@ class MusicFeatures(
         _state.value = MusicState(tags = TrackTags.fromMetadata(e.title, 0, emptyList()))
         val ready = metadataReady
         loadJob = scope.launch {
-            // 等播放器读出音轨的元数据；VLC 内核或读得慢时改用系统接口
-            val metadata = withTimeoutOrNull(2500) { ready.await() }
+            // 等播放器读出音轨的元数据；VLC 内核、Web 流媒体或读得慢时改用已登记元数据或系统接口
+            val isWebStream = WebStreamingMusic.isStreamingUri(e.uri)
+            val metadata = if (isWebStream) null else withTimeoutOrNull(2500) { ready.await() }
             val duration = player().duration.takeIf { it > 0 } ?: 0L
             val fileTags = withContext(Dispatchers.IO) {
                 if (!metadata.isNullOrEmpty()) TrackTags.fromMetadata(e.title, duration, metadata)
-                else (if (FileOps.isLocal(e)) TrackTags.fromRetriever(app, Uri.parse(e.uri), e.title) else null)
+                else (if (!isWebStream && FileOps.isLocal(e)) TrackTags.fromRetriever(app, Uri.parse(e.uri), e.title) else null)
                     ?: TrackTags.fromMetadata(e.title, duration, emptyList())
             }
-            // Plex、Emby、Navidrome / Subsonic 的歌：文件里没写歌名、歌手、专辑时用服务器整理好的元数据
+            // Plex、Emby、Navidrome / Subsonic 及 Apple Music / Spotify 的歌：使用整理好的元数据
             val server = com.aisub.player.remote.cloud.ServerProgress.find(e.uri)
             val fallbackTitle = e.title.substringBeforeLast('.')
             val tags = if (server == null) fileTags else fileTags.copy(
@@ -101,6 +102,40 @@ class MusicFeatures(
             _state.update { it.copy(tags = shown, edited = shown !== tags) }
             launch { loadCover(e, shown) }
             loadLyrics(e, shown)
+        }
+    }
+
+    /** 流媒体后台播放器实时解析到更完整的歌名/歌手/专辑/时长/封面时动态补齐封面与同步歌词 */
+    fun onStreamingMetadataUpdated(
+        uri: String,
+        title: String,
+        artist: String,
+        album: String,
+        durationMs: Long,
+        coverUrl: String?,
+    ) {
+        val e = entry ?: return
+        if (e.uri != uri) return
+        val cur = _state.value
+        val oldTags = cur.tags ?: TrackTags(title = title.ifBlank { e.displayTitle })
+        val updatedTags = if (cur.edited) {
+            oldTags.copy(durationMs = if (durationMs > 0L) durationMs else oldTags.durationMs)
+        } else {
+            oldTags.copy(
+                title = title.ifBlank { oldTags.title },
+                artist = artist.ifBlank { oldTags.artist },
+                album = album.ifBlank { oldTags.album },
+                durationMs = if (durationMs > 0L) durationMs else oldTags.durationMs,
+            )
+        }
+        val titleOrArtistChanged = updatedTags.title != oldTags.title || updatedTags.artist != oldTags.artist
+        rawTags = updatedTags
+        _state.update { it.copy(tags = updatedTags) }
+        if (cur.cover == null && !coverUrl.isNullOrBlank()) {
+            scope.launch { loadCover(e, updatedTags) }
+        }
+        if ((cur.lyrics == null || titleOrArtistChanged) && settings().musicOnlineLookup && updatedTags.title.isNotBlank()) {
+            scope.launch { loadLyrics(e, updatedTags) }
         }
     }
 

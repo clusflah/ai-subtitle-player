@@ -122,6 +122,7 @@ object PlatformCatalog {
             t.contains("优酷") || low.contains("youku") -> "优酷"
             t.contains("哔哩") || low.contains("bilibili") || t.equals("B站", ignoreCase = true) -> "哔哩哔哩"
             t.contains("芒果") || low.contains("mgtv") || low.contains("mango tv") -> "芒果TV"
+            t.contains("湖南卫视") || low == "hunan television" || low == "hunan tv" -> "湖南卫视"
             t.contains("咪咕") || low.contains("migu") -> "咪咕视频"
             low.contains("hulu") -> "Hulu"
             low.contains("paramount") -> "Paramount+"
@@ -744,7 +745,7 @@ object DiscoverRepository {
                     DiscoverChartPage(
                         chart = chart,
                         items = items,
-                        note = "未填写 TMDB API Key，当前暂展示豆瓣海外口碑剧集榜；在「我的 → 设置 → 影视信息」填写 TMDB Key 后可拉取该平台实时榜单。",
+                        note = "未填写 TMDB API Key，当前暂展示豆瓣海外口碑剧集榜；在「我的 → 设置 → 影音信息」填写 TMDB Key 后可拉取该平台实时榜单。",
                         usedFallback = true,
                     )
                 }
