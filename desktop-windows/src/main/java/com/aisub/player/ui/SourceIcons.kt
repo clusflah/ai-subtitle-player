@@ -68,7 +68,7 @@ fun ServerType.hasSolidIconBackdrop(): Boolean = when (this) {
 }
 
 /**
- * Apple Music / Spotify 官方品牌矢量图标。
+ * Apple Music / Spotify / YouTube Music / 网易云音乐 / QQ音乐 官方品牌矢量图标。
  */
 @Composable
 fun WebMusicServiceIcon(
@@ -81,6 +81,9 @@ fun WebMusicServiceIcon(
         when (service) {
             WebMusicService.APPLE_MUSIC -> buildAppleMusicOfficialVector(insetScale)
             WebMusicService.SPOTIFY -> buildSpotifyOfficialVector(insetScale)
+            WebMusicService.YOUTUBE_MUSIC -> buildYouTubeMusicOfficialVector()
+            WebMusicService.NETEASE_MUSIC -> buildNetEaseMusicOfficialVector()
+            WebMusicService.QQ_MUSIC -> buildQqMusicOfficialVector()
         }
     }
     ImageIcon(vector = vector, contentDescription = service.label, size = size, modifier = modifier)

@@ -893,8 +893,7 @@ private fun PlayControls(
         GlassBox(
             modifier = Modifier
                 .size(68.dp)
-                .tvFocusRing(CircleShape, color = Color.White)
-                .glassShadow(CircleShape, GlassStyle.Floating, 12.dp),
+                .tvFocusRing(CircleShape, color = Color.White),
             shape = CircleShape,
             style = GlassStyle.Floating,
             tint = Color(0x36FFFFFF),

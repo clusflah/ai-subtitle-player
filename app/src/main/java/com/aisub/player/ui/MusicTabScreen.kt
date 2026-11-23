@@ -376,7 +376,7 @@ fun MusicTabScreen(
                     MusicAction.SPEED -> activeDialog = MusicTabDialog.SPEED
                     MusicAction.EQUALIZER -> {
                         if (WebStreamingMusic.isStreamingUri(mainState.current?.uri)) {
-                            showToast("流媒体加密音频由系统 DRM 直出，暂不支持内置均衡器")
+                            showToast("当前在线流媒体播放模式暂不支持内置均衡器")
                         } else {
                             activeDialog = MusicTabDialog.EQUALIZER
                         }

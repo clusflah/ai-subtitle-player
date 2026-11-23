@@ -1525,7 +1525,7 @@ private fun MusicDiscoverPlayDialog(
                             Text("应用内账号直接播放", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                         }
                         Text(
-                            "登录 Apple Music 或 Spotify 会员账号后，可直接在应用自带音乐播放页播放并同步歌词。",
+                            "登录 Apple Music、Spotify、YouTube Music、网易云音乐或 QQ音乐 账号后，可直接在应用自带音乐播放页播放并同步歌词。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

@@ -1,4 +1,13 @@
-## 本版更新（2.10.29）
+## 本版更新（2.10.30）
+
+- **新增 YouTube Music、网易云音乐、QQ音乐 应用内直连播放与个人曲库（Android / TV）**：
+  - 在「音乐 → 右上角音源」、「乐库」及「发现 → 音乐 → 播放」中新增 **YouTube Music**、**网易云音乐**、**QQ音乐** 三个原生直连音源，统一支持应用内账号登录（Google / 网易云 / QQ 与微信）、登录态自动检测及一键退出清理。
+  - 原生直连个人点赞/我喜欢的歌曲、歌单、收藏专辑与全目录搜歌，并直接解析最高可用音质音频流交给原生 Media3 ExoPlayer 秒播（**YouTube Music** 最高 `256k Opus/AAC`；**网易云音乐** 支持 VIP **无损 FLAC / 极高 320k**；**QQ音乐** 支持绿钻 **无损 FLAC / HQ 320k**），受限时自动无缝回退内置网页播放。
+  - 完整复用现有黑胶唱机界面、自动同步双语滚动歌词、队列自动切歌、睡眠定时、倍速及系统锁屏/通知栏媒体控制。
+- **修复音乐播放界面播放/暂停圆形按键透出暗灰底影的问题（Android / TV / Windows）**：
+  - 移除半透明圆形播放/暂停液态玻璃按键的 `glassShadow` 投影，消除按钮内部透出灰暗圆斑的视觉瑕疵。
+
+## 2.10.29 更新
 
 - **修复 Android 14+ 上 Spotify 官方客户端联动无法拉起授权窗导致超时的问题（Android / TV）**：
   - 针对 Spotify 官方 `0.8.0` App Remote SDK 内部 `bindService` 缺失 Android 14+（API 34+）`Context.BIND_ALLOW_ACTIVITY_STARTS` 标志导致系统拦截后台拉起授权页的问题，新增 `SpotifyBalContextWrapper` 注入该标志并补齐 PKCE `app-remote-control` 权限范围，确保点击测试连接可正常拉起官方 Spotify 授权确认窗。

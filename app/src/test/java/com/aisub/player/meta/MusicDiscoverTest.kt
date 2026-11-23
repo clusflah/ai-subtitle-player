@@ -373,4 +373,178 @@ class MusicDiscoverTest {
         assertTrue(!afterLogout.remoteEnabled)
         assertTrue(!com.aisub.player.music.SpotifyAppRemoteBridge.isReadyAsLoggedIn(ctx))
     }
+
+    @Test
+    fun youtubeNetEaseAndQqMusicDirectParsersAndRoutingWork() {
+        // 1. 全部 5 个流媒体服务的协议识别、音源枚举与 DiscoverItem ID 提取
+        assertEquals(com.aisub.player.music.WebMusicService.YOUTUBE_MUSIC, com.aisub.player.music.WebMusicService.fromUri("ytmusic://track/dQw4w9WgXcQ"))
+        assertEquals(com.aisub.player.music.WebMusicService.NETEASE_MUSIC, com.aisub.player.music.WebMusicService.fromUri("neteasemusic://track/186016"))
+        assertEquals(com.aisub.player.music.WebMusicService.QQ_MUSIC, com.aisub.player.music.WebMusicService.fromUri("qqmusic://track/0039MnYb0qxYhV"))
+
+        val ytDiscover = DiscoverItem(
+            id = "yt:dQw4w9WgXcQ",
+            kind = "music",
+            title = "Never Gonna Give You Up",
+            artist = "Rick Astley",
+            platforms = listOf(PlatformSource("YouTube Music", "https://music.youtube.com/watch?v=dQw4w9WgXcQ")),
+        )
+        assertEquals("dQw4w9WgXcQ", com.aisub.player.music.WebStreamingMusic.extractYouTubeVideoId(ytDiscover))
+        val ytEntry = com.aisub.player.music.WebStreamingMusic.buildEntryFromDiscoverItem(
+            com.aisub.player.music.WebMusicService.YOUTUBE_MUSIC,
+            ytDiscover,
+        )
+        assertTrue(ytEntry.uri.startsWith("ytmusic://track/dQw4w9WgXcQ"))
+
+        val neDiscover = DiscoverItem(
+            id = "netease:186016",
+            kind = "music",
+            title = "晴天",
+            artist = "周杰伦",
+            neteaseId = "186016",
+        )
+        assertEquals("186016", com.aisub.player.music.WebStreamingMusic.extractNetEaseSongId(neDiscover))
+        val neEntry = com.aisub.player.music.WebStreamingMusic.buildEntryFromDiscoverItem(
+            com.aisub.player.music.WebMusicService.NETEASE_MUSIC,
+            neDiscover,
+        )
+        assertTrue(neEntry.uri.startsWith("neteasemusic://track/186016"))
+
+        val qqDiscover = DiscoverItem(
+            id = "qq:0039MnYb0qxYhV",
+            kind = "music",
+            title = "晴天",
+            artist = "周杰伦",
+            platforms = listOf(PlatformSource("QQ音乐", "https://y.qq.com/n/ryqq/songDetail/0039MnYb0qxYhV")),
+        )
+        assertEquals("0039MnYb0qxYhV", com.aisub.player.music.WebStreamingMusic.extractQqSongMid(qqDiscover))
+        val qqEntry = com.aisub.player.music.WebStreamingMusic.buildEntryFromDiscoverItem(
+            com.aisub.player.music.WebMusicService.QQ_MUSIC,
+            qqDiscover,
+        )
+        assertTrue(qqEntry.uri.startsWith("qqmusic://track/0039MnYb0qxYhV"))
+
+        // 2. YouTube Music SAPISIDHASH 签名、曲库条目解析与音质优先级（256k Opus 774 > 256k AAC 141 > 160k Opus 251 > 128k AAC 140）
+        val sapisidHash = com.aisub.player.music.DirectMusicServiceApi.buildSapisidHash(
+            cookies = "SAPISID=test_secret_123; SID=abc",
+            origin = "https://music.youtube.com",
+            nowSec = 1700000000L,
+        )
+        assertNotNull(sapisidHash)
+        assertTrue(sapisidHash!!.startsWith("SAPISIDHASH 1700000000_"))
+        assertEquals(40, sapisidHash.substringAfter('_').length)
+
+        val ytBrowseJson = JSONObject().put(
+            "contents",
+            JSONArray()
+                .put(
+                    JSONObject().put(
+                        "musicResponsiveListItemRenderer",
+                        JSONObject()
+                            .put("playlistItemData", JSONObject().put("videoId", "abc123XYZ"))
+                            .put(
+                                "flexColumns",
+                                JSONArray()
+                                    .put(
+                                        JSONObject().put(
+                                            "musicResponsiveListItemFlexColumnRenderer",
+                                            JSONObject().put("text", JSONObject().put("runs", JSONArray().put(JSONObject().put("text", "稻香")))),
+                                        ),
+                                    )
+                                    .put(
+                                        JSONObject().put(
+                                            "musicResponsiveListItemFlexColumnRenderer",
+                                            JSONObject().put("text", JSONObject().put("runs", JSONArray().put(JSONObject().put("text", "周杰伦 • 魔杰座 • 3:43")))),
+                                        ),
+                                    ),
+                            ),
+                    ),
+                )
+                .put(
+                    JSONObject().put(
+                        "musicTwoRowItemRenderer",
+                        JSONObject()
+                            .put("title", JSONObject().put("runs", JSONArray().put(JSONObject().put("text", "叶惠美"))))
+                            .put("subtitle", JSONObject().put("runs", JSONArray().put(JSONObject().put("text", "专辑 • 周杰伦"))))
+                            .put(
+                                "navigationEndpoint",
+                                JSONObject().put(
+                                    "browseEndpoint",
+                                    JSONObject().put("browseId", "MPREb_123456"),
+                                ),
+                            ),
+                    ),
+                ),
+        )
+        val ytTracks = com.aisub.player.music.DirectMusicServiceApi.parseYouTubeItems(ytBrowseJson, wantType = "track")
+        assertEquals(1, ytTracks.size)
+        assertEquals("abc123XYZ", ytTracks.first().ratingKey)
+        assertEquals("稻香", ytTracks.first().title)
+        assertEquals("周杰伦", ytTracks.first().grandparentTitle)
+        assertEquals(223_000L, ytTracks.first().durationMs)
+
+        val ytAlbums = com.aisub.player.music.DirectMusicServiceApi.parseYouTubeItems(ytBrowseJson, wantType = "album")
+        assertEquals(1, ytAlbums.size)
+        assertEquals("album|MPREb_123456", ytAlbums.first().ratingKey)
+
+        val ytPlayerResp = JSONObject()
+            .put("playabilityStatus", JSONObject().put("status", "OK"))
+            .put("videoDetails", JSONObject().put("lengthSeconds", "223"))
+            .put(
+                "streamingData",
+                JSONObject().put(
+                    "adaptiveFormats",
+                    JSONArray()
+                        .put(JSONObject().put("itag", 140).put("mimeType", "audio/mp4; codecs=\"mp4a.40.2\"").put("bitrate", 128000).put("url", "https://rr1.googlevideo.com/140"))
+                        .put(JSONObject().put("itag", 251).put("mimeType", "audio/webm; codecs=\"opus\"").put("bitrate", 160000).put("url", "https://rr1.googlevideo.com/251"))
+                        .put(JSONObject().put("itag", 141).put("mimeType", "audio/mp4; codecs=\"mp4a.40.2\"").put("bitrate", 256000).put("url", "https://rr1.googlevideo.com/141"))
+                        .put(JSONObject().put("itag", 774).put("mimeType", "audio/webm; codecs=\"opus\"").put("bitrate", 256000).put("url", "https://rr1.googlevideo.com/774")),
+                ),
+            )
+        val bestYt = com.aisub.player.music.DirectMusicServiceApi.parseBestYouTubeAudioFormat(ytPlayerResp)
+        assertNotNull(bestYt)
+        assertEquals("https://rr1.googlevideo.com/774", bestYt!!.url)
+        assertEquals("256k Opus", bestYt.qualityLabel)
+        assertEquals(223_000L, bestYt.durationMs)
+
+        // 3. 网易云音乐无损 FLAC / 320k 直链响应解析
+        val neFlacResp = JSONObject().put(
+            "data",
+            JSONArray().put(
+                JSONObject()
+                    .put("url", "http://m8.music.126.net/song.flac")
+                    .put("level", "lossless")
+                    .put("br", 999000)
+                    .put("time", 269000L),
+            ),
+        )
+        val neStream = com.aisub.player.music.DirectMusicServiceApi.parseNetEasePlayerUrlResponse(neFlacResp)
+        assertNotNull(neStream)
+        assertEquals("https://m8.music.126.net/song.flac", neStream!!.url)
+        assertEquals("无损 FLAC", neStream.qualityLabel)
+        assertEquals(269_000L, neStream.durationMs)
+
+        // 4. QQ音乐 Cookie 解析与 vkey 响应优先级（跳过空 purl，拼接 sip）
+        val (qqUin, qqKey) = com.aisub.player.music.DirectMusicServiceApi.extractQqUinAndKey("p_uin=o012345678; qm_keyst=Q_H_L_testkey")
+        assertEquals("12345678", qqUin)
+        assertEquals("Q_H_L_testkey", qqKey)
+
+        val qqVkeyResp = JSONObject().put(
+            "req_0",
+            JSONObject().put(
+                "data",
+                JSONObject()
+                    .put("sip", JSONArray().put("https://ws.stream.qqmusic.qq.com/"))
+                    .put(
+                        "midurlinfo",
+                        JSONArray()
+                            .put(JSONObject().put("filename", "F0000039MnYb0qxYhV.flac").put("purl", ""))
+                            .put(JSONObject().put("filename", "M8000039MnYb0qxYhV.mp3").put("purl", "M8000039MnYb0qxYhV.mp3?guid=10000&vkey=XYZ")),
+                    ),
+            ),
+        )
+        val qqStream = com.aisub.player.music.DirectMusicServiceApi.parseQqVkeyResponse(qqVkeyResp)
+        assertNotNull(qqStream)
+        assertEquals("https://ws.stream.qqmusic.qq.com/M8000039MnYb0qxYhV.mp3?guid=10000&vkey=XYZ", qqStream!!.url)
+        assertEquals("HQ 320k", qqStream.qualityLabel)
+    }
 }

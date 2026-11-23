@@ -21,6 +21,9 @@ enum class MusicSourceKind {
     SERVER,
     APPLE_MUSIC,
     SPOTIFY,
+    YOUTUBE_MUSIC,
+    NETEASE_MUSIC,
+    QQ_MUSIC,
 }
 
 enum class WebMusicService(
@@ -46,6 +49,30 @@ enum class WebMusicService(
         accentHex = 0xFF1DB954,
         homeUrl = "https://open.spotify.com/",
         uriScheme = "spotify",
+    ),
+    YOUTUBE_MUSIC(
+        sourceKind = MusicSourceKind.YOUTUBE_MUSIC,
+        label = "YouTube Music",
+        badge = "YT",
+        accentHex = 0xFFFF0000,
+        homeUrl = "https://music.youtube.com/",
+        uriScheme = "ytmusic",
+    ),
+    NETEASE_MUSIC(
+        sourceKind = MusicSourceKind.NETEASE_MUSIC,
+        label = "网易云音乐",
+        badge = "云",
+        accentHex = 0xFFE60026,
+        homeUrl = "https://music.163.com/",
+        uriScheme = "neteasemusic",
+    ),
+    QQ_MUSIC(
+        sourceKind = MusicSourceKind.QQ_MUSIC,
+        label = "QQ音乐",
+        badge = "QQ",
+        accentHex = 0xFF12B775,
+        homeUrl = "https://y.qq.com/",
+        uriScheme = "qqmusic",
     ),
     ;
 
