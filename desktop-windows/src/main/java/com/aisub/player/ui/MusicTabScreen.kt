@@ -950,7 +950,7 @@ private fun StructuredServerMusicContent(
                     subTab == 0 -> MusicSourceStore.loadServerTracks(client, sectionKey)
                     subTab == 1 -> MusicSourceStore.loadServerAlbums(client, sectionKey)
                     subTab == 2 -> MusicSourceStore.loadServerArtists(client, sectionKey)
-                    else -> MusicSourceStore.loadServerPlaylists(client)
+                    else -> MusicSourceStore.loadServerPlaylists(client, sectionKey)
                 }
             }
         }.onSuccess { list ->
@@ -996,12 +996,18 @@ private fun StructuredServerMusicContent(
         val childPlayable = remember(items, server.id) {
             items.filter { it.playUrl != null }.mapNotNull { it.toMusicMediaEntry(server.id, topContainer.title) }
         }
-        DrilldownHeader(
-            title = topContainer.title,
-            subtitle = listOfNotNull(topContainer.grandparentTitle, topContainer.parentTitle, topContainer.year?.toString())
+        val headerSub = when (topContainer.type) {
+            "playlist" -> listOfNotNull(
+                (childPlayable.size.takeIf { it > 0 } ?: topContainer.leafCount.takeIf { it > 0 })?.let { "$it 首歌曲" },
+                topContainer.summary.trim().replace(Regex("\\s+"), " ").takeIf { it.isNotEmpty() },
+            ).joinToString(" · ")
+            else -> listOfNotNull(topContainer.grandparentTitle, topContainer.parentTitle, topContainer.year?.toString())
                 .filter { it.isNotBlank() }
                 .joinToString(" · ")
-                .ifBlank { server.name },
+        }.ifBlank { server.name }
+        DrilldownHeader(
+            title = topContainer.title,
+            subtitle = headerSub,
             onBack = { if (containerStack.isNotEmpty()) containerStack.removeAt(containerStack.lastIndex) },
             onPlayAll = if (childPlayable.isNotEmpty()) ({ onPlayQueue(childPlayable, 0) }) else null,
         )
@@ -1023,8 +1029,17 @@ private fun StructuredServerMusicContent(
             )
         }
         items.isEmpty() -> DarkLibraryEmptyBox(
-            title = if (query.isNotEmpty()) "没有找到匹配「$query」的音乐" else "该分类下暂无音乐内容",
-            subtitle = "请确认 ${server.name} 中已建立音乐媒体库",
+            title = when {
+                query.isNotEmpty() -> "没有找到匹配「$query」的音乐"
+                topContainer?.type == "playlist" -> "该歌单里还没有歌曲"
+                topContainer != null -> "该条目下暂无可播放曲目"
+                else -> "该分类下暂无音乐内容"
+            },
+            subtitle = when {
+                query.isNotEmpty() -> ""
+                topContainer != null -> topContainer.summary.trim().ifBlank { "可在 ${server.name} 中向此${if (topContainer.type == "playlist") "歌单" else "条目"}添加音乐" }
+                else -> "请确认 ${server.name} 中已建立音乐媒体库"
+            },
         )
         else -> {
             val containers = remember(items) { items.filter { it.isFolder && it.playUrl == null } }
@@ -1040,10 +1055,11 @@ private fun StructuredServerMusicContent(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 items(containers, key = { "c:${it.ratingKey}" }) { c ->
+                    val cleanSummary = c.summary.trim().replace(Regex("\\s+"), " ").takeIf { it.isNotEmpty() }
                     val sub = when (c.type) {
                         "album" -> listOfNotNull(c.parentTitle, c.year?.toString(), c.leafCount.takeIf { it > 0 }?.let { "$it 首" }).joinToString(" · ")
-                        "artist" -> listOfNotNull(c.childCount.takeIf { it > 0 }?.let { "$it 张专辑" }, c.summary.takeIf { it.isNotBlank() }).joinToString(" · ")
-                        "playlist" -> listOfNotNull(c.leafCount.takeIf { it > 0 }?.let { "$it 首歌曲" }, c.summary.takeIf { it.isNotBlank() }).joinToString(" · ")
+                        "artist" -> listOfNotNull(c.childCount.takeIf { it > 0 }?.let { "$it 张专辑" }, cleanSummary).joinToString(" · ")
+                        "playlist" -> listOfNotNull(c.leafCount.takeIf { it > 0 }?.let { "$it 首歌曲" }, cleanSummary).joinToString(" · ")
                         else -> c.parentTitle.orEmpty()
                     }
                     DarkServerContainerRow(
@@ -1487,7 +1503,8 @@ private fun DrilldownHeader(
         Column(Modifier.weight(1f)) {
             Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (subtitle.isNotEmpty()) {
-                Text(subtitle, color = Color(0x99FFFFFF), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(2.dp))
+                Text(subtitle, color = Color(0x99FFFFFF), fontSize = 12.sp, lineHeight = 16.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
             }
         }
         if (onPlayAll != null) {
@@ -1601,6 +1618,7 @@ private fun DarkServerContainerRow(
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(12.dp)
+    val subtitleMaxLines = if (item.type == "playlist") 5 else 2
     Row(
         Modifier
             .fillMaxWidth()
@@ -1608,7 +1626,7 @@ private fun DarkServerContainerRow(
             .clip(shape)
             .background(Color(0x1FFFFFFF))
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -1629,9 +1647,18 @@ private fun DarkServerContainerRow(
         Column(Modifier.weight(1f)) {
             Text(item.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (subtitle.isNotBlank()) {
-                Text(subtitle, color = Color(0x99FFFFFF), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    subtitle,
+                    color = Color(0x99FFFFFF),
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    maxLines = subtitleMaxLines,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
+        Spacer(Modifier.width(6.dp))
         Icon(AppIcons.ChevronRight, null, tint = Color(0x88FFFFFF), modifier = Modifier.size(20.dp))
     }
 }

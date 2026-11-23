@@ -47,8 +47,19 @@ class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
                 val started = System.currentTimeMillis()
                 val json = probeHttp.newCall(req).execute().use { resp ->
                     android.util.Log.d("Voxtitle", "Plex ${path.substringBefore('?')} → ${resp.code}，${System.currentTimeMillis() - started}ms")
-                    if (resp.code == 401) throw IOException("Plex 登录已失效，请重新登录")
-                    if (!resp.isSuccessful) throw IOException("Plex 请求失败 HTTP ${resp.code}")
+                    if (resp.code == 401) throw PlexHttpError(401, "Plex 登录已失效，请重新登录")
+                    if (!resp.isSuccessful) {
+                        // 服务器已正常响应（含 X-Plex-Protocol 头）但返回 400/404：说明连接畅通、仅该条目/媒体库已失效，无需轮询其他地址
+                        if (resp.header("X-Plex-Protocol") != null && resp.code in setOf(400, 404)) {
+                            if (base != baseUrl) {
+                                baseUrl = base
+                                creds.put("base", base)
+                                saveCreds()
+                            }
+                            throw PlexHttpError(resp.code, "该内容在 Plex 服务器上不存在或已失效（HTTP ${resp.code}）")
+                        }
+                        throw IOException("Plex 请求失败 HTTP ${resp.code}")
+                    }
                     resp.json()
                 }
                 if (base != baseUrl) {
@@ -57,8 +68,9 @@ class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
                     saveCreds()
                 }
                 return json.optJSONObject("MediaContainer") ?: JSONObject()
+            } catch (e: PlexHttpError) {
+                throw e
             } catch (e: IOException) {
-                if (e.message?.contains("登录已失效") == true) throw e
                 last = e
             }
         }
@@ -268,12 +280,117 @@ class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
             .optJSONArray("Metadata").objects().map(::item)
     }
 
-    suspend fun musicPlaylists(): List<ServerItem> = withContext(Dispatchers.IO) {
-        get("/playlists?playlistType=audio").optJSONArray("Metadata").objects().map(::item)
+    suspend fun musicPlaylists(
+        sectionKey: String? = null,
+        validSectionKeys: Set<String>? = null,
+    ): List<ServerItem> = withContext(Dispatchers.IO) {
+        val allRaw = get("/playlists?playlistType=audio").optJSONArray("Metadata").objects()
+        if (allRaw.isEmpty()) return@withContext emptyList()
+
+        val manual = allRaw.filter { !it.optBoolean("smart") }
+        val allSmart = allRaw.filter { it.optBoolean("smart") }
+        if (allSmart.isEmpty()) return@withContext manual.map(::item)
+
+        // Plex 每建一个音乐媒体库都会自动生成 All Music、❤️ Tracks、Fresh ❤️ 等智能歌单，且删除旧音乐库后数据库常残留孤儿智能歌单。
+        // 先按当前选中的 sectionID 请求；若服务端未按 sectionID 缩小范围、或仍存在同名重复，再读取歌单详情里的 content 路径精确核对所属媒体库。
+        val scopedSmart = if (!sectionKey.isNullOrBlank()) {
+            runCatching {
+                get("/playlists/all?playlistType=audio&sectionID=$sectionKey")
+                    .optJSONArray("Metadata").objects()
+                    .filter { it.optBoolean("smart") }
+            }.getOrNull()?.takeIf { it.isNotEmpty() }
+        } else {
+            null
+        }
+
+        val candidates = scopedSmart ?: allSmart
+        val scopedNarrowed = scopedSmart != null && scopedSmart.size < allSmart.size
+        val hasDuplicateSmartTitles = candidates.groupBy { it.optString("title") }.any { it.value.size > 1 }
+        val needDetailCheck = !scopedNarrowed || hasDuplicateSmartTitles || !validSectionKeys.isNullOrEmpty()
+
+        val validSmart = ArrayList<JSONObject>()
+        for (m in candidates) {
+            var secId = extractPlaylistSectionId(m)
+            var resolved = m
+            if (secId == null && needDetailCheck) {
+                val rk = m.optString("ratingKey")
+                if (rk.isNotEmpty()) {
+                    val detail = runCatching {
+                        get("/playlists/$rk").optJSONArray("Metadata").objects().firstOrNull()
+                    }.getOrNull() ?: continue
+                    resolved = detail
+                    secId = extractPlaylistSectionId(detail)
+                }
+            }
+            if (secId != null) {
+                if (!validSectionKeys.isNullOrEmpty() && secId !in validSectionKeys) continue
+                if (!sectionKey.isNullOrBlank() && secId != sectionKey) continue
+            }
+            validSmart += resolved
+        }
+
+        // 若仍有无法从 content 提取 sectionID 的同名智能歌单，探测首条曲目剔除 404 或数量虚标的残留歌单
+        val duplicateTitles = validSmart.groupBy { it.optString("title") }.filterValues { it.size > 1 }.keys
+        val cleanedSmart = if (duplicateTitles.isEmpty()) {
+            validSmart
+        } else {
+            validSmart.filter { m ->
+                if (m.optString("title") !in duplicateTitles) return@filter true
+                val rk = m.optString("ratingKey")
+                val probe = runCatching {
+                    get("/playlists/$rk/items?X-Plex-Container-Start=0&X-Plex-Container-Size=1")
+                }.getOrNull() ?: return@filter false
+                val probeCount = probe.optJSONArray("Metadata")?.length() ?: 0
+                !(m.optInt("leafCount") > 0 && probeCount == 0)
+            }
+        }
+
+        val allowedSmartKeys = cleanedSmart.associateBy { it.optString("ratingKey") }
+        val merged = ArrayList<ServerItem>(manual.size + cleanedSmart.size)
+        val seen = HashSet<String>()
+        for (m in allRaw) {
+            val rk = m.optString("ratingKey")
+            if (rk.isEmpty() || !seen.add(rk)) continue
+            if (m.optBoolean("smart")) {
+                val target = allowedSmartKeys[rk] ?: continue
+                merged += item(target)
+            } else {
+                merged += item(m)
+            }
+        }
+        for ((rk, target) in allowedSmartKeys) {
+            if (seen.add(rk)) merged += item(target)
+        }
+        merged
     }
 
-    suspend fun playlistTracks(ratingKey: String): List<ServerItem> = withContext(Dispatchers.IO) {
-        get("/playlists/$ratingKey/items").optJSONArray("Metadata").objects().map(::item)
+    suspend fun playlistTracks(ratingKey: String, maxItems: Int = 10_000): List<ServerItem> = withContext(Dispatchers.IO) {
+        val pageSize = 500
+        val out = ArrayList<ServerItem>()
+        var start = 0
+        var firstKey: String? = null
+        while (start < maxItems) {
+            val container = get(
+                "/playlists/$ratingKey/items?excludeElements=Genre,Director,Writer,Role,Country,Similar,Mood,Style" +
+                    "&X-Plex-Container-Start=$start&X-Plex-Container-Size=$pageSize",
+            )
+            val batch = container.optJSONArray("Metadata").objects()
+            if (batch.isEmpty()) break
+            val batchFirst = batch.first().optString("ratingKey")
+            if (start == 0) {
+                firstKey = batchFirst
+            } else if (batchFirst.isNotEmpty() && batchFirst == firstKey && container.optInt("offset", -1) == 0) {
+                // 兼容极少数忽略分页参数一次性返回全部条目的服务端实现，避免重复拼接
+                break
+            }
+            out.ensureCapacity(out.size + batch.size)
+            batch.mapTo(out, ::item)
+            if (batch.size != pageSize) break
+            val total = container.optInt("totalSize", -1)
+            start += batch.size
+            if (total in 0..start) break
+        }
+        out
     }
 
     suspend fun searchMusic(query: String): List<ServerItem> = withContext(Dispatchers.IO) {
@@ -327,8 +444,11 @@ class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
         val duration = m.optLong("duration")
         val offset = m.optLong("viewOffset")
         val wide = type == "episode" || type == "clip"
-        val thumbUrl = if (wide) photo(m.optString("thumb"), 480, 270)
-        else photo(m.optString("thumb").ifEmpty { m.optString("parentThumb").ifEmpty { m.optString("grandparentThumb") } }, 450, 450)
+        val rawThumb = m.optString("thumb")
+            .ifEmpty { m.optString("composite") }
+            .ifEmpty { m.optString("parentThumb") }
+            .ifEmpty { m.optString("grandparentThumb") }
+        val thumbUrl = if (wide) photo(m.optString("thumb"), 480, 270) else photo(rawThumb, 450, 450)
         playUrl?.let {
             ServerProgress.register(it, ServerProgress.Entry(
                 server.id, rk, duration, offset, title = title,
@@ -378,8 +498,24 @@ class PlexClient(server: Server) : CloudClient(server), MediaBrowser {
         return ResolvedLink("$baseUrl$fileRef?X-Plex-Token=$token", validMs = 24 * 60 * 60_000L)
     }
 
+    private class PlexHttpError(val code: Int, message: String) : IOException(message)
+
     companion object {
         private val FOLDER_TYPES = setOf("show", "season", "artist", "album", "collection", "photo")
+        private val SECTION_PATH_REGEX = Regex("""/library/sections/(\d+)(?:/|\?|$)""")
+
+        /** 从智能歌单的 librarySectionID 或 content 过滤 URI（server://.../library/sections/<id>/...）中提取所属媒体库编号 */
+        internal fun extractPlaylistSectionId(m: JSONObject): String? {
+            val direct = m.optString("librarySectionID").trim()
+            if (direct.isNotEmpty() && direct != "0" && direct != "null") return direct
+            val raw = m.optString("content").trim()
+            if (raw.isEmpty()) return null
+            val decoded = runCatching {
+                java.net.URLDecoder.decode(raw.replace("+", "%2B"), "UTF-8")
+            }.getOrDefault(raw)
+            return SECTION_PATH_REGEX.find(decoded)?.groupValues?.getOrNull(1)
+                ?: SECTION_PATH_REGEX.find(raw)?.groupValues?.getOrNull(1)
+        }
 
         /** 首页各行的中文名（服务器给的名字按服务器语言，多半是英文） */
         private val HUB_TITLES = mapOf(

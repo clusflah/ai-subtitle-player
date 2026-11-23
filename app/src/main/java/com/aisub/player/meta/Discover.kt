@@ -18,10 +18,10 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
-/** 发现页条目：可来自豆瓣片单、TMDB 发现页 / 流媒体榜 / 搜索，点开后进入影视详情页。 */
+/** 发现页条目：可来自豆瓣片单、TMDB 发现页 / 流媒体榜 / 搜索，或音乐发现榜单 / 新音乐（kind == "music"）。 */
 data class DiscoverItem(
     val id: String,
-    val kind: String, // "movie" | "tv"
+    val kind: String, // "movie" | "tv" | "music"
     val title: String,
     val originalTitle: String = "",
     val year: Int? = null,
@@ -39,7 +39,15 @@ data class DiscoverItem(
     val doubanId: String? = null,
     val imdbId: String? = null,
     val platforms: List<PlatformSource> = emptyList(),
+    /** 音乐发现专用字段（影视条目保持默认空值） */
+    val artist: String = "",
+    val album: String = "",
+    val durationMs: Long = 0L,
+    val neteaseId: String? = null,
+    val appleUrl: String? = null,
 ) {
+    val isMusicItem: Boolean get() = kind == "music"
+
     /** 转为元信息流水线查询参数；详情页用它继续补齐演员、导演、Logo、来源平台与多平台评分。 */
     fun toMetaQuery(): MetaQuery = MetaQuery(
         titles = listOfNotNull(
@@ -53,15 +61,23 @@ data class DiscoverItem(
         doubanId = doubanId,
     )
 
-    /** 副标题一行摘要，形如「2026 · 日本 · 12集」或「2024 · 美国 · 科幻 / 动作」。 */
-    fun subtitleLine(): String = buildList {
-        year?.let { add(it.toString()) }
-        countries.firstOrNull()?.takeIf { it.isNotBlank() }?.let { add(it) }
-        when {
-            !episodeInfo.isNullOrBlank() -> add(episodeInfo)
-            genres.isNotEmpty() -> add(genres.take(2).joinToString(" / "))
-        }
-    }.joinToString(" · ")
+    /** 副标题一行摘要：影视形如「2026 · 日本 · 12集」；歌曲形如「歌手 · 专辑」。 */
+    fun subtitleLine(): String = if (isMusicItem) {
+        buildList {
+            artist.takeIf { it.isNotBlank() }?.let { add(it) }
+            album.takeIf { it.isNotBlank() && !it.equals(title, ignoreCase = true) }?.let { add(it) }
+            if (isEmpty() && year != null) add(year.toString())
+        }.joinToString(" · ")
+    } else {
+        buildList {
+            year?.let { add(it.toString()) }
+            countries.firstOrNull()?.takeIf { it.isNotBlank() }?.let { add(it) }
+            when {
+                !episodeInfo.isNullOrBlank() -> add(episodeInfo)
+                genres.isNotEmpty() -> add(genres.take(2).joinToString(" / "))
+            }
+        }.joinToString(" · ")
+    }
 }
 
 /** 流媒体与影视播出平台规范化目录（名称归一、品牌配色与原平台官方播放/检索跳转地址）。 */
@@ -611,7 +627,7 @@ object DiscoverRepository {
         return DiscoverChartPage(chart, items, note, obj.optBoolean("usedFallback", false))
     }
 
-    private fun encodeItemJson(item: DiscoverItem): JSONObject = JSONObject().apply {
+    internal fun encodeItemJson(item: DiscoverItem): JSONObject = JSONObject().apply {
         put("id", item.id)
         put("kind", item.kind)
         put("title", item.title)
@@ -630,6 +646,11 @@ object DiscoverRepository {
         if (item.tmdbId != null) put("tmdbId", item.tmdbId)
         if (item.doubanId != null) put("doubanId", item.doubanId)
         if (item.imdbId != null) put("imdbId", item.imdbId)
+        if (item.artist.isNotEmpty()) put("artist", item.artist)
+        if (item.album.isNotEmpty()) put("album", item.album)
+        if (item.durationMs > 0L) put("durationMs", item.durationMs)
+        if (item.neteaseId != null) put("neteaseId", item.neteaseId)
+        if (item.appleUrl != null) put("appleUrl", item.appleUrl)
         if (item.platforms.isNotEmpty()) {
             put(
                 "platforms",
@@ -645,7 +666,7 @@ object DiscoverRepository {
         }
     }
 
-    private fun decodeItemJson(obj: JSONObject): DiscoverItem? {
+    internal fun decodeItemJson(obj: JSONObject): DiscoverItem? {
         val id = obj.optString("id").trim()
         val kind = obj.optString("kind").trim()
         val title = obj.optString("title").trim()
@@ -685,6 +706,11 @@ object DiscoverRepository {
             doubanId = optStr("doubanId"),
             imdbId = optStr("imdbId"),
             platforms = platforms,
+            artist = optStr("artist").orEmpty(),
+            album = optStr("album").orEmpty(),
+            durationMs = obj.optLong("durationMs", 0L).coerceAtLeast(0L),
+            neteaseId = optStr("neteaseId"),
+            appleUrl = optStr("appleUrl"),
         )
     }
 

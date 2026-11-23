@@ -142,6 +142,8 @@ fun HomeScreen(
     val state by lib.state.collectAsStateWithLifecycle()
     val mainUi by main.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val discoverModeFlow = remember(context) { com.aisub.player.meta.DiscoverModeStore.ensureInit(context) }
+    val discoverMode by discoverModeFlow.collectAsStateWithLifecycle()
     // 标签和本机页的视频 / 音乐存在 ViewModel 里，进播放页再回来不会跳回第一个标签
     val tab = Tab.entries[lib.homeTab.coerceIn(Tab.entries.indices)]
     val localVideo = lib.localShowsVideo
@@ -255,22 +257,38 @@ fun HomeScreen(
                     Text(
                         text = when (tab) {
                             Tab.HOME -> "译幕"
+                            Tab.DISCOVER -> discoverMode.label
                             else -> tab.label
                         },
                         fontSize = if (isDiscover) 22.sp else 28.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onBackground,
-                        modifier = Modifier.weight(1f),
+                        modifier = if (isDiscover) Modifier else Modifier.weight(1f),
                     )
+                    if (isDiscover) {
+                        Spacer(Modifier.width(12.dp))
+                        DiscoverModeSwitch(
+                            mode = discoverMode,
+                            onSelect = { nextMode ->
+                                if (nextMode != discoverMode) {
+                                    discoverSearching = false
+                                    com.aisub.player.meta.DiscoverRepository.setSessionSearchExpanded(false)
+                                    com.aisub.player.meta.DiscoverModeStore.select(context, nextMode)
+                                }
+                            },
+                        )
+                        Spacer(Modifier.weight(1f))
+                    }
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(if (glass) 10.dp else 2.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         if (isDiscover) {
+                            val isMusicDiscover = discoverMode == com.aisub.player.meta.DiscoverMode.MUSIC
                             LiquidGlassIconButton(
-                                onClick = { nav.push(Screen.DiscoverAiRecommend()) },
+                                onClick = { nav.push(Screen.DiscoverAiRecommend(musicMode = isMusicDiscover)) },
                                 icon = AppIcons.AutoAwesome,
-                                contentDescription = "AI 推荐影片",
+                                contentDescription = if (isMusicDiscover) "AI 推荐音乐" else "AI 推荐影片",
                                 size = 38.dp,
                             )
                             // 发现页：搜索行缩减为右上角搜索图标，替换原有的「···」按钮
@@ -584,25 +602,44 @@ fun HomeScreen(
                     onRequestPermission = onRequestPermission,
                     onOpenAppSettings = openSettings,
                 )
-                Tab.DISCOVER -> DiscoverTab(
-                    settings = mainUi.settings,
-                    lib = lib,
-                    listState = lib.listState("discover.home"),
-                    searchExpanded = discoverSearching,
-                    onSearchExpandedChange = {
-                        discoverSearching = it
-                        com.aisub.player.meta.DiscoverRepository.setSessionSearchExpanded(it)
-                    },
-                    onOpenDetail = { nav.push(Screen.DiscoverDetail(it)) },
-                    onOpenChart = { nav.push(Screen.DiscoverChart(it)) },
-                    onOpenTelegramSearch = { nav.push(Screen.TelegramSearch(it)) },
-                    onOpenWeb = { url ->
-                        com.aisub.player.web.WebLaunch.open(url, mangaMode = false)
-                        nav.push(Screen.Web)
-                    },
-                    onOpenMagnet = { mag -> com.aisub.player.meta.MagnetLaunch.pending = mag },
-                    onOpenAiRecommend = { prompt -> nav.push(Screen.DiscoverAiRecommend(prompt)) },
-                )
+                Tab.DISCOVER -> if (discoverMode == com.aisub.player.meta.DiscoverMode.MUSIC) {
+                    MusicDiscoverTab(
+                        lib = lib,
+                        listState = lib.listState("discover.music.home"),
+                        searchExpanded = discoverSearching,
+                        onSearchExpandedChange = {
+                            discoverSearching = it
+                            com.aisub.player.meta.DiscoverRepository.setSessionSearchExpanded(it)
+                        },
+                        onOpenDetail = { nav.push(Screen.DiscoverDetail(it)) },
+                        onOpenChart = { nav.push(Screen.DiscoverChart(it)) },
+                        onOpenPlayWeb = { url ->
+                            com.aisub.player.web.WebLaunch.open(url, mangaMode = false, allowOpenApp = true)
+                            nav.push(Screen.Web)
+                        },
+                        onOpenAiRecommend = { prompt -> nav.push(Screen.DiscoverAiRecommend(prompt, musicMode = true)) },
+                    )
+                } else {
+                    DiscoverTab(
+                        settings = mainUi.settings,
+                        lib = lib,
+                        listState = lib.listState("discover.home"),
+                        searchExpanded = discoverSearching,
+                        onSearchExpandedChange = {
+                            discoverSearching = it
+                            com.aisub.player.meta.DiscoverRepository.setSessionSearchExpanded(it)
+                        },
+                        onOpenDetail = { nav.push(Screen.DiscoverDetail(it)) },
+                        onOpenChart = { nav.push(Screen.DiscoverChart(it)) },
+                        onOpenTelegramSearch = { nav.push(Screen.TelegramSearch(it)) },
+                        onOpenWeb = { url ->
+                            com.aisub.player.web.WebLaunch.open(url, mangaMode = false)
+                            nav.push(Screen.Web)
+                        },
+                        onOpenMagnet = { mag -> com.aisub.player.meta.MagnetLaunch.pending = mag },
+                        onOpenAiRecommend = { prompt -> nav.push(Screen.DiscoverAiRecommend(prompt, musicMode = false)) },
+                    )
+                }
                 Tab.BROWSE -> BrowseTab(
                     state = state,
                     onRequestPermission = onRequestPermission,

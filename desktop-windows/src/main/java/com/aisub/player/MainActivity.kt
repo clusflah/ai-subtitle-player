@@ -336,6 +336,10 @@ class MainActivity : ComponentActivity() {
                                 while (nav.stack.size > 1) nav.pop()
                                 nav.push(Screen.LocalFolder("", "用户目录"))
                             },
+                            onOpenMusicLibrary = {
+                                lib.homeTab = 3 // Tab.MUSIC
+                                while (nav.stack.size > 1) nav.pop()
+                            },
                             onOpenCustomItem = { libId, itemId ->
                                 nav.push(Screen.CustomLibraryItem(libId, itemId))
                             },
@@ -355,6 +359,7 @@ class MainActivity : ComponentActivity() {
                         )
                         is Screen.DiscoverAiRecommend -> com.aisub.player.ui.DiscoverAiRecommendScreen(
                             initialPrompt = screen.initialPrompt,
+                            musicMode = screen.musicMode,
                             settings = ui.settings,
                             lib = lib,
                             onBack = back,

@@ -1182,6 +1182,14 @@ fun DiscoverChartScreen(
     onOpenSettings: () -> Unit,
     onOpenWeb: (String) -> Unit,
 ) {
+    if (initialChartId != null && com.aisub.player.meta.MusicDiscoverCharts.findChart(initialChartId) != null) {
+        MusicDiscoverChartScreen(
+            initialChartId = initialChartId,
+            onBack = onBack,
+            onOpenDetail = onOpenDetail,
+        )
+        return
+    }
     var selectedChartId by rememberSaveable(initialChartId) {
         mutableStateOf(initialChartId ?: DiscoverCharts.allCharts.first().id)
     }
@@ -1329,10 +1337,28 @@ fun DiscoverDetailScreen(
     onOpenServerDetail: (serverId: String, ratingKey: String) -> Unit = { _, _ -> },
     onOpenRemote: (server: Server, path: String, title: String) -> Unit = { _, _, _ -> },
     onOpenLocalLibrary: () -> Unit = {},
+    onOpenMusicLibrary: () -> Unit = onOpenLocalLibrary,
     onOpenCustomItem: (libraryId: String, itemId: String) -> Unit = { _, _ -> },
     onUpdateSettings: ((AppSettings) -> Unit)? = null,
     onSelectWork: (DiscoverItem) -> Unit = {},
 ) {
+    if (item.isMusicItem) {
+        MusicDiscoverDetailScreen(
+            item = item,
+            settings = settings,
+            lib = lib,
+            onBack = onBack,
+            play = play,
+            onOpenPlayWeb = onOpenPlayWeb,
+            onOpenSettings = onOpenSettings,
+            onOpenServerDetail = onOpenServerDetail,
+            onOpenRemote = onOpenRemote,
+            onOpenMusicLibrary = onOpenMusicLibrary,
+            onUpdateSettings = onUpdateSettings,
+            onSelectSong = onSelectWork,
+        )
+        return
+    }
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val libState by lib.state.collectAsStateWithLifecycle()
@@ -2232,7 +2258,7 @@ private fun DiscoverPlaySourceDialog(
 }
 
 @Composable
-private fun PlayOptionRow(
+internal fun PlayOptionRow(
     title: String,
     subtitle: String,
     actionText: String,
@@ -2487,7 +2513,7 @@ private fun DiscoverResourceSearchDialog(
 }
 
 @Composable
-private fun DiscoverQuickJumpButton(
+internal fun DiscoverQuickJumpButton(
     icon: ImageVector,
     label: String,
     accent: Boolean = false,
@@ -2937,6 +2963,7 @@ private val AI_DISCOVER_PRESETS = listOf(
 @Composable
 fun DiscoverAiRecommendScreen(
     initialPrompt: String = "",
+    musicMode: Boolean = false,
     settings: AppSettings,
     lib: LibraryViewModel,
     onBack: () -> Unit,
@@ -2944,6 +2971,18 @@ fun DiscoverAiRecommendScreen(
     onOpenSettings: () -> Unit,
     onUpdateSettings: ((AppSettings) -> Unit)? = null,
 ) {
+    if (musicMode) {
+        MusicDiscoverAiRecommendScreen(
+            initialPrompt = initialPrompt,
+            settings = settings,
+            lib = lib,
+            onBack = onBack,
+            onOpenDetail = onOpenDetail,
+            onOpenSettings = onOpenSettings,
+            onUpdateSettings = onUpdateSettings,
+        )
+        return
+    }
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val wide = LocalWideLayout.current

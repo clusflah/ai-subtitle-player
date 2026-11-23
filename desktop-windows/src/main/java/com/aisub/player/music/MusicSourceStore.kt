@@ -154,10 +154,17 @@ object MusicSourceStore {
         else -> emptyList()
     }
 
+    private suspend fun resolvePlexMusicSection(client: PlexClient, preferredKey: String?): Pair<String?, Set<String>> {
+        val secs = discoverMusicSections(client)
+        val valid = secs.map { it.key }.toSet()
+        val chosen = preferredKey?.takeIf { it in valid } ?: secs.firstOrNull()?.key
+        return chosen to valid
+    }
+
     suspend fun loadServerTracks(client: RemoteClient, sectionKey: String?): List<ServerItem> = when (client) {
         is SubsonicClient -> client.musicTracks(sectionKey)
         is PlexClient -> {
-            val sec = sectionKey ?: discoverMusicSections(client).firstOrNull()?.key ?: return emptyList()
+            val sec = resolvePlexMusicSection(client, sectionKey).first ?: return emptyList()
             client.musicTracks(sec)
         }
         is EmbyClient -> {
@@ -170,7 +177,7 @@ object MusicSourceStore {
     suspend fun loadServerAlbums(client: RemoteClient, sectionKey: String?): List<ServerItem> = when (client) {
         is SubsonicClient -> client.musicAlbums(musicFolderId = sectionKey)
         is PlexClient -> {
-            val sec = sectionKey ?: discoverMusicSections(client).firstOrNull()?.key ?: return emptyList()
+            val sec = resolvePlexMusicSection(client, sectionKey).first ?: return emptyList()
             client.musicAlbums(sec)
         }
         is EmbyClient -> {
@@ -183,7 +190,7 @@ object MusicSourceStore {
     suspend fun loadServerArtists(client: RemoteClient, sectionKey: String?): List<ServerItem> = when (client) {
         is SubsonicClient -> client.musicArtists(musicFolderId = sectionKey)
         is PlexClient -> {
-            val sec = sectionKey ?: discoverMusicSections(client).firstOrNull()?.key ?: return emptyList()
+            val sec = resolvePlexMusicSection(client, sectionKey).first ?: return emptyList()
             client.musicArtists(sec)
         }
         is EmbyClient -> {
@@ -193,9 +200,12 @@ object MusicSourceStore {
         else -> emptyList()
     }
 
-    suspend fun loadServerPlaylists(client: RemoteClient): List<ServerItem> = when (client) {
+    suspend fun loadServerPlaylists(client: RemoteClient, sectionKey: String? = null): List<ServerItem> = when (client) {
         is SubsonicClient -> client.musicPlaylists()
-        is PlexClient -> client.musicPlaylists()
+        is PlexClient -> {
+            val (sec, valid) = resolvePlexMusicSection(client, sectionKey)
+            client.musicPlaylists(sectionKey = sec, validSectionKeys = valid)
+        }
         is EmbyClient -> client.musicPlaylists()
         else -> emptyList()
     }
