@@ -137,6 +137,8 @@ fun MusicTabScreen(
     onOpenAppSettings: () -> Unit,
 ) {
     val context = LocalContext.current
+    val tv = LocalTv.current
+    val isLandscape = LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE || tv
     val scope = rememberCoroutineScope()
     val libState by lib.state.collectAsStateWithLifecycle()
     val mainState by main.state.collectAsStateWithLifecycle()
@@ -262,12 +264,18 @@ fun MusicTabScreen(
         }
     }
 
+    val jumpToPage: (Int) -> Unit = { targetPage ->
+        scope.launch {
+            if (tv) pager.scrollToPage(targetPage) else pager.animateScrollToPage(targetPage)
+        }
+    }
+
     val startQueuePlayback: (List<MediaEntry>, Int, Boolean) -> Unit = { queue, index, switchToVinyl ->
         if (queue.isNotEmpty()) {
             val safeIdx = index.coerceIn(queue.indices)
             main.play(queue, safeIdx)
             if (switchToVinyl && pager.currentPage != 0) {
-                scope.launch { pager.animateScrollToPage(0) }
+                jumpToPage(0)
             }
         }
     }
@@ -288,7 +296,7 @@ fun MusicTabScreen(
                 startQueuePlayback(queue, idx, false)
             }
             effectiveSpec.isLocal && !libState.hasPermission -> onRequestPermission()
-            else -> scope.launch { pager.animateScrollToPage(2) }
+            else -> jumpToPage(2)
         }
     }
 
@@ -349,7 +357,7 @@ fun MusicTabScreen(
                         addServerFlow = if (srv.type.isCloud) AddMusicServerFlow.Cloud(srv.type, srv) else AddMusicServerFlow.Storage(srv)
                     },
                     onOpenLocalFilter = { activeDialog = MusicTabDialog.LOCAL_FILTER },
-                    onPlayQueue = { queue, idx -> startQueuePlayback(queue, idx, true) },
+                    onPlayQueue = { queue, idx -> startQueuePlayback(queue, idx, !isLandscape) },
                     onTracksLoaded = { loaded ->
                         if (!effectiveSpec.isLocal && loaded.isNotEmpty()) {
                             cachedRemoteTracks = loaded
@@ -424,7 +432,7 @@ fun MusicTabScreen(
                     if (svc in loggedInWebServices) {
                         MusicSourceStore.selectWebService(context, svc)
                         reloadNonce++
-                        scope.launch { pager.animateScrollToPage(2) }
+                        jumpToPage(2)
                         showToast("已切换音乐源：${svc.label}")
                     } else {
                         loginWebService = svc
@@ -450,7 +458,7 @@ fun MusicTabScreen(
                     reloadNonce++
                     showSourceSettings = false
                     if (!MusicSourceStore.isStructuredMusicServer(srv.type) && folderPath.isEmpty()) {
-                        scope.launch { pager.animateScrollToPage(2) }
+                        jumpToPage(2)
                     }
                     showToast("已切换音乐源：${customLabel ?: srv.name}")
                 },
@@ -496,7 +504,7 @@ fun MusicTabScreen(
                 loginWebService = null
                 MusicSourceStore.selectWebService(context, targetService)
                 reloadNonce++
-                scope.launch { pager.animateScrollToPage(2) }
+                jumpToPage(2)
                 showToast("${targetService.label} 登录成功，已切换为当前音源")
             },
         )
@@ -516,7 +524,7 @@ fun MusicTabScreen(
                 }
                 reloadNonce++
                 addServerFlow = null
-                scope.launch { pager.animateScrollToPage(2) }
+                jumpToPage(2)
                 showToast(if (flow.existing != null) "已重新登录 ${saved.name}" else "已接入并切换至 ${saved.name}")
             },
         )
@@ -531,7 +539,7 @@ fun MusicTabScreen(
                 }
                 reloadNonce++
                 addServerFlow = null
-                scope.launch { pager.animateScrollToPage(2) }
+                jumpToPage(2)
                 showToast("已更新 ${saved.name}")
             },
         )
@@ -751,7 +759,10 @@ private fun MusicLibraryBrowser(
                     },
                 )
                 if (searchQuery.isNotEmpty()) {
-                    IconButton(onClick = { searchQuery = "" }, modifier = Modifier.size(30.dp)) {
+                    IconButton(
+                        onClick = { searchQuery = "" },
+                        modifier = Modifier.size(30.dp).tvFocusRing(CircleShape, color = Color.White),
+                    ) {
                         Icon(AppIcons.Close, "清除", tint = Color(0xCCFFFFFF), modifier = Modifier.size(16.dp))
                     }
                 }
@@ -763,6 +774,7 @@ private fun MusicLibraryBrowser(
                 },
                 modifier = Modifier
                     .size(42.dp)
+                    .tvFocusRing(CircleShape, color = Color.White)
                     .liquidGlass(shape = CircleShape, style = GlassStyle.Pill, tint = Color(0x28FFFFFF)),
             ) {
                 Icon(AppIcons.Refresh, "刷新", tint = Color.White, modifier = Modifier.size(19.dp))
@@ -2348,11 +2360,13 @@ private fun SourceOptionRow(
     onClick: () -> Unit,
 ) {
     val c = LocalPopupColors.current
+    val rowShape = RoundedCornerShape(12.dp)
     Row(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 6.dp, vertical = 2.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .tvFocusRing(rowShape)
+            .clip(rowShape)
             .background(if (selected) c.selectedBg else Color.Transparent)
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 10.dp),
@@ -2381,6 +2395,7 @@ private fun SourceOptionRow(
             Spacer(Modifier.width(8.dp))
             Box(
                 Modifier
+                    .tvFocusRing(RoundedCornerShape(50))
                     .clip(RoundedCornerShape(50))
                     .background(c.button)
                     .clickable(onClick = onTrailingAction)
@@ -2408,9 +2423,11 @@ private fun QuickAddSourceChip(
     onClick: () -> Unit,
 ) {
     val c = LocalPopupColors.current
+    val chipShape = RoundedCornerShape(12.dp)
     Row(
         Modifier
-            .clip(RoundedCornerShape(12.dp))
+            .tvFocusRing(chipShape)
+            .clip(chipShape)
             .background(c.button)
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 8.dp),
@@ -2432,6 +2449,7 @@ private fun SettingToggleItem(
     Row(
         Modifier
             .fillMaxWidth()
+            .tvFocusRing(RoundedCornerShape(12.dp))
             .clickable { onCheckedChange(!checked) }
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -2453,6 +2471,7 @@ private fun SimpleSheetActionRow(
     Row(
         Modifier
             .fillMaxWidth()
+            .tvFocusRing(RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,

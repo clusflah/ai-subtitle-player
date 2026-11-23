@@ -82,9 +82,9 @@ class VlcAudioBridge {
         val h = nativeHandle
         if (h == 0L) return "libVLC 默认"
         return when (nativeActiveBackend(h)) {
-            1 -> "AAudio C++ 防欠载直出"
-            2 -> "AudioTrack（-180ms 唇形同步补偿）"
-            else -> if (isAAudioSupported()) "AAudio 待命" else "AudioTrack 待命（-180ms 补偿）"
+            1 -> "AAudio C++ 异步环形缓冲直出"
+            2 -> "AudioTrack 异步环形缓冲输出"
+            else -> if (isAAudioSupported()) "AAudio 待命" else "AudioTrack 待命"
         }
     }
 

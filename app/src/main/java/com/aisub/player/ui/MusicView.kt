@@ -176,7 +176,8 @@ fun MusicView(
     val effectiveEntry = current?.takeIf { activeMusic && !it.isVideo && !it.isLive }
     val effectiveWantsPlay = activeMusic && wantsPlay
     val config = LocalConfiguration.current
-    val landscape = config.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val tv = LocalTv.current
+    val landscape = config.orientation == Configuration.ORIENTATION_LANDSCAPE || tv
     val screenH = config.screenHeightDp.dp
     val scope = rememberCoroutineScope()
     val pageCount = if (libraryTabContent != null) 3 else 2
@@ -202,12 +203,12 @@ fun MusicView(
     val translations = if (!activeMusic) null else if (music.lyrics != null) music.translations else remember(cues) {
         cues.sortedBy { it.startMs }.map { it.translation }.takeIf { t -> t.any { it != null } }
     }
-    // 播放满 3 秒无操作时自动隐藏顶部栏与底部按钮行；暂停、拖动进度或轻点屏幕立即恢复显示
+    // 播放满 3 秒无操作时自动隐藏顶部栏与底部按钮行（TV 遥控器交互下保持控件常显，防止焦点丢失跳动）
     var touches by remember { mutableIntStateOf(0) }
     var seekDragging by remember { mutableStateOf(false) }
     var barsVisible by remember { mutableStateOf(true) }
-    LaunchedEffect(pager.currentPage, touches, effectiveWantsPlay, showMenu, showQueue, seekDragging, externalHoldVisible, onLibraryPage) {
-        if (onLibraryPage) {
+    LaunchedEffect(pager.currentPage, touches, effectiveWantsPlay, showMenu, showQueue, seekDragging, externalHoldVisible, onLibraryPage, tv) {
+        if (onLibraryPage || tv) {
             barsVisible = true
             return@LaunchedEffect
         }
@@ -248,7 +249,7 @@ fun MusicView(
         Box(Modifier.fillMaxSize()) {
             Backdrop(displayCover)
         }
-        val immersive = !barsVisible && !onLibraryPage
+        val immersive = !barsVisible && !onLibraryPage && !tv
         val immersiveVinyl = immersive && !onLyricsPage
         val vinylWidthFraction by animateFloatAsState(
             targetValue = when {
@@ -316,13 +317,19 @@ fun MusicView(
                         showLibraryTab = libraryTabContent != null,
                         onBack = onBack,
                         trailingContent = topTrailingContent,
-                    ) {
+                    ) { targetPage ->
                         touches++
-                        scope.launch { pager.animateScrollToPage(it) }
+                        scope.launch {
+                            if (tv) pager.scrollToPage(targetPage) else pager.animateScrollToPage(targetPage)
+                        }
                     }
                 }
                 val vinylVisible = pager.currentPage == 0 || pager.targetPage == 0
-                HorizontalPager(pager, Modifier.weight(1f).fillMaxWidth(), beyondViewportPageCount = 1) { page ->
+                HorizontalPager(
+                    state = pager,
+                    modifier = Modifier.weight(1f).fillMaxWidth().graphicsLayer { clip = true },
+                    userScrollEnabled = !tv,
+                ) { page ->
                     when (page) {
                         LYRICS_PAGE -> LyricsPage(
                             vm, music, lyrics, translations, positionMs, onSeek, onAction, onMessage,
@@ -413,7 +420,9 @@ fun MusicView(
                         onQueue = {
                             touches++
                             if (activeMusic && vm.queueSize > 0) showQueue = true
-                            else if (libraryTabContent != null) scope.launch { pager.animateScrollToPage(LIBRARY_PAGE) }
+                            else if (libraryTabContent != null) scope.launch {
+                                if (tv) pager.scrollToPage(LIBRARY_PAGE) else pager.animateScrollToPage(LIBRARY_PAGE)
+                            }
                         },
                     )
                 }
@@ -424,8 +433,9 @@ fun MusicView(
             .let { if (applyNavigationBarInset) it.navigationBarsPadding() else it }
             .padding(bottom = bottomOverlayPadding)
         if (landscape) {
+            // 横屏与 TV 下左侧 Pager 宽度保持恒定，严禁随 pager.currentPage 动态跳变，彻底消除 Pager 重测导致的 60Hz 抖动重叠
             Row(insetMod.padding(horizontal = landscapeOuterPad)) {
-                pages(Modifier.weight(if (onLibraryPage) 1.25f else 1f).fillMaxHeight())
+                pages(Modifier.weight(if (libraryTabContent != null) 1.25f else 1f).fillMaxHeight())
                 controls(Modifier.weight(1f).align(Alignment.CenterVertically).padding(bottom = controlsBottomPad))
             }
         } else {
@@ -636,10 +646,12 @@ private fun SongTitleRow(
             exit = fadeOut(tween(220)) + shrinkHorizontally(tween(260)),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onLike) {
+                IconButton(onClick = onLike, modifier = Modifier.tvFocusRing(CircleShape, color = Color.White)) {
                     Icon(if (liked) AppIcons.Favorite else AppIcons.FavoriteBorder, if (liked) "取消喜欢" else "喜欢", tint = if (liked) Color(0xFFFF5A6E) else Color.White, modifier = Modifier.size(26.dp))
                 }
-                IconButton(onClick = onMenu) { Icon(AppIcons.MoreVert, "更多", tint = Color.White) }
+                IconButton(onClick = onMenu, modifier = Modifier.tvFocusRing(CircleShape, color = Color.White)) {
+                    Icon(AppIcons.MoreVert, "更多", tint = Color.White)
+                }
             }
         }
     }
@@ -775,18 +787,27 @@ private fun PlayControls(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconButton(onClick = { onMessage(next().label) }) { Icon(mode.icon, mode.label, tint = Color.White, modifier = Modifier.size(28.dp)) }
+        IconButton(
+            onClick = { onMessage(next().label) },
+            modifier = Modifier.tvFocusRing(CircleShape, color = Color.White),
+        ) {
+            Icon(mode.icon, mode.label, tint = Color.White, modifier = Modifier.size(28.dp))
+        }
         IconButton(
             onClick = {
                 if (!activeMusic) onIdlePlay?.invoke()
                 else if (canSkip) vm.skipInQueue(false, restartFirst = true)
                 else player.seekTo(0)
             },
+            modifier = Modifier.tvFocusRing(CircleShape, color = Color.White),
         ) {
             Icon(AppIcons.SkipPrevious, "上一首", tint = Color.White, modifier = Modifier.size(34.dp))
         }
         GlassBox(
-            modifier = Modifier.size(68.dp).glassShadow(CircleShape, GlassStyle.Floating, 12.dp),
+            modifier = Modifier
+                .size(68.dp)
+                .tvFocusRing(CircleShape, color = Color.White)
+                .glassShadow(CircleShape, GlassStyle.Floating, 12.dp),
             shape = CircleShape,
             style = GlassStyle.Floating,
             tint = Color(0x36FFFFFF),
@@ -798,10 +819,15 @@ private fun PlayControls(
         IconButton(
             onClick = { if (activeMusic) vm.skipInQueue(true) else onIdlePlay?.invoke() },
             enabled = canSkip || (!activeMusic && onIdlePlay != null),
+            modifier = Modifier.tvFocusRing(CircleShape, color = Color.White),
         ) {
             Icon(AppIcons.SkipNext, "下一首", tint = if (canSkip || (!activeMusic && onIdlePlay != null)) Color.White else Faint, modifier = Modifier.size(34.dp))
         }
-        IconButton(onClick = onQueue, enabled = (activeMusic && vm.queueSize > 0) || !activeMusic) {
+        IconButton(
+            onClick = onQueue,
+            enabled = (activeMusic && vm.queueSize > 0) || !activeMusic,
+            modifier = Modifier.tvFocusRing(CircleShape, color = Color.White),
+        ) {
             Icon(AppIcons.QueueMusic, "播放列表", tint = Color.White, modifier = Modifier.size(28.dp))
         }
     }

@@ -1,4 +1,13 @@
-## 本版更新（2.10.26）
+## 本版更新（2.10.27）
+
+- **修复 TV 端与横屏模式「乐库」显示重影与高频乱跳问题，优化遥控器焦点体验（Android TV / Android / Windows）**：
+  - 修复横屏/TV 模式下切换至「乐库」时 `HorizontalPager` 宽度权重随 `currentPage` 动态跳变引发的 60Hz 重测震荡、重影及右侧按钮裁切问题，固定左栏宽度比例并严格裁剪视口。
+  - TV 端关闭 Pager 触控滚动与屏外预挂载页、改用无过渡帧瞬时切页、禁用播放 3 秒自动隐藏控件栏；横屏与 TV 在「乐库」选歌时直接起播不再强跳回唱片页；补齐播放控制栏、喜欢/更多、刷新与音源面板的遥控器白色焦点框。
+- **彻底解决 VLC 内核播放 4K HDR 直播流（如 Travelxp 4K HDR EU）的电流声问题（Android / TV）**：
+  - 将 `libvlc_audio_bridge.so` 重构为 **4 秒非阻塞 PCM 环形缓冲区 + 独立 C++ 渲染线程**：`onVlcAudioPlay` 微秒级非阻塞返回，消除同步阻塞硬件写入叠加负向 `--audio-desync` 触发 VLC `dec.c`（`advance < -60 ms`）周期性丢包的锯齿状电流声；基于 `CLOCK_MONOTONIC` 对齐首包 PTS 精确起播，并内置 `>2.8 s` 高水位 `1.002x` 线性插值防长时间直播时钟漂移。
+  - 修正 `LibVLC 3.0.25` 音频解码子模块匹配名称（在 `setHWDecoderEnabled` 之前注入 `:codec=mediacodec_ndk,ffmpeg,avcodec,all`），使 DVB `AAC-LATM` 等广播音轨真正命中 FFmpeg `libavcodec` 解码器而不再回落至旧版 `faad`。
+
+## 2.10.26 更新
 
 - **修复安卓端 VLC 内核在 2.10.25 版本出现无声的问题，同时彻底消除 4K 直播电流声（Android / TV）**：
   - 恢复 `LibVLC 3.0.25` 内存音频模块（`amem`）唯一接受的 `"S16N"` 采样格式与 `:codec=mediacodec_ndk,avcodec,all` 解码链通配符，解决 2.10.25 中因 `"FL32"` 格式被 `amem` 拒绝导致的无声问题。

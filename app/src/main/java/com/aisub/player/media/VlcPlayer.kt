@@ -87,34 +87,18 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
     private var lastDirectReadBytes = -1L
 
     private fun startVlcKernel(): Pair<LibVLC, MediaPlayer> {
-        val useAAudio = VlcAudioBridge.isAAudioSupported()
-        val vlcOptions = if (useAAudio) {
-            // AAudio 标准媒体缓冲约 240ms，提前 140ms 送出音频抵消硬件与环形缓冲延迟，同时彻底杜绝 4K 直播 XRun 电流声
-            arrayListOf(
-                "--network-caching=1500",
-                "--live-caching=1800",
-                "--prefetch-buffer-size=16384",
-                "--audio-desync=-140",
-                "--no-spdif",
-                "--avcodec-skiploopfilter=1",
-                "--input-fast-seek",
-                "--http-reconnect",
-                "--audio-time-stretch",
-            )
-        } else {
-            // Android 6.0 老电视等走 Java AudioTrack 回退路径：提前 180ms 送出音频抵消环形缓冲延迟，嘴型对齐
-            arrayListOf(
-                "--network-caching=1500",
-                "--live-caching=1800",
-                "--prefetch-buffer-size=16384",
-                "--audio-desync=-180",
-                "--no-spdif",
-                "--avcodec-skiploopfilter=1",
-                "--input-fast-seek",
-                "--http-reconnect",
-                "--audio-time-stretch",
-            )
-        }
+        // 严禁传负值 --audio-desync：LibVLC 3.0 amem 模块 time_get=NULL，负向偏移 PTS 会触发 dec.c (advance < -60ms) 周期性丢包电流声；
+        // 现由 C++ 独立音频渲染线程基于 CLOCK_MONOTONIC 与首包 PTS 对齐起播并异步消费环形缓冲，兼顾零阻塞与唇形同步。
+        val vlcOptions = arrayListOf(
+            "--network-caching=1500",
+            "--live-caching=1800",
+            "--prefetch-buffer-size=16384",
+            "--no-spdif",
+            "--avcodec-skiploopfilter=1",
+            "--input-fast-seek",
+            "--http-reconnect",
+            "--audio-time-stretch",
+        )
         val vlc = LibVLC(appContext, vlcOptions)
         val player = MediaPlayer(vlc)
         audioBridge.attach(vlc, player)
@@ -455,20 +439,23 @@ class VlcPlayer(context: Context, private val proxy: MediaProxy) : SimpleBasePla
         directRemoteStream = openDirectly
         lastDirectReadBytes = -1L
 
+        // 注意：1) 必须在 setHWDecoderEnabled 之前调用 addOption(":codec=...")，使 Media.mCodecOptionSet=true，
+        //         防止 setHWDecoderEnabled 抢先注入 ":codec=mediacodec_ndk,all" 覆盖自定义解码器优先级；
+        //       2) LibVLC 3.0.25 的 avcodec.c 中音频解码子模块（InitAudioDec）唯一注册的 shortcut 是 "ffmpeg"（不含 "avcodec"！），
+        //         必须写 "ffmpeg" 才能真正命中 FFmpeg 音频解码器，彻底绕过旧版 faad 在 DVB AAC-LATM 4K 直播上的电流声。
         when (userForceHwdec) {
             true -> {
+                media.addOption(":codec=mediacodec_ndk,iomx,ffmpeg,avcodec,all")
                 media.setHWDecoderEnabled(true, true)
-                // LibVLC 3.0 结尾通配符为 all：视频保留 MediaCodec 硬解，音频优先走 FFmpeg avcodec（绕过旧版 faad 在 DVB AAC-LATM 上的电流声）
-                media.addOption(":codec=mediacodec_ndk,iomx,avcodec,all")
             }
             false -> {
-                media.setHWDecoderEnabled(false, false)
                 media.addOption(":avcodec-hw=none")
-                media.addOption(":codec=avcodec,all")
+                media.addOption(":codec=ffmpeg,avcodec,all")
+                media.setHWDecoderEnabled(false, false)
             }
             null -> {
+                media.addOption(":codec=mediacodec_ndk,ffmpeg,avcodec,all")
                 media.setHWDecoderEnabled(true, false)
-                media.addOption(":codec=mediacodec_ndk,avcodec,all")
             }
         }
         media.addOption(":no-spdif")
