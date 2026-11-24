@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">VoxMusic</string>
+    <string name="widget_now_playing_label">VoxMusic · 正在播放</string>
+    <string name="widget_now_playing_description">显示正在播放的歌曲、同步歌词与播放控制</string>
+</resources>

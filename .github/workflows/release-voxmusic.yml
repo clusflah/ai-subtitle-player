@@ -1,0 +1,91 @@
+name: Build & Release VoxMusic
+
+on:
+  push:
+    tags: ["music-v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "按 versionName 打 tag（music-v<版本>）并发布 VoxMusic Release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-home-cache-strict-match: true
+
+      - name: Decode release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "RELEASE_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::未配置发布证书，APK 将使用临时 debug 签名"
+          fi
+
+      - name: Test & Build VoxMusic Release APK
+        env:
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          VERSION=$(grep -oP 'versionName = "\K[^"]+' music/build.gradle.kts)
+          ./gradlew :music:testDebugUnitTest :music:assembleRelease --stacktrace --no-daemon
+          mkdir -p dist
+          cp "music/build/outputs/apk/release/music-release.apk" "dist/VoxMusic-${VERSION}.apk"
+          ls -lh dist
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: voxmusic-apk
+          path: dist/*.apk
+
+      - name: Publish VoxMusic GitHub Release
+        if: startsWith(github.ref, 'refs/tags/music-v') || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then TAG="$GITHUB_REF_NAME"; else TAG="music-v$VERSION"; fi
+          APK="VoxMusic-${VERSION}.apk"
+          SIZE_MB=$(python3 -c "import os; print(f'{os.path.getsize(\"dist/$APK\")/1048576:.1f}')")
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+
+          cat > "$RUNNER_TEMP/voxmusic-notes.md" <<EOF
+          ## 安装包下载
+
+          - [🎵 VoxMusic Android 正式版 (\`${APK}\`)](${BASE_URL}/${APK}) · \`${SIZE_MB} MB\`（包名 \`com.voxmusic.app\`，可与译幕并存安装）
+
+          ## VoxMusic v${VERSION} 更新内容
+
+          - **纯净独立音乐 App**：从译幕抽离音乐核心能力，仅保留 **Apple Music** 与 **Spotify** 两大流媒体音乐源（支持 Spotify 官方客户端高音质/无损联动与网页 DRM 自动兜底）。
+          - **榜单智能选源即点即播**：发现页全热门榜单（流行热歌 / 新音乐 / 飙升趋势 / 华语 / 欧美 / Billboard / Oricon / K-Pop）、搜索与 AI 荐歌点击直接智能选择已登录源开播，无需弹窗选源。
+          - **黑胶唱机与双语同步歌词**：支持沉浸式旋转黑胶、逐行同步歌词、长按歌词 A-B 区间循环、在线歌词/封面匹配、导入 LRC、AI 歌词翻译与 AI 智能荐歌。
+          - **后台与桌面控制**：支持通知栏 / 锁屏 / 蓝牙耳机控制、桌面「正在播放」自适应小组件以及应用内代理设置。
+
+          > Spotify 官方客户端联动请在开发者后台添加包名 \`com.voxmusic.app\` 与 Redirect URI \`voxmusic://spotify-callback\`（App 登录页内置一键复制）。
+          EOF
+
+          gh release create "$TAG" "dist/$APK" \
+            --target "$GITHUB_SHA" \
+            --title "VoxMusic v${VERSION}" \
+            --notes-file "$RUNNER_TEMP/voxmusic-notes.md" \
+            --latest=false || \
+          (gh release upload "$TAG" "dist/$APK" --clobber && gh release edit "$TAG" --notes-file "$RUNNER_TEMP/voxmusic-notes.md" --latest=false)

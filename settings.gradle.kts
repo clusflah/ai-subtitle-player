@@ -18,3 +18,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Voxtitle"
 include(":app")
+include(":music")
