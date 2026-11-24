@@ -65,12 +65,14 @@ class MusicFeatures(
 
     private var entry: MediaEntry? = null
     private var loadJob: Job? = null
+    private var lyricsJob: Job? = null
     private var metadataReady = CompletableDeferred<List<Metadata>>()
 
     fun onEntryChanged(e: MediaEntry) {
         if (entry?.uri == e.uri) return
         entry = e
         loadJob?.cancel()
+        lyricsJob?.cancel()
         metadataReady = CompletableDeferred()
         if (e.isVideo || e.isLive) {
             _state.value = MusicState()
@@ -97,12 +99,25 @@ class MusicFeatures(
                 album = fileTags.album ?: server.album,
                 durationMs = if (fileTags.durationMs > 0) fileTags.durationMs else server.durationMs,
             )
+            if (entry?.uri != e.uri) return@launch
             rawTags = tags
             val shown = withContext(Dispatchers.IO) { applySavedInfo(e, tags) }
+            if (entry?.uri != e.uri) return@launch
             _state.update { it.copy(tags = shown, edited = shown !== tags) }
             launch { loadCover(e, shown) }
-            loadLyrics(e, shown)
+            launchLyricsLoad(e, shown)
         }
+    }
+
+    private fun launchLyricsLoad(e: MediaEntry, tags: TrackTags) {
+        lyricsJob?.cancel()
+        lyricsJob = scope.launch { loadLyrics(e, tags) }
+    }
+
+    private fun isGenericPlaceholderTitle(t: String?): Boolean {
+        val s = t?.trim().orEmpty()
+        if (s.isEmpty() || s == "未知歌曲") return true
+        return WebMusicService.entries.any { it.label.equals(s, ignoreCase = true) }
     }
 
     /** 流媒体后台播放器实时解析到更完整的歌名/歌手/专辑/时长/封面时动态补齐封面与同步歌词 */
@@ -121,10 +136,13 @@ class MusicFeatures(
         val updatedTags = if (cur.edited) {
             oldTags.copy(durationMs = if (durationMs > 0L) durationMs else oldTags.durationMs)
         } else {
+            val effectiveTitle = if (isGenericPlaceholderTitle(oldTags.title) && title.isNotBlank()) title else oldTags.title
+            val effectiveArtist = if (oldTags.artist.isNullOrBlank() && artist.isNotBlank()) artist else oldTags.artist
+            val effectiveAlbum = if (oldTags.album.isNullOrBlank() && album.isNotBlank()) album else oldTags.album
             oldTags.copy(
-                title = title.ifBlank { oldTags.title },
-                artist = artist.ifBlank { oldTags.artist },
-                album = album.ifBlank { oldTags.album },
+                title = effectiveTitle,
+                artist = effectiveArtist,
+                album = effectiveAlbum,
                 durationMs = if (durationMs > 0L) durationMs else oldTags.durationMs,
             )
         }
@@ -134,8 +152,8 @@ class MusicFeatures(
         if (cur.cover == null && !coverUrl.isNullOrBlank()) {
             scope.launch { loadCover(e, updatedTags) }
         }
-        if ((cur.lyrics == null || titleOrArtistChanged) && settings().musicOnlineLookup && updatedTags.title.isNotBlank()) {
-            scope.launch { loadLyrics(e, updatedTags) }
+        if ((titleOrArtistChanged || (cur.lyrics == null && lyricsJob?.isActive != true)) && settings().musicOnlineLookup && updatedTags.title.isNotBlank()) {
+            launchLyricsLoad(e, updatedTags)
         }
     }
 
@@ -195,29 +213,62 @@ class MusicFeatures(
 
     // ---------------- 歌词 ----------------
 
+    private fun normTitleForLyricsCache(t: String): String =
+        t.trim().lowercase().replace(Regex("[\\s\\p{Punct}（）()【】\\[\\]《》·•—\\-]+"), "")
+
+    /**
+     * 校验磁盘歌词缓存是否属于当前曲目：
+     * - 手动选词/导入/微调过（`[vox_manual:1]`）：始终信任；
+     * - 自动联网抓取（`[vox_auto_ti:...]`）：校验歌名匹配，不匹配则视为脏缓存重新查找；
+     * - 流媒体旧版无标记自动缓存：自动重查一次以修复历史切歌残留导致的错词。
+     */
+    private fun isCachedLyricsValidForTrack(e: MediaEntry, tags: TrackTags, rawCached: String): Boolean {
+        val firstLine = rawCached.lineSequence().firstOrNull()?.trim().orEmpty()
+        if (firstLine == "[vox_manual:1]") return true
+        val autoTagPrefix = "[vox_auto_ti:"
+        if (firstLine.startsWith(autoTagPrefix) && firstLine.endsWith("]")) {
+            val savedTitle = firstLine.removePrefix(autoTagPrefix).removeSuffix("]")
+            val want = normTitleForLyricsCache(tags.title)
+            val got = normTitleForLyricsCache(savedTitle)
+            return want.isEmpty() || got.isEmpty() || want == got
+        }
+        return !WebStreamingMusic.isStreamingUri(e.uri)
+    }
+
     private suspend fun loadLyrics(e: MediaEntry, tags: TrackTags) {
-        val cached = withContext(Dispatchers.IO) { lyricsFile(e).takeIf { it.exists() }?.readText() }
+        if (entry?.uri != e.uri) return
+        val cached = withContext(Dispatchers.IO) {
+            lyricsFile(e).takeIf { it.exists() }?.readText()?.takeIf { isCachedLyricsValidForTrack(e, tags, it) }
+        }
         val local = cached?.let { Lyrics.parse(it, "已保存") }
             ?: tags.lyrics?.let { Lyrics.parse(it, "内嵌") }
             ?: withContext(Dispatchers.IO) { sidecarLrc(e) }?.let { Lyrics.parse(it, "LRC 文件") }
             ?: withContext(Dispatchers.IO) { serverLyrics(e, tags) }
+        if (entry?.uri != e.uri) return
         if (local != null) {
             val tr = withContext(Dispatchers.IO) { savedTranslations(e, local) }
+            if (entry?.uri != e.uri) return
             _state.update { it.copy(lyrics = local, lyricsStatus = null, translations = tr) }
             return
         }
         if (!settings().musicOnlineLookup) {
-            _state.update { it.copy(lyricsStatus = "没有歌词") }
+            _state.update { it.copy(lyrics = null, lyricsStatus = "没有歌词", translations = null) }
             return
         }
-        _state.update { it.copy(lyricsStatus = "正在在线查找歌词…") }
+        _state.update { it.copy(lyrics = null, lyricsStatus = "正在在线查找歌词…", translations = null) }
         val found = withContext(Dispatchers.IO) { MusicLookup.bestLyrics(tags)?.let(::localize) }
-        if (entry != e) return
+        if (entry?.uri != e.uri) return
         if (found != null) {
-            withContext(Dispatchers.IO) { lyricsFile(e).writeText(found.toLrc()) }
-            _state.update { it.copy(lyrics = found, lyricsStatus = null) }
+            val header = "[vox_auto_ti:${tags.title.replace("\n", " ").replace("]", "")}]\n"
+            withContext(Dispatchers.IO) { lyricsFile(e).writeText(header + found.toLrc()) }
+            if (entry?.uri != e.uri) return
+            _state.update { it.copy(lyrics = found, lyricsStatus = null, translations = null) }
         } else {
-            _state.update { it.copy(lyricsStatus = "没有找到歌词") }
+            withContext(Dispatchers.IO) {
+                if (WebStreamingMusic.isStreamingUri(e.uri)) lyricsFile(e).delete()
+            }
+            if (entry?.uri != e.uri) return
+            _state.update { it.copy(lyrics = null, lyricsStatus = "没有找到歌词", translations = null) }
         }
     }
 
@@ -280,7 +331,7 @@ class MusicFeatures(
         val sameText = _state.value.lyrics?.lines?.map { it.text } == lyrics.lines.map { it.text }
         _state.update { it.copy(lyrics = lyrics, lyricsStatus = null, translations = it.translations.takeIf { sameText }) }
         scope.launch(Dispatchers.IO) {
-            lyricsFile(e).writeText(lyrics.toLrc())
+            lyricsFile(e).writeText("[vox_manual:1]\n" + lyrics.toLrc())
             if (!sameText) translationFile(e).delete()
         }
     }

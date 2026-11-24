@@ -656,34 +656,34 @@ private fun MusicSourcePill(
     val hitShape = RoundedCornerShape(10.dp)
     Box(
         modifier = Modifier
-            .size(38.dp)
+            .size(34.dp)
             .tvFocusRing(hitShape, color = Color.White)
             .clip(hitShape)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         when {
-            webSvc != null -> WebMusicServiceIcon(webSvc, size = 28.dp)
+            webSvc != null -> WebMusicServiceIcon(webSvc, size = 21.dp)
             server != null -> {
                 if (server.type.hasSolidIconBackdrop()) {
-                    ServerSourceIcon(server, size = 30.dp)
+                    ServerSourceIcon(server, size = 22.dp)
                 } else {
                     Box(
                         Modifier
-                            .size(28.dp)
+                            .size(22.dp)
                             .liquidGlass(
-                                shape = RoundedCornerShape(7.dp),
+                                shape = RoundedCornerShape(6.dp),
                                 style = GlassStyle.Pill,
                                 tint = Color(0x2EFFFFFF),
                                 enableBackdrop = false,
                             ),
                         contentAlignment = Alignment.Center,
                     ) {
-                        ServerSourceIcon(server, size = 22.dp)
+                        ServerSourceIcon(server, size = 16.dp)
                     }
                 }
             }
-            else -> SourceBadgeIcon(SourceBadgeKind.LOCAL_MUSIC, size = 28.dp)
+            else -> SourceBadgeIcon(SourceBadgeKind.LOCAL_MUSIC, size = 21.dp)
         }
     }
 }

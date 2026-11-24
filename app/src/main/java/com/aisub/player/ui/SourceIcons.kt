@@ -116,6 +116,18 @@ fun MusicPlatformIcon(
             val vec = remember { buildQqMusicOfficialVector() }
             ImageIcon(vector = vec, contentDescription = platformName, size = size, modifier = modifier)
         }
+        norm.contains("汽水") || norm.contains("qishui") || norm.contains("soda") -> {
+            val vec = remember { buildQishuiMusicOfficialVector() }
+            ImageIcon(vector = vec, contentDescription = platformName, size = size, modifier = modifier)
+        }
+        norm.contains("酷狗") || norm.contains("kugou") -> {
+            val vec = remember { buildKugouMusicOfficialVector() }
+            ImageIcon(vector = vec, contentDescription = platformName, size = size, modifier = modifier)
+        }
+        norm.contains("哔哩") || norm.contains("bilibili") || norm == "b站" -> {
+            val vec = remember { buildBilibiliOfficialVector() }
+            ImageIcon(vector = vec, contentDescription = platformName, size = size, modifier = modifier)
+        }
         else -> {
             Box(
                 modifier
@@ -314,6 +326,9 @@ internal const val OFFICIAL_NETEASE_MUSIC_PATH =
 internal const val OFFICIAL_YOUTUBE_MUSIC_PATH =
     "M12 0C5.376 0 0 5.376 0 12s5.376 12 12 12 12-5.376 12-12S18.624 0 12 0zm0 19.104c-3.924 0-7.104-3.18-7.104-7.104S8.076 4.896 12 4.896s7.104 3.18 7.104 7.104-3.18 7.104-7.104 7.104zm0-13.332c-3.432 0-6.228 2.796-6.228 6.228S8.568 18.228 12 18.228s6.228-2.796 6.228-6.228S15.432 5.772 12 5.772zM9.684 15.54V8.46L15.816 12l-6.132 3.54z"
 
+internal const val OFFICIAL_BILIBILI_PATH =
+    "M17.813 4.653h.854q2.266.08 3.773 1.574Q23.946 7.72 24 9.987v7.36q-.054 2.266-1.56 3.773c-1.506 1.507-2.262 1.524-3.773 1.56H5.333q-2.266-.054-3.773-1.56C.053 19.614.036 18.858 0 17.347v-7.36q.054-2.267 1.56-3.76t3.773-1.574h.774l-1.174-1.12a1.23 1.23 0 0 1-.373-.906q0-.534.373-.907l.027-.027q.4-.373.92-.373t.92.373L9.653 4.44q.107.106.187.213h4.267a.8.8 0 0 1 .16-.213l2.853-2.747q.4-.373.92-.373c.347 0 .662.151.929.4s.391.551.391.907q0 .532-.373.906zM5.333 7.24q-1.12.027-1.88.773q-.76.748-.786 1.894v7.52q.026 1.146.786 1.893t1.88.773h13.334q1.12-.026 1.88-.773t.786-1.893v-7.52q-.026-1.147-.786-1.894t-1.88-.773zM8 11.107q.56 0 .933.373q.375.374.4.96v1.173q-.025.586-.4.96q-.373.375-.933.374c-.56-.001-.684-.125-.933-.374q-.375-.373-.4-.96V12.44q0-.56.386-.947q.387-.386.947-.386m8 0q.56 0 .933.373q.375.374.4.96v1.173q-.025.586-.4.96q-.373.375-.933.374c-.56-.001-.684-.125-.933-.374q-.375-.373-.4-.96V12.44q.025-.586.4-.96q.373-.373.933-.373z"
+
 internal fun buildAppleMusicOfficialVector(scale: Float = 1f): ImageVector = ImageVector.Builder(
     defaultWidth = 24.dp,
     defaultHeight = 24.dp,
@@ -507,6 +522,89 @@ internal fun buildQqMusicOfficialVector(): ImageVector = ImageVector.Builder(
         pathData = addPathNodes("M13.2,4.8 L18.6,6.3 L18.6,9.2 L15.0,8.2 L15.0,15.6 C15.0,18.1 12.9,20.0 10.2,20.0 C7.6,20.0 5.6,18.2 5.6,15.9 C5.6,13.6 7.6,11.8 10.2,11.8 C11.3,11.8 12.4,12.2 13.2,12.8 Z"),
         fill = SolidColor(Color(0xFF12B775)),
     )
+}.build()
+
+internal fun buildQishuiMusicOfficialVector(): ImageVector = ImageVector.Builder(
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    // 汽水音乐官方标志：深黑圆角底 + 黄绿至青绿渐变实心音符 + 底部双斜切气泡波纹
+    addPath(
+        pathData = addPathNodes("M5.6,0 H18.4 C21.5,0 24,2.5 24,5.6 V18.4 C24,21.5 21.5,24 18.4,24 H5.6 C2.5,24 0,21.5 0,18.4 V5.6 C0,2.5 2.5,0 5.6,0 Z"),
+        fill = Brush.verticalGradient(
+            colors = listOf(Color(0xFF1A1D22), Color(0xFF0C0E11)),
+            startY = 0f,
+            endY = 24f,
+        ),
+    )
+    addPath(
+        pathData = addPathNodes(
+            "M12.3,4.2 H15.1 C15.4,6.4 16.9,7.9 19.0,8.3 V11.0 C17.3,10.9 15.9,10.2 14.9,9.3 V15.0 " +
+                "C14.9,17.9 12.6,20.0 9.8,20.0 C7.0,20.0 4.8,17.8 4.8,15.0 C4.8,12.2 7.0,10.1 9.8,10.1 " +
+                "C10.7,10.1 11.6,10.3 12.3,10.8 Z",
+        ),
+        fill = Brush.linearGradient(
+            colors = listOf(Color(0xFFD6FF00), Color(0xFF00E676), Color(0xFF00D2B8)),
+            start = Offset(6f, 4f),
+            end = Offset(17f, 20f),
+        ),
+    )
+    // 标志性汽水气泡斜向双切口
+    addPath(
+        pathData = addPathNodes("M4.2,14.5 L15.6,11.9 L15.9,13.1 L4.5,15.7 Z"),
+        fill = SolidColor(Color(0xFF101216)),
+    )
+    addPath(
+        pathData = addPathNodes("M4.9,17.2 L15.5,14.8 L15.8,16.0 L5.2,18.4 Z"),
+        fill = SolidColor(Color(0xFF101216)),
+    )
+}.build()
+
+internal fun buildKugouMusicOfficialVector(): ImageVector = ImageVector.Builder(
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    // 酷狗音乐官方标志：亮蓝渐变圆角底 + 居中白色几何粗体 K
+    addPath(
+        pathData = addPathNodes("M5.6,0 H18.4 C21.5,0 24,2.5 24,5.6 V18.4 C24,21.5 21.5,24 18.4,24 H5.6 C2.5,24 0,21.5 0,18.4 V5.6 C0,2.5 2.5,0 5.6,0 Z"),
+        fill = Brush.verticalGradient(
+            colors = listOf(Color(0xFF00A2FF), Color(0xFF006CFF)),
+            startY = 0f,
+            endY = 24f,
+        ),
+    )
+    addPath(
+        pathData = addPathNodes("M6.6,5.5 H9.6 V18.5 H6.6 Z"),
+        fill = SolidColor(Color.White),
+    )
+    addPath(
+        pathData = addPathNodes("M14.3,5.5 H17.8 L12.5,11.9 L18.0,18.5 H14.3 L9.6,12.5 V11.4 Z"),
+        fill = SolidColor(Color.White),
+    )
+}.build()
+
+internal fun buildBilibiliOfficialVector(): ImageVector = ImageVector.Builder(
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    // 哔哩哔哩官方标志：B站粉圆角底 + 官方小电视矢量轮廓
+    addPath(
+        pathData = addPathNodes("M5.6,0 H18.4 C21.5,0 24,2.5 24,5.6 V18.4 C24,21.5 21.5,24 18.4,24 H5.6 C2.5,24 0,21.5 0,18.4 V5.6 C0,2.5 2.5,0 5.6,0 Z"),
+        fill = SolidColor(Color(0xFFFB7299)),
+    )
+    group(scaleX = 0.72f, scaleY = 0.72f, pivotX = 12f, pivotY = 12f) {
+        addPath(
+            pathData = addPathNodes(OFFICIAL_BILIBILI_PATH),
+            pathFillType = PathFillType.EvenOdd,
+            fill = SolidColor(Color.White),
+        )
+    }
 }.build()
 
 // ============================================================================

@@ -247,6 +247,9 @@ class MusicDiscoverTest {
             com.aisub.player.ui.buildNetEaseMusicOfficialVector(),
             com.aisub.player.ui.buildYouTubeMusicOfficialVector(),
             com.aisub.player.ui.buildQqMusicOfficialVector(),
+            com.aisub.player.ui.buildQishuiMusicOfficialVector(),
+            com.aisub.player.ui.buildKugouMusicOfficialVector(),
+            com.aisub.player.ui.buildBilibiliOfficialVector(),
         )
         vectors.forEach { vec ->
             assertTrue(vec.root.size > 0)
@@ -629,7 +632,8 @@ class MusicDiscoverTest {
         assertEquals("playlist|202", movedToTop.first().ratingKey)
         assertEquals(2, movedToTop.size)
 
-        // 6. 含重复歌曲的歌单队列在 WebStreamingMusicPlayer 中不会触发 SimpleBasePlayer Duplicate UID 闪退
+        // 6. 含重复歌曲的歌单队列在 WebStreamingMusicPlayer 中不会触发 SimpleBasePlayer Duplicate UID 闪退，
+        //    且 setMediaItems 切歌时会立即将状态复位至 IDLE，避免 prepare() 前的 playWhenReady=true 误续播上一首
         val ctx = RuntimeEnvironment.getApplication()
         val dupPlayer = com.aisub.player.media.WebStreamingMusicPlayer(ctx)
         val dupUri = "spotify://track/3DYVWvPh3kGwPasp7yjahc?title=Test"
@@ -638,6 +642,13 @@ class MusicDiscoverTest {
         dupPlayer.setMediaItems(listOf(item1, item2), 1, 0L)
         assertEquals(2, dupPlayer.mediaItemCount)
         assertEquals(1, dupPlayer.currentMediaItemIndex)
+        assertEquals(androidx.media3.common.Player.STATE_IDLE, dupPlayer.playbackState)
+        val newItem = androidx.media3.common.MediaItem.Builder()
+            .setUri("spotify://search?title=Patient%20Zero&artist=Taylor%20Swift")
+            .setMediaId("spotify://search?title=Patient%20Zero&artist=Taylor%20Swift")
+            .build()
+        dupPlayer.setMediaItems(listOf(newItem), 0, 0L)
+        assertEquals(androidx.media3.common.Player.STATE_IDLE, dupPlayer.playbackState)
         dupPlayer.release()
     }
 }

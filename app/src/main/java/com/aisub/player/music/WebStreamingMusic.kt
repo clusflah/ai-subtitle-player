@@ -884,8 +884,9 @@ object WebStreamingMusic {
         val webUrl = parsed.getQueryParameter("url")?.let(::decodeParam).orEmpty()
         val meta = ServerProgress.find(uriString)
 
-        // 先停止原生直连播放器，并通知后台网页引擎进入切歌冻结态，彻底阻断旧进度上报
+        // 先停止原生直连播放器与本机 Spotify 遥控快照，并通知后台网页引擎进入切歌冻结态，彻底阻断旧曲目出声与旧进度/旧歌名上报
         NativeDirectAudioPlayer.pauseIfActive()
+        SpotifyAppRemoteBridge.pauseIfActive()
         engines[service]?.evalFireAndForget(
             "window.__voxBridge && window.__voxBridge.beginSwitch($effectiveSeq, ${JSONObject.quote(trackId)}, ${startPositionMs.coerceAtLeast(0L)}, ${JSONObject.quote(title)})",
         )
@@ -977,6 +978,7 @@ object WebStreamingMusic {
                     title = title,
                     artist = artist,
                     startPositionMs = startPositionMs,
+                    playSeq = effectiveSeq,
                 )
                 if (remoteRes.isSuccess) {
                     return Result.success(Unit)

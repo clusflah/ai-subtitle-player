@@ -928,12 +928,16 @@ object SpotifyAppRemoteBridge {
     @Volatile
     private var startTargetPosMs: Long = 0L
 
+    @Volatile
+    private var targetPlaySeq: Long = 0L
+
     suspend fun tryPlayTrack(
         context: Context,
         trackId: String,
         title: String,
         artist: String,
         startPositionMs: Long,
+        playSeq: Long = 0L,
     ): Result<Unit> {
         val statusNow = refreshStatus(context)
         if (!statusNow.canAttemptRemotePlayback) {
@@ -959,6 +963,7 @@ object SpotifyAppRemoteBridge {
         stalePreviousUri = if (!prevPlayingUri.isNullOrBlank() && prevPlayingUri != spotifyUri) prevPlayingUri else null
         commandSentElapsedMs = SystemClock.elapsedRealtime()
         targetTrackUri = spotifyUri
+        targetPlaySeq = playSeq.takeIf { it > 0L } ?: WebStreamingMusic.activePlaySeq
         startTargetPosMs = startPositionMs.coerceAtLeast(0L)
         sawTargetTrackPlaying = false
         maxTargetPosMs = 0L
@@ -1016,8 +1021,11 @@ object SpotifyAppRemoteBridge {
         if (remote != null && remote.isConnected && _status.value.activeForCurrentTrack) {
             scope.launch { runCatching { remote.playerApi.pause() } }
         }
+        tickerJob?.cancel()
+        tickerJob = null
         _status.value = _status.value.copy(activeForCurrentTrack = false)
         targetTrackUri = null
+        targetPlaySeq = 0L
         stalePreviousUri = null
     }
 
@@ -1084,10 +1092,12 @@ object SpotifyAppRemoteBridge {
         val dur = (tr?.duration ?: 0L).coerceAtLeast(0L)
         val sinceCmdMs = (SystemClock.elapsedRealtime() - commandSentElapsedMs).coerceAtLeast(0L)
 
+        val snapSeq = targetPlaySeq.takeIf { it > 0L } ?: WebStreamingMusic.activePlaySeq
+
         // 切歌初期过滤上一首残留状态，同时兼容 Spotify 跨区曲目自动重链（Track Relinking）
         if (!sawTargetTrackPlaying && curUri.isNotEmpty()) {
             val stale = stalePreviousUri
-            if (stale != null && curUri == stale && sinceCmdMs < 3_500L) {
+            if (stale != null && curUri == stale) {
                 return
             }
             if (wantUri != null && curUri != wantUri && curUri.startsWith("spotify:track:")) {
@@ -1137,7 +1147,7 @@ object SpotifyAppRemoteBridge {
             WebStreamingMusic.dispatchSnapshotObj(
                 WebStreamingMusic.PlaybackSnapshot(
                     service = WebMusicService.SPOTIFY,
-                    playSeq = WebStreamingMusic.activePlaySeq,
+                    playSeq = snapSeq,
                     switching = false,
                     playing = false,
                     buffering = true,
@@ -1157,7 +1167,7 @@ object SpotifyAppRemoteBridge {
         val coverUrl = spotifyImageUriToHttps(tr?.imageUri?.raw)
         val snap = WebStreamingMusic.PlaybackSnapshot(
             service = WebMusicService.SPOTIFY,
-            playSeq = WebStreamingMusic.activePlaySeq,
+            playSeq = snapSeq,
             playing = !state.isPaused && !naturalEnded,
             buffering = false,
             positionMs = if (naturalEnded && dur > 0L) dur else clampedPos,

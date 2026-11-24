@@ -233,6 +233,7 @@ class WebStreamingMusicPlayer(
         seekHoldTargetMs = C.TIME_UNSET
         seekHoldUntilMs = 0L
         trackTransitionPending = false
+        lastSyncedMetaKey = ""
         val knownDur = ServerProgress.find(uri)?.durationMs?.takeIf { it > 0L } ?: C.TIME_UNSET
         currentDurMs = knownDur
         playbackState = Player.STATE_BUFFERING
@@ -369,16 +370,24 @@ class WebStreamingMusicPlayer(
         startIndex: Int,
         startPositionMs: Long,
     ): ListenableFuture<*> {
+        // 切换播放列表/新曲目前立即中断上一首后台播放与残留快照，避免 prepare() 前的 playWhenReady=true 误唤醒旧曲目
+        activePlayGeneration++
+        launchJob?.cancel()
+        WebStreamingMusic.stopAll()
         items = mediaItems.toList()
         currentIndex = if (items.isEmpty()) 0 else startIndex.coerceIn(items.indices)
         this.startPositionMs = startPositionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0L) ?: 0L
         currentPosMs = this.startPositionMs
         currentDurMs = C.TIME_UNSET
+        hasStartedCurrentTrackAudio = false
+        remoteActuallyPlaying = false
+        maxPosReachedMs = 0L
+        seekHoldTargetMs = C.TIME_UNSET
+        seekHoldUntilMs = 0L
+        trackTransitionPending = false
+        lastSyncedMetaKey = ""
         error = null
-        if (items.isEmpty()) {
-            WebStreamingMusic.stopAll()
-            playbackState = Player.STATE_IDLE
-        }
+        playbackState = Player.STATE_IDLE
         return Futures.immediateVoidFuture()
     }
 
@@ -431,8 +440,13 @@ class WebStreamingMusicPlayer(
         val svc = activeService()
         if (playbackState == Player.STATE_ENDED && playWhenReady) {
             startCurrentTrack(0L)
+        } else if (playWhenReady && playbackState == Player.STATE_READY && !hasStartedCurrentTrackAudio && items.isNotEmpty()) {
+            // 若新曲目尚未真正起播（例如缓冲期被暂停后再次点播放），重新下发当前曲目播放而非 resume 旧曲目
+            startCurrentTrack(currentPosMs)
         } else if (svc != null && playbackState != Player.STATE_IDLE) {
-            WebStreamingMusic.setPlaying(svc, playWhenReady)
+            if (!playWhenReady || hasStartedCurrentTrackAudio) {
+                WebStreamingMusic.setPlaying(svc, playWhenReady)
+            }
         }
         invalidateState()
         return Futures.immediateVoidFuture()
