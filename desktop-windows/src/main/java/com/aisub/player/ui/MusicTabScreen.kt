@@ -240,6 +240,7 @@ fun MusicTabScreen(
     }
 
     val pager = rememberPagerState(initialPage = 0) { 3 }
+    var tvPage by rememberSaveable { mutableIntStateOf(0) }
     var toastMessage by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(toastMessage) {
         if (toastMessage != null) {
@@ -267,8 +268,11 @@ fun MusicTabScreen(
     }
 
     val jumpToPage: (Int) -> Unit = { targetPage ->
-        scope.launch {
-            if (tv) pager.scrollToPage(targetPage) else pager.animateScrollToPage(targetPage)
+        val safeTarget = targetPage.coerceIn(0, 2)
+        if (tv) {
+            tvPage = safeTarget
+        } else {
+            scope.launch { pager.animateScrollToPage(safeTarget) }
         }
     }
 
@@ -276,7 +280,8 @@ fun MusicTabScreen(
         if (queue.isNotEmpty()) {
             val safeIdx = index.coerceIn(queue.indices)
             main.play(queue, safeIdx)
-            if (switchToVinyl && pager.currentPage != 0) {
+            val curPage = if (tv) tvPage else pager.currentPage
+            if (switchToVinyl && curPage != 0) {
                 jumpToPage(0)
             }
         }
@@ -329,6 +334,8 @@ fun MusicTabScreen(
             standbyCover = standbyCover,
             onIdlePlay = handleIdlePlay,
             externalPager = pager,
+            externalTvPage = tvPage,
+            onExternalTvPageChange = { tvPage = it.coerceIn(0, 2) },
             externalHoldVisible = anyOverlayOpen,
             onBarsVisibleChange = onBarsVisibleChange,
             topTrailingContent = {
@@ -1484,7 +1491,7 @@ private fun WebStreamingMusicLibraryContent(
                     onPlayQueue(playableNow.shuffled(), 0)
                 }
             }
-            DarkActionChip("退出登录", null, onClick = onLogout)
+            DarkActionChip("退出", null, onClick = onLogout)
         }
     } else if (topContainer != null) {
         val childPlayable = remember(items) {
@@ -1879,6 +1886,8 @@ private fun DarkSubTabChip(label: String, selected: Boolean, onClick: () -> Unit
         color = if (selected) Color.White else Color(0xAAFFFFFF),
         fontSize = 13.sp,
         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        maxLines = 1,
+        softWrap = false,
         modifier = Modifier
             .tvFocusRing(shape, color = Color.White)
             .liquidGlass(
@@ -1910,7 +1919,7 @@ private fun DarkActionChip(
             Icon(icon, null, tint = Color.White, modifier = Modifier.size(15.dp))
             Spacer(Modifier.width(4.dp))
         }
-        Text(label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+        Text(label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
     }
 }
 

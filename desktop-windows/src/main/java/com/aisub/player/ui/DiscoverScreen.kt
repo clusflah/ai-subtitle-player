@@ -1177,17 +1177,30 @@ fun DiscoverPosterCard(
 fun DiscoverChartScreen(
     initialChartId: String?,
     settings: AppSettings,
+    lib: LibraryViewModel? = null,
+    play: ((List<MediaEntry>, Int) -> Unit)? = null,
     onBack: () -> Unit,
     onOpenDetail: (DiscoverItem) -> Unit,
+    onOpenDetailWithQueue: (DiscoverItem, List<DiscoverItem>, Int) -> Unit = { item, _, _ -> onOpenDetail(item) },
     onOpenSettings: () -> Unit,
     onOpenWeb: (String) -> Unit,
+    onOpenServerDetail: (serverId: String, ratingKey: String) -> Unit = { _, _ -> },
+    onOpenRemote: (server: Server, path: String, title: String) -> Unit = { _, _, _ -> },
+    onOpenMusicLibrary: () -> Unit = {},
 ) {
     if (initialChartId != null && com.aisub.player.meta.MusicDiscoverCharts.findChart(initialChartId) != null) {
         MusicDiscoverChartScreen(
             initialChartId = initialChartId,
             settings = settings,
+            lib = lib,
+            play = play,
             onBack = onBack,
             onOpenDetail = onOpenDetail,
+            onOpenDetailWithQueue = onOpenDetailWithQueue,
+            onOpenPlayWeb = onOpenWeb,
+            onOpenServerDetail = onOpenServerDetail,
+            onOpenRemote = onOpenRemote,
+            onOpenMusicLibrary = onOpenMusicLibrary,
         )
         return
     }
@@ -1326,6 +1339,8 @@ fun DiscoverChartScreen(
 @Composable
 fun DiscoverDetailScreen(
     item: DiscoverItem,
+    queue: List<DiscoverItem> = emptyList(),
+    queueIndex: Int = 0,
     settings: AppSettings,
     lib: LibraryViewModel,
     onBack: () -> Unit,
@@ -1342,10 +1357,13 @@ fun DiscoverDetailScreen(
     onOpenCustomItem: (libraryId: String, itemId: String) -> Unit = { _, _ -> },
     onUpdateSettings: ((AppSettings) -> Unit)? = null,
     onSelectWork: (DiscoverItem) -> Unit = {},
+    onSelectWorkWithQueue: (DiscoverItem, List<DiscoverItem>, Int) -> Unit = { w, _, _ -> onSelectWork(w) },
 ) {
     if (item.isMusicItem) {
         MusicDiscoverDetailScreen(
             item = item,
+            queueItems = queue,
+            queueIndex = queueIndex,
             settings = settings,
             lib = lib,
             onBack = onBack,
@@ -1357,6 +1375,7 @@ fun DiscoverDetailScreen(
             onOpenMusicLibrary = onOpenMusicLibrary,
             onUpdateSettings = onUpdateSettings,
             onSelectSong = onSelectWork,
+            onSelectSongWithQueue = onSelectWorkWithQueue,
         )
         return
     }
@@ -2896,6 +2915,7 @@ fun DiscoverAiRecommendScreen(
     lib: LibraryViewModel,
     onBack: () -> Unit,
     onOpenDetail: (DiscoverItem) -> Unit,
+    onOpenDetailWithQueue: (DiscoverItem, List<DiscoverItem>, Int) -> Unit = { item, _, _ -> onOpenDetail(item) },
     onOpenSettings: () -> Unit,
     onUpdateSettings: ((AppSettings) -> Unit)? = null,
 ) {
@@ -2906,6 +2926,7 @@ fun DiscoverAiRecommendScreen(
             lib = lib,
             onBack = onBack,
             onOpenDetail = onOpenDetail,
+            onOpenDetailWithQueue = onOpenDetailWithQueue,
             onOpenSettings = onOpenSettings,
             onUpdateSettings = onUpdateSettings,
         )

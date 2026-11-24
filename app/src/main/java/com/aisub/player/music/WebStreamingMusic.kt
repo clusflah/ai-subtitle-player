@@ -444,6 +444,29 @@ object WebStreamingMusic {
         )
     }
 
+    /**
+     * 将发现页榜单/列表批量转换为指定流媒体服务的可连续播放队列，并返回 (队列, 起始播放下标)。
+     */
+    fun buildQueueFromDiscoverItems(
+        service: WebMusicService,
+        currentItem: DiscoverItem,
+        queueItems: List<DiscoverItem>,
+        preferredIndex: Int = 0,
+    ): Pair<List<MediaEntry>, Int> {
+        if (queueItems.isEmpty()) {
+            return listOf(buildEntryFromDiscoverItem(service, currentItem)) to 0
+        }
+        val matchedIndex = queueItems.indices
+            .firstOrNull { it == preferredIndex && queueItems[it].id == currentItem.id }
+            ?: queueItems.indexOfFirst { it.id == currentItem.id }.takeIf { it >= 0 }
+            ?: preferredIndex.coerceIn(queueItems.indices)
+        val entries = queueItems.mapIndexed { i, q ->
+            val src = if (i == matchedIndex) currentItem else q
+            buildEntryFromDiscoverItem(service, src)
+        }
+        return entries to matchedIndex
+    }
+
     internal fun extractAppleSongId(item: DiscoverItem): String? {
         if (item.id.startsWith("apple:") || item.id.startsWith("itunes:")) {
             val raw = item.id.substringAfter(':').trim()

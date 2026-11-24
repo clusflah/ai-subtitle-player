@@ -82,6 +82,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
@@ -172,6 +173,8 @@ fun MusicView(
     externalHoldVisible: Boolean = false,
     onBarsVisibleChange: ((Boolean) -> Unit)? = null,
     externalPager: androidx.compose.foundation.pager.PagerState? = null,
+    externalTvPage: Int? = null,
+    onExternalTvPageChange: ((Int) -> Unit)? = null,
     libraryTabContent: (@Composable () -> Unit)? = null,
 ) {
     val activeMusic = music.tags != null
@@ -184,14 +187,25 @@ fun MusicView(
     val loopB = if (activeMusic) mainState.loopB else null
     val effectiveDuration = if (activeMusic) (player.duration.takeIf { it > 0 } ?: tags.durationMs) else tags.durationMs
     val config = LocalConfiguration.current
-    val landscape = config.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val tv = LocalTv.current
+    val landscape = config.orientation == Configuration.ORIENTATION_LANDSCAPE || tv
     val screenH = config.screenHeightDp.dp
     val scope = rememberCoroutineScope()
     val pageCount = if (libraryTabContent != null) 3 else 2
     val internalPager = rememberPagerState(initialPage = 0) { pageCount }
     val pager = externalPager ?: internalPager
-    val onLyricsPage = pager.currentPage == LYRICS_PAGE
-    val onLibraryPage = libraryTabContent != null && pager.currentPage == LIBRARY_PAGE
+    var internalTvPage by rememberSaveable { mutableIntStateOf(0) }
+    val currentPage = if (tv) (externalTvPage ?: internalTvPage).coerceIn(0, pageCount - 1) else pager.currentPage
+    val selectPage: (Int) -> Unit = { targetPage ->
+        val safeTarget = targetPage.coerceIn(0, pageCount - 1)
+        if (tv) {
+            if (onExternalTvPageChange != null) onExternalTvPageChange(safeTarget) else internalTvPage = safeTarget
+        } else {
+            scope.launch { pager.animateScrollToPage(safeTarget) }
+        }
+    }
+    val onLyricsPage = currentPage == LYRICS_PAGE
+    val onLibraryPage = libraryTabContent != null && currentPage == LIBRARY_PAGE
     var showQueue by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var liked by remember(effectiveEntry?.uri) { mutableStateOf(effectiveEntry?.let { vm.isLiked(it.uri) } == true) }
@@ -215,8 +229,8 @@ fun MusicView(
     var sliderAdjusting by remember { mutableStateOf(false) }
     var seekDragging by remember { mutableStateOf(false) }
     var barsVisible by remember { mutableStateOf(true) }
-    LaunchedEffect(pager.currentPage, touches, effectiveWantsPlay, showMenu, showQueue, sliderAdjusting, seekDragging, externalHoldVisible, onLibraryPage) {
-        if (onLibraryPage) {
+    LaunchedEffect(currentPage, touches, effectiveWantsPlay, showMenu, showQueue, sliderAdjusting, seekDragging, externalHoldVisible, onLibraryPage, tv) {
+        if (onLibraryPage || tv) {
             barsVisible = true
             return@LaunchedEffect
         }
@@ -360,21 +374,17 @@ fun MusicView(
                     exit = fadeOut(tween(340)) + shrinkVertically(tween(360)),
                 ) {
                     TopTabs(
-                        page = pager.currentPage,
+                        page = currentPage,
                         showLibraryTab = libraryTabContent != null,
                         onBack = onBack,
                         trailingContent = topTrailingContent,
                     ) {
                         touches++
-                        scope.launch { pager.animateScrollToPage(it) }
+                        selectPage(it)
                     }
                 }
-                val vinylVisible = pager.currentPage == 0 || pager.targetPage == 0
-                HorizontalPager(
-                    state = pager,
-                    modifier = Modifier.weight(1f).fillMaxWidth().graphicsLayer { clip = true },
-                    userScrollEnabled = !LocalTv.current,
-                ) { page ->
+                val vinylVisible = if (tv) currentPage == 0 else (pager.currentPage == 0 || pager.targetPage == 0)
+                val renderPageContent: @Composable (Int) -> Unit = { page ->
                     when (page) {
                         LYRICS_PAGE -> LyricsPage(
                             vm = vm,
@@ -404,6 +414,18 @@ fun MusicView(
                                 ),
                             )
                         }
+                    }
+                }
+                if (tv) {
+                    Box(Modifier.weight(1f).fillMaxWidth().graphicsLayer { clip = true }) {
+                        renderPageContent(currentPage)
+                    }
+                } else {
+                    HorizontalPager(
+                        state = pager,
+                        modifier = Modifier.weight(1f).fillMaxWidth().graphicsLayer { clip = true },
+                    ) { page ->
+                        renderPageContent(page)
                     }
                 }
             }
@@ -487,7 +509,7 @@ fun MusicView(
                             onQueue = {
                                 touches++
                                 if (activeMusic && vm.queueSize > 0) showQueue = true
-                                else if (libraryTabContent != null) scope.launch { pager.animateScrollToPage(LIBRARY_PAGE) }
+                                else if (libraryTabContent != null) selectPage(LIBRARY_PAGE)
                             },
                         )
                         DesktopAdjustPill(
@@ -544,25 +566,25 @@ fun MusicView(
 
     CompositionLocalProvider(LocalForceDarkPopup provides true) {
         if (showQueue) {
-            var queueVersion by remember { mutableIntStateOf(0) }
-            val entries = remember(queueVersion, effectiveEntry?.uri) { vm.queueEntries }
-            val (mode, next) = rememberPlayMode(player)
+            val entries = remember(mainState.queueVersion, effectiveEntry?.uri) { vm.queueEntries }
+            val (mode, next) = rememberPlayMode(vm, player)
+            val modeTint = if (mode == PlayMode.INFINITE) Orange else MaterialTheme.colorScheme.onSurface
             AppSheet(
                 onDismissRequest = { showQueue = false },
                 sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
                 title = "播放列表 (${entries.size})",
                 headerActions = {
                     Row(
-                        Modifier.clip(RoundedCornerShape(50)).clickable { onMessage(next().label) }.padding(horizontal = 10.dp, vertical = 5.dp),
+                        Modifier.clip(RoundedCornerShape(50)).clickable { onMessage(next().toastLabel) }.padding(horizontal = 10.dp, vertical = 5.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(mode.icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(18.dp))
+                        Icon(mode.icon, null, tint = modeTint, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text(mode.label, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
+                        Text(mode.label, color = modeTint, fontSize = 14.sp)
                     }
                 },
             ) {
-                QueueSheet(vm, entries, effectiveEntry, onRemoved = { queueVersion++ })
+                QueueSheet(vm, entries, effectiveEntry, onRemoved = {})
             }
         }
 
@@ -858,24 +880,28 @@ private fun MusicSeekBar(
 
 // ---------------- 播放按钮 ----------------
 
-/** 播放顺序：顺序播放 → 列表循环 → 单曲循环 → 随机播放 */
-private enum class PlayMode(val label: String, val icon: ImageVector) {
-    ORDER("顺序播放", AppIcons.PlaylistPlay),
-    LOOP("列表循环", AppIcons.Repeat),
-    ONE("单曲循环", AppIcons.RepeatOne),
-    SHUFFLE("随机播放", AppIcons.Shuffle);
+/** 播放顺序：顺序播放 → 列表循环 → 单曲循环 → 随机播放 → 无限随机 */
+private enum class PlayMode(val label: String, val toastLabel: String, val icon: ImageVector) {
+    ORDER("顺序播放", "顺序播放", AppIcons.PlaylistPlay),
+    LOOP("列表循环", "列表循环", AppIcons.Repeat),
+    ONE("单曲循环", "单曲循环", AppIcons.RepeatOne),
+    SHUFFLE("随机播放", "随机播放", AppIcons.Shuffle),
+    INFINITE("无限随机", "无限随机 · 自动续播推荐好歌", AppIcons.AllInclusive);
 
-    fun apply(player: Player) {
-        player.shuffleModeEnabled = this == SHUFFLE
-        player.repeatMode = when (this) {
+    fun apply(vm: MainViewModel) {
+        val inf = this == INFINITE
+        val shuf = this == SHUFFLE || inf
+        val rep = when (this) {
             ORDER -> Player.REPEAT_MODE_OFF
             ONE -> Player.REPEAT_MODE_ONE
             else -> Player.REPEAT_MODE_ALL
         }
+        vm.applyMusicPlayMode(infiniteShuffle = inf, shuffleEnabled = shuf, repeatMode = rep)
     }
 
     companion object {
-        fun of(player: Player) = when {
+        fun of(player: Player, infiniteShuffle: Boolean) = when {
+            infiniteShuffle -> INFINITE
             player.shuffleModeEnabled -> SHUFFLE
             player.repeatMode == Player.REPEAT_MODE_ONE -> ONE
             player.repeatMode == Player.REPEAT_MODE_ALL -> LOOP
@@ -885,12 +911,15 @@ private enum class PlayMode(val label: String, val icon: ImageVector) {
 }
 
 @Composable
-private fun rememberPlayMode(player: Player): Pair<PlayMode, () -> PlayMode> {
-    var mode by remember(player) { mutableStateOf(PlayMode.of(player)) }
+private fun rememberPlayMode(vm: MainViewModel, player: Player): Pair<PlayMode, () -> PlayMode> {
+    val mainState by vm.state.collectAsStateWithLifecycle()
+    val mode = remember(player, mainState.infiniteShuffle, mainState.playModeVersion) {
+        PlayMode.of(player, mainState.infiniteShuffle)
+    }
     return mode to {
-        mode = PlayMode.entries[(mode.ordinal + 1) % PlayMode.entries.size]
-        mode.apply(player)
-        mode
+        val next = PlayMode.entries[(mode.ordinal + 1) % PlayMode.entries.size]
+        next.apply(vm)
+        next
     }
 }
 
@@ -904,22 +933,25 @@ private fun PlayControls(
     onMessage: (String) -> Unit,
     onQueue: () -> Unit,
 ) {
-    val (mode, next) = rememberPlayMode(player)
-    val canSkip = activeMusic && vm.queueSize > 1
+    val mainState by vm.state.collectAsStateWithLifecycle()
+    val (mode, next) = rememberPlayMode(vm, player)
+    val hasMultiQueue = mainState.queueVersion >= 0 && vm.queueSize > 1
+    val canSkipPrev = activeMusic && hasMultiQueue
+    val canSkipNext = activeMusic && (hasMultiQueue || mode == PlayMode.INFINITE)
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(
-            onClick = { onMessage(next().label) },
+            onClick = { onMessage(next().toastLabel) },
             modifier = Modifier.tvFocusRing(CircleShape, color = Color.White),
         ) {
-            Icon(mode.icon, mode.label, tint = Color.White, modifier = Modifier.size(28.dp))
+            Icon(mode.icon, mode.label, tint = if (mode == PlayMode.INFINITE) Orange else Color.White, modifier = Modifier.size(28.dp))
         }
         IconButton(
             onClick = {
                 if (!activeMusic) onIdlePlay?.invoke()
-                else if (canSkip) vm.skipInQueue(false, restartFirst = true)
+                else if (canSkipPrev) vm.skipInQueue(false, restartFirst = true)
                 else player.seekTo(0)
             },
             modifier = Modifier.tvFocusRing(CircleShape, color = Color.White),
@@ -940,10 +972,10 @@ private fun PlayControls(
         }
         IconButton(
             onClick = { if (activeMusic) vm.skipInQueue(true) else onIdlePlay?.invoke() },
-            enabled = canSkip || (!activeMusic && onIdlePlay != null),
+            enabled = canSkipNext || (!activeMusic && onIdlePlay != null),
             modifier = Modifier.tvFocusRing(CircleShape, color = Color.White),
         ) {
-            Icon(AppIcons.SkipNext, "下一首", tint = if (canSkip || (!activeMusic && onIdlePlay != null)) Color.White else Faint, modifier = Modifier.size(34.dp))
+            Icon(AppIcons.SkipNext, "下一首", tint = if (canSkipNext || (!activeMusic && onIdlePlay != null)) Color.White else Faint, modifier = Modifier.size(34.dp))
         }
         IconButton(
             onClick = onQueue,

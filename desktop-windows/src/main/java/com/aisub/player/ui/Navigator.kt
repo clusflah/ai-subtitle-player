@@ -53,8 +53,12 @@ sealed interface Screen {
     data object Books : Screen
     /** 看图：同一文件夹里的图片左右滑动切换。 */
     data class ImageViewer(val serverId: String?, val images: List<com.aisub.player.remote.RemoteItem>, val index: Int) : Screen
-    /** 发现页条目进入的影视详情页，支持跳转到 Telegram / 影巢 / 网盘 / 磁力搜索。 */
-    data class DiscoverDetail(val item: com.aisub.player.meta.DiscoverItem) : Screen
+    /** 发现页条目进入的影视/音乐详情页；音乐榜单/列表进入时附带所在列表 queue 与下标 index 以支持连续播放。 */
+    data class DiscoverDetail(
+        val item: com.aisub.player.meta.DiscoverItem,
+        val queue: List<com.aisub.player.meta.DiscoverItem> = emptyList(),
+        val index: Int = 0,
+    ) : Screen
     /** 发现页的流媒体榜单 / 豆瓣与 TMDB 全部分类榜单网格页。 */
     data class DiscoverChart(val chartId: String? = null) : Screen
     /** 发现页 AI 推荐页面：向 AI 描述需求，智能推荐对应影视或音乐作品。 */

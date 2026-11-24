@@ -62,6 +62,8 @@ class WebStreamingMusicPlayer(
     private var lastAnchoredElapsedMs: Long = 0L
     private var trackTransitionPending: Boolean = false
     private var lastSyncedMetaKey: String = ""
+    private var consecutiveAutoAdvanceFailures: Int = 0
+    private val shufflePlayedUris = HashSet<String>()
 
     init {
         WebStreamingMusic.setSnapshotListener { snap ->
@@ -69,9 +71,12 @@ class WebStreamingMusicPlayer(
         }
     }
 
+    private fun itemUriAt(index: Int): String =
+        items.getOrNull(index)?.localConfiguration?.uri?.toString()
+            ?: items.getOrNull(index)?.mediaId?.takeIf { it.isNotBlank() }.orEmpty()
+
     private fun currentUriString(): String? =
-        items.getOrNull(currentIndex)?.localConfiguration?.uri?.toString()
-            ?: items.getOrNull(currentIndex)?.mediaId?.takeIf { it.isNotBlank() }
+        itemUriAt(currentIndex).takeIf { it.isNotBlank() }
 
     private fun activeService(): WebMusicService? =
         WebMusicService.fromUri(currentUriString())
@@ -200,8 +205,11 @@ class WebStreamingMusicPlayer(
         }
         val nextIdx = when {
             shuffleEnabled && items.size > 1 -> {
-                val candidates = items.indices.filter { it != currentIndex }
-                candidates[Random.nextInt(candidates.size)]
+                pickNextShuffleIndex(
+                    itemUris = List(items.size) { idx -> itemUriAt(idx) },
+                    currentIndex = currentIndex,
+                    playedUris = shufflePlayedUris,
+                )
             }
             currentIndex + 1 < items.size -> currentIndex + 1
             repeatModeState == Player.REPEAT_MODE_ALL -> 0
@@ -211,7 +219,7 @@ class WebStreamingMusicPlayer(
             currentIndex = nextIdx
             startPositionMs = 0L
             invalidateState()
-            startCurrentTrack(0L)
+            startCurrentTrack(0L, autoAdvanced = true)
         } else {
             remoteActuallyPlaying = false
             playbackState = Player.STATE_ENDED
@@ -220,8 +228,9 @@ class WebStreamingMusicPlayer(
         }
     }
 
-    private fun startCurrentTrack(positionMs: Long) {
+    private fun startCurrentTrack(positionMs: Long, autoAdvanced: Boolean = false) {
         val uri = currentUriString() ?: return
+        shufflePlayedUris.add(uri)
         val gen = ++activePlayGeneration
         launchJob?.cancel()
         error = null
@@ -243,6 +252,7 @@ class WebStreamingMusicPlayer(
             val result = WebStreamingMusic.playUri(appContext, uri, safeStart, gen)
             if (gen != activePlayGeneration) return@launch
             result.onSuccess {
+                consecutiveAutoAdvanceFailures = 0
                 error = null
                 // 保持 STATE_BUFFERING 直至首帧真实音频开始推进，防止缓冲静默期进度条提前空跑
                 if (!playWhenReady) {
@@ -258,6 +268,12 @@ class WebStreamingMusicPlayer(
                 invalidateState()
             }.onFailure { e ->
                 remoteActuallyPlaying = false
+                // 榜单/歌单自动连播下一首时，若个别曲目因无版权等原因无法播放，自动跳过继续播放后续曲目（最多连续跳 3 首）
+                if (autoAdvanced && playWhenReady && items.size > 1 && consecutiveAutoAdvanceFailures < 3) {
+                    consecutiveAutoAdvanceFailures++
+                    advanceOnTrackEnd()
+                    return@onFailure
+                }
                 error = PlaybackException(
                     e.message ?: "流媒体播放失败",
                     e,
@@ -281,6 +297,7 @@ class WebStreamingMusicPlayer(
         currentIndex = 0
         currentPosMs = 0L
         currentDurMs = C.TIME_UNSET
+        shufflePlayedUris.clear()
         error = null
         WebStreamingMusic.stopAll()
         invalidateState()
@@ -375,6 +392,8 @@ class WebStreamingMusicPlayer(
         launchJob?.cancel()
         WebStreamingMusic.stopAll()
         items = mediaItems.toList()
+        val retainedUris = items.indices.mapTo(HashSet(items.size)) { idx -> itemUriAt(idx) }
+        shufflePlayedUris.retainAll(retainedUris)
         currentIndex = if (items.isEmpty()) 0 else startIndex.coerceIn(items.indices)
         this.startPositionMs = startPositionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0L) ?: 0L
         currentPosMs = this.startPositionMs
@@ -386,6 +405,7 @@ class WebStreamingMusicPlayer(
         seekHoldUntilMs = 0L
         trackTransitionPending = false
         lastSyncedMetaKey = ""
+        consecutiveAutoAdvanceFailures = 0
         error = null
         playbackState = Player.STATE_IDLE
         return Futures.immediateVoidFuture()
@@ -512,5 +532,31 @@ class WebStreamingMusicPlayer(
         scope.cancel()
         WebStreamingMusic.setSnapshotListener(null)
         return Futures.immediateVoidFuture()
+    }
+
+    companion object {
+        /**
+         * 随机切歌时优先从未播放过的曲目中挑选（使无限随机新追加的推荐曲目优先被播到）；
+         * 若队列内曲目均已播过一轮，则清空本轮记录后在非当前曲目中重新随机。
+         */
+        internal fun pickNextShuffleIndex(
+            itemUris: List<String>,
+            currentIndex: Int,
+            playedUris: MutableSet<String>,
+        ): Int {
+            if (itemUris.size <= 1) return currentIndex.coerceAtLeast(0)
+            val unplayed = itemUris.indices.filter { idx ->
+                idx != currentIndex && itemUris[idx] !in playedUris
+            }
+            val pool = if (unplayed.isNotEmpty()) {
+                unplayed
+            } else {
+                val curUri = itemUris.getOrNull(currentIndex)
+                playedUris.clear()
+                if (!curUri.isNullOrEmpty()) playedUris.add(curUri)
+                itemUris.indices.filter { it != currentIndex }
+            }
+            return pool[Random.nextInt(pool.size)]
+        }
     }
 }

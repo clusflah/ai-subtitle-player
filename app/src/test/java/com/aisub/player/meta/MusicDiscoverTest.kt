@@ -232,6 +232,24 @@ class MusicDiscoverTest {
         )
         assertTrue(com.aisub.player.music.WebStreamingMusic.isStreamingUri(spotifyEntry.uri))
         assertTrue(spotifyEntry.uri.startsWith("spotify://track/3DYVWvPh3kGwPasp7yjahc"))
+
+        // 榜单连续播放队列转换：保留当前曲目的补全元数据并精确定位起始下标
+        val chartItems = listOf(
+            appleDiscover,
+            spotifyDiscover,
+            DiscoverItem(id = "itunes:999", kind = "music", title = "Go Easy", artist = "Dua Lipa", album = "DL4"),
+        )
+        val enrichedCurrent = spotifyDiscover.copy(album = "叶惠美", durationMs = 269_000L)
+        val (chartQueue, startIdx) = com.aisub.player.music.WebStreamingMusic.buildQueueFromDiscoverItems(
+            service = com.aisub.player.music.WebMusicService.SPOTIFY,
+            currentItem = enrichedCurrent,
+            queueItems = chartItems,
+            preferredIndex = 1,
+        )
+        assertEquals(3, chartQueue.size)
+        assertEquals(1, startIdx)
+        assertEquals("叶惠美", com.aisub.player.remote.cloud.ServerProgress.find(chartQueue[1].uri)?.album)
+        assertEquals("Go Easy", com.aisub.player.remote.cloud.ServerProgress.find(chartQueue[2].uri)?.title)
     }
 
     @Test
@@ -650,5 +668,35 @@ class MusicDiscoverTest {
         dupPlayer.setMediaItems(listOf(newItem), 0, 0L)
         assertEquals(androidx.media3.common.Player.STATE_IDLE, dupPlayer.playbackState)
         dupPlayer.release()
+    }
+
+    @Test
+    fun infiniteShuffleIconAndUnplayedFirstShuffleSelectionWork() {
+        assertNotNull(com.aisub.player.ui.AppIcons.AllInclusive)
+
+        val uris = listOf(
+            "spotify://track/A",
+            "spotify://track/B",
+            "spotify://track/C",
+            "spotify://track/D",
+        )
+        val played = HashSet<String>(listOf("spotify://track/A", "spotify://track/B", "spotify://track/C"))
+        // 仅 D 未播放过，必须优先选中 D（下标 3）
+        val nextIdx = com.aisub.player.media.WebStreamingMusicPlayer.pickNextShuffleIndex(
+            itemUris = uris,
+            currentIndex = 2,
+            playedUris = played,
+        )
+        assertEquals(3, nextIdx)
+
+        // 当全部曲目都已播过一轮时，清空旧记录（仅保留当前曲目）并在非当前曲目中继续随机
+        played.add("spotify://track/D")
+        val cycledIdx = com.aisub.player.media.WebStreamingMusicPlayer.pickNextShuffleIndex(
+            itemUris = uris,
+            currentIndex = 3,
+            playedUris = played,
+        )
+        assertTrue(cycledIdx in 0..2)
+        assertEquals(setOf("spotify://track/D"), played)
     }
 }

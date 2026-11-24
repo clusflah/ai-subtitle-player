@@ -306,6 +306,8 @@ class MainActivity : ComponentActivity() {
                         )
                         is Screen.DiscoverDetail -> com.aisub.player.ui.DiscoverDetailScreen(
                             item = screen.item,
+                            queue = screen.queue,
+                            queueIndex = screen.index,
                             settings = ui.settings,
                             lib = lib,
                             onBack = back,
@@ -345,16 +347,34 @@ class MainActivity : ComponentActivity() {
                             },
                             onUpdateSettings = main::updateSettings,
                             onSelectWork = { w -> nav.push(Screen.DiscoverDetail(w)) },
+                            onSelectWorkWithQueue = { w, q, idx -> nav.push(Screen.DiscoverDetail(w, q, idx)) },
                         )
                         is Screen.DiscoverChart -> com.aisub.player.ui.DiscoverChartScreen(
                             initialChartId = screen.chartId,
                             settings = ui.settings,
+                            lib = lib,
+                            play = play,
                             onBack = back,
                             onOpenDetail = { item -> nav.push(Screen.DiscoverDetail(item)) },
+                            onOpenDetailWithQueue = { item, q, idx -> nav.push(Screen.DiscoverDetail(item, q, idx)) },
                             onOpenSettings = { nav.push(Screen.Settings) },
                             onOpenWeb = { url ->
                                 com.aisub.player.web.WebLaunch.open(url, mangaMode = false, allowOpenApp = true)
                                 nav.push(Screen.Web)
+                            },
+                            onOpenServerDetail = { serverId, ratingKey ->
+                                nav.push(Screen.ServerDetail(serverId, ratingKey))
+                            },
+                            onOpenRemote = { server, path, title ->
+                                if (server.type.isMediaServer && path.isEmpty()) {
+                                    nav.push(Screen.ServerHome(server.id, server.name))
+                                } else {
+                                    nav.push(Screen.Remote(server.id, path, title))
+                                }
+                            },
+                            onOpenMusicLibrary = {
+                                lib.homeTab = 3 // Tab.MUSIC
+                                while (nav.stack.size > 1) nav.pop()
                             },
                         )
                         is Screen.DiscoverAiRecommend -> com.aisub.player.ui.DiscoverAiRecommendScreen(
@@ -364,6 +384,7 @@ class MainActivity : ComponentActivity() {
                             lib = lib,
                             onBack = back,
                             onOpenDetail = { item -> nav.push(Screen.DiscoverDetail(item)) },
+                            onOpenDetailWithQueue = { item, q, idx -> nav.push(Screen.DiscoverDetail(item, q, idx)) },
                             onOpenSettings = { nav.push(Screen.Settings) },
                             onUpdateSettings = main::updateSettings,
                         )

@@ -181,6 +181,7 @@ fun MusicDiscoverTab(
     searchExpanded: Boolean = false,
     onSearchExpandedChange: (Boolean) -> Unit = {},
     onOpenDetail: (DiscoverItem) -> Unit,
+    onOpenDetailWithQueue: (DiscoverItem, List<DiscoverItem>, Int) -> Unit = { item, _, _ -> onOpenDetail(item) },
     onOpenChart: (String) -> Unit,
     onOpenPlayWeb: (String) -> Unit,
     onOpenAiRecommend: (String) -> Unit = {},
@@ -554,7 +555,7 @@ fun MusicDiscoverTab(
                             )
                         }
                         val cols = if (wide || tv) 5 else 3
-                        items(searchResults.chunked(cols), key = { row -> row.first().id }) { row ->
+                        itemsIndexed(searchResults.chunked(cols), key = { _, row -> row.first().id }) { rowIdx, row ->
                             Row(
                                 Modifier.fillMaxWidth().padding(horizontal = 14.dp),
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -562,11 +563,12 @@ fun MusicDiscoverTab(
                                 for (i in 0 until cols) {
                                     val song = row.getOrNull(i)
                                     if (song != null) {
+                                        val fullIdx = rowIdx * cols + i
                                         MusicSquareCard(
                                             item = song,
                                             width = null,
                                             modifier = Modifier.weight(1f),
-                                            onClick = { onOpenDetail(song) },
+                                            onClick = { onOpenDetailWithQueue(song, searchResults, fullIdx) },
                                         )
                                     } else {
                                         Spacer(Modifier.weight(1f))
@@ -702,7 +704,17 @@ fun MusicDiscoverTab(
                             cardWidth = cardSize,
                             showRanks = section.chart.id != "music_new_express",
                             onSeeAll = { onOpenChart(section.chart.id) },
-                            onOpenDetail = onOpenDetail,
+                            onOpenDetailWithQueue = { song, idx ->
+                                val fuller = MusicDiscoverRepository.peekChartPage(section.chart, context, sourcePref)
+                                    ?.items
+                                    ?.takeIf { it.size > section.items.size }
+                                val matchInFuller = fuller?.indexOfFirst { it.id == song.id }?.takeIf { it >= 0 }
+                                if (fuller != null && matchInFuller != null) {
+                                    onOpenDetailWithQueue(song, fuller, matchInFuller)
+                                } else {
+                                    onOpenDetailWithQueue(song, section.items, idx)
+                                }
+                            },
                         )
                     }
                 }
@@ -764,7 +776,7 @@ private fun MusicChartRowSection(
     cardWidth: Dp,
     showRanks: Boolean,
     onSeeAll: () -> Unit,
-    onOpenDetail: (DiscoverItem) -> Unit,
+    onOpenDetailWithQueue: (DiscoverItem, Int) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(
@@ -816,7 +828,7 @@ private fun MusicChartRowSection(
                     item = item,
                     width = cardWidth,
                     rank = if (showRanks) idx + 1 else null,
-                    onClick = { onOpenDetail(item) },
+                    onClick = { onOpenDetailWithQueue(item, idx) },
                 )
             }
         }
@@ -923,13 +935,22 @@ fun MusicSquareCard(
 fun MusicDiscoverChartScreen(
     initialChartId: String?,
     settings: AppSettings = AppSettings(),
+    lib: LibraryViewModel? = null,
+    play: ((List<MediaEntry>, Int) -> Unit)? = null,
     onBack: () -> Unit,
     onOpenDetail: (DiscoverItem) -> Unit,
+    onOpenDetailWithQueue: (DiscoverItem, List<DiscoverItem>, Int) -> Unit = { item, _, _ -> onOpenDetail(item) },
+    onOpenPlayWeb: (String) -> Unit = {},
+    onOpenServerDetail: (serverId: String, ratingKey: String) -> Unit = { _, _ -> },
+    onOpenRemote: (server: Server, path: String, title: String) -> Unit = { _, _, _ -> },
+    onOpenMusicLibrary: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val wide = LocalWideLayout.current
     val tv = LocalTv.current
     val sourcePref = settings.musicDiscoverSource
+    var chartPlayDialogOpen by remember { mutableStateOf(false) }
 
     val defaultId = initialChartId?.takeIf { MusicDiscoverCharts.findChart(it) != null }
         ?: MusicDiscoverCharts.allCharts.first().id
@@ -979,6 +1000,16 @@ fun MusicDiscoverChartScreen(
         title = chart.title,
         onBack = onBack,
         actions = {
+            if (items.isNotEmpty() && lib != null && play != null) {
+                TextButton(
+                    onClick = { chartPlayDialogOpen = true },
+                    modifier = Modifier.tvFocusRing(RoundedCornerShape(8.dp)),
+                ) {
+                    Icon(AppIcons.PlayArrow, null, tint = Orange, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(3.dp))
+                    Text("连播榜单", color = Orange, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
             IconButton(onClick = { reloadNonce++ }) {
                 Icon(AppIcons.Refresh, "刷新榜单")
             }
@@ -1015,12 +1046,63 @@ fun MusicDiscoverChartScreen(
                             item = song,
                             width = null,
                             rank = if (chart.id != "music_new_express") idx + 1 else null,
-                            onClick = { onOpenDetail(song) },
+                            onClick = { onOpenDetailWithQueue(song, items, idx) },
                         )
                     }
                 }
             }
         }
+    }
+
+    if (chartPlayDialogOpen && items.isNotEmpty() && lib != null && play != null) {
+        val libState by lib.state.collectAsStateWithLifecycle()
+        val firstItem = items.first()
+        val firstLocalMatches = remember(libState.audios, libState.history, firstItem.title, firstItem.artist) {
+            MusicRecommendationEngine.matchLocalTracks(
+                item = firstItem,
+                localAudios = libState.audios,
+                historyEntries = libState.history.map { it.entry },
+            )
+        }
+        MusicDiscoverPlayDialog(
+            item = firstItem,
+            queueItems = items,
+            queueIndex = 0,
+            localMatches = firstLocalMatches,
+            localAudios = libState.audios,
+            historyEntries = libState.history.map { it.entry },
+            lib = lib,
+            servers = libState.servers,
+            onDismiss = { chartPlayDialogOpen = false },
+            onPlayEntries = { list, idx ->
+                chartPlayDialogOpen = false
+                play(list, idx)
+            },
+            onOpenMusicLibrary = {
+                chartPlayDialogOpen = false
+                onOpenMusicLibrary()
+            },
+            onOpenServerDetail = { sid, rk ->
+                chartPlayDialogOpen = false
+                onOpenServerDetail(sid, rk)
+            },
+            onOpenRemote = { srv, path, title ->
+                chartPlayDialogOpen = false
+                onOpenRemote(srv, path, title)
+            },
+            onOpenPlayWeb = { url ->
+                chartPlayDialogOpen = false
+                onOpenPlayWeb(url)
+            },
+            onOpenExternal = { url ->
+                chartPlayDialogOpen = false
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }.onFailure {
+                    clipboard.setText(AnnotatedString(url))
+                }
+            },
+        )
     }
 }
 
@@ -1032,6 +1114,8 @@ fun MusicDiscoverChartScreen(
 @Composable
 fun MusicDiscoverDetailScreen(
     item: DiscoverItem,
+    queueItems: List<DiscoverItem> = emptyList(),
+    queueIndex: Int = 0,
     settings: AppSettings,
     lib: LibraryViewModel,
     onBack: () -> Unit,
@@ -1043,6 +1127,7 @@ fun MusicDiscoverDetailScreen(
     onOpenMusicLibrary: () -> Unit = {},
     onUpdateSettings: ((AppSettings) -> Unit)? = null,
     onSelectSong: (DiscoverItem) -> Unit = {},
+    onSelectSongWithQueue: (DiscoverItem, List<DiscoverItem>, Int) -> Unit = { s, _, _ -> onSelectSong(s) },
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -1230,7 +1315,11 @@ fun MusicDiscoverDetailScreen(
                         Icon(AppIcons.PlayArrow, null, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            text = if (localMatches.isNotEmpty()) "播放（本机已匹配曲目）" else "跳转播放",
+                            text = when {
+                                localMatches.isNotEmpty() -> "播放（本机已匹配曲目）"
+                                queueItems.size > 1 -> "跳转播放（连播列表 ${queueItems.size} 首）"
+                                else -> "跳转播放"
+                            },
                             fontWeight = FontWeight.SemiBold,
                         )
                     }
@@ -1290,6 +1379,7 @@ fun MusicDiscoverDetailScreen(
                 onUpdateSettings = onUpdateSettings,
                 onOpenSettings = onOpenSettings,
                 onSelectSong = onSelectSong,
+                onSelectSongWithQueue = onSelectSongWithQueue,
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
         }
@@ -1298,7 +1388,11 @@ fun MusicDiscoverDetailScreen(
     if (playDialogOpen) {
         MusicDiscoverPlayDialog(
             item = enriched,
+            queueItems = queueItems,
+            queueIndex = queueIndex,
             localMatches = localMatches,
+            localAudios = libState.audios,
+            historyEntries = libState.history.map { it.entry },
             lib = lib,
             servers = libState.servers,
             onDismiss = { playDialogOpen = false },
@@ -1341,7 +1435,11 @@ private sealed interface RemoteMusicHit {
 @Composable
 private fun MusicDiscoverPlayDialog(
     item: DiscoverItem,
+    queueItems: List<DiscoverItem> = emptyList(),
+    queueIndex: Int = 0,
     localMatches: List<MediaEntry>,
+    localAudios: List<MediaEntry> = emptyList(),
+    historyEntries: List<MediaEntry> = emptyList(),
     lib: LibraryViewModel,
     servers: List<Server>,
     onDismiss: () -> Unit,
@@ -1352,6 +1450,36 @@ private fun MusicDiscoverPlayDialog(
     onOpenPlayWeb: (String) -> Unit,
     onOpenExternal: (String) -> Unit,
 ) {
+    val effectiveQueueCount = queueItems.size.takeIf { it > 1 } ?: 1
+    val continuousLocalQueue = remember(queueItems, queueIndex, item.id, localMatches, localAudios, historyEntries) {
+        if (queueItems.size <= 1 || localMatches.isEmpty()) {
+            null
+        } else {
+            val startIdx = queueItems.indices
+                .firstOrNull { it == queueIndex && queueItems[it].id == item.id }
+                ?: queueItems.indexOfFirst { it.id == item.id }.takeIf { it >= 0 }
+                ?: queueIndex.coerceIn(queueItems.indices)
+            val seenUris = LinkedHashSet<String>()
+            val merged = ArrayList<MediaEntry>()
+            val currentUriToQueueIndex = LinkedHashMap<String, Int>()
+            queueItems.forEachIndexed { i, qItem ->
+                if (i == startIdx) {
+                    localMatches.forEach { m ->
+                        if (seenUris.add(m.uri)) {
+                            currentUriToQueueIndex[m.uri] = merged.size
+                            merged += m
+                        }
+                    }
+                } else {
+                    val m = MusicRecommendationEngine.matchLocalTracks(qItem, localAudios, historyEntries).firstOrNull()
+                    if (m != null && seenUris.add(m.uri)) {
+                        merged += m
+                    }
+                }
+            }
+            if (merged.size > localMatches.size) merged to currentUriToQueueIndex else null
+        }
+    }
     var remoteHits by remember(item.id, servers) { mutableStateOf<List<RemoteMusicHit>>(emptyList()) }
     var searchingRemote by remember(item.id, servers) { mutableStateOf(false) }
 
@@ -1437,9 +1565,20 @@ private fun MusicDiscoverPlayDialog(
                         localMatches.forEachIndexed { idx, entry ->
                             PlayOptionRow(
                                 title = entry.displayTitle,
-                                subtitle = entry.folder.ifBlank { "本机音频" },
+                                subtitle = if (continuousLocalQueue != null) {
+                                    "${entry.folder.ifBlank { "本机音频" }} · 连播已匹配 ${continuousLocalQueue.first.size} 首"
+                                } else {
+                                    entry.folder.ifBlank { "本机音频" }
+                                },
                                 actionText = "直接播放",
-                                onClick = { onPlayEntries(localMatches, idx) },
+                                onClick = {
+                                    if (continuousLocalQueue != null) {
+                                        val (q, map) = continuousLocalQueue
+                                        onPlayEntries(q, map[entry.uri] ?: 0)
+                                    } else {
+                                        onPlayEntries(localMatches, idx)
+                                    }
+                                },
                             )
                         }
                     }
@@ -1539,8 +1678,13 @@ private fun MusicDiscoverPlayDialog(
                                     .tvFocusRing(RoundedCornerShape(10.dp))
                                     .clickable {
                                         if (isLogged) {
-                                            val entry = WebStreamingMusic.buildEntryFromDiscoverItem(svc, item)
-                                            onPlayEntries(listOf(entry), 0)
+                                            val (entries, startIdx) = WebStreamingMusic.buildQueueFromDiscoverItems(
+                                                service = svc,
+                                                currentItem = item,
+                                                queueItems = queueItems,
+                                                preferredIndex = queueIndex,
+                                            )
+                                            onPlayEntries(entries, startIdx)
                                         } else {
                                             pendingLoginService = svc
                                         }
@@ -1558,14 +1702,22 @@ private fun MusicDiscoverPlayDialog(
                                         maxLines = 1,
                                     )
                                     Text(
-                                        text = if (isLogged) "已登录 · 在应用音乐页直接播放" else "未登录 · 点击登录并直接播放",
+                                        text = when {
+                                            isLogged && effectiveQueueCount > 1 -> "已登录 · 连续播放当前列表（共 $effectiveQueueCount 首）"
+                                            isLogged -> "已登录 · 在应用音乐页直接播放"
+                                            else -> "未登录 · 点击登录并直接播放"
+                                        },
                                         fontSize = 11.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1,
                                     )
                                 }
                                 Text(
-                                    text = if (isLogged) "直接播放" else "登录播放",
+                                    text = when {
+                                        isLogged && effectiveQueueCount > 1 -> "连播"
+                                        isLogged -> "直接播放"
+                                        else -> "登录播放"
+                                    },
                                     style = MaterialTheme.typography.labelMedium,
                                     color = Orange,
                                     fontWeight = FontWeight.SemiBold,
@@ -1580,8 +1732,13 @@ private fun MusicDiscoverPlayDialog(
                             onDismiss = { pendingLoginService = null },
                             onLoggedIn = {
                                 pendingLoginService = null
-                                val entry = WebStreamingMusic.buildEntryFromDiscoverItem(svc, item)
-                                onPlayEntries(listOf(entry), 0)
+                                val (entries, startIdx) = WebStreamingMusic.buildQueueFromDiscoverItems(
+                                    service = svc,
+                                    currentItem = item,
+                                    queueItems = queueItems,
+                                    preferredIndex = queueIndex,
+                                )
+                                onPlayEntries(entries, startIdx)
                             },
                         )
                     }
@@ -1667,6 +1824,7 @@ fun MusicRecommendationsSection(
     onUpdateSettings: ((AppSettings) -> Unit)? = null,
     onOpenSettings: (() -> Unit)? = null,
     onSelectSong: (DiscoverItem) -> Unit,
+    onSelectSongWithQueue: (DiscoverItem, List<DiscoverItem>, Int) -> Unit = { s, _, _ -> onSelectSong(s) },
     modifier: Modifier = Modifier,
 ) {
     val tv = LocalTv.current
@@ -1776,11 +1934,11 @@ fun MusicRecommendationsSection(
                             contentPadding = PaddingValues(horizontal = 14.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            items(similarSongs, key = { it.id }) { sim ->
+                            itemsIndexed(similarSongs, key = { _, s -> s.id }) { idx, sim ->
                                 MusicSquareCard(
                                     item = sim,
                                     width = cardWidth,
-                                    onClick = { onSelectSong(sim) },
+                                    onClick = { onSelectSongWithQueue(sim, similarSongs, idx) },
                                 )
                             }
                         }
@@ -1916,12 +2074,13 @@ fun MusicRecommendationsSection(
                         }
                     }
                     else -> {
+                        val aiQueue = remember(aiItems) { aiItems.map { it.item } }
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            items(aiItems, key = { it.item.id + it.reason.hashCode() }) { rec ->
+                            itemsIndexed(aiItems, key = { _, r -> r.item.id + r.reason.hashCode() }) { idx, rec ->
                                 MusicAiSongCard(
                                     rec = rec,
                                     width = if (wide || tv) 262.dp else 232.dp,
-                                    onClick = { onSelectSong(rec.item) },
+                                    onClick = { onSelectSongWithQueue(rec.item, aiQueue, idx) },
                                 )
                             }
                         }
@@ -2046,6 +2205,7 @@ fun MusicDiscoverAiRecommendScreen(
     lib: LibraryViewModel,
     onBack: () -> Unit,
     onOpenDetail: (DiscoverItem) -> Unit,
+    onOpenDetailWithQueue: (DiscoverItem, List<DiscoverItem>, Int) -> Unit = { item, _, _ -> onOpenDetail(item) },
     onOpenSettings: () -> Unit,
     onUpdateSettings: ((AppSettings) -> Unit)? = null,
 ) {
@@ -2319,14 +2479,15 @@ fun MusicDiscoverAiRecommendScreen(
                     }
                 }
             } else {
-                items(results, key = { it.item.id + it.reason.hashCode() }) { rec ->
+                val recSongs = results.map { it.item }
+                itemsIndexed(results, key = { _, r -> r.item.id + r.reason.hashCode() }) { idx, rec ->
                     val song = rec.item
                     SurfaceCard(Modifier.fillMaxWidth()) {
                         Row(
                             Modifier
                                 .fillMaxWidth()
                                 .tvFocusRing(RoundedCornerShape(14.dp))
-                                .clickable { onOpenDetail(song) }
+                                .clickable { onOpenDetailWithQueue(song, recSongs, idx) }
                                 .padding(12.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                             verticalAlignment = Alignment.CenterVertically,

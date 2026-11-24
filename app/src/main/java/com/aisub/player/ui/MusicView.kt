@@ -81,6 +81,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
@@ -173,6 +174,8 @@ fun MusicView(
     externalHoldVisible: Boolean = false,
     onBarsVisibleChange: ((Boolean) -> Unit)? = null,
     externalPager: androidx.compose.foundation.pager.PagerState? = null,
+    externalTvPage: Int? = null,
+    onExternalTvPageChange: ((Int) -> Unit)? = null,
     libraryTabContent: (@Composable () -> Unit)? = null,
 ) {
     val activeMusic = music.tags != null
@@ -192,8 +195,18 @@ fun MusicView(
     val pageCount = if (libraryTabContent != null) 3 else 2
     val internalPager = rememberPagerState(initialPage = 0) { pageCount }
     val pager = externalPager ?: internalPager
-    val onLyricsPage = pager.currentPage == LYRICS_PAGE
-    val onLibraryPage = libraryTabContent != null && pager.currentPage == LIBRARY_PAGE
+    var internalTvPage by rememberSaveable { mutableIntStateOf(0) }
+    val currentPage = if (tv) (externalTvPage ?: internalTvPage).coerceIn(0, pageCount - 1) else pager.currentPage
+    val selectPage: (Int) -> Unit = { targetPage ->
+        val safeTarget = targetPage.coerceIn(0, pageCount - 1)
+        if (tv) {
+            if (onExternalTvPageChange != null) onExternalTvPageChange(safeTarget) else internalTvPage = safeTarget
+        } else {
+            scope.launch { pager.animateScrollToPage(safeTarget) }
+        }
+    }
+    val onLyricsPage = currentPage == LYRICS_PAGE
+    val onLibraryPage = libraryTabContent != null && currentPage == LIBRARY_PAGE
     var showQueue by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var liked by remember(effectiveEntry?.uri) { mutableStateOf(effectiveEntry?.let { vm.isLiked(it.uri) } == true) }
@@ -216,7 +229,7 @@ fun MusicView(
     var touches by remember { mutableIntStateOf(0) }
     var seekDragging by remember { mutableStateOf(false) }
     var barsVisible by remember { mutableStateOf(true) }
-    LaunchedEffect(pager.currentPage, touches, effectiveWantsPlay, showMenu, showQueue, seekDragging, externalHoldVisible, onLibraryPage, tv) {
+    LaunchedEffect(currentPage, touches, effectiveWantsPlay, showMenu, showQueue, seekDragging, externalHoldVisible, onLibraryPage, tv) {
         if (onLibraryPage || tv) {
             barsVisible = true
             return@LaunchedEffect
@@ -323,23 +336,17 @@ fun MusicView(
                     exit = fadeOut(tween(340)) + shrinkVertically(tween(360)),
                 ) {
                     TopTabs(
-                        page = pager.currentPage,
+                        page = currentPage,
                         showLibraryTab = libraryTabContent != null,
                         onBack = onBack,
                         trailingContent = topTrailingContent,
                     ) { targetPage ->
                         touches++
-                        scope.launch {
-                            if (tv) pager.scrollToPage(targetPage) else pager.animateScrollToPage(targetPage)
-                        }
+                        selectPage(targetPage)
                     }
                 }
-                val vinylVisible = pager.currentPage == 0 || pager.targetPage == 0
-                HorizontalPager(
-                    state = pager,
-                    modifier = Modifier.weight(1f).fillMaxWidth().graphicsLayer { clip = true },
-                    userScrollEnabled = !tv,
-                ) { page ->
+                val vinylVisible = if (tv) currentPage == 0 else (pager.currentPage == 0 || pager.targetPage == 0)
+                val renderPageContent: @Composable (Int) -> Unit = { page ->
                     when (page) {
                         LYRICS_PAGE -> LyricsPage(
                             vm = vm,
@@ -369,6 +376,20 @@ fun MusicView(
                                 ),
                             )
                         }
+                    }
+                }
+                if (tv) {
+                    // TV 端不使用 HorizontalPager：彻底移除其内部横向 ContentInViewNode / PagerBringIntoViewSpec，
+                    // 根治遥控器聚焦曲库/歌词列表项时触发横向 BringIntoView 与页面吸附对抗导致的 60Hz 左右闪动重影
+                    Box(Modifier.weight(1f).fillMaxWidth().graphicsLayer { clip = true }) {
+                        renderPageContent(currentPage)
+                    }
+                } else {
+                    HorizontalPager(
+                        state = pager,
+                        modifier = Modifier.weight(1f).fillMaxWidth().graphicsLayer { clip = true },
+                    ) { page ->
+                        renderPageContent(page)
                     }
                 }
             }
@@ -444,9 +465,7 @@ fun MusicView(
                         onQueue = {
                             touches++
                             if (activeMusic && vm.queueSize > 0) showQueue = true
-                            else if (libraryTabContent != null) scope.launch {
-                                if (tv) pager.scrollToPage(LIBRARY_PAGE) else pager.animateScrollToPage(LIBRARY_PAGE)
-                            }
+                            else if (libraryTabContent != null) selectPage(LIBRARY_PAGE)
                         },
                     )
                 }
@@ -774,24 +793,28 @@ private fun MusicSeekBar(
 
 // ---------------- 播放按钮 ----------------
 
-/** 播放顺序：顺序播放 → 列表循环 → 单曲循环 → 随机播放 */
-private enum class PlayMode(val label: String, val icon: ImageVector) {
-    ORDER("顺序播放", AppIcons.PlaylistPlay),
-    LOOP("列表循环", AppIcons.Repeat),
-    ONE("单曲循环", AppIcons.RepeatOne),
-    SHUFFLE("随机播放", AppIcons.Shuffle);
+/** 播放顺序：顺序播放 → 列表循环 → 单曲循环 → 随机播放 → 无限随机 */
+private enum class PlayMode(val label: String, val toastLabel: String, val icon: ImageVector) {
+    ORDER("顺序播放", "顺序播放", AppIcons.PlaylistPlay),
+    LOOP("列表循环", "列表循环", AppIcons.Repeat),
+    ONE("单曲循环", "单曲循环", AppIcons.RepeatOne),
+    SHUFFLE("随机播放", "随机播放", AppIcons.Shuffle),
+    INFINITE("无限随机", "无限随机 · 自动续播推荐好歌", AppIcons.AllInclusive);
 
-    fun apply(player: Player) {
-        player.shuffleModeEnabled = this == SHUFFLE
-        player.repeatMode = when (this) {
+    fun apply(vm: MainViewModel) {
+        val inf = this == INFINITE
+        val shuf = this == SHUFFLE || inf
+        val rep = when (this) {
             ORDER -> Player.REPEAT_MODE_OFF
             ONE -> Player.REPEAT_MODE_ONE
             else -> Player.REPEAT_MODE_ALL
         }
+        vm.applyMusicPlayMode(infiniteShuffle = inf, shuffleEnabled = shuf, repeatMode = rep)
     }
 
     companion object {
-        fun of(player: Player) = when {
+        fun of(player: Player, infiniteShuffle: Boolean) = when {
+            infiniteShuffle -> INFINITE
             player.shuffleModeEnabled -> SHUFFLE
             player.repeatMode == Player.REPEAT_MODE_ONE -> ONE
             player.repeatMode == Player.REPEAT_MODE_ALL -> LOOP
@@ -801,12 +824,15 @@ private enum class PlayMode(val label: String, val icon: ImageVector) {
 }
 
 @Composable
-private fun rememberPlayMode(player: Player): Pair<PlayMode, () -> PlayMode> {
-    var mode by remember(player) { mutableStateOf(PlayMode.of(player)) }
+private fun rememberPlayMode(vm: MainViewModel, player: Player): Pair<PlayMode, () -> PlayMode> {
+    val mainState by vm.state.collectAsStateWithLifecycle()
+    val mode = remember(player, mainState.infiniteShuffle, mainState.playModeVersion) {
+        PlayMode.of(player, mainState.infiniteShuffle)
+    }
     return mode to {
-        mode = PlayMode.entries[(mode.ordinal + 1) % PlayMode.entries.size]
-        mode.apply(player)
-        mode
+        val next = PlayMode.entries[(mode.ordinal + 1) % PlayMode.entries.size]
+        next.apply(vm)
+        next
     }
 }
 
@@ -821,23 +847,26 @@ private fun PlayControls(
     onMessage: (String) -> Unit,
     onQueue: () -> Unit,
 ) {
-    val (mode, next) = rememberPlayMode(player)
-    val canSkip = activeMusic && vm.queueSize > 1
+    val mainState by vm.state.collectAsStateWithLifecycle()
+    val (mode, next) = rememberPlayMode(vm, player)
+    val hasMultiQueue = mainState.queueVersion >= 0 && vm.queueSize > 1
+    val canSkipPrev = activeMusic && hasMultiQueue
+    val canSkipNext = activeMusic && (hasMultiQueue || mode == PlayMode.INFINITE)
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(
-            onClick = { onInteract(); onMessage(next().label) },
+            onClick = { onInteract(); onMessage(next().toastLabel) },
             modifier = Modifier.tvFocusRing(CircleShape, color = Color.White),
         ) {
-            Icon(mode.icon, mode.label, tint = Color.White, modifier = Modifier.size(28.dp))
+            Icon(mode.icon, mode.label, tint = if (mode == PlayMode.INFINITE) Orange else Color.White, modifier = Modifier.size(28.dp))
         }
         IconButton(
             onClick = {
                 onInteract()
                 if (!activeMusic) onIdlePlay?.invoke()
-                else if (canSkip) vm.skipInQueue(false, restartFirst = true)
+                else if (canSkipPrev) vm.skipInQueue(false, restartFirst = true)
                 else player.seekTo(0)
             },
             modifier = Modifier.tvFocusRing(CircleShape, color = Color.White),
@@ -858,10 +887,10 @@ private fun PlayControls(
         }
         IconButton(
             onClick = { onInteract(); if (activeMusic) vm.skipInQueue(true) else onIdlePlay?.invoke() },
-            enabled = canSkip || (!activeMusic && onIdlePlay != null),
+            enabled = canSkipNext || (!activeMusic && onIdlePlay != null),
             modifier = Modifier.tvFocusRing(CircleShape, color = Color.White),
         ) {
-            Icon(AppIcons.SkipNext, "下一首", tint = if (canSkip || (!activeMusic && onIdlePlay != null)) Color.White else Faint, modifier = Modifier.size(34.dp))
+            Icon(AppIcons.SkipNext, "下一首", tint = if (canSkipNext || (!activeMusic && onIdlePlay != null)) Color.White else Faint, modifier = Modifier.size(34.dp))
         }
         IconButton(
             onClick = { onInteract(); onQueue() },
@@ -936,10 +965,11 @@ private fun LyricsPage(
         }
     }
 
+    val tv = LocalTv.current
     Column(Modifier.fillMaxSize()) {
         Box(
             Modifier.weight(1f).fillMaxWidth()
-                .clickable(remember { MutableInteractionSource() }, indication = null) { onBlankTap() },
+                .let { if (tv) it else it.clickable(remember { MutableInteractionSource() }, indication = null) { onBlankTap() } },
         ) {
             when {
                 !activeMusic -> Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1133,6 +1163,7 @@ private fun SyncedLyrics(
             listState.animateScrollToItem(index.coerceAtLeast(0) + 1, -(viewportPx * anchorRatio).toInt())
         }
     }
+    val tv = LocalTv.current
     LazyColumn(
         modifier.onSizeChanged { viewportPx = it.height }
             .pointerInput(Unit) { detectTapGestures { currentOnBlankTap() } }
@@ -1151,7 +1182,7 @@ private fun SyncedLyrics(
             Spacer(
                 Modifier.fillMaxWidth()
                     .height(with(density) { (viewportPx * anchorRatio).toDp() })
-                    .clickable(remember { MutableInteractionSource() }, indication = null) { onBlankTap() },
+                    .let { if (tv) it else it.clickable(remember { MutableInteractionSource() }, indication = null) { onBlankTap() } },
             )
         }
         itemsIndexed(lyrics.lines) { i, line ->
@@ -1173,13 +1204,14 @@ private fun SyncedLyrics(
             // 整行空白区域点击只显示控件不跳转；仅点击实际歌词文本区域才跳转播放，长按设置循环起点/终点
             Box(
                 Modifier.fillMaxWidth()
-                    .clickable(remember { MutableInteractionSource() }, indication = null) { onBlankTap() }
+                    .let { if (tv) it else it.clickable(remember { MutableInteractionSource() }, indication = null) { onBlankTap() } }
                     .padding(horizontal = 24.dp, vertical = (lineVertPad - 3.dp).coerceAtLeast(3.dp)),
                 contentAlignment = Alignment.Center,
             ) {
                 val textMod = if (hasLyricText) {
                     Modifier
                         .wrapContentWidth()
+                        .tvFocusRing(RoundedCornerShape(10.dp), color = Color.White)
                         .clip(RoundedCornerShape(10.dp))
                         .background(highlightBg)
                         .combinedClickable(
@@ -1237,7 +1269,7 @@ private fun SyncedLyrics(
             Spacer(
                 Modifier.fillMaxWidth()
                     .height(with(density) { (viewportPx * 0.55f).toDp() })
-                    .clickable(remember { MutableInteractionSource() }, indication = null) { onBlankTap() },
+                    .let { if (tv) it else it.clickable(remember { MutableInteractionSource() }, indication = null) { onBlankTap() } },
             )
         }
     }
@@ -1247,21 +1279,22 @@ private fun SyncedLyrics(
 
 @Composable
 private fun QueueSheet(vm: MainViewModel, player: Player, current: MediaEntry?, onMessage: (String) -> Unit) {
-    var version by remember { mutableIntStateOf(0) }
-    val entries = remember(version, current?.uri) { vm.queueEntries }
+    val mainState by vm.state.collectAsStateWithLifecycle()
+    val entries = remember(mainState.queueVersion, current?.uri) { vm.queueEntries }
     val currentIndex = entries.indexOfFirst { it.uri == current?.uri }
-    val (mode, next) = rememberPlayMode(player)
+    val (mode, next) = rememberPlayMode(vm, player)
+    val modeTint = if (mode == PlayMode.INFINITE) Orange else MaterialTheme.colorScheme.onSurface
     Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Text("播放列表", color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp, fontWeight = FontWeight.Bold)
         Text("(${entries.size})", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 15.sp, modifier = Modifier.padding(start = 2.dp))
         Spacer(Modifier.weight(1f))
         Row(
-            Modifier.clip(RoundedCornerShape(50)).clickable { onMessage(next().label) }.padding(horizontal = 10.dp, vertical = 6.dp),
+            Modifier.clip(RoundedCornerShape(50)).clickable { onMessage(next().toastLabel) }.padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(mode.icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(20.dp))
+            Icon(mode.icon, null, tint = modeTint, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(4.dp))
-            Text(mode.label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp)
+            Text(mode.label, color = modeTint, fontSize = 15.sp)
         }
     }
     val c = LocalPopupColors.current
@@ -1290,7 +1323,7 @@ private fun QueueSheet(vm: MainViewModel, player: Player, current: MediaEntry?, 
                     fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(vertical = 12.dp),
                 )
-                if (entries.size > 1) IconButton(onClick = { vm.removeQueueIndex(i); version++ }) {
+                if (entries.size > 1) IconButton(onClick = { vm.removeQueueIndex(i) }) {
                     Icon(AppIcons.Close, "从播放列表移除", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }

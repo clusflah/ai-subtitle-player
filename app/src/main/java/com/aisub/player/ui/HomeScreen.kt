@@ -612,6 +612,7 @@ fun HomeScreen(
                             com.aisub.player.meta.DiscoverRepository.setSessionSearchExpanded(it)
                         },
                         onOpenDetail = { nav.push(Screen.DiscoverDetail(it)) },
+                        onOpenDetailWithQueue = { item, q, idx -> nav.push(Screen.DiscoverDetail(item, q, idx)) },
                         onOpenChart = { nav.push(Screen.DiscoverChart(it)) },
                         onOpenPlayWeb = { url ->
                             com.aisub.player.web.WebLaunch.open(url, mangaMode = false, allowOpenApp = true)

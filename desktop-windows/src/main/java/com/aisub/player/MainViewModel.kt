@@ -39,8 +39,10 @@ import com.aisub.player.media.DolbyVisionHelper
 import com.aisub.player.media.MediaProxy
 import com.aisub.player.media.MpvPlayer
 import com.aisub.player.media.VlcPlayer
+import com.aisub.player.music.toMusicMediaEntry
 import com.aisub.player.remote.AuthRegistry
 import com.aisub.player.remote.Endpoints
+import com.aisub.player.remote.clientFor
 import com.aisub.player.remote.cloud.CloudRegistry
 import com.aisub.player.remote.cloud.MediaBrowser
 import com.aisub.player.remote.cloud.ServerProgress
@@ -159,6 +161,11 @@ data class UiState(
     val hasOriginalSubtitleBackup: Boolean = false,
     /** 当前视频/直播实际生效的内核选项（AUTO / MEDIA3 / MPV / VLC） */
     val selectedKernel: PlayerKernel = PlayerKernel.AUTO,
+    /** 是否开启音乐「无限随机」模式（队列临近播完或切下一首时自动补充相似与热歌） */
+    val infiniteShuffle: Boolean = false,
+    /** 播放模式与播放队列变更代次（驱动播放页控制栏与队列抽屉实时同步刷新） */
+    val playModeVersion: Int = 0,
+    val queueVersion: Int = 0,
 ) {
     /** 当前视频识别时用的设置：语音语言换成这个视频单独选的 */
     val asrSettings: AppSettings get() = videoAsrLanguage?.let { settings.copy(asrLanguage = it) } ?: settings
@@ -386,7 +393,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val models = ModelManager(app)
     private val library = AppStore(app)
 
-    private val _state = MutableStateFlow(UiState(settings = settingsRepo.load()))
+    private val _state = MutableStateFlow(
+        UiState(
+            settings = settingsRepo.load(),
+            infiniteShuffle = app.getSharedPreferences("playback", Context.MODE_PRIVATE).getBoolean("infinite_shuffle", false),
+        ),
+    )
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private var transcribeJob: Job? = null
@@ -485,6 +497,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 音乐的歌词与封面 */
     val music = com.aisub.player.music.MusicFeatures(app, viewModelScope, player = { player }, settings = { _state.value.settings })
 
+    /** 无限随机模式：记录本轮已播曲目地址与归一化歌名键值，优先播放未听过的新歌 */
+    private val infinitePlayedUris = LinkedHashSet<String>()
+    private val infinitePlayedKeys = LinkedHashSet<String>()
+    private var infiniteReplenishJob: Job? = null
+    @Volatile
+    private var pendingJumpAfterReplenish = false
+    private val cachedServerTracks = HashMap<String, Pair<Long, List<MediaEntry>>>()
+
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             val counting = playbackStatsJob?.isActive == true
@@ -493,7 +513,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) _state.value.current?.let { prev ->
                 ServerProgress.find(prev.uri)?.let { p -> reportPlex(prev.uri, "stopped", p.durationMs, p.durationMs) }
             }
-            if (!usingExternalKernel) queue.getOrNull(exoPlayer.currentMediaItemIndex)?.let(::onEntryChanged)
+            if (!usingExternalKernel) {
+                val nextEntry = queue.getOrNull(exoPlayer.currentMediaItemIndex)
+                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO &&
+                    _state.value.infiniteShuffle &&
+                    nextEntry != null &&
+                    nextEntry.isMusic &&
+                    nextEntry.uri in infinitePlayedUris
+                ) {
+                    val unplayedIdx = queue.indices.filter { idx ->
+                        val cand = queue[idx]
+                        cand.isMusic && cand.uri != _state.value.current?.uri && cand.uri !in infinitePlayedUris
+                    }
+                    if (unplayedIdx.isNotEmpty()) {
+                        exoPlayer.seekTo(unplayedIdx.random(), 0L)
+                        exoPlayer.play()
+                        return
+                    }
+                }
+                nextEntry?.let(::onEntryChanged)
+            }
             if (counting) _state.value.current?.let { library.recordPlayback(it, 0, started = true) }
         }
 
@@ -595,6 +634,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         if (_state.value.settings.ttsEnabled) ttsReader.start()
+        if (_state.value.infiniteShuffle) {
+            exoPlayer.shuffleModeEnabled = true
+            exoPlayer.repeatMode = Player.REPEAT_MODE_ALL
+        }
         exoPlayer.addListener(listener)
         // 内嵌字幕默认不显示（避免和 AI 字幕重叠），除非设置了首选字幕语言
         extras.applyTrackDefaults()
@@ -972,9 +1015,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _player.value = exoPlayer
         // 连播队列里跳过光盘镜像，ExoPlayer 打不开
         queue = entries.filter { it == start || !VlcPlayer.needsVlc(it.title) }
+        if (start.isVideo || start.isLive) {
+            if (_state.value.infiniteShuffle) exoPlayer.shuffleModeEnabled = false
+        } else if (_state.value.infiniteShuffle) {
+            exoPlayer.shuffleModeEnabled = true
+            exoPlayer.repeatMode = Player.REPEAT_MODE_ALL
+        }
         exoPlayer.setMediaItems(queue.map(::itemOf), queue.indexOf(start), resume)
-        _state.update { it.copy(playbackError = null, videoProblem = null) }
+        _state.update { it.copy(playbackError = null, videoProblem = null, queueVersion = it.queueVersion + 1) }
         onEntryChanged(start)
+        if (_state.value.infiniteShuffle && start.isMusic) {
+            recordInfinitePlayed(start)
+            replenishInfiniteShuffleIfNeeded(forceIfSingle = true)
+        }
         exoPlayer.playWhenReady = true
         exoPlayer.prepare()
         startPlaybackService()
@@ -1078,6 +1131,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         extras.onEntryChanged(entry)
         music.onEntryChanged(entry)
         library.recordHistory(entry, 0)
+        if (entry.isMusic) {
+            recordInfinitePlayed(entry)
+            if (_state.value.infiniteShuffle) {
+                replenishInfiniteShuffleIfNeeded()
+            }
+        }
     }
 
     /**
@@ -3253,6 +3312,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         exoPlayer.play()
     }
 
+    private fun jumpToMusicTrackStart(index: Int) {
+        if (index !in queue.indices) return
+        val e = queue[index]
+        if (!usingExternalKernel && manualEntryKernel[e.uri] == null && !VlcPlayer.needsVlc(e.title)) {
+            savePosition()
+            exoPlayer.seekTo(index, 0L)
+            exoPlayer.play()
+            return
+        }
+        playQueueIndex(index)
+    }
+
     /** 从播放队列里去掉第 index 个；去掉的是正在放的就接着放下一个。 */
     fun removeQueueIndex(index: Int) {
         if (index !in queue.indices || queue.size <= 1) return
@@ -3264,6 +3335,232 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         } else {
             exoPlayer.removeMediaItem(index)
         }
+        _state.update { it.copy(queueVersion = it.queueVersion + 1) }
+    }
+
+    /** 切换音乐播放模式（顺序 / 列表循环 / 单曲循环 / 随机播放 / 无限随机），同步各内核与队列抽屉状态。 */
+    fun applyMusicPlayMode(infiniteShuffle: Boolean, shuffleEnabled: Boolean, repeatMode: Int) {
+        val effectiveShuffle = shuffleEnabled || infiniteShuffle
+        val effectiveRepeat = if (infiniteShuffle) Player.REPEAT_MODE_ALL else repeatMode
+        player.shuffleModeEnabled = effectiveShuffle
+        player.repeatMode = effectiveRepeat
+        if (_state.value.current?.let { !it.isVideo && !it.isLive } != false) {
+            exoPlayer.shuffleModeEnabled = effectiveShuffle
+            exoPlayer.repeatMode = effectiveRepeat
+        }
+        playbackPrefs.edit().putBoolean("infinite_shuffle", infiniteShuffle).apply()
+        _state.update {
+            it.copy(
+                infiniteShuffle = infiniteShuffle,
+                playModeVersion = it.playModeVersion + 1,
+            )
+        }
+        if (infiniteShuffle) {
+            _state.value.current?.takeIf { it.isMusic }?.let(::recordInfinitePlayed)
+            replenishInfiniteShuffleIfNeeded(forceIfSingle = true)
+        } else {
+            pendingJumpAfterReplenish = false
+            infiniteReplenishJob?.cancel()
+        }
+    }
+
+    private fun extractMusicTitleArtist(entry: MediaEntry): Triple<String, String, String> {
+        val liveTags = if (_state.value.current?.uri == entry.uri) music.state.value.tags else null
+        val prog = ServerProgress.find(entry.uri)
+        val rawTitle = liveTags?.title?.takeIf { it.isNotBlank() }
+            ?: prog?.title?.takeIf { it.isNotBlank() }
+            ?: entry.displayTitle
+        val rawArtist = liveTags?.artist?.takeIf { it.isNotBlank() }
+            ?: prog?.artist?.takeIf { it.isNotBlank() }
+            ?: entry.folder.substringBefore(" - ").trim()
+        val rawAlbum = liveTags?.album?.takeIf { it.isNotBlank() }
+            ?: prog?.album.orEmpty()
+        return Triple(rawTitle, rawArtist, rawAlbum)
+    }
+
+    private fun recordInfinitePlayed(entry: MediaEntry) {
+        if (!entry.isMusic) return
+        infinitePlayedUris.remove(entry.uri)
+        infinitePlayedUris.add(entry.uri)
+        while (infinitePlayedUris.size > 200) {
+            val first = infinitePlayedUris.iterator().next()
+            infinitePlayedUris.remove(first)
+        }
+        val (t, a, _) = extractMusicTitleArtist(entry)
+        val key = com.aisub.player.meta.MusicDiscoverRepository.songNormKey(t, a)
+        if (key.isNotBlank() && key != "|") {
+            infinitePlayedKeys.remove(key)
+            infinitePlayedKeys.add(key)
+            while (infinitePlayedKeys.size > 200) {
+                val first = infinitePlayedKeys.iterator().next()
+                infinitePlayedKeys.remove(first)
+            }
+        }
+    }
+
+    private fun appendEntriesToQueue(newEntries: List<MediaEntry>): Int {
+        if (newEntries.isEmpty()) return 0
+        val existingUris = queue.mapTo(HashSet(queue.size + newEntries.size)) { it.uri }
+        val filtered = ArrayList<MediaEntry>(newEntries.size)
+        for (e in newEntries) {
+            if (e.uri.isBlank() || !existingUris.add(e.uri)) continue
+            if (com.aisub.player.music.WebStreamingMusic.isStreamingUri(e.uri)) continue
+            if (VlcPlayer.needsVlc(e.title)) continue
+            filtered += e
+        }
+        if (filtered.isEmpty()) return 0
+        queue = queue + filtered
+        if (!usingExternalKernel) {
+            exoPlayer.addMediaItems(filtered.map(::itemOf))
+        }
+        _state.update { it.copy(queueVersion = it.queueVersion + 1) }
+        return filtered.size
+    }
+
+    private fun jumpToNextInfiniteCandidate(currentUri: String?) {
+        val unplayed = queue.indices.filter { idx ->
+            val cand = queue[idx]
+            cand.isMusic && cand.uri != currentUri && cand.uri !in infinitePlayedUris
+        }
+        if (unplayed.isNotEmpty()) {
+            jumpToMusicTrackStart(unplayed.random())
+            return
+        }
+        if (queue.size > 1) {
+            infinitePlayedUris.clear()
+            if (!currentUri.isNullOrEmpty()) infinitePlayedUris.add(currentUri)
+            val curIdx = queue.indexOfFirst { it.uri == currentUri }
+            val fallback = queue.indices.filter { it != curIdx && queue[it].isMusic }
+            if (fallback.isNotEmpty()) {
+                jumpToMusicTrackStart(fallback.random())
+                return
+            }
+        }
+        if (queue.isNotEmpty()) {
+            player.seekTo(0)
+            player.play()
+        }
+    }
+
+    private fun replenishInfiniteShuffleIfNeeded(
+        forceIfSingle: Boolean = false,
+        playFirstAppended: Boolean = false,
+    ) {
+        if (!_state.value.infiniteShuffle) return
+        val cur = _state.value.current?.takeIf { it.isMusic } ?: return
+        val unplayedCount = queue.count { it.isMusic && it.uri != cur.uri && it.uri !in infinitePlayedUris }
+        if (!playFirstAppended && !(forceIfSingle && queue.size <= 2) && unplayedCount > 4) return
+        if (playFirstAppended) pendingJumpAfterReplenish = true
+        if (infiniteReplenishJob?.isActive == true) return
+
+        val snapshotQueue = queue.toList()
+        val snapshotPlayedUris = HashSet(infinitePlayedUris)
+        val (seedTitle, seedArtist, _) = extractMusicTitleArtist(cur)
+
+        infiniteReplenishJob = viewModelScope.launch {
+            val fetched = withContext(Dispatchers.IO) {
+                runCatching {
+                    fetchInfiniteShuffleCandidates(
+                        seedEntry = cur,
+                        seedTitle = seedTitle,
+                        seedArtist = seedArtist,
+                        existingQueue = snapshotQueue,
+                        playedUris = snapshotPlayedUris,
+                    )
+                }.getOrDefault(emptyList())
+            }
+            if (!_state.value.infiniteShuffle) {
+                pendingJumpAfterReplenish = false
+                return@launch
+            }
+            val activeCur = _state.value.current?.takeIf { it.isMusic }
+            if (activeCur != null) {
+                appendEntriesToQueue(fetched)
+            }
+            if (pendingJumpAfterReplenish) {
+                pendingJumpAfterReplenish = false
+                jumpToNextInfiniteCandidate(_state.value.current?.uri)
+            }
+        }
+    }
+
+    private suspend fun fetchInfiniteShuffleCandidates(
+        seedEntry: MediaEntry,
+        seedTitle: String,
+        seedArtist: String,
+        existingQueue: List<MediaEntry>,
+        playedUris: Set<String>,
+    ): List<MediaEntry> {
+        val app = getApplication<Application>()
+        val existingUris = existingQueue.mapTo(HashSet()) { it.uri }
+
+        // 1. 专用远程音乐媒体库（Plex / Navidrome / Subsonic / Emby / Jellyfin）
+        val serverId = ServerProgress.find(seedEntry.uri)?.serverId?.takeIf { !it.startsWith("web:") }
+        val srv = serverId?.let { id ->
+            library.servers().firstOrNull { it.id == id && com.aisub.player.music.MusicSourceStore.isStructuredMusicServer(it.type) }
+        }
+        if (srv != null) {
+            val client = clientFor(srv)
+            val candidates = ArrayList<MediaEntry>()
+            if (seedArtist.isNotBlank()) {
+                runCatching { com.aisub.player.music.MusicSourceStore.searchServerMusic(client, seedArtist) }
+                    .getOrDefault(emptyList())
+                    .shuffled()
+                    .mapNotNull { it.toMusicMediaEntry(srv.id, srv.name) }
+                    .take(6)
+                    .let { candidates += it }
+            }
+            val now = System.currentTimeMillis()
+            val cached = synchronized(cachedServerTracks) { cachedServerTracks[srv.id] }
+            val allServerTracks = if (cached != null && now - cached.first < 5 * 60_000L && cached.second.isNotEmpty()) {
+                cached.second
+            } else {
+                val secKey = com.aisub.player.music.MusicSourceStore.active(app)
+                    .takeIf { it.serverId == srv.id }?.sectionKey
+                val loaded = runCatching {
+                    com.aisub.player.music.MusicSourceStore.loadServerTracks(client, secKey)
+                }.getOrDefault(emptyList()).mapNotNull {
+                    it.toMusicMediaEntry(srv.id, srv.name)
+                }
+                if (loaded.isNotEmpty()) {
+                    synchronized(cachedServerTracks) { cachedServerTracks[srv.id] = now to loaded }
+                }
+                loaded
+            }
+            candidates += allServerTracks.shuffled()
+            val unplayed = candidates.distinctBy { it.uri }
+                .filter { it.uri !in existingUris && it.uri !in playedUris }
+            return (unplayed.ifEmpty { candidates.distinctBy { it.uri }.filter { it.uri !in existingUris } }).take(12)
+        }
+
+        // 2. 本机音乐库、歌单与听歌历史（严格过滤隐藏目录与本地音频筛选规则）
+        val localHidden = library.hiddenFolders().filter { it.serverId == null }
+        fun isHiddenLocal(e: MediaEntry): Boolean =
+            !e.isLive && e.folder.isNotEmpty() && localHidden.any { h ->
+                e.folder == h.path || e.folder.startsWith(h.path.trimEnd('/') + "/")
+            }
+        val audioFilter = com.aisub.player.media.LocalMediaFilterStore.ensureInit(app)
+        val localAudios = runCatching { MediaLibrary.audios(app) }.getOrDefault(emptyList())
+            .filter { !isHiddenLocal(it) && audioFilter.matchesAudio(it) }
+        val playlistAudios = library.playlists().asSequence()
+            .flatMap { it.items.asSequence() }
+            .filter { it.isMusic && !com.aisub.player.music.WebStreamingMusic.isStreamingUri(it.uri) && !isHiddenLocal(it) }
+            .toList()
+        val historyAudios = library.history().asSequence()
+            .map { it.entry }
+            .filter { it.isMusic && !com.aisub.player.music.WebStreamingMusic.isStreamingUri(it.uri) && !isHiddenLocal(it) }
+            .toList()
+        val pool = (localAudios + playlistAudios + historyAudios)
+            .distinctBy { it.uri }
+            .filter { it.uri !in existingUris && !VlcPlayer.needsVlc(it.title) }
+
+        val sameArtistOrFolder = pool.filter { cand ->
+            (seedArtist.length >= 2 && (cand.displayTitle.contains(seedArtist, ignoreCase = true) || cand.folder.contains(seedArtist, ignoreCase = true))) ||
+                (seedEntry.folder.isNotBlank() && cand.folder == seedEntry.folder && seedTitle != cand.displayTitle)
+        }.shuffled()
+        val prioritized = (sameArtistOrFolder.take(6) + pool.shuffled()).distinctBy { it.uri }
+        val unplayed = prioritized.filter { it.uri !in playedUris }
+        return (unplayed.ifEmpty { prioritized }).take(12)
     }
 
     // ---- 「我喜欢」：存成一个普通的播放列表，在首页的播放列表里也能看到 ----
@@ -3289,24 +3586,44 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 上一个 / 下一个，按队列顺序（跟随循环、随机播放设置）。
+     * 上一个 / 下一个，按队列顺序（跟随循环、随机与无限随机播放设置）。
      * restartFirst 时「上一个」在播放超过 3 秒时先回到开头，和常见音乐播放器的按钮一样。
      */
     fun skipInQueue(next: Boolean, restartFirst: Boolean = false) {
-        if (usingExternalKernel) {
-            if (!next && restartFirst && player.currentPosition > 3000 && _state.value.current?.isLive != true) {
-                player.seekTo(0)
-                return
+        if (!next && restartFirst && player.currentPosition > 3000 && _state.value.current?.isLive != true) {
+            player.seekTo(0)
+            return
+        }
+        if (next && _state.value.infiniteShuffle && _state.value.current?.isMusic == true) {
+            val curUri = _state.value.current?.uri
+            val unplayed = queue.indices.filter { idx ->
+                val cand = queue[idx]
+                cand.isMusic && cand.uri != curUri && cand.uri !in infinitePlayedUris
             }
-            if (queue.size > 1) {
-                val cur = queue.indexOfFirst { it.uri == _state.value.current?.uri }.coerceAtLeast(0)
-                val target = (cur + if (next) 1 else -1).takeIf { it in queue.indices } ?: return
-                playQueueIndex(target)
+            if (unplayed.isNotEmpty()) {
+                jumpToMusicTrackStart(unplayed.random())
+                replenishInfiniteShuffleIfNeeded()
+            } else {
+                replenishInfiniteShuffleIfNeeded(forceIfSingle = true, playFirstAppended = true)
             }
             return
         }
-        if (!next && restartFirst && exoPlayer.currentPosition > 3000 && _state.value.current?.isLive != true) {
-            exoPlayer.seekTo(0)
+        if (usingExternalKernel) {
+            if (queue.size > 1) {
+                val cur = queue.indexOfFirst { it.uri == _state.value.current?.uri }.coerceAtLeast(0)
+                if (next && player.shuffleModeEnabled && _state.value.current?.isMusic == true) {
+                    val candidates = queue.indices.filter { it != cur }
+                    if (candidates.isNotEmpty()) jumpToMusicTrackStart(candidates.random())
+                    return
+                }
+                val rawTarget = cur + if (next) 1 else -1
+                val target = if (player.repeatMode == Player.REPEAT_MODE_ALL || _state.value.current?.isLive == true) {
+                    rawTarget.mod(queue.size)
+                } else {
+                    rawTarget.takeIf { it in queue.indices } ?: return
+                }
+                playQueueIndex(target)
+            }
             return
         }
         val target = if (next) exoPlayer.nextMediaItemIndex else exoPlayer.previousMediaItemIndex
