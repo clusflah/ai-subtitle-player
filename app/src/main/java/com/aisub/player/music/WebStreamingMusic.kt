@@ -97,6 +97,8 @@ import com.aisub.player.ui.Orange
 import com.aisub.player.ui.WebMusicServiceIcon
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -149,6 +151,7 @@ object WebStreamingMusic {
 
     private val engines = ConcurrentHashMap<WebMusicService, ServiceWebEngine>()
     private val pendingRpc = ConcurrentHashMap<String, CompletableDeferred<String>>()
+    private val containerChildrenCache = ConcurrentHashMap<String, List<ServerItem>>()
 
     @Volatile
     internal var activePlaySeq: Long = 0L
@@ -548,19 +551,29 @@ object WebStreamingMusic {
             val direct = runCatching { DirectMusicServiceApi.loadTracks(service) }.getOrDefault(emptyList())
             if (direct.isNotEmpty()) return direct
         } else if (service == WebMusicService.SPOTIFY) {
-            val oauthTracks = runCatching { SpotifyAppRemoteBridge.loadTracksViaOAuth(context) }.getOrDefault(emptyList())
+            val canRemote = SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback
+            val oauthTracks = withTimeoutOrNull(if (canRemote) 4_500L else 10_000L) {
+                runCatching { SpotifyAppRemoteBridge.loadTracksViaOAuth(context) }.getOrDefault(emptyList())
+            }.orEmpty()
             if (oauthTracks.isNotEmpty()) return oauthTracks
-            if (isWebSpotifyLoggedIn(context)) {
-                val engine = ensureEngine(context, service)
-                val raw = engine.callRpc("loadTracks", JSONObject(), timeoutMs = 22_000L)
-                val parsed = parseServerItemsJson(service, raw)
-                if (parsed.isNotEmpty()) return parsed
-            }
-            if (SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback) {
+            if (canRemote) {
+                val likedViaRemote = runCatching {
+                    SpotifyAppRemoteBridge.loadChildrenViaRemote(
+                        context,
+                        ServerItem(ratingKey = "playlist|liked", type = "playlist", title = "已点赞的歌曲"),
+                    ).filter { it.type == "track" }
+                }.getOrDefault(emptyList())
+                if (likedViaRemote.isNotEmpty()) return likedViaRemote
                 val recTracks = runCatching {
                     SpotifyAppRemoteBridge.loadRecommendedViaRemote(context).filter { it.type == "track" }
                 }.getOrDefault(emptyList())
                 if (recTracks.isNotEmpty()) return recTracks
+            }
+            if (isWebSpotifyLoggedIn(context)) {
+                val engine = ensureEngine(context, service)
+                val raw = engine.callRpc("loadTracks", JSONObject(), timeoutMs = 15_000L)
+                val parsed = parseServerItemsJson(service, raw)
+                if (parsed.isNotEmpty()) return parsed
             }
         } else {
             val engine = ensureEngine(context, service)
@@ -582,19 +595,22 @@ object WebStreamingMusic {
             return runCatching { DirectMusicServiceApi.loadAlbums(service) }.getOrDefault(emptyList())
         }
         if (service == WebMusicService.SPOTIFY) {
-            val oauthAlbums = runCatching { SpotifyAppRemoteBridge.loadAlbumsViaOAuth(context) }.getOrDefault(emptyList())
+            val canRemote = SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback
+            val oauthAlbums = withTimeoutOrNull(if (canRemote) 4_500L else 10_000L) {
+                runCatching { SpotifyAppRemoteBridge.loadAlbumsViaOAuth(context) }.getOrDefault(emptyList())
+            }.orEmpty()
             if (oauthAlbums.isNotEmpty()) return oauthAlbums
-            if (isWebSpotifyLoggedIn(context)) {
-                val engine = ensureEngine(context, service)
-                val raw = engine.callRpc("loadAlbums", JSONObject(), timeoutMs = 20_000L)
-                val parsed = parseServerItemsJson(service, raw)
-                if (parsed.isNotEmpty()) return parsed
-            }
-            if (SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback) {
+            if (canRemote) {
                 val recAlbums = runCatching {
                     SpotifyAppRemoteBridge.loadRecommendedViaRemote(context).filter { it.type == "album" }
                 }.getOrDefault(emptyList())
                 if (recAlbums.isNotEmpty()) return recAlbums
+            }
+            if (isWebSpotifyLoggedIn(context)) {
+                val engine = ensureEngine(context, service)
+                val raw = engine.callRpc("loadAlbums", JSONObject(), timeoutMs = 15_000L)
+                val parsed = parseServerItemsJson(service, raw)
+                if (parsed.isNotEmpty()) return parsed
             }
             return emptyList()
         }
@@ -637,23 +653,26 @@ object WebStreamingMusic {
             isDirectService(service) ->
                 runCatching { DirectMusicServiceApi.loadPlaylists(service) }.getOrDefault(emptyList())
             service == WebMusicService.SPOTIFY -> {
-                val oauthPlaylists = runCatching { SpotifyAppRemoteBridge.loadPlaylistsViaOAuth(context) }.getOrDefault(emptyList())
+                val canRemote = SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback
+                val oauthPlaylists = withTimeoutOrNull(if (canRemote) 4_500L else 10_000L) {
+                    runCatching { SpotifyAppRemoteBridge.loadPlaylistsViaOAuth(context) }.getOrDefault(emptyList())
+                }.orEmpty()
                 if (oauthPlaylists.isNotEmpty()) {
                     oauthPlaylists
                 } else {
-                    val webPlaylists = if (isWebSpotifyLoggedIn(context)) {
-                        val engine = ensureEngine(context, service)
-                        val raw = engine.callRpc("loadPlaylists", JSONObject(), timeoutMs = 20_000L)
-                        parseServerItemsJson(service, raw)
-                    } else {
-                        emptyList()
-                    }
-                    if (webPlaylists.isNotEmpty()) {
-                        webPlaylists
-                    } else if (SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback) {
+                    val remotePlaylists = if (canRemote) {
                         runCatching {
                             SpotifyAppRemoteBridge.loadRecommendedViaRemote(context).filter { it.type == "playlist" }
                         }.getOrDefault(emptyList())
+                    } else {
+                        emptyList()
+                    }
+                    if (remotePlaylists.isNotEmpty()) {
+                        remotePlaylists
+                    } else if (isWebSpotifyLoggedIn(context)) {
+                        val engine = ensureEngine(context, service)
+                        val raw = engine.callRpc("loadPlaylists", JSONObject(), timeoutMs = 15_000L)
+                        parseServerItemsJson(service, raw)
                     } else {
                         emptyList()
                     }
@@ -672,19 +691,66 @@ object WebStreamingMusic {
         if (container.ratingKey == "playlist|liked") {
             return loadLibraryTracks(context, service)
         }
+        val cacheKey = "${service.name}|${container.ratingKey}"
         if (isDirectService(service)) {
             return runCatching { DirectMusicServiceApi.loadContainerChildren(service, container) }.getOrDefault(emptyList())
+                .also { if (it.isNotEmpty()) containerChildrenCache[cacheKey] = it }
         }
         if (service == WebMusicService.SPOTIFY) {
-            val oauthChildren = runCatching { SpotifyAppRemoteBridge.loadChildrenViaOAuth(context, container) }.getOrDefault(emptyList())
-            if (oauthChildren.isNotEmpty()) return oauthChildren
+            val canRemote = SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback
+            if (canRemote) {
+                // OAuth 网页接口与本机官方客户端 ContentApi IPC 并行请求：
+                // 代理畅通时优先采用 OAuth 完整元数据，无代理/接口受限时立即回退本机官方客户端 IPC 秒开歌单
+                val resolved = coroutineScope {
+                    val oauthJob = async {
+                        runCatching { SpotifyAppRemoteBridge.loadChildrenViaOAuth(context, container) }.getOrDefault(emptyList())
+                    }
+                    val remoteJob = async {
+                        runCatching { SpotifyAppRemoteBridge.loadChildrenViaRemote(context, container) }.getOrDefault(emptyList())
+                    }
+                    val fastOauth = withTimeoutOrNull(3_500L) { oauthJob.await() }
+                    if (!fastOauth.isNullOrEmpty()) {
+                        remoteJob.cancel()
+                        return@coroutineScope fastOauth
+                    }
+                    val fromRemote = remoteJob.await()
+                    if (fromRemote.isNotEmpty()) {
+                        oauthJob.cancel()
+                        return@coroutineScope fromRemote
+                    }
+                    val lateOauth = withTimeoutOrNull(4_000L) { oauthJob.await() }.orEmpty()
+                    if (lateOauth.isNotEmpty()) return@coroutineScope lateOauth
+                    emptyList()
+                }
+                if (resolved.isNotEmpty()) {
+                    containerChildrenCache[cacheKey] = resolved
+                    return resolved
+                }
+                if (!isWebSpotifyLoggedIn(context)) {
+                    return containerChildrenCache[cacheKey].orEmpty()
+                }
+            } else {
+                val oauthChildren = runCatching { SpotifyAppRemoteBridge.loadChildrenViaOAuth(context, container) }.getOrDefault(emptyList())
+                if (oauthChildren.isNotEmpty()) {
+                    containerChildrenCache[cacheKey] = oauthChildren
+                    return oauthChildren
+                }
+                if (!isWebSpotifyLoggedIn(context)) {
+                    return containerChildrenCache[cacheKey].orEmpty()
+                }
+            }
         }
         val engine = ensureEngine(context, service)
         val args = JSONObject()
             .put("ratingKey", container.ratingKey)
             .put("type", container.type)
-        val raw = engine.callRpc("loadChildren", args, timeoutMs = 20_000L)
-        return parseServerItemsJson(service, raw)
+        val raw = engine.callRpc("loadChildren", args, timeoutMs = 15_000L)
+        val parsed = parseServerItemsJson(service, raw)
+        if (parsed.isNotEmpty()) {
+            containerChildrenCache[cacheKey] = parsed
+            return parsed
+        }
+        return containerChildrenCache[cacheKey].orEmpty()
     }
 
     suspend fun searchMusic(context: Context, service: WebMusicService, query: String): List<ServerItem> {

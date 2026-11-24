@@ -157,11 +157,13 @@ fun MusicTabScreen(
     var speed by remember(player) { mutableFloatStateOf(player.playbackParameters.speed) }
     LaunchedEffect(player) {
         while (true) {
-            positionMs = player.currentPosition.coerceAtLeast(0L)
+            val pos = player.currentPosition.coerceAtLeast(0L)
+            positionMs = pos
             wantsPlay = player.playWhenReady &&
                 player.playbackState != Player.STATE_IDLE &&
                 player.playbackState != Player.STATE_ENDED
-            delay(180)
+            main.checkAbLoop(pos)
+            delay(150)
         }
     }
 

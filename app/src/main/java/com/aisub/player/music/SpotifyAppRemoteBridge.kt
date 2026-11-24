@@ -83,10 +83,12 @@ object SpotifyAppRemoteBridge {
 
     private val http by lazy {
         AppProxy.builder()
-            .connectTimeout(12, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
             .build()
     }
+
+    private val remoteItemCache = java.util.concurrent.ConcurrentHashMap<String, ListItem>()
 
     private val _status = MutableStateFlow(Status())
     val status: StateFlow<Status> = _status.asStateFlow()
@@ -566,10 +568,13 @@ object SpotifyAppRemoteBridge {
         if (cid.isEmpty()) return emptyList()
         return if (kind == "playlist") {
             if (cid == "liked") return loadTracksViaOAuth(context)
-            val arr = apiGetJson(context, "/playlists/$cid/tracks?limit=100")?.optJSONArray("items") ?: return emptyList()
+            val arr = apiGetJson(context, "/playlists/$cid/tracks?limit=100")?.optJSONArray("items")
+                ?: apiGetJson(context, "/playlists/$cid/items?limit=100")?.optJSONArray("items")
+                ?: return emptyList()
             val out = ArrayList<ServerItem>(arr.length())
             for (i in 0 until arr.length()) {
-                parseWebApiTrack(arr.optJSONObject(i)?.optJSONObject("track"))?.let(out::add)
+                val entry = arr.optJSONObject(i) ?: continue
+                parseWebApiTrack(entry.optJSONObject("track") ?: entry.optJSONObject("item"))?.let(out::add)
             }
             out
         } else {
@@ -651,16 +656,106 @@ object SpotifyAppRemoteBridge {
         return out
     }
 
-    /** 当仅连接了 App Remote 而尚未进行 OAuth PKCE 时，也可通过 ContentApi 读取官方客户端推荐歌单/专辑。 */
+    private fun cacheRemoteListItem(li: ListItem, mapped: ServerItem? = null) {
+        if (!li.uri.isNullOrBlank()) remoteItemCache[li.uri] = li
+        if (!li.id.isNullOrBlank()) remoteItemCache[li.id] = li
+        if (mapped != null && mapped.ratingKey.isNotBlank()) {
+            remoteItemCache[mapped.ratingKey] = li
+        }
+    }
+
+    /** 通过本机官方 Spotify 客户端 ContentApi（本地 Binder IPC，无需代理）读取推荐/曲库歌单与专辑。 */
     suspend fun loadRecommendedViaRemote(context: Context): List<ServerItem> {
-        val remote = connectRemote(context, showAuthView = false).getOrNull() ?: return emptyList()
+        val remote = connectRemote(context, showAuthView = false, timeoutMs = 4_500L).getOrNull() ?: return emptyList()
         val listItems = awaitCallResult(remote.contentApi.getRecommendedContentItems("default"), 5_000L).getOrNull()
             ?: return emptyList()
         val items = listItems.items ?: return emptyList()
         val out = ArrayList<ServerItem>()
+        val seen = HashSet<String>()
+        var expandedShelves = 0
         for (li in items) {
-            mapRemoteListItem(li)?.let(out::add)
+            if (li == null || li.uri.isNullOrBlank()) continue
+            val mapped = mapRemoteListItem(li)
+            cacheRemoteListItem(li, mapped)
+            if (mapped != null && seen.add("${mapped.type}|${mapped.ratingKey}")) {
+                out += mapped
+            }
+            val isContainerLeaf = li.uri.startsWith("spotify:track:") ||
+                li.uri.startsWith("spotify:playlist:") ||
+                li.uri.contains(":playlist:") ||
+                li.uri.startsWith("spotify:album:")
+            if (li.hasChildren && !isContainerLeaf && expandedShelves < 6) {
+                expandedShelves++
+                val children = awaitCallResult(remote.contentApi.getChildrenOfItem(li, 30, 0), 3_500L)
+                    .getOrNull()?.items.orEmpty()
+                for (child in children) {
+                    if (child == null || child.uri.isNullOrBlank()) continue
+                    val cm = mapRemoteListItem(child)
+                    cacheRemoteListItem(child, cm)
+                    if (cm != null && seen.add("${cm.type}|${cm.ratingKey}")) {
+                        out += cm
+                    }
+                }
+            }
         }
+        return out
+    }
+
+    /**
+     * 通过本机官方 Spotify 客户端 ContentApi.getChildrenOfItem 读取歌单/专辑内曲目：
+     * 直接走本地 Binder IPC 复用官方客户端已打通的网络与本地缓存，不开代理也能秒开歌单。
+     */
+    suspend fun loadChildrenViaRemote(context: Context, container: ServerItem): List<ServerItem> {
+        val st = refreshStatus(context)
+        if (!st.canAttemptRemotePlayback) return emptyList()
+        val parts = container.ratingKey.split('|')
+        val kind = parts.firstOrNull().orEmpty()
+        val cid = parts.getOrNull(1) ?: parts.firstOrNull().orEmpty()
+        if (cid.isEmpty()) return emptyList()
+
+        val remote = connectRemote(context, showAuthView = false, timeoutMs = 4_500L).getOrNull() ?: return emptyList()
+        val candidateUris = when {
+            kind == "playlist" && cid == "liked" -> listOf("spotify:collection:tracks")
+            kind == "playlist" -> listOf("spotify:playlist:$cid")
+            kind == "album" -> listOf("spotify:album:$cid")
+            else -> listOf("spotify:playlist:$cid", "spotify:album:$cid")
+        }
+
+        val out = ArrayList<ServerItem>()
+        val seen = HashSet<String>()
+        for (targetUri in candidateUris) {
+            val baseItem = remoteItemCache[container.ratingKey]
+                ?: remoteItemCache[targetUri]
+                ?: ListItem(
+                    targetUri,
+                    targetUri,
+                    null,
+                    container.title,
+                    container.summary.ifBlank { container.parentTitle.orEmpty() },
+                    true,
+                    true,
+                )
+            var offset = 0
+            val pageSize = 50
+            while (offset < 200) {
+                val page = awaitCallResult(remote.contentApi.getChildrenOfItem(baseItem, pageSize, offset), 4_500L)
+                    .getOrNull() ?: break
+                val batch = page.items.orEmpty()
+                if (batch.isEmpty()) break
+                for (li in batch) {
+                    if (li == null || li.uri.isNullOrBlank()) continue
+                    val mapped = mapRemoteListItem(li)
+                    cacheRemoteListItem(li, mapped)
+                    if (mapped != null && seen.add("${mapped.type}|${mapped.ratingKey}")) {
+                        out += mapped
+                    }
+                }
+                offset += batch.size
+                if (batch.size < pageSize || (page.total > 0 && offset >= page.total)) break
+            }
+            if (out.isNotEmpty()) break
+        }
+        android.util.Log.d("Voxtitle", "Spotify loadChildrenViaRemote key=${container.ratingKey} count=${out.size}")
         return out
     }
 
@@ -670,7 +765,7 @@ object SpotifyAppRemoteBridge {
         val cover = spotifyImageUriToHttps(li.imageUri?.raw)
         return when {
             uri.startsWith("spotify:track:") -> {
-                val id = uri.removePrefix("spotify:track:")
+                val id = uri.substringAfterLast(':')
                 val entry = WebStreamingMusic.buildTrackEntry(
                     service = WebMusicService.SPOTIFY,
                     trackId = id,
@@ -689,8 +784,8 @@ object SpotifyAppRemoteBridge {
                     playUrl = entry.uri,
                 )
             }
-            uri.startsWith("spotify:playlist:") -> {
-                val id = uri.removePrefix("spotify:playlist:")
+            uri.startsWith("spotify:playlist:") || uri.contains(":playlist:") -> {
+                val id = uri.substringAfterLast(':')
                 ServerItem(
                     ratingKey = "playlist|$id",
                     type = "playlist",
@@ -700,7 +795,7 @@ object SpotifyAppRemoteBridge {
                 )
             }
             uri.startsWith("spotify:album:") -> {
-                val id = uri.removePrefix("spotify:album:")
+                val id = uri.substringAfterLast(':')
                 ServerItem(
                     ratingKey = "album|$id",
                     type = "album",

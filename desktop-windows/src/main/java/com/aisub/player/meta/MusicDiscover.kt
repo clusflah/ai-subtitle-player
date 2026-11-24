@@ -217,8 +217,8 @@ object MusicDiscoverCharts {
             remoteId = "3778678",
             neteasePlaylistId = "3778678",
             qqTopId = 26,
-            fallbackAppleCountry = "cn",
-            fallbackKeyword = "热门华语流行",
+            fallbackAppleCountry = "us",
+            fallbackKeyword = "Pop Hits",
         ),
         MusicChartDef(
             id = "music_new_express",
@@ -228,8 +228,8 @@ object MusicDiscoverCharts {
             remoteId = "newsong",
             neteasePlaylistId = "3779629",
             qqTopId = 4,
-            fallbackAppleCountry = "hk",
-            fallbackKeyword = "${Calendar.getInstance().get(Calendar.YEAR)} 新歌",
+            fallbackAppleCountry = "us",
+            fallbackKeyword = "New Music ${Calendar.getInstance().get(Calendar.YEAR)}",
         ),
         MusicChartDef(
             id = "music_soar",
@@ -399,7 +399,7 @@ object MusicDiscoverSearchStore {
  */
 object MusicDiscoverRepository {
     private const val CACHE_TTL_MS = 20 * 60_000L
-    private const val DISK_CACHE_FILE = "discover_music_cache_v1.json"
+    private const val DISK_CACHE_FILE = "discover_music_cache_v2.json"
     private const val BROWSER_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
@@ -425,6 +425,10 @@ object MusicDiscoverRepository {
 
     private val fetchPool = Executors.newFixedThreadPool(4) { r ->
         Thread(r, "voxtitle-music-discover").apply { isDaemon = true }
+    }
+    /** 二级并发拉取池：避免 loadHomeSections 占满 fetchPool 后内部嵌套 supplyAsync().get() 造成线程饥饿死锁。 */
+    private val subFetchPool = Executors.newCachedThreadPool { r ->
+        Thread(r, "voxtitle-music-subfetch").apply { isDaemon = true }
     }
 
     fun consumeFirstVisitAutoRefresh(sourcePref: MusicDiscoverSource = MusicDiscoverSource.AUTO): Boolean =
@@ -637,16 +641,36 @@ object MusicDiscoverRepository {
         runCatching { fetchQqToplist(chart.qqTopId, count) }.getOrDefault(emptyList())
 
     private fun fetchAppleForChart(chart: MusicChartDef, count: Int): List<DiscoverItem> {
-        if (chart.id == "music_new_express" || chart.id == "music_original") {
-            val searched = runCatching { fetchItunesSearch(chart.fallbackKeyword, count) }.getOrDefault(emptyList())
-            if (searched.isNotEmpty()) return searched
+        when (chart.id) {
+            "music_hot" -> {
+                val pop = runCatching { fetchAppleGlobalPopHot(count) }.getOrDefault(emptyList())
+                if (pop.isNotEmpty()) return pop
+            }
+            "music_new_express" -> {
+                val fresh = runCatching { fetchAppleNewReleases(count, preferChinese = false) }.getOrDefault(emptyList())
+                if (fresh.isNotEmpty()) return fresh
+            }
+            "music_new_chart" -> {
+                val freshRegional = runCatching { fetchAppleNewReleases(count, preferChinese = true) }.getOrDefault(emptyList())
+                if (freshRegional.isNotEmpty()) return freshRegional
+            }
+            "music_original" -> {
+                val indie = runCatching { fetchAppleIndieChart(count) }.getOrDefault(emptyList())
+                if (indie.isNotEmpty()) return indie
+            }
+            "music_soar" -> {
+                val rising = runCatching { fetchAppleRisingChart(count) }.getOrDefault(emptyList())
+                if (rising.isNotEmpty()) return rising
+            }
         }
         val country = if (chart.source == MusicChartSource.APPLE_MOST_PLAYED) chart.remoteId else chart.fallbackAppleCountry
         val primary = runCatching { fetchAppleMostPlayed(country, count) }.getOrDefault(emptyList())
         if (primary.isNotEmpty()) return primary
-        if (country != "tw") {
-            val tw = runCatching { fetchAppleMostPlayed("tw", count) }.getOrDefault(emptyList())
-            if (tw.isNotEmpty()) return tw
+        val rssFallback = runCatching { fetchItunesTopSongsRss(country, count) }.getOrDefault(emptyList())
+        if (rssFallback.isNotEmpty()) return rssFallback
+        if (country != "us") {
+            val us = runCatching { fetchAppleMostPlayed("us", count) }.getOrDefault(emptyList())
+            if (us.isNotEmpty()) return us
         }
         return runCatching { fetchItunesSearch(chart.fallbackKeyword, count) }.getOrDefault(emptyList())
     }
@@ -805,7 +829,153 @@ object MusicDiscoverRepository {
         return root.optJSONObject("result")?.optJSONArray("songs").objects().mapNotNull(::parseNeteaseSongJson)
     }
 
-    internal fun fetchAppleMostPlayed(country: String, limit: Int = 30): List<DiscoverItem> {
+    private data class DatedAppleSong(val item: DiscoverItem, val releaseDateIso: String)
+
+    private fun isoDateDaysAgo(days: Int): String {
+        val cal = Calendar.getInstance()
+        cal.add(Calendar.DAY_OF_YEAR, -days)
+        return "%04d-%02d-%02d".format(
+            cal.get(Calendar.YEAR),
+            cal.get(Calendar.MONTH) + 1,
+            cal.get(Calendar.DAY_OF_MONTH),
+        )
+    }
+
+    private fun interleaveLists(lists: List<List<DiscoverItem>>, limit: Int): List<DiscoverItem> {
+        val raw = ArrayList<DiscoverItem>()
+        val maxLen = lists.maxOfOrNull { it.size } ?: 0
+        for (i in 0 until maxLen) {
+            for (l in lists) {
+                if (i < l.size) raw += l[i]
+            }
+            if (raw.size >= limit * 2) break
+        }
+        return deduplicateSongs(raw).take(limit)
+    }
+
+    /** Apple Music「流行热歌榜」：聚合欧美主流流行流派榜 (US/GB Pop genre=14) 与全球热门单曲，避免落入中国区全是华语老歌。 */
+    internal fun fetchAppleGlobalPopHot(limit: Int = 30): List<DiscoverItem> {
+        val usPopFut = CompletableFuture.supplyAsync({
+            runCatching { fetchItunesTopSongsRss("us", 35, genreId = 14) }.getOrDefault(emptyList())
+        }, subFetchPool)
+        val gbPopFut = CompletableFuture.supplyAsync({
+            runCatching { fetchItunesTopSongsRss("gb", 35, genreId = 14) }.getOrDefault(emptyList())
+        }, subFetchPool)
+        val usAllFut = CompletableFuture.supplyAsync({
+            runCatching { fetchAppleMostPlayed("us", 30) }.getOrDefault(emptyList())
+        }, subFetchPool)
+        val hkFut = CompletableFuture.supplyAsync({
+            runCatching { fetchAppleMostPlayed("hk", 15) }.getOrDefault(emptyList())
+        }, subFetchPool)
+        val lists = listOf(
+            runCatching { usPopFut.get() }.getOrDefault(emptyList()),
+            runCatching { gbPopFut.get() }.getOrDefault(emptyList()),
+            runCatching { usAllFut.get() }.getOrDefault(emptyList()),
+            runCatching { hkFut.get() }.getOrDefault(emptyList()),
+        ).filter { it.isNotEmpty() }
+        return interleaveLists(lists, limit)
+    }
+
+    /** Apple Music「新音乐速递 / 新歌榜」：汇总多区实时在榜与流行流派单曲，严格按发行日期过滤近半年新歌并按最新发行时间倒序排列。 */
+    internal fun fetchAppleNewReleases(limit: Int = 30, preferChinese: Boolean = false): List<DiscoverItem> {
+        val sources: List<() -> List<DatedAppleSong>> = if (preferChinese) {
+            listOf(
+                { fetchItunesTopSongsRssDated("tw", 45, null) },
+                { fetchItunesTopSongsRssDated("hk", 45, null) },
+                { fetchAppleMostPlayedDated("hk", 45) },
+                { fetchAppleMostPlayedDated("tw", 45) },
+                { fetchItunesTopSongsRssDated("us", 35, 14) },
+                { fetchAppleMostPlayedDated("jp", 30) },
+                { fetchAppleMostPlayedDated("kr", 30) },
+            )
+        } else {
+            listOf(
+                { fetchItunesTopSongsRssDated("us", 50, 14) },
+                { fetchItunesTopSongsRssDated("us", 50, null) },
+                { fetchItunesTopSongsRssDated("gb", 45, 14) },
+                { fetchAppleMostPlayedDated("us", 50) },
+                { fetchAppleMostPlayedDated("gb", 45) },
+                { fetchAppleMostPlayedDated("hk", 30) },
+                { fetchAppleMostPlayedDated("jp", 30) },
+                { fetchAppleMostPlayedDated("kr", 30) },
+            )
+        }
+        val futures = sources.map { fn ->
+            CompletableFuture.supplyAsync({ runCatching { fn() }.getOrDefault(emptyList()) }, subFetchPool)
+        }
+        val all = futures.flatMap { runCatching { it.get() }.getOrDefault(emptyList()) }
+        if (all.isEmpty()) return emptyList()
+
+        // 按曲目规范键去重，保留发行日期最明确的一条
+        val byKey = LinkedHashMap<String, DatedAppleSong>()
+        for (entry in all) {
+            val key = songNormKey(entry.item.title, entry.item.artist)
+            if (key.isEmpty()) continue
+            val prev = byKey[key]
+            if (prev == null || (entry.releaseDateIso.length >= 10 && entry.releaseDateIso > prev.releaseDateIso)) {
+                byKey[key] = entry
+            }
+        }
+        val unique = byKey.values.toList()
+        val cutoffRecent = isoDateDaysAgo(120)
+        val cutoffYear = isoDateDaysAgo(365)
+        val recent = unique
+            .filter { it.releaseDateIso.length >= 10 && it.releaseDateIso >= cutoffRecent }
+            .sortedByDescending { it.releaseDateIso }
+        if (recent.size >= minOf(limit, 12)) {
+            return recent.map { it.item }.take(limit)
+        }
+        val withinYear = unique
+            .filter { it.releaseDateIso.length >= 10 && it.releaseDateIso >= cutoffYear }
+            .sortedByDescending { it.releaseDateIso }
+        if (withinYear.isNotEmpty()) {
+            return withinYear.map { it.item }.take(limit)
+        }
+        return unique
+            .sortedByDescending { it.releaseDateIso }
+            .map { it.item }
+            .take(limit)
+    }
+
+    /** Apple Music「原创与独立音乐」：拉取美/英区 Alternative & Indie (genre=20) 热单。 */
+    internal fun fetchAppleIndieChart(limit: Int = 30): List<DiscoverItem> {
+        val usFut = CompletableFuture.supplyAsync({
+            runCatching { fetchItunesTopSongsRss("us", 35, genreId = 20) }.getOrDefault(emptyList())
+        }, subFetchPool)
+        val gbFut = CompletableFuture.supplyAsync({
+            runCatching { fetchItunesTopSongsRss("gb", 35, genreId = 20) }.getOrDefault(emptyList())
+        }, subFetchPool)
+        val lists = listOf(
+            runCatching { usFut.get() }.getOrDefault(emptyList()),
+            runCatching { gbFut.get() }.getOrDefault(emptyList()),
+        ).filter { it.isNotEmpty() }
+        return interleaveLists(lists, limit)
+    }
+
+    /** Apple Music「飙升趋势榜」：聚合英/美/港/日多区实时飙升热单，优先近期发行高热度曲目。 */
+    internal fun fetchAppleRisingChart(limit: Int = 30): List<DiscoverItem> {
+        val gbFut = CompletableFuture.supplyAsync({
+            runCatching { fetchAppleMostPlayedDated("gb", 35) }.getOrDefault(emptyList())
+        }, subFetchPool)
+        val hkFut = CompletableFuture.supplyAsync({
+            runCatching { fetchAppleMostPlayedDated("hk", 35) }.getOrDefault(emptyList())
+        }, subFetchPool)
+        val krFut = CompletableFuture.supplyAsync({
+            runCatching { fetchAppleMostPlayedDated("kr", 25) }.getOrDefault(emptyList())
+        }, subFetchPool)
+        val usFut = CompletableFuture.supplyAsync({
+            runCatching { fetchItunesTopSongsRssDated("us", 35, 14) }.getOrDefault(emptyList())
+        }, subFetchPool)
+        val cutoff = isoDateDaysAgo(365)
+        val pools = listOf(gbFut, hkFut, usFut, krFut).map { f ->
+            val raw = runCatching { f.get() }.getOrDefault(emptyList())
+            val fresh = raw.filter { it.releaseDateIso >= cutoff }.map { it.item }
+            fresh.ifEmpty { raw.map { it.item } }
+        }.filter { it.isNotEmpty() }
+        return interleaveLists(pools, limit)
+    }
+
+    private fun fetchAppleMostPlayedDated(country: String, limit: Int = 30): List<DatedAppleSong> {
         val capped = if (limit <= 25) 25 else 50
         val urls = listOf(
             "https://rss.applemarketingtools.com/api/v2/$country/music/most-played/$capped/songs.json",
@@ -813,13 +983,80 @@ object MusicDiscoverRepository {
         )
         for (url in urls) {
             val text = httpText(Request.Builder().url(url).header("User-Agent", BROWSER_UA).build()) ?: continue
-            val parsed = parseAppleRssSongsJson(text)
+            val parsed = parseAppleRssSongsWithDate(text)
             if (parsed.isNotEmpty()) return parsed.take(limit)
         }
         return emptyList()
     }
 
-    internal fun parseAppleRssSongsJson(rawJson: String): List<DiscoverItem> {
+    internal fun fetchAppleMostPlayed(country: String, limit: Int = 30): List<DiscoverItem> =
+        fetchAppleMostPlayedDated(country, limit).map { it.item }
+
+    internal fun fetchItunesTopSongsRss(country: String, limit: Int = 30, genreId: Int? = null): List<DiscoverItem> =
+        fetchItunesTopSongsRssDated(country, limit, genreId).map { it.item }
+
+    private fun fetchItunesTopSongsRssDated(country: String, limit: Int = 30, genreId: Int? = null): List<DatedAppleSong> {
+        val n = limit.coerceIn(10, 50)
+        val genreSeg = genreId?.let { "/genre=$it" }.orEmpty()
+        val url = "https://itunes.apple.com/$country/rss/topsongs/limit=$n$genreSeg/json"
+        val text = httpText(Request.Builder().url(url).header("User-Agent", BROWSER_UA).build()) ?: return emptyList()
+        return parseItunesTopSongsRssJson(text)
+    }
+
+    private fun parseItunesTopSongsRssJson(rawJson: String): List<DatedAppleSong> {
+        val root = runCatching { JSONObject(rawJson) }.getOrNull() ?: return emptyList()
+        val feed = root.optJSONObject("feed") ?: return emptyList()
+        val entryObj = feed.opt("entry")
+        val entries: List<JSONObject> = when (entryObj) {
+            is JSONArray -> entryObj.objects()
+            is JSONObject -> listOf(entryObj)
+            else -> emptyList()
+        }
+        return entries.mapNotNull { e ->
+            val id = e.optJSONObject("id")?.optJSONObject("attributes")?.optString("im:id")?.trim().orEmpty()
+            val title = e.optJSONObject("im:name")?.optString("label")?.trim().orEmpty()
+            if (id.isEmpty() || title.isEmpty()) return@mapNotNull null
+            val artist = e.optJSONObject("im:artist")?.optString("label")?.trim().orEmpty()
+            val album = e.optJSONObject("im:collection")?.optJSONObject("im:name")?.optString("label")?.trim().orEmpty()
+            val releaseIso = e.optJSONObject("im:releaseDate")?.optString("label")?.trim()?.take(10).orEmpty()
+            val year = releaseIso.take(4).toIntOrNull()?.takeIf { it in 1900..2100 }
+            val images = e.optJSONArray("im:image").objects()
+            val cover = images.lastOrNull()?.optString("label")?.trim()?.takeIf { it.startsWith("http") }
+                ?.replace(Regex("""\d+x\d+bb"""), "600x600bb")
+            val linkField = e.opt("link")
+            val links = when (linkField) {
+                is JSONArray -> linkField.objects()
+                is JSONObject -> listOf(linkField)
+                else -> emptyList()
+            }
+            val songUrl = links.firstNotNullOfOrNull { l ->
+                val attr = l.optJSONObject("attributes")
+                if (attr?.optString("rel") == "alternate") attr.optString("href").trim().takeIf { it.startsWith("http") } else null
+            } ?: e.optJSONObject("id")?.optString("label")?.trim()?.takeIf { it.startsWith("http") }
+            val genre = e.optJSONObject("category")?.optJSONObject("attributes")?.optString("label")?.trim()
+                ?.takeIf { it.isNotEmpty() && !it.equals("Music", ignoreCase = true) && it != "音乐" }
+            val item = DiscoverItem(
+                id = "apple:$id",
+                kind = "music",
+                title = title,
+                originalTitle = artist,
+                year = year,
+                posterUrl = cover,
+                backdropUrl = cover,
+                genres = listOfNotNull(genre),
+                artist = artist,
+                album = album,
+                appleUrl = songUrl,
+                platforms = listOfNotNull(songUrl?.let { PlatformSource("Apple Music", it) }),
+            )
+            DatedAppleSong(item, releaseIso)
+        }
+    }
+
+    internal fun parseAppleRssSongsJson(rawJson: String): List<DiscoverItem> =
+        parseAppleRssSongsWithDate(rawJson).map { it.item }
+
+    private fun parseAppleRssSongsWithDate(rawJson: String): List<DatedAppleSong> {
         val root = runCatching { JSONObject(rawJson) }.getOrNull() ?: return emptyList()
         val results = root.optJSONObject("feed")?.optJSONArray("results").objects()
         return results.mapNotNull { r ->
@@ -827,7 +1064,7 @@ object MusicDiscoverRepository {
             val title = r.optString("name").trim()
             if (id.isEmpty() || title.isEmpty()) return@mapNotNull null
             val artist = r.optString("artistName").trim()
-            val releaseDate = r.optString("releaseDate").trim()
+            val releaseDate = r.optString("releaseDate").trim().take(10)
             val year = releaseDate.take(4).toIntOrNull()?.takeIf { it in 1900..2100 }
             val cover = r.optString("artworkUrl100").takeIf { it.startsWith("http") }
                 ?.replace("100x100bb", "600x600bb")
@@ -835,7 +1072,7 @@ object MusicDiscoverRepository {
             val songUrl = r.optString("url").takeIf { it.startsWith("http") }
             val genres = r.optJSONArray("genres").objects()
                 .mapNotNull { it.optString("name").trim().takeIf { g -> g.isNotEmpty() && !g.equals("Music", ignoreCase = true) && g != "音乐" } }
-            DiscoverItem(
+            val item = DiscoverItem(
                 id = "apple:$id",
                 kind = "music",
                 title = title,
@@ -848,6 +1085,7 @@ object MusicDiscoverRepository {
                 appleUrl = songUrl,
                 platforms = listOfNotNull(songUrl?.let { PlatformSource("Apple Music", it) }),
             )
+            DatedAppleSong(item, releaseDate)
         }
     }
 

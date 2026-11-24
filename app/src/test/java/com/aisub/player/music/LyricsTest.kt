@@ -58,6 +58,24 @@ class LyricsTest {
     }
 
     @Test
+    fun lineStartAndEndMsForAbLoop() {
+        val l = Lyrics.parse("[00:10.00]第一句\n[00:10.00]同时间翻译\n[00:22.50]第二句\n[00:35.00]最后一句")!!
+        assertEquals(10_000L, l.lineStartMs(0))
+        assertEquals(22_500L, l.lineEndMs(0, durationMs = 60_000L))
+        assertEquals(35_000L, l.lineEndMs(2, durationMs = 60_000L))
+        assertEquals(60_000L, l.lineEndMs(3, durationMs = 60_000L))
+        assertEquals(40_000L, l.lineEndMs(3, durationMs = 0L))
+
+        val aiCues = Lyrics(
+            listOf(LyricLine(5_000L, "hello", endMs = 8_200L), LyricLine(12_000L, "world", endMs = 15_000L)),
+            synced = true,
+            source = "AI 字幕",
+        )
+        assertEquals(8_200L, aiCues.lineEndMs(0, durationMs = 60_000L))
+        assertEquals(15_000L, aiCues.lineEndMs(1, durationMs = 60_000L))
+    }
+
+    @Test
     fun roundTripsThroughLrc() {
         val l = Lyrics.parse("[01:05.40]hello\n[00:01.00]start")!!
         assertEquals(l.lines, Lyrics.parse(l.toLrc())!!.lines)

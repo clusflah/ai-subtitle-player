@@ -54,7 +54,7 @@ object DirectMusicServiceApi {
         val urls = when (service) {
             WebMusicService.YOUTUBE_MUSIC -> listOf("https://music.youtube.com", "https://youtube.com", "https://www.youtube.com")
             WebMusicService.NETEASE_MUSIC -> listOf("https://music.163.com", "https://interface3.music.163.com")
-            WebMusicService.QQ_MUSIC -> listOf("https://y.qq.com", "https://c.y.qq.com", "https://u.y.qq.com", "https://qq.com")
+            WebMusicService.QQ_MUSIC -> listOf("https://y.qq.com", "https://c.y.qq.com", "https://u.y.qq.com", "https://i.y.qq.com", "https://qq.com")
             else -> listOf(service.homeUrl)
         }
         val merged = LinkedHashMap<String, String>()
@@ -66,7 +66,9 @@ object DirectMusicServiceApi {
                 if (idx <= 0) continue
                 val k = part.substring(0, idx).trim()
                 val v = part.substring(idx + 1).trim()
-                if (k.isNotEmpty() && v.isNotEmpty() && !merged.containsKey(k)) {
+                val prev = merged[k]
+                val prevTrivial = prev == null || prev == "0" || prev == "o0" || prev == "o0000000000"
+                if (k.isNotEmpty() && v.isNotEmpty() && prevTrivial) {
                     merged[k] = v
                 }
             }
@@ -1071,9 +1073,22 @@ object DirectMusicServiceApi {
     // 4. QQ音乐 (u.y.qq.com / c.y.qq.com)
     // =========================================================================
 
+    private fun qqGtk(cookies: String): Long {
+        val rawKey = listOf("qqmusic_key", "qm_keyst", "p_skey", "skey")
+            .mapNotNull { WebStreamingMusic.extractCookieValue(cookies, it) }
+            .firstOrNull { it.isNotBlank() }
+            ?: return 5381L
+        var hash = 5381
+        for (ch in rawKey) {
+            hash += (hash shl 5) + ch.code
+        }
+        return (hash and 0x7fffffff).toLong()
+    }
+
     private fun qqMusicuRequest(payload: JSONObject, cookies: String): JSONObject? {
+        val gtk = qqGtk(cookies)
         val reqBuilder = Request.Builder()
-            .url("https://u.y.qq.com/cgi-bin/musicu.fcg")
+            .url("https://u.y.qq.com/cgi-bin/musicu.fcg?g_tk=$gtk&format=json&inCharset=utf8&outCharset=utf-8")
             .header("User-Agent", BROWSER_UA)
             .header("Referer", "https://y.qq.com/")
             .header("Origin", "https://y.qq.com")
@@ -1083,18 +1098,30 @@ object DirectMusicServiceApi {
         return runCatching { JSONObject(text) }.getOrNull()
     }
 
-    private fun qqComm(cookies: String): JSONObject {
+    private fun qqComm(cookies: String, ct: Int = 24, cv: Int = 0): JSONObject {
         val (uin, key) = extractQqUinAndKey(cookies)
+        val tmeLoginCookie = WebStreamingMusic.extractCookieValue(cookies, "tmeLoginType")?.trim()?.toIntOrNull()
+        val loginTypeCookie = WebStreamingMusic.extractCookieValue(cookies, "login_type")?.trim().orEmpty()
         val isWx = key.startsWith("W_X_", ignoreCase = true) ||
-            (cookies.contains("wxuin=") && !cookies.contains("p_uin="))
-        return JSONObject()
+            loginTypeCookie == "2" ||
+            (cookies.contains("wxuin=") && !key.startsWith("Q_H_L_", ignoreCase = true) && !cookies.contains("p_uin="))
+        val effectiveLoginType = tmeLoginCookie?.takeIf { it in 1..2 } ?: if (isWx) 1 else 2
+        val openid = WebStreamingMusic.extractCookieValue(cookies, "wxopenid")
+            ?: WebStreamingMusic.extractCookieValue(cookies, "psrf_qqopenid")
+            ?: ""
+        val comm = JSONObject()
             // u.y.qq.com musicu.fcg 严格要求 comm.uin 为字符串，传整型会返回 code=500001
             .put("uin", uin)
+            .put("qq", uin)
             .put("authst", key)
-            .put("tmeLoginType", if (isWx) 1 else 2)
+            .put("tmeLoginType", effectiveLoginType)
+            .put("tmeAppID", "qqmusic")
+            .put("g_tk", qqGtk(cookies))
             .put("format", "json")
-            .put("ct", 24)
-            .put("cv", 0)
+            .put("ct", ct)
+            .put("cv", cv)
+        if (openid.isNotBlank()) comm.put("openid", openid)
+        return comm
     }
 
     private fun parseQqTrackObj(s: JSONObject): ServerItem? {
@@ -1429,6 +1456,10 @@ object DirectMusicServiceApi {
         if (songMid.isEmpty()) return null
 
         val (uin, _) = extractQqUinAndKey(cookies)
+        val guid = WebStreamingMusic.extractCookieValue(cookies, "pgv_pvid")
+            ?.trim()?.filter(Char::isDigit)?.take(10)?.takeIf { it.length >= 6 }
+            ?: "1429839143"
+
         // 第 1 次探针：获取准确的 mediaMid（及普通音质默认 purl）
         val probePayload = JSONObject()
             .put(
@@ -1439,7 +1470,7 @@ object DirectMusicServiceApi {
                     .put(
                         "param",
                         JSONObject()
-                            .put("guid", "10000")
+                            .put("guid", guid)
                             .put("songmid", JSONArray().put(songMid))
                             .put("songtype", JSONArray().put(0))
                             .put("uin", uin)
@@ -1449,45 +1480,69 @@ object DirectMusicServiceApi {
             )
             .put("comm", qqComm(cookies))
         val probeRoot = qqMusicuRequest(probePayload, cookies) ?: return null
-        val probeData = probeRoot.optJSONObject("req_0")?.optJSONObject("data")
-        val mediaMid = probeData?.optJSONArray("midurlinfo")?.optJSONObject(0)
-            ?.optString("mid")?.trim()?.takeIf { it.isNotEmpty() } ?: songMid
+        val probeReq0 = probeRoot.optJSONObject("req_0")
+        val probeData = probeReq0?.optJSONObject("data")
+        val probeInfo0 = probeData?.optJSONArray("midurlinfo")?.optJSONObject(0)
+        val rawFn0 = probeInfo0?.optString("filename")?.trim().orEmpty()
+        val mediaMidFromFn = Regex("""^[A-Za-z0-9]{4}([A-Za-z0-9]{10,})\.[a-z0-9]+$""")
+            .find(rawFn0)?.groupValues?.getOrNull(1)
+        val mediaMid = probeInfo0?.optString("mid")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: mediaMidFromFn
+            ?: songMid
 
-        // 第 2 次批量按音质从高到低请求：FLAC 无损 > 320k MP3 > 128k MP3 > 96k M4A
+        // 第 2 次批量按音质从高到低请求：FLAC 无损 > 320k MP3 > 128k MP3 > 96k M4A > OGG 192k
         val fnList = buildList {
             add("F000$mediaMid.flac")
             add("M800$mediaMid.mp3")
             add("M500$mediaMid.mp3")
             add("C400$mediaMid.m4a")
+            add("O600$mediaMid.ogg")
             if (mediaMid != songMid) {
                 add("M500$songMid.mp3")
                 add("C400$songMid.m4a")
             }
         }
-        val filenames = JSONArray().apply { fnList.forEach(::put) }
-        val mids = JSONArray().apply { repeat(fnList.size) { put(songMid) } }
-        val types = JSONArray().apply { repeat(fnList.size) { put(0) } }
-        val hqPayload = JSONObject()
-            .put(
-                "req_0",
-                JSONObject()
-                    .put("module", "vkey.GetVkeyServer")
-                    .put("method", "CgiGetVkey")
-                    .put(
-                        "param",
-                        JSONObject()
-                            .put("guid", "10000")
-                            .put("filename", filenames)
-                            .put("songmid", mids)
-                            .put("songtype", types)
-                            .put("uin", uin)
-                            .put("loginflag", 1)
-                            .put("platform", "20"),
-                    ),
-            )
-            .put("comm", qqComm(cookies))
-        val hqRoot = qqMusicuRequest(hqPayload, cookies)
-        return hqRoot?.let(::parseQqVkeyResponse) ?: parseQqVkeyResponse(probeRoot)
+        fun buildVkeyPayload(module: String, method: String, files: List<String>, ct: Int, cv: Int): JSONObject {
+            val filenames = JSONArray().apply { files.forEach(::put) }
+            val mids = JSONArray().apply { repeat(files.size) { put(songMid) } }
+            val types = JSONArray().apply { repeat(files.size) { put(0) } }
+            return JSONObject()
+                .put(
+                    "req_0",
+                    JSONObject()
+                        .put("module", module)
+                        .put("method", method)
+                        .put(
+                            "param",
+                            JSONObject()
+                                .put("guid", guid)
+                                .put("filename", filenames)
+                                .put("songmid", mids)
+                                .put("songtype", types)
+                                .put("uin", uin)
+                                .put("loginflag", 1)
+                                .put("platform", "20"),
+                        ),
+                )
+                .put("comm", qqComm(cookies, ct = ct, cv = cv))
+        }
+
+        // 先尝试移动端客户端通道 (music.vkey.GetVkey.UrlGetVkey, ct=11)，对绿钻/微信登录态与无损音质兼容最好
+        val mobileRoot = qqMusicuRequest(buildVkeyPayload("music.vkey.GetVkey", "UrlGetVkey", fnList, ct = 11, cv = 13020508), cookies)
+        mobileRoot?.let(::parseQqVkeyResponse)?.let { return it }
+
+        // 再尝试网页端 vkey.GetVkeyServer.CgiGetVkey (ct=24)
+        val hqRoot = qqMusicuRequest(buildVkeyPayload("vkey.GetVkeyServer", "CgiGetVkey", fnList, ct = 24, cv = 0), cookies)
+        hqRoot?.let(::parseQqVkeyResponse)?.let { return it }
+        parseQqVkeyResponse(probeRoot)?.let { return it }
+
+        // 兜底：若该曲目无绿钻完整直链，尝试获取官方 60s 试听流 (RS02) 以避免直接报错无法发声
+        val previewFiles = buildList {
+            add("RS02$mediaMid.mp3")
+            if (mediaMid != songMid) add("RS02$songMid.mp3")
+        }
+        val previewRoot = qqMusicuRequest(buildVkeyPayload("vkey.GetVkeyServer", "CgiGetVkey", previewFiles, ct = 24, cv = 0), cookies)
+        return previewRoot?.let(::parseQqVkeyResponse)
     }
 
     internal fun parseQqVkeyResponse(root: JSONObject): ResolvedAudioStream? {
@@ -1504,6 +1559,8 @@ object DirectMusicServiceApi {
                 fn.startsWith("F000", ignoreCase = true) || fn.endsWith(".flac", ignoreCase = true) -> "无损 FLAC"
                 fn.startsWith("M800", ignoreCase = true) -> "HQ 320k"
                 fn.startsWith("M500", ignoreCase = true) -> "标准 128k"
+                fn.startsWith("O600", ignoreCase = true) -> "HQ OGG"
+                fn.startsWith("RS02", ignoreCase = true) -> "试听版"
                 else -> "QQ音乐直连"
             }
             val fullUrl = if (purl.startsWith("http")) purl else (sip.trimEnd('/') + "/" + purl.trimStart('/'))

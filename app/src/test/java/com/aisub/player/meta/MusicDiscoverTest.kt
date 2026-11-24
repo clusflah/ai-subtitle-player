@@ -579,6 +579,32 @@ class MusicDiscoverTest {
         assertEquals("http://aqqmusic.tc.qq.com/RS02001.mp3?vkey=PREVIEW", qqPreview!!.url)
         assertEquals("试听 30s", qqPreview.qualityLabel)
 
+        val qqRs02Resp = JSONObject().put(
+            "req_0",
+            JSONObject().put(
+                "data",
+                JSONObject()
+                    .put("sip", JSONArray().put("http://aqqmusic.tc.qq.com/"))
+                    .put(
+                        "midurlinfo",
+                        JSONArray().put(
+                            JSONObject()
+                                .put("filename", "RS02003yrAfR3G899X.mp3")
+                                .put("purl", "RS02003yrAfR3G899X.mp3?vkey=RS02KEY"),
+                        ),
+                    ),
+            ),
+        )
+        val qqRs02 = com.aisub.player.music.DirectMusicServiceApi.parseQqVkeyResponse(qqRs02Resp)
+        assertNotNull(qqRs02)
+        assertEquals("http://aqqmusic.tc.qq.com/RS02003yrAfR3G899X.mp3?vkey=RS02KEY", qqRs02!!.url)
+        assertEquals("试听版", qqRs02.qualityLabel)
+
+        // 4b. Apple Music 流行热歌榜不再默认指向中国区（避免全中文老歌）
+        val hotChart = MusicDiscoverCharts.findChart("music_hot")
+        assertNotNull(hotChart)
+        assertEquals("us", hotChart!!.fallbackAppleCountry)
+
         // 5. 歌单顶部固定「已点赞的歌曲」逻辑
         val normalPlaylists = listOf(
             com.aisub.player.remote.cloud.ServerItem(ratingKey = "playlist|101", type = "playlist", title = "运动歌单"),

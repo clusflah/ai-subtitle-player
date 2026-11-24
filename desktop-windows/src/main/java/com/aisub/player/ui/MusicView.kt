@@ -22,6 +22,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -47,6 +48,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -105,6 +107,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -176,6 +179,10 @@ fun MusicView(
     val displayCover = music.cover ?: standbyCover
     val effectiveEntry = current?.takeIf { activeMusic && !it.isVideo && !it.isLive }
     val effectiveWantsPlay = activeMusic && wantsPlay
+    val mainState by vm.state.collectAsStateWithLifecycle()
+    val loopA = if (activeMusic) mainState.loopA else null
+    val loopB = if (activeMusic) mainState.loopB else null
+    val effectiveDuration = if (activeMusic) (player.duration.takeIf { it > 0 } ?: tags.durationMs) else tags.durationMs
     val config = LocalConfiguration.current
     val landscape = config.orientation == Configuration.ORIENTATION_LANDSCAPE
     val screenH = config.screenHeightDp.dp
@@ -198,7 +205,7 @@ fun MusicView(
     }
     // 没有歌词、但生成过 AI 字幕时，把字幕当歌词
     val lyrics = if (!activeMusic) null else music.lyrics ?: remember(cues) {
-        cues.takeIf { it.isNotEmpty() }?.let { c -> Lyrics(c.sortedBy { it.startMs }.map { LyricLine(it.startMs, it.text) }, synced = true, source = "AI 字幕") }
+        cues.takeIf { it.isNotEmpty() }?.let { c -> Lyrics(c.sortedBy { it.startMs }.map { LyricLine(it.startMs, it.text, it.endMs) }, synced = true, source = "AI 字幕") }
     }
     val translations = if (!activeMusic) null else if (music.lyrics != null) music.translations else remember(cues) {
         cues.sortedBy { it.startMs }.map { it.translation }.takeIf { t -> t.any { it != null } }
@@ -229,6 +236,7 @@ fun MusicView(
     }
     val wakeDistPx = with(LocalDensity.current) { 36.dp.toPx() }
 
+    val onLyricsPageState by rememberUpdatedState(onLyricsPage)
     Box(
         Modifier.fillMaxSize().background(Color(0xFF1E201F))
             .pointerInput(wakeDistPx) {
@@ -269,8 +277,8 @@ fun MusicView(
                 }
             }
             .pointerInput(Unit) {
-                // 只观察、不消费，歌词的点击、滑动照常。轻点才算操作（重新显示控件）；
-                // 拖着歌词滑动不算，免得一滑控件就冒出来
+                // 只观察、不消费。非歌词页轻点任意处即重新显示控件；
+                // 歌词页改由 LyricsPage 区分「点歌词跳转」与「点空白处显示控件」
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                     var dragged = false
@@ -280,7 +288,7 @@ fun MusicView(
                         if ((change.position - down.position).getDistance() > viewConfiguration.touchSlop) dragged = true
                         if (!change.pressed) break
                     }
-                    if (!dragged) touches++
+                    if (!dragged && !onLyricsPageState) touches++
                 }
             }
             .pointerInput(Unit) { detectTapGestures { } },
@@ -369,8 +377,20 @@ fun MusicView(
                 ) { page ->
                     when (page) {
                         LYRICS_PAGE -> LyricsPage(
-                            vm, music, lyrics, translations, positionMs, onSeek, onAction, onMessage,
-                            toolsShown = barsVisible, activeMusic = activeMusic,
+                            vm = vm,
+                            music = music,
+                            lyrics = lyrics,
+                            translations = translations,
+                            positionMs = positionMs,
+                            durationMs = effectiveDuration,
+                            loopA = loopA,
+                            loopB = loopB,
+                            onSeek = onSeek,
+                            onBlankTap = { touches++ },
+                            onAction = { touches++; onAction(it) },
+                            onMessage = onMessage,
+                            toolsShown = barsVisible,
+                            activeMusic = activeMusic,
                         )
                         LIBRARY_PAGE -> libraryTabContent?.invoke()
                         else -> Box(Modifier.fillMaxSize(), contentAlignment = BiasAlignment(0f, vinylBiasY)) {
@@ -439,11 +459,12 @@ fun MusicView(
                 } else {
                     Spacer(Modifier.height(if (immersiveVinyl) 18.dp else 14.dp))
                 }
-                val effectiveDuration = if (activeMusic) (player.duration.takeIf { it > 0 } ?: tags.durationMs) else tags.durationMs
                 MusicSeekBar(
                     positionMs = if (activeMusic) positionMs else positionMs.coerceAtMost(effectiveDuration),
                     durationMs = effectiveDuration,
                     immersive = immersive,
+                    loopA = loopA,
+                    loopB = loopB,
                     onSeek = { target ->
                         touches++
                         if (activeMusic) onSeek(target) else onIdlePlay?.invoke()
@@ -751,6 +772,8 @@ private fun MusicSeekBar(
     positionMs: Long,
     durationMs: Long,
     immersive: Boolean = false,
+    loopA: Long? = null,
+    loopB: Long? = null,
     onSeek: (Long) -> Unit,
     onDragActiveChange: (Boolean) -> Unit = {},
 ) {
@@ -802,6 +825,19 @@ private fun MusicSeekBar(
                 Modifier.fillMaxWidth().height(trackHeight).clip(RoundedCornerShape(50))
                     .background(if (immersive && dragging == null) Color(0x33FFFFFF) else Color(0x40FFFFFF)),
             )
+            if (durationMs > 0L && loopA != null && loopB != null && loopB > loopA) {
+                val aFrac = (loopA.toFloat() / durationMs).coerceIn(0f, 1f)
+                val bFrac = (loopB.toFloat() / durationMs).coerceIn(aFrac, 1f)
+                val segFrac = (bFrac - aFrac).coerceAtLeast(0.01f)
+                Box(
+                    Modifier
+                        .offset { IntOffset((aFrac * widthPx).roundToInt(), 0) }
+                        .fillMaxWidth(segFrac)
+                        .height(trackHeight + 1.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(Orange.copy(alpha = 0.85f)),
+                )
+            }
             Box(
                 Modifier.fillMaxWidth(fraction).height(trackHeight).clip(RoundedCornerShape(50))
                     .background(if (immersive && dragging == null) Color(0xCCFFFFFF) else Color(0xEBFFFFFF)),
@@ -921,6 +957,7 @@ private fun PlayControls(
 
 // ---------------- 歌词 ----------------
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun LyricsPage(
     vm: MainViewModel,
@@ -928,7 +965,11 @@ private fun LyricsPage(
     lyrics: Lyrics?,
     translations: List<String?>?,
     positionMs: Long,
+    durationMs: Long,
+    loopA: Long?,
+    loopB: Long?,
     onSeek: (Long) -> Unit,
+    onBlankTap: () -> Unit,
     onAction: (MusicAction) -> Unit,
     onMessage: (String) -> Unit,
     /** 下方控件淡出时，LRC、音量这一行也一起收起 */
@@ -938,8 +979,45 @@ private fun LyricsPage(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var adjusting by remember { mutableStateOf(false) }
+    var pendingLoopStartIndex by remember(lyrics) { mutableStateOf<Int?>(null) }
+    var activeLoopEndIndex by remember(lyrics) { mutableStateOf<Int?>(null) }
+    LaunchedEffect(loopA, loopB) {
+        if (loopA == null) {
+            pendingLoopStartIndex = null
+            activeLoopEndIndex = null
+        }
+    }
+    val handleLyricLongPress: (Int) -> Unit = { lineIdx ->
+        val lyr = lyrics
+        val startMs = lyr?.lineStartMs(lineIdx)
+        val endMs = lyr?.lineEndMs(lineIdx, durationMs)
+        if (lyr != null && startMs != null && endMs != null) {
+            if (loopA == null || loopB != null) {
+                pendingLoopStartIndex = lineIdx
+                activeLoopEndIndex = null
+                vm.setAbLoopStart(startMs)
+                onMessage("已设循环起点 ${formatClock(startMs)}，长按歌词设终点")
+            } else {
+                val anchorIdx = pendingLoopStartIndex ?: lyr.indexAt(loopA).takeIf { it >= 0 } ?: lineIdx
+                val firstIdx = minOf(anchorIdx, lineIdx)
+                val lastIdx = maxOf(anchorIdx, lineIdx)
+                val finalStart = lyr.lineStartMs(firstIdx) ?: startMs
+                val finalEnd = lyr.lineEndMs(lastIdx, durationMs) ?: endMs
+                pendingLoopStartIndex = firstIdx
+                activeLoopEndIndex = lastIdx
+                vm.setAbLoopRange(finalStart, finalEnd)
+                if (positionMs < finalStart || positionMs >= finalEnd) {
+                    onSeek(finalStart)
+                }
+                onMessage("已开启区间循环 ${formatClock(finalStart)} - ${formatClock(finalEnd)}")
+            }
+        }
+    }
     Column(Modifier.fillMaxSize()) {
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        Box(
+            Modifier.weight(1f).fillMaxWidth()
+                .clickable(remember { MutableInteractionSource() }, indication = null) { onBlankTap() },
+        ) {
             when {
                 !activeMusic -> Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("开始播放音乐后自动加载同步歌词", color = Dim, fontSize = 16.sp)
@@ -949,7 +1027,10 @@ private fun LyricsPage(
                     TextButton(onClick = { onAction(MusicAction.SEARCH_LYRICS) }) { Text("搜索歌词", color = Color.White) }
                 }
                 !lyrics.synced -> Column(
-                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 24.dp),
+                    Modifier.fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .clickable(remember { MutableInteractionSource() }, indication = null) { onBlankTap() }
+                        .padding(horizontal = 28.dp, vertical = 24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     lyrics.lines.forEachIndexed { i, l ->
@@ -957,7 +1038,59 @@ private fun LyricsPage(
                         translations?.getOrNull(i)?.let { Text(it, color = Dim, fontSize = 14.sp, textAlign = TextAlign.Center) }
                     }
                 }
-                else -> SyncedLyrics(lyrics, translations, positionMs, onSeek, Modifier.fillMaxSize(), immersive = !toolsShown)
+                else -> SyncedLyrics(
+                    lyrics = lyrics,
+                    translations = translations,
+                    positionMs = positionMs,
+                    loopA = loopA,
+                    loopB = loopB,
+                    loopStartIndex = pendingLoopStartIndex,
+                    loopEndIndex = activeLoopEndIndex,
+                    onSeek = onSeek,
+                    onBlankTap = onBlankTap,
+                    onLongPressLine = handleLyricLongPress,
+                    modifier = Modifier.fillMaxSize(),
+                    immersive = !toolsShown,
+                )
+            }
+        }
+        if (activeMusic && loopA != null) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    Modifier
+                        .weight(1f)
+                        .liquidGlass(shape = RoundedCornerShape(50), style = GlassStyle.Pill, tint = Orange.copy(alpha = 0.22f))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(AppIcons.Repeat, null, tint = Orange, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = if (loopB != null) {
+                            "区间循环 ${formatClock(loopA)} - ${formatClock(loopB)}"
+                        } else {
+                            "起点 ${formatClock(loopA)} · 长按设终点"
+                        },
+                        color = Color.White,
+                        fontSize = 12.5.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (loopB == null && lyrics != null && pendingLoopStartIndex != null) {
+                    Pill("循环本句") {
+                        val idx = pendingLoopStartIndex ?: return@Pill
+                        handleLyricLongPress(idx)
+                    }
+                }
+                Pill("关闭") {
+                    vm.clearAbLoop()
+                    onMessage("已关闭区间循环")
+                }
             }
         }
         if (adjusting && lyrics?.synced == true && music.lyrics != null) {
@@ -1046,12 +1179,19 @@ private fun MenuRow(text: String, icon: ImageVector, enabled: Boolean = true, on
     },
 )
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SyncedLyrics(
     lyrics: Lyrics,
     translations: List<String?>?,
     positionMs: Long,
+    loopA: Long?,
+    loopB: Long?,
+    loopStartIndex: Int?,
+    loopEndIndex: Int?,
     onSeek: (Long) -> Unit,
+    onBlankTap: () -> Unit,
+    onLongPressLine: (Int) -> Unit,
     modifier: Modifier,
     immersive: Boolean = false,
 ) {
@@ -1066,6 +1206,7 @@ private fun SyncedLyrics(
     val anchorRatio = if (immersive) 0.44f else 0.42f
     val lineVertPad by animateDpAsState(if (immersive) 12.dp else 9.dp, tween(320), label = "lyricVertPad")
     val density = LocalDensity.current
+    val currentOnBlankTap by rememberUpdatedState(onBlankTap)
     LaunchedEffect(index, lyrics, hasViewport) {
         if (!hasViewport) return@LaunchedEffect
         val wait = 4000 - (System.currentTimeMillis() - touchedAt)
@@ -1082,6 +1223,7 @@ private fun SyncedLyrics(
     }
     LazyColumn(
         modifier.onSizeChanged { viewportPx = it.height }
+            .pointerInput(Unit) { detectTapGestures { currentOnBlankTap() } }
             // 上下边缘渐隐
             .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
             .drawWithContent {
@@ -1093,35 +1235,98 @@ private fun SyncedLyrics(
             },
         state = listState,
     ) {
-        item { Spacer(Modifier.height(with(density) { (viewportPx * anchorRatio).toDp() })) }
+        item {
+            Spacer(
+                Modifier.fillMaxWidth()
+                    .height(with(density) { (viewportPx * anchorRatio).toDp() })
+                    .clickable(remember { MutableInteractionSource() }, indication = null) { onBlankTap() },
+            )
+        }
         itemsIndexed(lyrics.lines) { i, line ->
             val active = i == index
-            Column(
-                Modifier.fillMaxWidth()
-                    .clickable(remember { MutableInteractionSource() }, indication = null) { line.timeMs?.let(onSeek) }
-                    .padding(horizontal = 30.dp, vertical = lineVertPad),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text(
-                    line.text.ifEmpty { "♪" },
-                    color = if (active) Color.White else Color(0x78FFFFFF),
-                    fontSize = if (active) (if (immersive) 23.sp else 20.sp) else 17.sp,
-                    fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-                    lineHeight = if (active && immersive) 32.sp else 28.sp,
-                    textAlign = TextAlign.Center,
+            val hasLyricText = line.text.isNotBlank() && line.timeMs != null
+            val lineT = line.timeMs
+            val isLoopStart = (loopStartIndex != null && i == loopStartIndex && loopA != null) ||
+                (loopStartIndex == null && loopA != null && lineT != null && lineT == loopA)
+            val isLoopEnd = loopB != null && (
+                (loopEndIndex != null && i == loopEndIndex) ||
+                    (loopEndIndex == null && lineT != null && lineT < loopB && (lyrics.lineEndMs(i) ?: Long.MAX_VALUE) >= loopB)
                 )
-                translations?.getOrNull(i)?.let {
+            val inLoopRange = loopA != null && loopB != null && lineT != null && lineT >= loopA && lineT < loopB
+            val highlightBg = when {
+                isLoopStart || isLoopEnd -> Orange.copy(alpha = 0.24f)
+                inLoopRange -> Orange.copy(alpha = 0.12f)
+                else -> Color.Transparent
+            }
+            Box(
+                Modifier.fillMaxWidth()
+                    .clickable(remember { MutableInteractionSource() }, indication = null) { onBlankTap() }
+                    .padding(horizontal = 24.dp, vertical = (lineVertPad - 3.dp).coerceAtLeast(3.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                val textMod = if (hasLyricText) {
+                    Modifier
+                        .wrapContentWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(highlightBg)
+                        .combinedClickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = { line.timeMs?.let(onSeek) },
+                            onLongClick = { onLongPressLine(i) },
+                        )
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                } else {
+                    Modifier
+                        .wrapContentWidth()
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                }
+                Column(textMod, horizontalAlignment = Alignment.CenterHorizontally) {
+                    if (isLoopStart || isLoopEnd) {
+                        val badge = when {
+                            isLoopStart && isLoopEnd -> "循环起止"
+                            isLoopStart -> "循环起点"
+                            else -> "循环终点"
+                        }
+                        Text(
+                            badge,
+                            color = Orange,
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(bottom = 2.dp),
+                        )
+                    }
                     Text(
-                        it,
-                        color = if (active) Color(0xDDFFFFFF) else Color(0x60FFFFFF),
-                        fontSize = if (active) (if (immersive) 16.sp else 15.sp) else 14.sp,
+                        line.text.ifEmpty { "♪" },
+                        color = when {
+                            active -> Color.White
+                            isLoopStart || isLoopEnd || inLoopRange -> Color(0xD8FFFFFF)
+                            else -> Color(0x78FFFFFF)
+                        },
+                        fontSize = if (active) (if (immersive) 23.sp else 20.sp) else 17.sp,
+                        fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                        lineHeight = if (active && immersive) 32.sp else 28.sp,
                         textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(top = 3.dp),
                     )
+                    translations?.getOrNull(i)?.let {
+                        Text(
+                            it,
+                            color = if (active) Color(0xDDFFFFFF) else Color(0x60FFFFFF),
+                            fontSize = if (active) (if (immersive) 16.sp else 15.sp) else 14.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(top = 3.dp),
+                        )
+                    }
                 }
             }
         }
-        item { Spacer(Modifier.height(with(density) { (viewportPx * 0.55f).toDp() })) }
+        item {
+            Spacer(
+                Modifier.fillMaxWidth()
+                    .height(with(density) { (viewportPx * 0.55f).toDp() })
+                    .clickable(remember { MutableInteractionSource() }, indication = null) { onBlankTap() },
+            )
+        }
     }
 }
 

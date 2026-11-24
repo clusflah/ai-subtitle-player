@@ -157,11 +157,13 @@ fun MusicTabScreen(
     var speed by remember(player) { mutableFloatStateOf(player.playbackParameters.speed) }
     LaunchedEffect(player) {
         while (true) {
-            positionMs = player.currentPosition.coerceAtLeast(0L)
+            val pos = player.currentPosition.coerceAtLeast(0L)
+            positionMs = pos
             wantsPlay = player.playWhenReady &&
                 player.playbackState != Player.STATE_IDLE &&
                 player.playbackState != Player.STATE_ENDED
-            delay(180)
+            main.checkAbLoop(pos)
+            delay(150)
         }
     }
 
@@ -246,6 +248,12 @@ fun MusicTabScreen(
         }
     }
     val showToast: (String) -> Unit = { msg -> toastMessage = msg }
+    LaunchedEffect(mainState.playbackError) {
+        val err = mainState.playbackError?.trim()
+        if (!err.isNullOrEmpty() && music.tags != null) {
+            showToast(err)
+        }
+    }
 
     var showSourceSettings by remember { mutableStateOf(false) }
     var loginWebService by remember { mutableStateOf<WebMusicService?>(null) }

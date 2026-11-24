@@ -1363,7 +1363,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         EmbeddedSubtitles.resetDemuxCache()
         sawFirstFrame = false
         frameWatch?.cancel()
-        _state.update { it.copy(videoProblem = null, transcoding = false, liveClock = null, liveHint = null, asrInfo = null, translateInfo = null) }
+        _state.update { it.copy(videoProblem = null, transcoding = false, liveClock = null, liveHint = null, asrInfo = null, translateInfo = null, loopA = null, loopB = null) }
+        lastAbLoopSeekAtMs = 0L
         val uri = Uri.parse(entry.uri)
         coverage.clear()
         coverageLimit = UNKNOWN_END
@@ -2868,10 +2869,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private var lastAbLoopSeekAtMs: Long = 0L
+
     /** A-B 循环：依次设置 A、B，第三次清除。 */
     fun toggleAbLoop(): String {
         val s = _state.value
         val pos = player.currentPosition
+        lastAbLoopSeekAtMs = 0L
         return when {
             s.loopA == null -> { _state.update { it.copy(loopA = pos, loopB = null) }; "已设置 A 点，再点一次设置 B 点" }
             s.loopB == null && pos > s.loopA -> { _state.update { it.copy(loopB = pos) }; "A-B 循环已开启" }
@@ -2879,11 +2883,41 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 由播放页的位置轮询调用：到达 B 点跳回 A 点。 */
+    /** 设置 A-B 循环起点（清空旧终点，等待设置终点）。 */
+    fun setAbLoopStart(startMs: Long) {
+        val a = startMs.coerceAtLeast(0L)
+        lastAbLoopSeekAtMs = 0L
+        _state.update { it.copy(loopA = a, loopB = null) }
+    }
+
+    /** 直接设置完整的 A-B 循环区间（起点 ~ 终点）。 */
+    fun setAbLoopRange(startMs: Long, endMs: Long) {
+        val a = startMs.coerceAtLeast(0L)
+        val b = endMs.coerceAtLeast(a + 300L)
+        lastAbLoopSeekAtMs = 0L
+        _state.update { it.copy(loopA = a, loopB = b) }
+    }
+
+    /** 关闭并清除当前 A-B 循环。 */
+    fun clearAbLoop() {
+        lastAbLoopSeekAtMs = 0L
+        _state.update { it.copy(loopA = null, loopB = null) }
+    }
+
+    /** 由播放页/音乐页的位置轮询调用：到达 B 点跳回 A 点（带防抖，兼容在线流媒体 seek 延迟）。 */
     fun checkAbLoop(positionMs: Long) {
         val a = _state.value.loopA ?: return
         val b = _state.value.loopB ?: return
-        if (positionMs >= b) player.seekTo(a)
+        if (b <= a) return
+        if (positionMs >= b) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - lastAbLoopSeekAtMs >= 450L) {
+                lastAbLoopSeekAtMs = now
+                player.seekTo(a)
+            }
+        } else if (positionMs < b - 600L) {
+            lastAbLoopSeekAtMs = 0L
+        }
     }
 
     /** 载入外挂字幕文件（SRT / ASS / SSA / VTT / SMI / SUB / ZIP），替换当前字幕并立即在画面上启用显示。 */

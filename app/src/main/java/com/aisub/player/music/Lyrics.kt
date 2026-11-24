@@ -1,7 +1,7 @@
 package com.aisub.player.music
 
-/** 一行歌词；timeMs 为 null 表示不带时间的纯文本歌词。 */
-data class LyricLine(val timeMs: Long?, val text: String)
+/** 一行歌词；timeMs 为 null 表示不带时间的纯文本歌词。endMs 可选（如 AI 字幕精确结束时间）。 */
+data class LyricLine(val timeMs: Long?, val text: String, val endMs: Long? = null)
 
 /**
  * 歌词。synced 为 true 时每行都有时间，按时间排好序，可以跟着播放滚动；
@@ -23,6 +23,25 @@ data class Lyrics(val lines: List<LyricLine>, val synced: Boolean, val source: S
             } else hi = mid - 1
         }
         return found
+    }
+
+    /** 某行歌词的起始时间（毫秒）。 */
+    fun lineStartMs(index: Int): Long? = lines.getOrNull(index)?.timeMs
+
+    /**
+     * 某行歌词的结束时间（毫秒）：
+     * 优先使用显式 endMs，其次取下一句时间戳严格大于本句的歌词开头，末句则取歌曲总时长（或 +5s 兜底）。
+     */
+    fun lineEndMs(index: Int, durationMs: Long = 0L): Long? {
+        val line = lines.getOrNull(index) ?: return null
+        val start = line.timeMs ?: return null
+        line.endMs?.takeIf { it > start }?.let { return it }
+        for (j in (index + 1) until lines.size) {
+            val nextStart = lines[j].timeMs
+            if (nextStart != null && nextStart > start) return nextStart
+        }
+        if (durationMs > start) return durationMs
+        return start + 5_000L
     }
 
     /** 存回 LRC 文本（纯文本歌词按行存）。 */
