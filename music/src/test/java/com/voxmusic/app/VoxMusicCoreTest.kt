@@ -205,5 +205,26 @@ class VoxMusicCoreTest {
         val (trimmed, trimmedIdx) = MusicAppStore.trimQueueAroundIndex(largeQueue, 210, maxItems = 200)
         assertEquals(200, trimmed.size)
         assertEquals("applemusic://track/210", trimmed[trimmedIdx].uri)
+
+        // 播放器被清空/释放后 SimpleBasePlayer.currentMediaItemIndex 会回退为 0，resolveQueueIndex 必须仍命中真实曲目下标
+        val sampleQueue = List(6) { i -> MediaEntry("spotify://search?title=Song$i", "Song$i.mp3") }
+        assertEquals(
+            4,
+            MusicViewModel.resolveQueueIndex(
+                queue = sampleQueue,
+                currentUri = "spotify://search?title=Song4",
+                playerMediaItemCount = 0,
+                playerIndex = 0,
+            ),
+        )
+        assertEquals(
+            4,
+            MusicViewModel.resolveQueueIndex(
+                queue = sampleQueue,
+                currentUri = "spotify://search?title=Song4",
+                playerMediaItemCount = 6,
+                playerIndex = 4,
+            ),
+        )
     }
 }

@@ -290,7 +290,7 @@ class WebStreamingMusicPlayer(
         }
     }
 
-    fun deactivateForKernelSwitch() {
+    fun deactivateForKernelSwitch(notify: Boolean = true) {
         activePlayGeneration++
         launchJob?.cancel()
         playWhenReady = false
@@ -304,7 +304,7 @@ class WebStreamingMusicPlayer(
         shufflePlayedUris.clear()
         error = null
         WebStreamingMusic.stopAll()
-        invalidateState()
+        if (notify) invalidateState()
     }
 
     override fun getState(): State {
@@ -541,7 +541,7 @@ class WebStreamingMusicPlayer(
     }
 
     override fun handleRelease(): ListenableFuture<*> {
-        deactivateForKernelSwitch()
+        deactivateForKernelSwitch(notify = false)
         scope.cancel()
         WebStreamingMusic.setSnapshotListener(null)
         return Futures.immediateVoidFuture()

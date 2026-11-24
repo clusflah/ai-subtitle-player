@@ -296,6 +296,11 @@ class MainActivity : ComponentActivity() {
         handleIntent(intent)
     }
 
+    override fun onPause() {
+        super.onPause()
+        vm.savePosition(sync = true)
+    }
+
     override fun onStop() {
         super.onStop()
         if (!vm.keepPlayingInBackground()) {

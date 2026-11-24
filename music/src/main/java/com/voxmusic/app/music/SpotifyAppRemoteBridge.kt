@@ -975,7 +975,17 @@ object SpotifyAppRemoteBridge {
             val playRes = awaitCallResult(remote.playerApi.play(spotifyUri), 4_500L)
             playRes.onSuccess {
                 if (startPositionMs > 1_000L) {
+                    val seekSeq = targetPlaySeq
                     runCatching { remote.playerApi.seekTo(startPositionMs) }
+                    scope.launch {
+                        kotlinx.coroutines.delay(650L)
+                        if (targetPlaySeq == seekSeq && targetTrackUri == spotifyUri) {
+                            val curPos = latestPlayerState?.playbackPosition ?: 0L
+                            if (curPos < (startPositionMs - 3_000L).coerceAtLeast(0L)) {
+                                runCatching { activeRemote?.playerApi?.seekTo(startPositionMs) }
+                            }
+                        }
+                    }
                 }
                 _status.value = _status.value.copy(
                     remoteConnected = true,

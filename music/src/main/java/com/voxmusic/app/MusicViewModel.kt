@@ -99,9 +99,53 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     private var sleepJob: Job? = null
     private var infiniteRefillJob: Job? = null
     private var playSessionStartMs: Long = 0L
+    @Volatile
+    private var cleared: Boolean = false
     private val taskRemovedCallback: () -> Unit = {
         flushPlaybackTime()
         savePosition(sync = true)
+    }
+
+    private val playerListener = object : Player.Listener {
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            if (cleared) return
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO && _state.value.sleepAt == -1L) {
+                player.pause()
+                setSleepTimer(null)
+            }
+            if (player.mediaItemCount == 0) return
+            val idx = player.currentMediaItemIndex
+            val next = queue.getOrNull(idx) ?: return
+            val isIdlePaused = player.playbackState == Player.STATE_IDLE && !player.playWhenReady
+            if (isIdlePaused && next.uri == _state.value.current?.uri) {
+                return
+            }
+            flushPlaybackTime()
+            onTrackActive(next, recordStart = !isIdlePaused, positionMs = player.currentPosition.coerceAtLeast(0L))
+            maybeRefillInfiniteShuffleQueue()
+        }
+
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (cleared) return
+            if (isPlaying) {
+                if (playSessionStartMs == 0L) playSessionStartMs = System.currentTimeMillis()
+            } else {
+                flushPlaybackTime()
+                savePosition()
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            if (cleared) return
+            _state.update { it.copy(playbackError = error.message ?: "流媒体播放失败，请检查网络或重新登录") }
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            if (cleared) return
+            if (playbackState == Player.STATE_READY) {
+                _state.update { it.copy(playbackError = null) }
+            }
+        }
     }
 
     private var widgetHandover = WidgetPlayback.takeOver()
@@ -146,42 +190,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     init {
         restoreSavedPlayMode()
         PlaybackService.onBeforeTaskRemoved = taskRemovedCallback
-        player.addListener(object : Player.Listener {
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO && _state.value.sleepAt == -1L) {
-                    player.pause()
-                    setSleepTimer(null)
-                }
-                val idx = player.currentMediaItemIndex
-                val next = queue.getOrNull(idx) ?: return
-                val isIdlePaused = player.playbackState == Player.STATE_IDLE && !player.playWhenReady
-                if (isIdlePaused && next.uri == _state.value.current?.uri) {
-                    return
-                }
-                flushPlaybackTime()
-                onTrackActive(next, recordStart = !isIdlePaused, positionMs = player.currentPosition.coerceAtLeast(0L))
-                maybeRefillInfiniteShuffleQueue()
-            }
-
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (isPlaying) {
-                    if (playSessionStartMs == 0L) playSessionStartMs = System.currentTimeMillis()
-                } else {
-                    flushPlaybackTime()
-                    savePosition()
-                }
-            }
-
-            override fun onPlayerError(error: PlaybackException) {
-                _state.update { it.copy(playbackError = error.message ?: "流媒体播放失败，请检查网络或重新登录") }
-            }
-
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_READY) {
-                    _state.update { it.copy(playbackError = null) }
-                }
-            }
-        })
+        player.addListener(playerListener)
 
         if (widgetHandover == null) {
             restoreSavedPlaybackSession()
@@ -390,8 +399,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         val target = positionMs.coerceAtLeast(0L)
         player.seekTo(target)
         val cur = _state.value.current ?: return
-        val idx = player.currentMediaItemIndex.takeIf { it in queue.indices }
-            ?: queue.indexOfFirst { it.uri == cur.uri }.coerceAtLeast(0)
+        val idx = resolveCurrentQueueIndex(cur)
         val dur = player.duration.takeIf { it > 0L } ?: cur.durationMs
         store.savePlaybackProgress(cur, idx, target, durationMs = dur)
     }
@@ -418,12 +426,18 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun resolveCurrentQueueIndex(cur: MediaEntry): Int = resolveQueueIndex(
+        queue = queue,
+        currentUri = cur.uri,
+        playerMediaItemCount = player.mediaItemCount,
+        playerIndex = player.currentMediaItemIndex,
+    )
+
     private fun onTrackActive(entry: MediaEntry, recordStart: Boolean, positionMs: Long = 0L) {
         _state.update { it.copy(current = entry, loopA = null, loopB = null) }
         music.onEntryChanged(entry)
         val safePos = positionMs.coerceAtLeast(0L)
-        val idx = player.currentMediaItemIndex.takeIf { it in queue.indices }
-            ?: queue.indexOfFirst { it.uri == entry.uri }.coerceAtLeast(0)
+        val idx = resolveCurrentQueueIndex(entry)
         store.savePlaybackProgress(entry, idx, safePos, durationMs = entry.durationMs)
         store.recordHistory(entry, safePos)
         if (recordStart) store.recordPlayback(0L, started = true)
@@ -443,23 +457,24 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun saveProgressOnly(sync: Boolean = false) {
+        if (cleared) return
         val cur = _state.value.current ?: return
-        if (queue.isEmpty()) return
-        val idx = player.currentMediaItemIndex.takeIf { it in queue.indices }
-            ?: queue.indexOfFirst { it.uri == cur.uri }.coerceAtLeast(0)
+        if (queue.isEmpty() || player.mediaItemCount == 0) return
+        val idx = resolveCurrentQueueIndex(cur)
         val dur = player.duration.takeIf { it > 0L } ?: cur.durationMs
         val pos = player.currentPosition.coerceAtLeast(0L)
         store.savePlaybackProgress(cur, idx, pos, durationMs = dur, sync = sync)
     }
 
     fun savePosition(sync: Boolean = false) {
+        if (cleared) return
         val cur = _state.value.current ?: return
+        if (player.mediaItemCount == 0) return
         val dur = player.duration.takeIf { it > 0L } ?: cur.durationMs
         val pos = player.currentPosition.coerceAtLeast(0L)
         val updatedCur = if (dur != cur.durationMs) cur.copy(durationMs = dur) else cur
         if (queue.isNotEmpty()) {
-            val idx = player.currentMediaItemIndex.takeIf { it in queue.indices }
-                ?: queue.indexOfFirst { it.uri == cur.uri }.coerceAtLeast(0)
+            val idx = resolveCurrentQueueIndex(cur)
             if (idx in queue.indices && queue[idx].durationMs != updatedCur.durationMs) {
                 queue = queue.toMutableList().apply { this[idx] = updatedCur }
             }
@@ -648,6 +663,8 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         flushPlaybackTime()
         savePosition(sync = true)
+        cleared = true
+        player.removeListener(playerListener)
         if (PlaybackService.onBeforeTaskRemoved === taskRemovedCallback) {
             PlaybackService.onBeforeTaskRemoved = null
         }
@@ -662,5 +679,23 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         const val LIKED_PLAYLIST = com.voxmusic.app.media.LIKED_PLAYLIST
+
+        /**
+         * 解析当前播放曲目在队列中的真实下标：
+         * 避免播放器清空或释放时 SimpleBasePlayer.currentMediaItemIndex 回退为 0 而误覆盖当前曲目下标。
+         */
+        internal fun resolveQueueIndex(
+            queue: List<MediaEntry>,
+            currentUri: String,
+            playerMediaItemCount: Int,
+            playerIndex: Int,
+        ): Int {
+            if (queue.isEmpty()) return 0
+            if (playerMediaItemCount > 0 && playerIndex in queue.indices && queue[playerIndex].uri == currentUri) {
+                return playerIndex
+            }
+            return queue.indexOfFirst { it.uri == currentUri }.takeIf { it >= 0 }
+                ?: playerIndex.coerceIn(queue.indices)
+        }
     }
 }
