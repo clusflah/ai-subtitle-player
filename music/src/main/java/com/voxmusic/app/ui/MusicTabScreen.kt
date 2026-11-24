@@ -258,7 +258,11 @@ fun MusicTabScreen(
             positionMs = if (music.tags != null) positionMs else (recentHistory?.takeIf { it.entry.uri == standbyEntry?.uri }?.positionMs ?: 0L),
             wantsPlay = wantsPlay,
             onBack = null,
-            onSeek = { target -> player.seekTo(target.coerceAtLeast(0L)); positionMs = target.coerceAtLeast(0L) },
+            onSeek = { target ->
+                val safe = target.coerceAtLeast(0L)
+                vm.seekTo(safe)
+                positionMs = safe
+            },
             onMessage = showToast,
             inHomeTab = true,
             bottomOverlayPadding = bottomOverlayPadding,

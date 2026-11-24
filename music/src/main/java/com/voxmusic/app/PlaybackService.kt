@@ -39,6 +39,7 @@ class PlaybackService : MediaSessionService() {
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
 
     override fun onTaskRemoved(rootIntent: Intent?) {
+        runCatching { onBeforeTaskRemoved?.invoke() }
         session?.player?.pause()
         stopSelf()
     }
@@ -70,5 +71,8 @@ class PlaybackService : MediaSessionService() {
 
         @Volatile
         var session: MediaSession? = null
+
+        @Volatile
+        var onBeforeTaskRemoved: (() -> Unit)? = null
     }
 }

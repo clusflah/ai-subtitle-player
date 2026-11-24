@@ -521,11 +521,10 @@ object WebStreamingMusic {
             val parsed = parseCatalogItemsJson(service, raw)
             if (parsed.isNotEmpty()) return parsed
         }
-        // 新账号或暂未收藏单曲时，自动兜底加载精选热门单曲列表（点击直接通过当前流媒体服务播放）
+        // 新账号或暂未收藏单曲时，自动兜底加载台湾区 Apple Music 精选热门单曲列表（点击直接通过当前流媒体服务播放）
         return withContext(Dispatchers.IO) {
-            val primaryStore = if (service == WebMusicService.SPOTIFY) "tw" else "cn"
-            MusicDiscoverRepository.fetchAppleMostPlayed(primaryStore, 40)
-                .ifEmpty { MusicDiscoverRepository.fetchAppleMostPlayed("us", 40) }
+            MusicDiscoverRepository.fetchAppleMostPlayed(MusicDiscoverRepository.APPLE_DEFAULT_COUNTRY, 40)
+                .ifEmpty { MusicDiscoverRepository.fetchItunesTopSongsRss(MusicDiscoverRepository.APPLE_DEFAULT_COUNTRY, 40) }
                 .map { discoverToCatalogItem(service, it) }
         }
     }
@@ -2078,7 +2077,15 @@ object WebStreamingMusic {
       await mk.setQueue(queueArg);
       await mk.play();
       if (args.startPositionMs > 1000 && typeof mk.seekToTime === 'function') {
-        mk.seekToTime(args.startPositionMs / 1000.0);
+        var targetSec = args.startPositionMs / 1000.0;
+        try { await mk.seekToTime(targetSec); } catch(e) {}
+        setTimeout(function() {
+          try {
+            if (!isPlayCancelled(reqSeq) && mk.currentPlaybackTime < Math.max(0, targetSec - 3)) {
+              mk.seekToTime(targetSec);
+            }
+          } catch(e) {}
+        }, 650);
       }
       return { ok: true };
     }

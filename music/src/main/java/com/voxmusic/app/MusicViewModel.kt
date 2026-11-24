@@ -71,6 +71,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
 
     val player: WebStreamingMusicPlayer = WebStreamingMusicPlayer(app) { uri, title, artist, album, durationMs, coverUrl ->
         music.onStreamingMetadataUpdated(uri, title, artist, album, durationMs, coverUrl)
+        enrichQueueEntryMetadata(uri, durationMs, coverUrl)
     }
 
     private val _playerFlow = MutableStateFlow<Player>(player)
@@ -98,6 +99,10 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     private var sleepJob: Job? = null
     private var infiniteRefillJob: Job? = null
     private var playSessionStartMs: Long = 0L
+    private val taskRemovedCallback: () -> Unit = {
+        flushPlaybackTime()
+        savePosition(sync = true)
+    }
 
     private var widgetHandover = WidgetPlayback.takeOver()
 
@@ -127,7 +132,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     fun skipInQueue(next: Boolean, restartFirst: Boolean = false) {
         if (next) skipNext()
         else {
-            if (restartFirst && player.currentPosition > 4_000L) player.seekTo(0L)
+            if (restartFirst && player.currentPosition > 4_000L) seekTo(0L)
             else skipPrevious()
         }
     }
@@ -140,16 +145,21 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         restoreSavedPlayMode()
+        PlaybackService.onBeforeTaskRemoved = taskRemovedCallback
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO && _state.value.sleepAt == -1L) {
                     player.pause()
                     setSleepTimer(null)
                 }
-                flushPlaybackTime()
                 val idx = player.currentMediaItemIndex
                 val next = queue.getOrNull(idx) ?: return
-                onTrackActive(next, recordStart = true)
+                val isIdlePaused = player.playbackState == Player.STATE_IDLE && !player.playWhenReady
+                if (isIdlePaused && next.uri == _state.value.current?.uri) {
+                    return
+                }
+                flushPlaybackTime()
+                onTrackActive(next, recordStart = !isIdlePaused, positionMs = player.currentPosition.coerceAtLeast(0L))
                 maybeRefillInfiniteShuffleQueue()
             }
 
@@ -173,6 +183,20 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
             }
         })
 
+        if (widgetHandover == null) {
+            restoreSavedPlaybackSession()
+        }
+
+        // 播放期间每 5 秒轻量持久化当前进度，防止后台进程被杀或直接划掉丢失进度
+        viewModelScope.launch {
+            while (true) {
+                delay(5_000L)
+                if (queue.isNotEmpty() && _state.value.current != null && player.isPlaying) {
+                    saveProgressOnly()
+                }
+            }
+        }
+
         // 同步歌曲元数据与封面至 MediaSession、通知栏锁屏及桌面小组件
         viewModelScope.launch {
             music.state.distinctUntilChanged { a, b -> a.tags == b.tags && a.cover === b.cover }.collect { ms ->
@@ -187,6 +211,45 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         NowPlayingWidget.attach(app, player)
+    }
+
+    private fun restoreSavedPlaybackSession() {
+        val saved = store.loadPlaybackSession() ?: return
+        if (saved.queue.isEmpty()) return
+        val safeIdx = saved.index.coerceIn(saved.queue.indices)
+        val target = saved.queue[safeIdx]
+        val safePos = MusicAppStore.sanitizeResumePosition(saved.positionMs, target.durationMs)
+        queue = saved.queue
+        WebMusicService.fromUri(target.uri)?.let { svc ->
+            MusicSourceStore.select(getApplication(), svc)
+        }
+        _state.update {
+            it.copy(
+                current = target,
+                playbackError = null,
+                loopA = null,
+                loopB = null,
+                queueVersion = it.queueVersion + 1,
+            )
+        }
+        // 恢复上次播放列表与精确进度，保持暂停态（点播放后直接从上次进度继续）
+        player.setMediaItems(queue.map(::itemOf), safeIdx, safePos)
+        music.onEntryChanged(target)
+    }
+
+    private fun enrichQueueEntryMetadata(uri: String, durationMs: Long, coverUrl: String?) {
+        if (durationMs <= 0L && coverUrl.isNullOrBlank()) return
+        val idx = queue.indexOfFirst { it.uri == uri }
+        if (idx < 0) return
+        val old = queue[idx]
+        val newDur = if (durationMs > 0L) durationMs else old.durationMs
+        val newCover = old.coverUrl ?: coverUrl?.takeIf { it.isNotBlank() }
+        if (newDur == old.durationMs && newCover == old.coverUrl) return
+        val updated = old.copy(durationMs = newDur, coverUrl = newCover)
+        queue = queue.toMutableList().apply { this[idx] = updated }
+        if (_state.value.current?.uri == uri) {
+            _state.update { it.copy(current = updated) }
+        }
     }
 
     private fun restoreSavedPlayMode() {
@@ -216,13 +279,14 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     fun resumeWidgetPlayback() {
         val h = widgetHandover ?: return
         widgetHandover = null
-        play(h.queue, h.index)
+        play(h.queue, h.index, h.positionMs)
         if (!h.playing) player.pause()
     }
 
-    fun play(entries: List<MediaEntry>, index: Int = 0) {
+    fun play(entries: List<MediaEntry>, index: Int = 0, startPositionMs: Long = 0L) {
         if (entries.isEmpty()) return
         val safeIdx = index.coerceIn(entries.indices)
+        val safePos = startPositionMs.coerceAtLeast(0L)
         flushPlaybackTime()
         queue = entries.toList()
         val target = queue[safeIdx]
@@ -236,10 +300,11 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         startPlaybackService()
-        player.setMediaItems(items, safeIdx, 0L)
+        player.setMediaItems(items, safeIdx, safePos)
         player.prepare()
         player.play()
-        onTrackActive(target, recordStart = true)
+        onTrackActive(target, recordStart = true, positionMs = safePos)
+        store.savePlaybackSession(queue, safeIdx, safePos)
         maybeRefillInfiniteShuffleQueue()
     }
 
@@ -284,9 +349,10 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
 
     fun playQueueIndex(index: Int) {
         if (index !in queue.indices) return
+        startPlaybackService()
         player.seekTo(index, 0L)
         player.play()
-        onTrackActive(queue[index], recordStart = true)
+        onTrackActive(queue[index], recordStart = true, positionMs = 0L)
     }
 
     fun removeFromQueue(index: Int) {
@@ -298,9 +364,12 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(queueVersion = it.queueVersion + 1) }
         if (queue.isEmpty()) {
             _state.update { it.copy(current = null) }
+            store.clearPlaybackSession()
         } else {
             val newIdx = player.currentMediaItemIndex.coerceIn(queue.indices)
-            onTrackActive(queue[newIdx], recordStart = false)
+            val pos = player.currentPosition.coerceAtLeast(0L)
+            onTrackActive(queue[newIdx], recordStart = false, positionMs = pos)
+            store.savePlaybackSession(queue, newIdx, pos)
         }
     }
 
@@ -309,8 +378,22 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
             player.pause()
         } else {
             if (player.playbackState == Player.STATE_ENDED) player.seekToDefaultPosition()
+            startPlaybackService()
+            if (player.playbackState == Player.STATE_IDLE && queue.isNotEmpty()) {
+                player.prepare()
+            }
             player.play()
         }
+    }
+
+    fun seekTo(positionMs: Long) {
+        val target = positionMs.coerceAtLeast(0L)
+        player.seekTo(target)
+        val cur = _state.value.current ?: return
+        val idx = player.currentMediaItemIndex.takeIf { it in queue.indices }
+            ?: queue.indexOfFirst { it.uri == cur.uri }.coerceAtLeast(0)
+        val dur = player.duration.takeIf { it > 0L } ?: cur.durationMs
+        store.savePlaybackProgress(cur, idx, target, durationMs = dur)
     }
 
     fun skipNext() {
@@ -326,7 +409,7 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
     fun skipPrevious() {
         if (queue.isEmpty()) return
         if (player.currentPosition > 4_000L) {
-            player.seekTo(0L)
+            seekTo(0L)
         } else if (player.hasPreviousMediaItem()) {
             player.seekToPreviousMediaItem()
         } else if (queue.size > 1) {
@@ -335,10 +418,14 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun onTrackActive(entry: MediaEntry, recordStart: Boolean) {
+    private fun onTrackActive(entry: MediaEntry, recordStart: Boolean, positionMs: Long = 0L) {
         _state.update { it.copy(current = entry, loopA = null, loopB = null) }
         music.onEntryChanged(entry)
-        store.recordHistory(entry, 0L)
+        val safePos = positionMs.coerceAtLeast(0L)
+        val idx = player.currentMediaItemIndex.takeIf { it in queue.indices }
+            ?: queue.indexOfFirst { it.uri == entry.uri }.coerceAtLeast(0)
+        store.savePlaybackProgress(entry, idx, safePos, durationMs = entry.durationMs)
+        store.recordHistory(entry, safePos)
         if (recordStart) store.recordPlayback(0L, started = true)
         refreshLibraryStore()
     }
@@ -355,10 +442,30 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun savePosition() {
+    private fun saveProgressOnly(sync: Boolean = false) {
+        val cur = _state.value.current ?: return
+        if (queue.isEmpty()) return
+        val idx = player.currentMediaItemIndex.takeIf { it in queue.indices }
+            ?: queue.indexOfFirst { it.uri == cur.uri }.coerceAtLeast(0)
+        val dur = player.duration.takeIf { it > 0L } ?: cur.durationMs
+        val pos = player.currentPosition.coerceAtLeast(0L)
+        store.savePlaybackProgress(cur, idx, pos, durationMs = dur, sync = sync)
+    }
+
+    fun savePosition(sync: Boolean = false) {
         val cur = _state.value.current ?: return
         val dur = player.duration.takeIf { it > 0L } ?: cur.durationMs
-        store.recordHistory(cur.copy(durationMs = dur), player.currentPosition.coerceAtLeast(0L))
+        val pos = player.currentPosition.coerceAtLeast(0L)
+        val updatedCur = if (dur != cur.durationMs) cur.copy(durationMs = dur) else cur
+        if (queue.isNotEmpty()) {
+            val idx = player.currentMediaItemIndex.takeIf { it in queue.indices }
+                ?: queue.indexOfFirst { it.uri == cur.uri }.coerceAtLeast(0)
+            if (idx in queue.indices && queue[idx].durationMs != updatedCur.durationMs) {
+                queue = queue.toMutableList().apply { this[idx] = updatedCur }
+            }
+            store.savePlaybackSession(queue, idx, pos, sync = sync)
+        }
+        store.recordHistory(updatedCur, pos)
         refreshLibraryStore()
     }
 
@@ -511,6 +618,8 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
                 queue = queue + added
                 player.addMediaItems(added.map(::itemOf))
                 _state.update { it.copy(queueVersion = it.queueVersion + 1) }
+                val idx = player.currentMediaItemIndex.coerceIn(queue.indices)
+                store.savePlaybackSession(queue, idx, player.currentPosition.coerceAtLeast(0L))
             }
         }
     }
@@ -538,7 +647,10 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         flushPlaybackTime()
-        savePosition()
+        savePosition(sync = true)
+        if (PlaybackService.onBeforeTaskRemoved === taskRemovedCallback) {
+            PlaybackService.onBeforeTaskRemoved = null
+        }
         sleepJob?.cancel()
         infiniteRefillJob?.cancel()
         if (PlaybackService.session === session) PlaybackService.session = null

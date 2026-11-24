@@ -30,7 +30,12 @@ import kotlinx.coroutines.launch
 @UnstableApi
 internal object WidgetPlayback {
 
-    class Handover(val queue: List<MediaEntry>, val index: Int, val playing: Boolean)
+    class Handover(
+        val queue: List<MediaEntry>,
+        val index: Int,
+        val positionMs: Long,
+        val playing: Boolean,
+    )
 
     private var player: WebStreamingMusicPlayer? = null
     private var session: MediaSession? = null
@@ -49,8 +54,23 @@ internal object WidgetPlayback {
         PlaybackService.session?.let { it.player.play(); return true }
         val app = service.application
         val st = MusicAppStore(app)
-        val songs = recentSongs(app)
-        if (songs.isEmpty()) return false
+        val savedSession = st.loadPlaybackSession()?.takeIf { it.queue.isNotEmpty() }
+        val startQueue: List<MediaEntry>
+        val startIdx: Int
+        val resume: Long
+        if (savedSession != null) {
+            startQueue = savedSession.queue
+            startIdx = savedSession.index.coerceIn(startQueue.indices)
+            resume = savedSession.positionMs.coerceAtLeast(0L)
+        } else {
+            val songs = recentSongs(app)
+            if (songs.isEmpty()) return false
+            startQueue = songs.map { it.entry }
+            startIdx = 0
+            val first = songs.first()
+            val duration = first.entry.durationMs
+            resume = first.positionMs.takeIf { duration <= 0L || it < duration - 10_000L } ?: 0L
+        }
 
         val sc = MainScope()
         val settings = SettingsRepository(app).load()
@@ -61,11 +81,8 @@ internal object WidgetPlayback {
         }
         m = MusicFeatures(app, sc, player = { p }, settings = { settings })
 
-        queue = songs.map { it.entry }
-        val first = songs.first()
-        val duration = first.entry.durationMs
-        val resume = first.positionMs.takeIf { duration <= 0L || it < duration - 10_000L } ?: 0L
-        p.setMediaItems(queue.map(::itemOf), 0, resume)
+        queue = startQueue
+        p.setMediaItems(queue.map(::itemOf), startIdx, resume)
         p.addListener(saver)
 
         val s = MediaSession.Builder(service, p)
@@ -84,7 +101,7 @@ internal object WidgetPlayback {
         p.prepare()
         p.play()
         NowPlayingWidget.attach(app, p)
-        m.onEntryChanged(queue.first())
+        m.onEntryChanged(queue[startIdx])
 
         sc.launch {
             m.state.distinctUntilChanged { a, b -> a.tags == b.tags && a.cover === b.cover }.collect { ms ->
@@ -103,7 +120,12 @@ internal object WidgetPlayback {
 
     fun takeOver(): Handover? {
         val p = player ?: return null
-        val h = Handover(queue, p.currentMediaItemIndex, p.playWhenReady)
+        val h = Handover(
+            queue = queue,
+            index = p.currentMediaItemIndex.coerceIn(queue.indices),
+            positionMs = p.currentPosition.coerceAtLeast(0L),
+            playing = p.playWhenReady,
+        )
         release()
         return h
     }
@@ -138,9 +160,14 @@ internal object WidgetPlayback {
     }
 
     private fun save(p: Player) {
-        val entry = queue.getOrNull(p.currentMediaItemIndex) ?: return
+        val idx = p.currentMediaItemIndex
+        val entry = queue.getOrNull(idx) ?: return
         val duration = p.duration.takeIf { it > 0L } ?: entry.durationMs
-        runCatching { store?.recordHistory(entry.copy(durationMs = duration), p.currentPosition.coerceAtLeast(0L)) }
+        val pos = p.currentPosition.coerceAtLeast(0L)
+        runCatching {
+            store?.recordHistory(entry.copy(durationMs = duration), pos)
+            store?.savePlaybackProgress(entry.copy(durationMs = duration), idx, pos, durationMs = duration)
+        }
     }
 
     private fun itemOf(e: MediaEntry) = MediaItem.Builder()

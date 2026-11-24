@@ -84,7 +84,7 @@ enum class MusicDiscoverSource(
     val description: String,
 ) {
     AUTO("自动融合（推荐）", "自动融合", "融合热门华语与全球榜单，任一源受限时自动回退"),
-    APPLE("Apple Music / iTunes", "Apple Music", "榜单、搜索与推荐优先采用 Apple Music 热播榜与 iTunes 曲库"),
+    APPLE("Apple Music / iTunes", "Apple Music", "榜单、搜索与推荐优先采用 Apple Music 台湾区热播榜与 iTunes 曲库"),
     NETEASE("网易云榜单", "网易云榜单", "流行榜单与新歌趋势优先采用网易云榜单数据"),
     QQ("QQ 巅峰榜", "QQ 巅峰榜", "流行榜单与新歌趋势优先采用 QQ 巅峰榜数据"),
     ;

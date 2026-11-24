@@ -104,6 +104,9 @@ class WebStreamingMusicPlayer(
 
         if (nowFlowing && !hasStartedCurrentTrackAudio) {
             hasStartedCurrentTrackAudio = true
+            if (seekHoldTargetMs != C.TIME_UNSET) {
+                seekHoldUntilMs = nowWall + 3_000L
+            }
             changed = true
         }
 
@@ -236,10 +239,11 @@ class WebStreamingMusicPlayer(
         error = null
         val safeStart = positionMs.coerceAtLeast(0L)
         currentPosMs = safeStart
+        startPositionMs = safeStart
         hasStartedCurrentTrackAudio = false
         remoteActuallyPlaying = false
         maxPosReachedMs = 0L
-        seekHoldTargetMs = C.TIME_UNSET
+        seekHoldTargetMs = if (safeStart > 1_000L) safeStart else C.TIME_UNSET
         seekHoldUntilMs = 0L
         trackTransitionPending = false
         lastSyncedMetaKey = ""
@@ -460,8 +464,8 @@ class WebStreamingMusicPlayer(
         val svc = activeService()
         if (playbackState == Player.STATE_ENDED && playWhenReady) {
             startCurrentTrack(0L)
-        } else if (playWhenReady && playbackState == Player.STATE_READY && !hasStartedCurrentTrackAudio && items.isNotEmpty()) {
-            // 若新曲目尚未真正起播（例如缓冲期被暂停后再次点播放），重新下发当前曲目播放而非 resume 旧曲目
+        } else if (playWhenReady && (playbackState == Player.STATE_IDLE || playbackState == Player.STATE_READY) && !hasStartedCurrentTrackAudio && items.isNotEmpty()) {
+            // 若当前曲目尚未真正起播（如冷启动恢复暂停态，或缓冲期被暂停后再次点播放），按当前进度发起播放
             startCurrentTrack(currentPosMs)
         } else if (svc != null && playbackState != Player.STATE_IDLE) {
             if (!playWhenReady || hasStartedCurrentTrackAudio) {
@@ -479,15 +483,24 @@ class WebStreamingMusicPlayer(
         if (targetIdx != currentIndex) {
             currentIndex = targetIdx
             startPositionMs = targetPos
-            startCurrentTrack(targetPos)
+            if (playbackState == Player.STATE_IDLE && !playWhenReady) {
+                currentPosMs = targetPos
+                currentDurMs = TrackMetadataRegistry.find(itemUriAt(targetIdx))?.durationMs?.takeIf { it > 0L } ?: C.TIME_UNSET
+                invalidateState()
+            } else {
+                startCurrentTrack(targetPos)
+            }
         } else {
             currentPosMs = targetPos
+            startPositionMs = targetPos
             seekHoldTargetMs = targetPos
             seekHoldUntilMs = System.currentTimeMillis() + 1_600L
             if (playbackState == Player.STATE_ENDED) {
                 startCurrentTrack(targetPos)
-            } else {
+            } else if (playbackState != Player.STATE_IDLE) {
                 activeService()?.let { WebStreamingMusic.seekTo(it, targetPos) }
+                invalidateState()
+            } else {
                 invalidateState()
             }
         }

@@ -301,7 +301,7 @@ class MainActivity : ComponentActivity() {
         if (!vm.keepPlayingInBackground()) {
             vm.player.pause()
         }
-        vm.savePosition()
+        vm.savePosition(sync = true)
     }
 
     private fun handleIntent(intent: Intent?) {
