@@ -1,4 +1,15 @@
-## 本版更新（2.10.30）
+## 本版更新（2.10.31）
+
+- **修复点击含重复曲目的歌单播放时闪退的问题（Android / TV）**：
+  - 为 Media3 `WebStreamingMusicPlayer` 播放队列条目生成带队列下标的严格唯一 `MediaItemData.uid`，解决导入/转换歌单中存在同一首歌曲重复出现时触发 `Duplicate MediaItemData UID in playlist` 闪退的问题。
+- **修复 QQ音乐 播放进度条不动、点击进度条不跳转及部分歌曲无反应的问题（Android / TV）**：
+  - 修正 QQ音乐 `musicu.fcg` 请求 `comm.uin` 为字符串类型（消除 `code=500001` 拒收），并修复微信登录下 `uin=0` 遮蔽 `wxuin` 的问题，确保歌曲由原生 Media3 ExoPlayer 直连播放、进度条实时推进且点击/拖动精准跳转；同步补齐 30 秒试听兜底、无版权/需绿钻清晰提示及 `client_search_cp` 搜索回退。
+- **修复 YouTube Music 登录提示「此浏览器或应用可能不安全」的问题（Android / TV）**：
+  - YouTube Music 登录页改用原生 Android System WebView 指纹（不伪装桌面 UA、不注入 JS 钩子）并直连 Google 官方音乐登录通道 `accounts.google.com/ServiceLogin?ltmpl=music&service=youtube...`。
+- **歌单顶部统一置顶「已点赞的歌曲」（Android / TV）**：
+  - Spotify、Apple Music、YouTube Music、网易云音乐、QQ音乐 五大在线音源在「乐库 → 歌单」顶部均自动置顶点赞/红心收藏歌单，一键直达个人点赞歌曲列表。
+
+## 2.10.30 更新
 
 - **新增 YouTube Music、网易云音乐、QQ音乐 应用内直连播放与个人曲库（Android / TV）**：
   - 在「音乐 → 右上角音源」、「乐库」及「发现 → 音乐 → 播放」中新增 **YouTube Music**、**网易云音乐**、**QQ音乐** 三个原生直连音源，统一支持应用内账号登录（Google / 网易云 / QQ 与微信）、登录态自动检测及一键退出清理。

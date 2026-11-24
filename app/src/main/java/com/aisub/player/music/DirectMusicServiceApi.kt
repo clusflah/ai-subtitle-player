@@ -54,7 +54,7 @@ object DirectMusicServiceApi {
         val urls = when (service) {
             WebMusicService.YOUTUBE_MUSIC -> listOf("https://music.youtube.com", "https://youtube.com", "https://www.youtube.com")
             WebMusicService.NETEASE_MUSIC -> listOf("https://music.163.com", "https://interface3.music.163.com")
-            WebMusicService.QQ_MUSIC -> listOf("https://y.qq.com", "https://c.y.qq.com", "https://u.y.qq.com")
+            WebMusicService.QQ_MUSIC -> listOf("https://y.qq.com", "https://c.y.qq.com", "https://u.y.qq.com", "https://qq.com")
             else -> listOf(service.homeUrl)
         }
         val merged = LinkedHashMap<String, String>()
@@ -86,13 +86,15 @@ object DirectMusicServiceApi {
     }
 
     internal fun extractQqUinAndKey(cookies: String): Pair<String, String> {
-        val rawUin = WebStreamingMusic.extractCookieValue(cookies, "uin")
-            ?: WebStreamingMusic.extractCookieValue(cookies, "p_uin")
-            ?: WebStreamingMusic.extractCookieValue(cookies, "wxuin")
-            ?: ""
-        val cleanUin = rawUin.trim().removePrefix("o").removePrefix("O").trimStart('0').ifEmpty { "0" }
-        val key = WebStreamingMusic.extractCookieValue(cookies, "qqmusic_key")
-            ?: WebStreamingMusic.extractCookieValue(cookies, "qm_keyst")
+        val cleanUin = listOf("p_uin", "uin", "wxuin", "luin")
+            .mapNotNull { WebStreamingMusic.extractCookieValue(cookies, it) }
+            .map { it.trim().removePrefix("o").removePrefix("O").trimStart('0') }
+            .firstOrNull { it.isNotEmpty() && it != "0" }
+            ?: "0"
+        val key = listOf("qqmusic_key", "qm_keyst")
+            .mapNotNull { WebStreamingMusic.extractCookieValue(cookies, it) }
+            .map { it.trim() }
+            .firstOrNull { it.isNotEmpty() }
             ?: ""
         return cleanUin to key
     }
@@ -320,23 +322,41 @@ object DirectMusicServiceApi {
     }
 
     private fun loadYouTubePlaylists(cookies: String): List<ServerItem> {
-        val liked = ytInnerTubeRequest(
+        val raw = ytInnerTubeRequest(
             "browse",
             JSONObject().put("context", ytWebRemixContext()).put("browseId", "FEmusic_liked_playlists"),
             cookies,
-        )?.let { parseYouTubeItems(it, wantType = "playlist") }.orEmpty()
-        if (liked.isNotEmpty()) return liked
-
-        return ytInnerTubeRequest(
-            "browse",
-            JSONObject().put("context", ytWebRemixContext()).put("browseId", "FEmusic_explore"),
-            cookies,
-        )?.let { parseYouTubeItems(it, wantType = "playlist") }.orEmpty()
+        )?.let { parseYouTubeItems(it, wantType = "playlist") }.orEmpty().ifEmpty {
+            ytInnerTubeRequest(
+                "browse",
+                JSONObject().put("context", ytWebRemixContext()).put("browseId", "FEmusic_explore"),
+                cookies,
+            )?.let { parseYouTubeItems(it, wantType = "playlist") }.orEmpty()
+        }
+        val likedIdx = raw.indexOfFirst { p ->
+            p.ratingKey.contains("FEmusic_liked_videos", ignoreCase = true) ||
+                p.ratingKey.endsWith("|VLLM", ignoreCase = true) ||
+                p.ratingKey.endsWith("|LM", ignoreCase = true) ||
+                p.title.contains("赞过") ||
+                p.title.contains("Liked", ignoreCase = true)
+        }
+        return if (likedIdx >= 0) {
+            listOf(raw[likedIdx]) + raw.filterIndexed { i, _ -> i != likedIdx }
+        } else {
+            val likedEntry = ServerItem(
+                ratingKey = "playlist|FEmusic_liked_videos",
+                type = "playlist",
+                title = "已点赞的歌曲",
+                summary = "YouTube Music 点赞收藏",
+            )
+            listOf(likedEntry) + raw
+        }
     }
 
     private fun loadYouTubeChildren(cookies: String, ratingKey: String): List<ServerItem> {
         val rawId = ratingKey.substringAfter('|', ratingKey).trim()
         if (rawId.isEmpty()) return emptyList()
+        if (rawId == "liked") return loadYouTubeTracks(cookies)
         val browseId = when {
             rawId.startsWith("VL") || rawId.startsWith("MPRE") || rawId.startsWith("FEmusic_") -> rawId
             rawId.startsWith("PL") || rawId.startsWith("OLAK") || rawId.startsWith("RD") || rawId == "LM" -> "VL$rawId"
@@ -841,7 +861,8 @@ object DirectMusicServiceApi {
                 val cover = pl.optString("coverImgUrl").trim().takeIf { it.startsWith("http") }?.replace("http://", "https://")
                 val count = pl.optInt("trackCount", 0).coerceAtLeast(0)
                 val desc = pl.optString("description").trim().takeIf { it != "null" }.orEmpty()
-                ServerItem(
+                val isLiked = pl.optInt("specialType", 0) == 5 || name.contains("喜欢的音乐")
+                isLiked to ServerItem(
                     ratingKey = "playlist|$id",
                     type = "playlist",
                     title = name,
@@ -851,7 +872,10 @@ object DirectMusicServiceApi {
                     childCount = count,
                 )
             }
-            if (parsed.isNotEmpty()) return parsed
+            if (parsed.isNotEmpty()) {
+                val likedFirst = parsed.filter { it.first }.map { it.second } + parsed.filterNot { it.first }.map { it.second }
+                return likedFirst
+            }
         }
         return emptyList()
     }
@@ -1061,9 +1085,11 @@ object DirectMusicServiceApi {
 
     private fun qqComm(cookies: String): JSONObject {
         val (uin, key) = extractQqUinAndKey(cookies)
-        val isWx = cookies.contains("wxuin=") && !cookies.contains("p_uin=")
+        val isWx = key.startsWith("W_X_", ignoreCase = true) ||
+            (cookies.contains("wxuin=") && !cookies.contains("p_uin="))
         return JSONObject()
-            .put("uin", uin.toLongOrNull() ?: 0L)
+            // u.y.qq.com musicu.fcg 严格要求 comm.uin 为字符串，传整型会返回 code=500001
+            .put("uin", uin)
             .put("authst", key)
             .put("tmeLoginType", if (isWx) 1 else 2)
             .put("format", "json")
@@ -1194,7 +1220,7 @@ object DirectMusicServiceApi {
     private fun loadQqTracks(cookies: String): List<ServerItem> {
         val playlists = loadQqPlaylists(cookies)
         val favId = playlists.firstOrNull()?.ratingKey?.substringAfter('|')
-        if (!favId.isNullOrBlank()) {
+        if (!favId.isNullOrBlank() && favId != "liked") {
             val liked = fetchQqPlaylistTracks(cookies, favId)
             if (liked.isNotEmpty()) return liked
         }
@@ -1244,6 +1270,7 @@ object DirectMusicServiceApi {
         val kind = ratingKey.substringBefore('|', "")
         val id = ratingKey.substringAfter('|', ratingKey).trim()
         if (id.isEmpty()) return emptyList()
+        if (id == "liked") return loadQqTracks(cookies)
         return if (kind == "album") {
             val payload = JSONObject()
                 .put(
@@ -1270,6 +1297,7 @@ object DirectMusicServiceApi {
     }
 
     private fun searchQq(cookies: String, query: String): List<ServerItem> {
+        val out = ArrayList<ServerItem>()
         val payload = JSONObject()
             .put(
                 "songs",
@@ -1293,14 +1321,33 @@ object DirectMusicServiceApi {
                     .put("param", JSONObject().put("num_per_page", 8).put("page_num", 1).put("query", query).put("search_type", 3)),
             )
             .put("comm", qqComm(cookies))
-        val root = qqMusicuRequest(payload, cookies) ?: return emptyList()
-        val out = ArrayList<ServerItem>()
+        val root = qqMusicuRequest(payload, cookies)
 
-        root.optJSONObject("songs")?.optJSONObject("data")?.optJSONObject("body")
+        root?.optJSONObject("songs")?.optJSONObject("data")?.optJSONObject("body")
             ?.optJSONObject("song")?.optJSONArray("list").objects()
             .mapNotNull(::parseQqTrackObj).let(out::addAll)
 
-        root.optJSONObject("albums")?.optJSONObject("data")?.optJSONObject("body")
+        // 当 DoSearchForQQMusicDesktop 被风控返回空列表时，自动切至 client_search_cp 获取完整 QQ 音乐曲目
+        if (out.isEmpty()) {
+            val cpUrl = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp".toHttpUrl().newBuilder()
+                .addQueryParameter("p", "1")
+                .addQueryParameter("n", "25")
+                .addQueryParameter("w", query)
+                .addQueryParameter("format", "json")
+                .addQueryParameter("new_json", "1")
+                .build()
+            val cpReq = Request.Builder()
+                .url(cpUrl)
+                .header("User-Agent", BROWSER_UA)
+                .header("Referer", "https://y.qq.com/")
+            if (cookies.isNotBlank()) cpReq.header("Cookie", cookies)
+            val cpText = httpText(cpReq.build())
+            cpText?.let { runCatching { JSONObject(it) }.getOrNull() }
+                ?.optJSONObject("data")?.optJSONObject("song")?.optJSONArray("list").objects()
+                .mapNotNull(::parseQqTrackObj).let(out::addAll)
+        }
+
+        val albumsAdded = root?.optJSONObject("albums")?.optJSONObject("data")?.optJSONObject("body")
             ?.optJSONObject("album")?.optJSONArray("list").objects()
             .mapNotNull { al ->
                 val mid = al.optString("albumMID").ifBlank { al.optString("albummid") }.trim()
@@ -1315,9 +1362,40 @@ object DirectMusicServiceApi {
                     parentTitle = singer.ifBlank { null },
                     grandparentTitle = singer.ifBlank { null },
                 )
-            }.let(out::addAll)
+            }.orEmpty()
+        out += albumsAdded
 
-        root.optJSONObject("playlists")?.optJSONObject("data")?.optJSONObject("body")
+        if (albumsAdded.isEmpty()) {
+            val sbUrl = "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg".toHttpUrl().newBuilder()
+                .addQueryParameter("key", query)
+                .addQueryParameter("format", "json")
+                .build()
+            val sbText = httpText(
+                Request.Builder()
+                    .url(sbUrl)
+                    .header("User-Agent", BROWSER_UA)
+                    .header("Referer", "https://y.qq.com/")
+                    .build(),
+            )
+            sbText?.let { runCatching { JSONObject(it) }.getOrNull() }
+                ?.optJSONObject("data")?.optJSONObject("album")?.optJSONArray("itemlist").objects()
+                .mapNotNull { al ->
+                    val mid = al.optString("mid").trim()
+                    val name = al.optString("name").trim()
+                    if (mid.isEmpty() || name.isEmpty()) return@mapNotNull null
+                    val singer = al.optString("singer").trim()
+                    ServerItem(
+                        ratingKey = "album|$mid",
+                        type = "album",
+                        title = name,
+                        thumb = "https://y.gtimg.cn/music/photo_new/T002R500x500M000$mid.jpg",
+                        parentTitle = singer.ifBlank { null },
+                        grandparentTitle = singer.ifBlank { null },
+                    )
+                }.let(out::addAll)
+        }
+
+        root?.optJSONObject("playlists")?.optJSONObject("data")?.optJSONObject("body")
             ?.optJSONObject("songlist")?.optJSONArray("list").objects()
             .mapNotNull { pl ->
                 val id = pl.optString("dissid").trim()
@@ -1345,8 +1423,8 @@ object DirectMusicServiceApi {
         var songMid = trackId.trim()
         if (songMid.isEmpty() && title.isNotBlank()) {
             val q = listOfNotNull(title, artist.takeIf { it.isNotBlank() }).joinToString(" ")
-            val hit = MusicDiscoverRepository.fetchQqSearch(q, 5).firstOrNull()
-            songMid = hit?.id?.removePrefix("qq:").orEmpty()
+            val hit = searchQq(cookies, q).firstOrNull { it.type == "track" }
+            songMid = hit?.ratingKey.orEmpty()
         }
         if (songMid.isEmpty()) return null
 
@@ -1376,13 +1454,19 @@ object DirectMusicServiceApi {
             ?.optString("mid")?.trim()?.takeIf { it.isNotEmpty() } ?: songMid
 
         // 第 2 次批量按音质从高到低请求：FLAC 无损 > 320k MP3 > 128k MP3 > 96k M4A
-        val filenames = JSONArray()
-            .put("F000$mediaMid.flac")
-            .put("M800$mediaMid.mp3")
-            .put("M500$mediaMid.mp3")
-            .put("C400$mediaMid.m4a")
-        val mids = JSONArray().put(songMid).put(songMid).put(songMid).put(songMid)
-        val types = JSONArray().put(0).put(0).put(0).put(0)
+        val fnList = buildList {
+            add("F000$mediaMid.flac")
+            add("M800$mediaMid.mp3")
+            add("M500$mediaMid.mp3")
+            add("C400$mediaMid.m4a")
+            if (mediaMid != songMid) {
+                add("M500$songMid.mp3")
+                add("C400$songMid.m4a")
+            }
+        }
+        val filenames = JSONArray().apply { fnList.forEach(::put) }
+        val mids = JSONArray().apply { repeat(fnList.size) { put(songMid) } }
+        val types = JSONArray().apply { repeat(fnList.size) { put(0) } }
         val hqPayload = JSONObject()
             .put(
                 "req_0",
@@ -1410,7 +1494,7 @@ object DirectMusicServiceApi {
         val data = root.optJSONObject("req_0")?.optJSONObject("data") ?: return null
         val sip = data.optJSONArray("sip")
             ?.let { arr -> (0 until arr.length()).firstNotNullOfOrNull { arr.optString(it).trim().takeIf { u -> u.startsWith("http") } } }
-            ?: "https://ws.stream.qqmusic.qq.com/"
+            ?: "http://aqqmusic.tc.qq.com/"
         val infos = data.optJSONArray("midurlinfo").objects()
         for (info in infos) {
             val purl = info.optString("purl").trim()
@@ -1430,6 +1514,20 @@ object DirectMusicServiceApi {
                     "Referer" to "https://y.qq.com/",
                 ),
                 qualityLabel = label,
+            )
+        }
+        // 非会员曲目若无完整直链但返回了 30 秒试听链接，优先用原生播放器试听（保留进度条与拖拽能力）
+        for (info in infos) {
+            val preview = info.optString("opi30surl").trim()
+            if (preview.isEmpty()) continue
+            val fullUrl = if (preview.startsWith("http")) preview else (sip.trimEnd('/') + "/" + preview.trimStart('/'))
+            return ResolvedAudioStream(
+                url = fullUrl,
+                headers = mapOf(
+                    "User-Agent" to BROWSER_UA,
+                    "Referer" to "https://y.qq.com/",
+                ),
+                qualityLabel = "试听 30s",
             )
         }
         return null

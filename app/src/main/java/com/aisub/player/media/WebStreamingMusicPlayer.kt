@@ -318,7 +318,9 @@ class WebStreamingMusicPlayer(
             } else {
                 ServerProgress.find(u)?.durationMs?.takeIf { it > 0L } ?: C.TIME_UNSET
             }
-            MediaItemData.Builder(item.mediaId.ifEmpty { "web_$idx:$u" })
+            // Media3 SimpleBasePlayer.State.Builder.setPlaylist 要求每条 MediaItemData 的 uid 严格唯一；
+            // 歌单中可能包含重复曲目（如导入/转换歌单），必须带上队列下标防止 IllegalArgumentException 闪退
+            MediaItemData.Builder("web_${idx}_${item.mediaId.ifEmpty { u }}")
                 .setMediaItem(item)
                 .setMediaMetadata(item.mediaMetadata)
                 .setDurationUs(if (itemDurMs == C.TIME_UNSET) C.TIME_UNSET else itemDurMs * 1_000L)

@@ -375,11 +375,17 @@ class MusicDiscoverTest {
     }
 
     @Test
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     fun youtubeNetEaseAndQqMusicDirectParsersAndRoutingWork() {
         // 1. 全部 5 个流媒体服务的协议识别、音源枚举与 DiscoverItem ID 提取
         assertEquals(com.aisub.player.music.WebMusicService.YOUTUBE_MUSIC, com.aisub.player.music.WebMusicService.fromUri("ytmusic://track/dQw4w9WgXcQ"))
         assertEquals(com.aisub.player.music.WebMusicService.NETEASE_MUSIC, com.aisub.player.music.WebMusicService.fromUri("neteasemusic://track/186016"))
         assertEquals(com.aisub.player.music.WebMusicService.QQ_MUSIC, com.aisub.player.music.WebMusicService.fromUri("qqmusic://track/0039MnYb0qxYhV"))
+        assertTrue(!com.aisub.player.music.WebStreamingMusic.needsLoginHookScript(com.aisub.player.music.WebMusicService.YOUTUBE_MUSIC))
+        assertTrue(!com.aisub.player.music.WebStreamingMusic.needsLoginHookScript(com.aisub.player.music.WebMusicService.NETEASE_MUSIC))
+        assertTrue(!com.aisub.player.music.WebStreamingMusic.needsLoginHookScript(com.aisub.player.music.WebMusicService.QQ_MUSIC))
+        assertTrue(com.aisub.player.music.WebStreamingMusic.needsLoginHookScript(com.aisub.player.music.WebMusicService.APPLE_MUSIC))
+        assertTrue(com.aisub.player.music.WebStreamingMusic.needsLoginHookScript(com.aisub.player.music.WebMusicService.SPOTIFY))
 
         val ytDiscover = DiscoverItem(
             id = "yt:dQw4w9WgXcQ",
@@ -523,17 +529,21 @@ class MusicDiscoverTest {
         assertEquals("无损 FLAC", neStream.qualityLabel)
         assertEquals(269_000L, neStream.durationMs)
 
-        // 4. QQ音乐 Cookie 解析与 vkey 响应优先级（跳过空 purl，拼接 sip）
+        // 4. QQ音乐 Cookie 解析（含微信 wxuin 跳过 uin=0）与 vkey 响应优先级（跳过空 purl、支持 opi30surl 试听兜底）
         val (qqUin, qqKey) = com.aisub.player.music.DirectMusicServiceApi.extractQqUinAndKey("p_uin=o012345678; qm_keyst=Q_H_L_testkey")
         assertEquals("12345678", qqUin)
         assertEquals("Q_H_L_testkey", qqKey)
+
+        val (wxUin, wxKey) = com.aisub.player.music.DirectMusicServiceApi.extractQqUinAndKey("uin=0; wxuin=11529215046068; qm_keyst=W_X_wxkey")
+        assertEquals("11529215046068", wxUin)
+        assertEquals("W_X_wxkey", wxKey)
 
         val qqVkeyResp = JSONObject().put(
             "req_0",
             JSONObject().put(
                 "data",
                 JSONObject()
-                    .put("sip", JSONArray().put("https://ws.stream.qqmusic.qq.com/"))
+                    .put("sip", JSONArray().put("http://aqqmusic.tc.qq.com/"))
                     .put(
                         "midurlinfo",
                         JSONArray()
@@ -544,7 +554,64 @@ class MusicDiscoverTest {
         )
         val qqStream = com.aisub.player.music.DirectMusicServiceApi.parseQqVkeyResponse(qqVkeyResp)
         assertNotNull(qqStream)
-        assertEquals("https://ws.stream.qqmusic.qq.com/M8000039MnYb0qxYhV.mp3?guid=10000&vkey=XYZ", qqStream!!.url)
+        assertEquals("http://aqqmusic.tc.qq.com/M8000039MnYb0qxYhV.mp3?guid=10000&vkey=XYZ", qqStream!!.url)
         assertEquals("HQ 320k", qqStream.qualityLabel)
+
+        val qqPreviewResp = JSONObject().put(
+            "req_0",
+            JSONObject().put(
+                "data",
+                JSONObject()
+                    .put("sip", JSONArray().put("http://aqqmusic.tc.qq.com/"))
+                    .put(
+                        "midurlinfo",
+                        JSONArray().put(
+                            JSONObject()
+                                .put("filename", "C400001.m4a")
+                                .put("purl", "")
+                                .put("opi30surl", "RS02001.mp3?vkey=PREVIEW"),
+                        ),
+                    ),
+            ),
+        )
+        val qqPreview = com.aisub.player.music.DirectMusicServiceApi.parseQqVkeyResponse(qqPreviewResp)
+        assertNotNull(qqPreview)
+        assertEquals("http://aqqmusic.tc.qq.com/RS02001.mp3?vkey=PREVIEW", qqPreview!!.url)
+        assertEquals("试听 30s", qqPreview.qualityLabel)
+
+        // 5. 歌单顶部固定「已点赞的歌曲」逻辑
+        val normalPlaylists = listOf(
+            com.aisub.player.remote.cloud.ServerItem(ratingKey = "playlist|101", type = "playlist", title = "运动歌单"),
+            com.aisub.player.remote.cloud.ServerItem(ratingKey = "playlist|102", type = "playlist", title = "睡前轻音乐"),
+        )
+        val pinnedSpotify = com.aisub.player.music.WebStreamingMusic.pinLikedPlaylistAtTop(
+            com.aisub.player.music.WebMusicService.SPOTIFY,
+            normalPlaylists,
+        )
+        assertEquals("playlist|liked", pinnedSpotify.first().ratingKey)
+        assertEquals("已点赞的歌曲", pinnedSpotify.first().title)
+        assertEquals(3, pinnedSpotify.size)
+
+        val withExistingLiked = listOf(
+            com.aisub.player.remote.cloud.ServerItem(ratingKey = "playlist|201", type = "playlist", title = "日语精选"),
+            com.aisub.player.remote.cloud.ServerItem(ratingKey = "playlist|202", type = "playlist", title = "我喜欢的音乐"),
+        )
+        val movedToTop = com.aisub.player.music.WebStreamingMusic.pinLikedPlaylistAtTop(
+            com.aisub.player.music.WebMusicService.NETEASE_MUSIC,
+            withExistingLiked,
+        )
+        assertEquals("playlist|202", movedToTop.first().ratingKey)
+        assertEquals(2, movedToTop.size)
+
+        // 6. 含重复歌曲的歌单队列在 WebStreamingMusicPlayer 中不会触发 SimpleBasePlayer Duplicate UID 闪退
+        val ctx = RuntimeEnvironment.getApplication()
+        val dupPlayer = com.aisub.player.media.WebStreamingMusicPlayer(ctx)
+        val dupUri = "spotify://track/3DYVWvPh3kGwPasp7yjahc?title=Test"
+        val item1 = androidx.media3.common.MediaItem.Builder().setUri(dupUri).setMediaId(dupUri).build()
+        val item2 = androidx.media3.common.MediaItem.Builder().setUri(dupUri).setMediaId(dupUri).build()
+        dupPlayer.setMediaItems(listOf(item1, item2), 1, 0L)
+        assertEquals(2, dupPlayer.mediaItemCount)
+        assertEquals(1, dupPlayer.currentMediaItemIndex)
+        dupPlayer.release()
     }
 }

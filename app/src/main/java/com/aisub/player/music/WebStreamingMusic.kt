@@ -603,33 +603,75 @@ object WebStreamingMusic {
         return parseServerItemsJson(service, raw)
     }
 
-    suspend fun loadLibraryPlaylists(context: Context, service: WebMusicService): List<ServerItem> {
-        if (isDirectService(service)) {
-            return runCatching { DirectMusicServiceApi.loadPlaylists(service) }.getOrDefault(emptyList())
+    internal fun pinLikedPlaylistAtTop(service: WebMusicService, playlists: List<ServerItem>): List<ServerItem> {
+        val likedIdx = playlists.indexOfFirst { p ->
+            val rk = p.ratingKey.lowercase()
+            val t = p.title.trim()
+            rk == "playlist|liked" ||
+                rk.contains("femusic_liked_videos") ||
+                rk.endsWith("|vllm") ||
+                rk.endsWith("|lm") ||
+                t.contains("已点赞") ||
+                t.contains("赞过") ||
+                t.contains("我喜欢") ||
+                t.contains("喜欢的音乐") ||
+                t.contains("喜爱歌曲") ||
+                t.equals("Liked Songs", ignoreCase = true) ||
+                t.equals("Liked Music", ignoreCase = true) ||
+                t.equals("Favorite Songs", ignoreCase = true)
         }
-        if (service == WebMusicService.SPOTIFY) {
-            val oauthPlaylists = runCatching { SpotifyAppRemoteBridge.loadPlaylistsViaOAuth(context) }.getOrDefault(emptyList())
-            if (oauthPlaylists.isNotEmpty()) return oauthPlaylists
-            if (isWebSpotifyLoggedIn(context)) {
+        if (likedIdx >= 0) {
+            return if (likedIdx == 0) playlists else listOf(playlists[likedIdx]) + playlists.filterIndexed { i, _ -> i != likedIdx }
+        }
+        val pinned = ServerItem(
+            ratingKey = "playlist|liked",
+            type = "playlist",
+            title = "已点赞的歌曲",
+            summary = "${service.label} 红心 / 点赞收藏歌曲",
+        )
+        return listOf(pinned) + playlists
+    }
+
+    suspend fun loadLibraryPlaylists(context: Context, service: WebMusicService): List<ServerItem> {
+        val rawList: List<ServerItem> = when {
+            isDirectService(service) ->
+                runCatching { DirectMusicServiceApi.loadPlaylists(service) }.getOrDefault(emptyList())
+            service == WebMusicService.SPOTIFY -> {
+                val oauthPlaylists = runCatching { SpotifyAppRemoteBridge.loadPlaylistsViaOAuth(context) }.getOrDefault(emptyList())
+                if (oauthPlaylists.isNotEmpty()) {
+                    oauthPlaylists
+                } else {
+                    val webPlaylists = if (isWebSpotifyLoggedIn(context)) {
+                        val engine = ensureEngine(context, service)
+                        val raw = engine.callRpc("loadPlaylists", JSONObject(), timeoutMs = 20_000L)
+                        parseServerItemsJson(service, raw)
+                    } else {
+                        emptyList()
+                    }
+                    if (webPlaylists.isNotEmpty()) {
+                        webPlaylists
+                    } else if (SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback) {
+                        runCatching {
+                            SpotifyAppRemoteBridge.loadRecommendedViaRemote(context).filter { it.type == "playlist" }
+                        }.getOrDefault(emptyList())
+                    } else {
+                        emptyList()
+                    }
+                }
+            }
+            else -> {
                 val engine = ensureEngine(context, service)
                 val raw = engine.callRpc("loadPlaylists", JSONObject(), timeoutMs = 20_000L)
-                val parsed = parseServerItemsJson(service, raw)
-                if (parsed.isNotEmpty()) return parsed
+                parseServerItemsJson(service, raw)
             }
-            if (SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback) {
-                val recPlaylists = runCatching {
-                    SpotifyAppRemoteBridge.loadRecommendedViaRemote(context).filter { it.type == "playlist" }
-                }.getOrDefault(emptyList())
-                if (recPlaylists.isNotEmpty()) return recPlaylists
-            }
-            return emptyList()
         }
-        val engine = ensureEngine(context, service)
-        val raw = engine.callRpc("loadPlaylists", JSONObject(), timeoutMs = 20_000L)
-        return parseServerItemsJson(service, raw)
+        return pinLikedPlaylistAtTop(service, rawList)
     }
 
     suspend fun loadContainerChildren(context: Context, service: WebMusicService, container: ServerItem): List<ServerItem> {
+        if (container.ratingKey == "playlist|liked") {
+            return loadLibraryTracks(context, service)
+        }
         if (isDirectService(service)) {
             return runCatching { DirectMusicServiceApi.loadContainerChildren(service, container) }.getOrDefault(emptyList())
         }
@@ -818,11 +860,16 @@ object WebStreamingMusic {
             }.getOrNull()
             if (resolved != null) {
                 engines[service]?.pauseOnly()
+                val enriched = if (resolved.durationMs > 0L) {
+                    resolved
+                } else {
+                    resolved.copy(durationMs = meta?.durationMs ?: 0L)
+                }
                 val nativeRes = NativeDirectAudioPlayer.play(
                     context = context,
                     service = service,
                     seq = effectiveSeq,
-                    stream = resolved,
+                    stream = enriched,
                     startPositionMs = startPositionMs,
                     title = title.ifBlank { meta?.title.orEmpty() },
                     artist = artist.ifBlank { meta?.artist.orEmpty() },
@@ -832,6 +879,10 @@ object WebStreamingMusic {
                 if (nativeRes.isSuccess) {
                     return Result.success(Unit)
                 }
+            } else if (service == WebMusicService.QQ_MUSIC) {
+                return Result.failure(
+                    IllegalStateException("QQ音乐暂无该曲目可播放音频流（可能需要绿钻会员、购买数字专辑或暂缺版权）"),
+                )
             }
         }
 
@@ -1062,6 +1113,18 @@ object WebStreamingMusic {
                         pendingInitResult = null
                         startTicker()
                     }
+                    emitCurrentSnapshot()
+                }
+
+                override fun onPositionDiscontinuity(
+                    oldPosition: Player.PositionInfo,
+                    newPosition: Player.PositionInfo,
+                    reason: Int,
+                ) {
+                    emitCurrentSnapshot()
+                }
+
+                override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
                     emitCurrentSnapshot()
                 }
 
@@ -1396,6 +1459,36 @@ object WebStreamingMusic {
         cm.setAcceptCookie(true)
         cm.setAcceptThirdPartyCookies(webView, true)
     }
+
+    /**
+     * 登录弹窗专用 WebView 配置：
+     * - YouTube Music (Google 账号登录) 严禁篡改 UA 伪装桌面 Windows 或注入 navigator/fetch 钩子，
+     *   必须保持原生 Android System WebView 指纹以与 HTTP Sec-CH-UA 客户端提示一致，避免触发 Google「此浏览器或应用可能不安全」拦截；
+     * - 其余服务继续使用桌面 Chrome 视图与完整 Cookie 支持。
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    internal fun configureLoginWebView(webView: WebView, service: WebMusicService) {
+        if (service == WebMusicService.YOUTUBE_MUSIC) {
+            with(webView.settings) {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                setSupportZoom(true)
+                builtInZoomControls = true
+                displayZoomControls = false
+                javaScriptCanOpenWindowsAutomatically = true
+                setSupportMultipleWindows(true)
+            }
+            val cm = CookieManager.getInstance()
+            cm.setAcceptCookie(true)
+            cm.setAcceptThirdPartyCookies(webView, true)
+        } else {
+            configureDrmWebView(webView, allowPopups = true)
+        }
+    }
+
+    internal fun needsLoginHookScript(service: WebMusicService): Boolean =
+        service == WebMusicService.APPLE_MUSIC || service == WebMusicService.SPOTIFY
 
     /**
      * 页面最早时机注入：
@@ -3303,7 +3396,7 @@ fun WebMusicLoginDialog(
                     val ytCookies = listOf("https://music.youtube.com", "https://youtube.com")
                         .joinToString("; ") { u -> runCatching { cm?.getCookie(u).orEmpty() }.getOrDefault("") }
                     val hasAuth = ytCookies.contains("SAPISID=") || ytCookies.contains("__Secure-3PAPISID=")
-                    if (hasAuth && !curUrl.contains("accounts.google.com")) {
+                    if (hasAuth && curUrl.startsWith("https://music.youtube.com")) {
                         delay(500L)
                         runCatching { cm?.flush() }
                         finishLogin()
@@ -3754,8 +3847,9 @@ fun WebMusicLoginDialog(
                                         ViewGroup.LayoutParams.MATCH_PARENT,
                                         ViewGroup.LayoutParams.MATCH_PARENT,
                                     )
-                                    WebStreamingMusic.configureDrmWebView(this, allowPopups = true)
-                                    if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                                    WebStreamingMusic.configureLoginWebView(this, service)
+                                    val injectHook = WebStreamingMusic.needsLoginHookScript(service)
+                                    if (injectHook && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                                         WebViewCompat.addDocumentStartJavaScript(this, WebStreamingMusic.DOCUMENT_START_SCRIPT, setOf("*"))
                                     }
                                     webViewClient = object : WebViewClient() {
@@ -3765,7 +3859,9 @@ fun WebMusicLoginDialog(
                                                 handlePkceCallbackUri(Uri.parse(url))
                                                 return
                                             }
-                                            view.evaluateJavascript(WebStreamingMusic.DOCUMENT_START_SCRIPT, null)
+                                            if (injectHook) {
+                                                view.evaluateJavascript(WebStreamingMusic.DOCUMENT_START_SCRIPT, null)
+                                            }
                                         }
 
                                         override fun onPageFinished(view: WebView, url: String?) {
@@ -3810,8 +3906,8 @@ fun WebMusicLoginDialog(
                                                     ViewGroup.LayoutParams.MATCH_PARENT,
                                                     ViewGroup.LayoutParams.MATCH_PARENT,
                                                 )
-                                                WebStreamingMusic.configureDrmWebView(this, allowPopups = true)
-                                                if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                                                WebStreamingMusic.configureLoginWebView(this, service)
+                                                if (injectHook && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                                                     WebViewCompat.addDocumentStartJavaScript(this, WebStreamingMusic.DOCUMENT_START_SCRIPT, setOf("*"))
                                                 }
                                                 webViewClient = object : WebViewClient() {
@@ -3848,7 +3944,7 @@ fun WebMusicLoginDialog(
                                     val entryUrl = pendingWebUrl ?: when (service) {
                                         WebMusicService.SPOTIFY -> "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
                                         WebMusicService.APPLE_MUSIC -> "https://music.apple.com/"
-                                        WebMusicService.YOUTUBE_MUSIC -> "https://music.youtube.com/"
+                                        WebMusicService.YOUTUBE_MUSIC -> "https://accounts.google.com/ServiceLogin?ltmpl=music&service=youtube&passive=true&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26next%3Dhttps%253A%252F%252Fmusic.youtube.com%252F"
                                         WebMusicService.NETEASE_MUSIC -> "https://music.163.com/"
                                         WebMusicService.QQ_MUSIC -> "https://y.qq.com/"
                                     }
