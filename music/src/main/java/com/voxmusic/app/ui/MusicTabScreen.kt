@@ -71,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.Player
+import com.voxmusic.app.AppDarkMode
 import com.voxmusic.app.AppSettings
 import com.voxmusic.app.MusicViewModel
 import com.voxmusic.app.media.CatalogItem
@@ -78,6 +79,7 @@ import com.voxmusic.app.media.MediaEntry
 import com.voxmusic.app.media.TrackMetadataRegistry
 import com.voxmusic.app.media.formatDuration
 import com.voxmusic.app.media.toMusicMediaEntry
+import com.voxmusic.app.meta.DiscoverItem
 import com.voxmusic.app.music.MusicFeatures
 import com.voxmusic.app.music.MusicSourceStore
 import com.voxmusic.app.music.TrackTags
@@ -98,9 +100,14 @@ private enum class MusicTabDialog {
     SLEEP, SPEED, INFO,
 }
 
+private const val TAB_DISCOVER_PAGE = 0
+private const val TAB_SONG_PAGE = 1
+private const val TAB_LYRICS_PAGE = 2
+private const val TAB_LIBRARY_PAGE = 3
+
 /**
- * 底部导航「音乐」主页面：
- * 黑胶唱机 / 同步歌词 / 个人乐库三合一，专注 Apple Music 与 Spotify 两大音乐源。
+ * 音乐播放器主页面（无底栏全屏四页横向滑动）：
+ * 发现（左侧） / 歌曲（默认黑胶唱机） / 歌词 / 乐库，右上角低调收起音乐源与设置入口。
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -109,6 +116,11 @@ fun MusicTabScreen(
     bottomOverlayPadding: Dp = 0.dp,
     applyNavigationBarInset: Boolean = true,
     onBarsVisibleChange: ((Boolean) -> Unit)? = null,
+    jumpToPlayerNonce: Int = 0,
+    onSmartPlay: (DiscoverItem, List<DiscoverItem>, Int) -> Unit,
+    onOpenDetail: (DiscoverItem, List<DiscoverItem>, Int) -> Unit,
+    onOpenChart: (String) -> Unit,
+    onOpenAiRecommend: (String) -> Unit,
     onOpenAppSettings: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -173,14 +185,14 @@ fun MusicTabScreen(
         } else {
             TrackTags(
                 title = "VoxMusic",
-                artist = "当前音源：${activeService.label} · 点上方「乐库」或底部「发现」直接开播",
+                artist = "当前音源：${activeService.label} · 左侧「发现」或右侧「乐库」直接开播",
                 durationMs = 0L,
             )
         }
     }
 
-    val pager = rememberPagerState(initialPage = 0) { 3 }
-    var tvPage by rememberSaveable { mutableIntStateOf(0) }
+    val pager = rememberPagerState(initialPage = TAB_SONG_PAGE) { 4 }
+    var tvPage by rememberSaveable { mutableIntStateOf(TAB_SONG_PAGE) }
     var toastMessage by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(toastMessage) {
         if (toastMessage != null) {
@@ -213,15 +225,19 @@ fun MusicTabScreen(
     }
 
     val jumpToPage: (Int) -> Unit = { targetPage ->
-        val safeTarget = targetPage.coerceIn(0, 2)
+        val safeTarget = targetPage.coerceIn(0, 3)
         if (tv) tvPage = safeTarget else scope.launch { pager.animateScrollToPage(safeTarget) }
+    }
+
+    LaunchedEffect(jumpToPlayerNonce) {
+        if (jumpToPlayerNonce > 0) jumpToPage(TAB_SONG_PAGE)
     }
 
     val startQueuePlayback: (List<MediaEntry>, Int, Boolean) -> Unit = { queue, index, switchToVinyl ->
         if (queue.isNotEmpty()) {
             vm.play(queue, index.coerceIn(queue.indices))
             val curPage = if (tv) tvPage else pager.currentPage
-            if (switchToVinyl && curPage != 0) jumpToPage(0)
+            if (switchToVinyl && curPage != TAB_SONG_PAGE) jumpToPage(TAB_SONG_PAGE)
         }
     }
 
@@ -238,7 +254,7 @@ fun MusicTabScreen(
                 val idx = histQueue.indexOfFirst { it.uri == standbyEntry.uri }.coerceAtLeast(0)
                 startQueuePlayback(histQueue, idx, false)
             }
-            else -> jumpToPage(2)
+            else -> jumpToPage(TAB_LIBRARY_PAGE)
         }
     }
 
@@ -248,6 +264,11 @@ fun MusicTabScreen(
         musicSearchCovers != null ||
         addingToPlaylist ||
         activeDialog != null
+
+    val currentPage = if (tv) tvPage else pager.currentPage
+    BackHandler(enabled = !anyOverlayOpen && currentPage != TAB_SONG_PAGE) {
+        jumpToPage(TAB_SONG_PAGE)
+    }
 
     Box(Modifier.fillMaxSize()) {
         MusicView(
@@ -272,14 +293,48 @@ fun MusicTabScreen(
             onIdlePlay = handleIdlePlay,
             externalPager = pager,
             externalTvPage = tvPage,
-            onExternalTvPageChange = { tvPage = it.coerceIn(0, 2) },
+            onExternalTvPageChange = { tvPage = it.coerceIn(0, 3) },
             externalHoldVisible = anyOverlayOpen,
             onBarsVisibleChange = onBarsVisibleChange,
             topTrailingContent = {
-                MusicSourcePill(
-                    service = activeService,
-                    onClick = { showSourceSettings = true },
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    MusicSourcePill(
+                        service = activeService,
+                        onClick = { showSourceSettings = true },
+                    )
+                    val settingsShape = RoundedCornerShape(10.dp)
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .tvFocusRing(settingsShape, color = Color.White)
+                            .clip(settingsShape)
+                            .clickable(onClick = onOpenAppSettings),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            AppIcons.Settings,
+                            contentDescription = "设置与我的",
+                            tint = Color(0xCCFFFFFF),
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+            },
+            discoverTabContent = {
+                AppTheme(uiState.settings.appBackground, AppDarkMode.DARK, uiState.settings.liquidGlass) {
+                    MusicDiscoverTab(
+                        vm = vm,
+                        bottomPadding = 16.dp,
+                        embeddedInPlayer = true,
+                        onSmartPlay = onSmartPlay,
+                        onOpenDetail = onOpenDetail,
+                        onOpenChart = onOpenChart,
+                        onOpenAiRecommend = onOpenAiRecommend,
+                    )
+                }
             },
             libraryTabContent = {
                 StreamingLibraryBrowser(
@@ -357,7 +412,7 @@ fun MusicTabScreen(
                     if (svc in loggedInServices) {
                         MusicSourceStore.select(context, svc)
                         reloadNonce++
-                        jumpToPage(2)
+                        jumpToPage(TAB_LIBRARY_PAGE)
                         showToast("已切换音乐源：${svc.label}")
                     } else {
                         loginWebService = svc
@@ -393,7 +448,7 @@ fun MusicTabScreen(
                 loginWebService = null
                 MusicSourceStore.select(context, targetService)
                 reloadNonce++
-                jumpToPage(2)
+                jumpToPage(TAB_LIBRARY_PAGE)
                 showToast("${targetService.label} 登录成功，已切换为当前音源")
             },
         )
@@ -927,7 +982,7 @@ private fun MusicSourceSettingsSheet(
             onCheckedChange = { onUpdateSettings(settings.copy(musicOnlineLookup = it)) },
         )
         SimpleSheetActionRow("睡眠定时", AppIcons.Timer, onOpenSleepTimer)
-        SimpleSheetActionRow("更多设置（代理 / AI 翻译 / 主题）", AppIcons.Settings, onOpenAppSettings)
+        SimpleSheetActionRow("我的歌单、历史与完整设置", AppIcons.Settings, onOpenAppSettings)
     }
 }
 

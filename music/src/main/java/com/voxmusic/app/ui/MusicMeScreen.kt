@@ -444,16 +444,27 @@ private fun TrackEntryCardRow(
     }
 }
 
-/** 完整应用设置页：网络代理、AI 歌词翻译与荐歌大模型、榜单数据源、外观主题。 */
+/** 完整设置页（整合原「我的」账号/歌单/历史 + 播放/榜单源/网络代理/AI 大模型/外观主题）。 */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MusicSettingsScreen(
     vm: MusicViewModel,
     onBack: () -> Unit,
+    onOpenPlaylist: (String) -> Unit = {},
+    onOpenHistory: () -> Unit = {},
 ) {
+    val context = LocalContext.current
     val uiState by vm.state.collectAsStateWithLifecycle()
     val settings = uiState.settings
     val scope = rememberCoroutineScope()
+    val loggedIn by WebStreamingMusic.loggedInServices.collectAsStateWithLifecycle()
+    val activeService by remember(context) { MusicSourceStore.ensureInit(context) }.collectAsStateWithLifecycle()
+    LaunchedEffect(context) { WebStreamingMusic.refreshAuthState(context) }
+
+    var loginTarget by remember { mutableStateOf<WebMusicService?>(null) }
+    var creatingPlaylist by remember { mutableStateOf(false) }
+    val likedPlaylist = remember(uiState.playlists) { uiState.playlists.firstOrNull { it.name == LIKED_PLAYLIST } }
+    val customPlaylists = remember(uiState.playlists) { uiState.playlists.filter { it.name != LIKED_PLAYLIST } }
 
     var proxyHost by remember(settings.proxyHost) { mutableStateOf(settings.proxyHost) }
     var proxyPort by remember(settings.proxyPort) { mutableStateOf(settings.proxyPort.toString()) }
@@ -477,6 +488,139 @@ fun MusicSettingsScreen(
                 .padding(bottom = 88.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            // 0. 我的账号与歌单（收起在设置中）
+            val mins = uiState.stats.musicMs / 60_000L
+            if (mins > 0L || uiState.stats.starts > 0) {
+                Text(
+                    text = "累计收听 $mins 分钟 · 播放 ${uiState.stats.starts} 次",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
+            }
+
+            SurfaceCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("流媒体音乐源", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Orange)
+                    WebMusicService.entries.forEachIndexed { idx, svc ->
+                        if (idx > 0) CardDivider()
+                        val isLogged = svc in loggedIn
+                        val isActive = svc == activeService
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    if (isLogged) MusicSourceStore.select(context, svc)
+                                    else loginTarget = svc
+                                }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            WebMusicServiceIcon(svc, size = 34.dp)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(svc.label, fontSize = 15.5.sp, fontWeight = FontWeight.SemiBold)
+                                    if (isLogged && isActive) {
+                                        Text(
+                                            "默认",
+                                            fontSize = 10.sp,
+                                            color = Orange,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(Orange.copy(alpha = 0.14f))
+                                                .padding(horizontal = 5.dp, vertical = 1.dp),
+                                        )
+                                    }
+                                }
+                                Text(
+                                    WebStreamingMusic.serviceStatusSubtitle(context, svc, isLogged),
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            if (isLogged) {
+                                TextButton(onClick = { loginTarget = svc }) {
+                                    Text(if (svc == WebMusicService.SPOTIFY) "管理" else "重登", fontSize = 12.sp)
+                                }
+                                TextButton(onClick = { WebStreamingMusic.logout(context, svc) }) {
+                                    Text("退出", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            } else {
+                                Button(
+                                    onClick = { loginTarget = svc },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
+                                    shape = RoundedCornerShape(50),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp),
+                                ) {
+                                    Text("登录", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            SurfaceCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(vertical = 4.dp)) {
+                    Text(
+                        "我的歌单与历史",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Orange,
+                        modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 4.dp),
+                    )
+                    MeListRow(
+                        icon = AppIcons.Favorite,
+                        iconTint = Color(0xFFFF5A6E),
+                        title = LIKED_PLAYLIST,
+                        subtitle = "${likedPlaylist?.items?.size ?: 0} 首红心歌曲",
+                        onClick = {
+                            if (likedPlaylist != null) onOpenPlaylist(likedPlaylist.id)
+                            else vm.createPlaylist(LIKED_PLAYLIST)
+                        },
+                    )
+                    CardDivider(inset = 54.dp)
+                    MeListRow(
+                        icon = AppIcons.History,
+                        iconTint = Orange,
+                        title = "最近播放",
+                        subtitle = "${uiState.history.size} 首播放记录",
+                        onClick = onOpenHistory,
+                    )
+                    if (customPlaylists.isNotEmpty()) {
+                        CardDivider(inset = 54.dp)
+                        customPlaylists.forEachIndexed { idx, pl ->
+                            if (idx > 0) CardDivider(inset = 54.dp)
+                            MeListRow(
+                                icon = AppIcons.QueueMusic,
+                                iconTint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                title = pl.name,
+                                subtitle = "${pl.items.size} 首歌曲",
+                                onClick = { onOpenPlaylist(pl.id) },
+                            )
+                        }
+                    }
+                    CardDivider(inset = 54.dp)
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { creatingPlaylist = true }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(AppIcons.Add, null, tint = Orange, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Text("新建歌单", color = Orange, fontSize = 14.5.sp, fontWeight = FontWeight.Medium)
+                    }
+                }
+            }
+
             // 1. 播放与歌词
             SurfaceCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -709,7 +853,7 @@ fun MusicSettingsScreen(
                     }
                     SettingsSwitchRow(
                         title = "液态玻璃效果",
-                        subtitle = "卡片与底部导航栏使用通透玻璃材质",
+                        subtitle = "卡片与悬浮控件使用通透玻璃材质",
                         checked = settings.liquidGlass,
                         onCheckedChange = { vm.updateSettings(settings.copy(liquidGlass = it)) },
                     )
@@ -724,6 +868,30 @@ fun MusicSettingsScreen(
                 }
             }
         }
+    }
+
+    loginTarget?.let { svc ->
+        WebMusicLoginDialog(
+            service = svc,
+            onDismiss = { loginTarget = null },
+            onLoggedIn = {
+                loginTarget = null
+                MusicSourceStore.select(context, svc)
+            },
+        )
+    }
+
+    if (creatingPlaylist) {
+        TextInputDialog(
+            title = "新建歌单",
+            label = "歌单名称",
+            confirm = "创建",
+            onDismiss = { creatingPlaylist = false },
+            onConfirm = { name ->
+                creatingPlaylist = false
+                if (name.isNotBlank()) vm.createPlaylist(name)
+            },
+        )
     }
 }
 

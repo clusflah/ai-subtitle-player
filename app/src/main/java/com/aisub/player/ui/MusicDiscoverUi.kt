@@ -2,10 +2,13 @@ package com.aisub.player.ui
 
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -57,10 +60,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -86,6 +91,7 @@ import com.aisub.player.meta.MusicRecommendationEngine
 import com.aisub.player.meta.PlatformSource
 import com.aisub.player.meta.RecommendationEngine
 import com.aisub.player.music.MusicSourceStore
+import com.aisub.player.music.SmartMusicSourceResolver
 import com.aisub.player.music.WebMusicLoginDialog
 import com.aisub.player.music.WebMusicService
 import com.aisub.player.music.WebStreamingMusic
@@ -169,8 +175,69 @@ fun DiscoverModeSwitch(
 }
 
 /**
+ * 智能调取音源并直接开播：
+ * 1. 优先选用已登录的流媒体音乐源（优先当前激活源，否则按 Apple Music / Spotify / 网易云 / QQ / YouTube 顺序）；
+ * 2. 若未登录任何流媒体，则尝试匹配本机曲库/播放历史；
+ * 3. 若均无可用源，返回 false 交由调用方弹出选源/登录弹窗。
+ */
+private fun trySmartPlayDiscoverMusic(
+    context: android.content.Context,
+    item: DiscoverItem,
+    queueItems: List<DiscoverItem>,
+    queueIndex: Int,
+    localAudios: List<MediaEntry>,
+    historyEntries: List<MediaEntry>,
+    onPlayEntries: (List<MediaEntry>, Int) -> Unit,
+): Boolean {
+    val service = SmartMusicSourceResolver.resolveForContext(context)
+    if (service != null) {
+        MusicSourceStore.selectWebService(context, service)
+        val (entries, startIdx) = WebStreamingMusic.buildQueueFromDiscoverItems(
+            service = service,
+            currentItem = item,
+            queueItems = queueItems,
+            preferredIndex = queueIndex,
+        )
+        if (entries.isNotEmpty()) {
+            Toast.makeText(context, "正在通过 ${service.label} 播放", Toast.LENGTH_SHORT).show()
+            onPlayEntries(entries, startIdx)
+            return true
+        }
+    }
+
+    val matchedAnchor = MusicRecommendationEngine.matchLocalTracks(item, localAudios, historyEntries).firstOrNull()
+    if (matchedAnchor != null) {
+        val localQueue = mutableListOf<MediaEntry>()
+        val seenUris = LinkedHashSet<String>()
+        var targetIdx = 0
+        val effectiveList = if (queueItems.isNotEmpty()) queueItems else listOf(item)
+        effectiveList.forEach { song ->
+            val hit = if (song.id == item.id) {
+                matchedAnchor
+            } else {
+                MusicRecommendationEngine.matchLocalTracks(song, localAudios, historyEntries).firstOrNull()
+            }
+            if (hit != null && seenUris.add(hit.uri)) {
+                if (hit.uri == matchedAnchor.uri) targetIdx = localQueue.size
+                localQueue.add(hit)
+            }
+        }
+        if (localQueue.isEmpty()) {
+            localQueue.add(matchedAnchor)
+            targetIdx = 0
+        }
+        Toast.makeText(context, "正在播放本机曲目", Toast.LENGTH_SHORT).show()
+        onPlayEntries(localQueue, targetIdx)
+        return true
+    }
+
+    return false
+}
+
+/**
  * 发现页「音乐」模式主视图：
  * 展示流行热歌榜、新音乐速递、飙升趋势榜、华语与欧美热播榜、原创音乐等，并支持按设置中的音乐推荐源切换。
+ * 点击歌曲卡片直接智能选源开播，长按查看歌曲详情与 AI 荐歌。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -185,12 +252,36 @@ fun MusicDiscoverTab(
     onOpenChart: (String) -> Unit,
     onOpenPlayWeb: (String) -> Unit,
     onOpenAiRecommend: (String) -> Unit = {},
+    play: ((List<MediaEntry>, Int) -> Unit)? = null,
+    onOpenMusicLibrary: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val focusManager = LocalFocusManager.current
+    val libState by lib.state.collectAsStateWithLifecycle()
     val wide = LocalWideLayout.current
     val tv = LocalTv.current
     val sourcePref = settings.musicDiscoverSource
+    var pendingPlayDialog by remember { mutableStateOf<Triple<DiscoverItem, List<DiscoverItem>, Int>?>(null) }
+
+    val smartPlayOrDialog: (DiscoverItem, List<DiscoverItem>, Int) -> Unit = { song, list, idx ->
+        if (play != null) {
+            val played = trySmartPlayDiscoverMusic(
+                context = context,
+                item = song,
+                queueItems = list,
+                queueIndex = idx,
+                localAudios = libState.audios,
+                historyEntries = libState.history.map { it.entry },
+                onPlayEntries = play,
+            )
+            if (!played) {
+                pendingPlayDialog = Triple(song, list, idx)
+            }
+        } else {
+            onOpenDetailWithQueue(song, list, idx)
+        }
+    }
 
     var queryInput by remember { mutableStateOf(MusicDiscoverRepository.sessionQueryInput) }
     var appliedQuery by remember { mutableStateOf(MusicDiscoverRepository.sessionAppliedQuery) }
@@ -568,7 +659,8 @@ fun MusicDiscoverTab(
                                             item = song,
                                             width = null,
                                             modifier = Modifier.weight(1f),
-                                            onClick = { onOpenDetailWithQueue(song, searchResults, fullIdx) },
+                                            onClick = { smartPlayOrDialog(song, searchResults, fullIdx) },
+                                            onLongClick = { onOpenDetailWithQueue(song, searchResults, fullIdx) },
                                         )
                                     } else {
                                         Spacer(Modifier.weight(1f))
@@ -704,6 +796,17 @@ fun MusicDiscoverTab(
                             cardWidth = cardSize,
                             showRanks = section.chart.id != "music_new_express",
                             onSeeAll = { onOpenChart(section.chart.id) },
+                            onPlayWithQueue = { song, idx ->
+                                val fuller = MusicDiscoverRepository.peekChartPage(section.chart, context, sourcePref)
+                                    ?.items
+                                    ?.takeIf { it.size > section.items.size }
+                                val matchInFuller = fuller?.indexOfFirst { it.id == song.id }?.takeIf { it >= 0 }
+                                if (fuller != null && matchInFuller != null) {
+                                    smartPlayOrDialog(song, fuller, matchInFuller)
+                                } else {
+                                    smartPlayOrDialog(song, section.items, idx)
+                                }
+                            },
                             onOpenDetailWithQueue = { song, idx ->
                                 val fuller = MusicDiscoverRepository.peekChartPage(section.chart, context, sourcePref)
                                     ?.items
@@ -720,6 +823,52 @@ fun MusicDiscoverTab(
                 }
             }
         }
+    }
+
+    val dialogTarget = pendingPlayDialog
+    if (dialogTarget != null && play != null) {
+        val (targetItem, targetQueue, targetIdx) = dialogTarget
+        val historyEntries = remember(libState.history) { libState.history.map { it.entry } }
+        val targetLocalMatches = remember(libState.audios, historyEntries, targetItem.title, targetItem.artist) {
+            MusicRecommendationEngine.matchLocalTracks(
+                item = targetItem,
+                localAudios = libState.audios,
+                historyEntries = historyEntries,
+            )
+        }
+        MusicDiscoverPlayDialog(
+            item = targetItem,
+            queueItems = targetQueue,
+            queueIndex = targetIdx,
+            localMatches = targetLocalMatches,
+            localAudios = libState.audios,
+            historyEntries = historyEntries,
+            lib = lib,
+            servers = libState.servers,
+            onDismiss = { pendingPlayDialog = null },
+            onPlayEntries = { list, idx ->
+                pendingPlayDialog = null
+                play(list, idx)
+            },
+            onOpenMusicLibrary = {
+                pendingPlayDialog = null
+                onOpenMusicLibrary()
+            },
+            onOpenServerDetail = { _, _ -> pendingPlayDialog = null },
+            onOpenRemote = { _, _, _ -> pendingPlayDialog = null },
+            onOpenPlayWeb = { url ->
+                pendingPlayDialog = null
+                onOpenPlayWeb(url)
+            },
+            onOpenExternal = { url ->
+                pendingPlayDialog = null
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }.onFailure {
+                    clipboard.setText(AnnotatedString(url))
+                }
+            },
+        )
     }
 }
 
@@ -776,6 +925,7 @@ private fun MusicChartRowSection(
     cardWidth: Dp,
     showRanks: Boolean,
     onSeeAll: () -> Unit,
+    onPlayWithQueue: (DiscoverItem, Int) -> Unit,
     onOpenDetailWithQueue: (DiscoverItem, Int) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -828,14 +978,16 @@ private fun MusicChartRowSection(
                     item = item,
                     width = cardWidth,
                     rank = if (showRanks) idx + 1 else null,
-                    onClick = { onOpenDetailWithQueue(item, idx) },
+                    onClick = { onPlayWithQueue(item, idx) },
+                    onLongClick = { onOpenDetailWithQueue(item, idx) },
                 )
             }
         }
     }
 }
 
-/** 1:1 正方形音乐单曲封面卡片 */
+/** 1:1 正方形音乐单曲封面卡片（点击即播，长按查看详情） */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MusicSquareCard(
     item: DiscoverItem,
@@ -843,13 +995,23 @@ fun MusicSquareCard(
     rank: Int? = null,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
 ) {
+    val haptic = LocalHapticFeedback.current
     Column(
         modifier
             .let { if (width != null) it.width(width) else it }
             .tvFocusRing(RoundedCornerShape(10.dp), scale = true)
             .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick?.let { fn ->
+                    {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        fn()
+                    }
+                },
+            )
             .padding(bottom = 2.dp),
     ) {
         Box(
@@ -950,7 +1112,28 @@ fun MusicDiscoverChartScreen(
     val wide = LocalWideLayout.current
     val tv = LocalTv.current
     val sourcePref = settings.musicDiscoverSource
-    var chartPlayDialogOpen by remember { mutableStateOf(false) }
+    val libState = lib?.state?.collectAsStateWithLifecycle()?.value
+    var playDialogTarget by remember { mutableStateOf<Triple<DiscoverItem, List<DiscoverItem>, Int>?>(null) }
+
+    val smartPlayOrDialog: (DiscoverItem, List<DiscoverItem>, Int) -> Unit = { song, list, idx ->
+        if (play != null) {
+            val played = trySmartPlayDiscoverMusic(
+                context = context,
+                item = song,
+                queueItems = list,
+                queueIndex = idx,
+                localAudios = libState?.audios.orEmpty(),
+                historyEntries = libState?.history.orEmpty().map { it.entry },
+                onPlayEntries = play,
+            )
+            if (!played) {
+                if (lib != null) playDialogTarget = Triple(song, list, idx)
+                else onOpenDetailWithQueue(song, list, idx)
+            }
+        } else {
+            onOpenDetailWithQueue(song, list, idx)
+        }
+    }
 
     val defaultId = initialChartId?.takeIf { MusicDiscoverCharts.findChart(it) != null }
         ?: MusicDiscoverCharts.allCharts.first().id
@@ -1000,9 +1183,9 @@ fun MusicDiscoverChartScreen(
         title = chart.title,
         onBack = onBack,
         actions = {
-            if (items.isNotEmpty() && lib != null && play != null) {
+            if (items.isNotEmpty() && play != null) {
                 TextButton(
-                    onClick = { chartPlayDialogOpen = true },
+                    onClick = { smartPlayOrDialog(items.first(), items, 0) },
                     modifier = Modifier.tvFocusRing(RoundedCornerShape(8.dp)),
                 ) {
                     Icon(AppIcons.PlayArrow, null, tint = Orange, modifier = Modifier.size(18.dp))
@@ -1046,7 +1229,8 @@ fun MusicDiscoverChartScreen(
                             item = song,
                             width = null,
                             rank = if (chart.id != "music_new_express") idx + 1 else null,
-                            onClick = { onOpenDetailWithQueue(song, items, idx) },
+                            onClick = { smartPlayOrDialog(song, items, idx) },
+                            onLongClick = { onOpenDetailWithQueue(song, items, idx) },
                         )
                     }
                 }
@@ -1054,48 +1238,49 @@ fun MusicDiscoverChartScreen(
         }
     }
 
-    if (chartPlayDialogOpen && items.isNotEmpty() && lib != null && play != null) {
-        val libState by lib.state.collectAsStateWithLifecycle()
-        val firstItem = items.first()
-        val firstLocalMatches = remember(libState.audios, libState.history, firstItem.title, firstItem.artist) {
+    val dialogTarget = playDialogTarget
+    if (dialogTarget != null && lib != null && play != null && libState != null) {
+        val (targetItem, targetQueue, targetIdx) = dialogTarget
+        val historyEntries = remember(libState.history) { libState.history.map { it.entry } }
+        val targetLocalMatches = remember(libState.audios, historyEntries, targetItem.title, targetItem.artist) {
             MusicRecommendationEngine.matchLocalTracks(
-                item = firstItem,
+                item = targetItem,
                 localAudios = libState.audios,
-                historyEntries = libState.history.map { it.entry },
+                historyEntries = historyEntries,
             )
         }
         MusicDiscoverPlayDialog(
-            item = firstItem,
-            queueItems = items,
-            queueIndex = 0,
-            localMatches = firstLocalMatches,
+            item = targetItem,
+            queueItems = targetQueue,
+            queueIndex = targetIdx,
+            localMatches = targetLocalMatches,
             localAudios = libState.audios,
-            historyEntries = libState.history.map { it.entry },
+            historyEntries = historyEntries,
             lib = lib,
             servers = libState.servers,
-            onDismiss = { chartPlayDialogOpen = false },
+            onDismiss = { playDialogTarget = null },
             onPlayEntries = { list, idx ->
-                chartPlayDialogOpen = false
+                playDialogTarget = null
                 play(list, idx)
             },
             onOpenMusicLibrary = {
-                chartPlayDialogOpen = false
+                playDialogTarget = null
                 onOpenMusicLibrary()
             },
             onOpenServerDetail = { sid, rk ->
-                chartPlayDialogOpen = false
+                playDialogTarget = null
                 onOpenServerDetail(sid, rk)
             },
             onOpenRemote = { srv, path, title ->
-                chartPlayDialogOpen = false
+                playDialogTarget = null
                 onOpenRemote(srv, path, title)
             },
             onOpenPlayWeb = { url ->
-                chartPlayDialogOpen = false
+                playDialogTarget = null
                 onOpenPlayWeb(url)
             },
             onOpenExternal = { url ->
-                chartPlayDialogOpen = false
+                playDialogTarget = null
                 runCatching {
                     context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 }.onFailure {
@@ -1297,31 +1482,60 @@ fun MusicDiscoverDetailScreen(
                 }
             }
 
-            // 跳转播放卡片（来源与收听平台统一收进点击「跳转播放」后的二级弹窗）
+            // 播放卡片：点击直接智能选源开播，右侧保留「选源」手动切换通道
             SurfaceCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
                 Column(
                     Modifier.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Button(
-                        onClick = { playDialogOpen = true },
-                        colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(44.dp)
-                            .tvFocusRing(RoundedCornerShape(12.dp), color = Color.White),
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(AppIcons.PlayArrow, null, modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = when {
-                                localMatches.isNotEmpty() -> "播放（本机已匹配曲目）"
-                                queueItems.size > 1 -> "跳转播放（连播列表 ${queueItems.size} 首）"
-                                else -> "跳转播放"
+                        Button(
+                            onClick = {
+                                val played = trySmartPlayDiscoverMusic(
+                                    context = context,
+                                    item = enriched,
+                                    queueItems = queueItems,
+                                    queueIndex = queueIndex,
+                                    localAudios = libState.audios,
+                                    historyEntries = libState.history.map { it.entry },
+                                    onPlayEntries = play,
+                                )
+                                if (!played) playDialogOpen = true
                             },
-                            fontWeight = FontWeight.SemiBold,
-                        )
+                            colors = ButtonDefaults.buttonColors(containerColor = Orange, contentColor = Color.White),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(44.dp)
+                                .tvFocusRing(RoundedCornerShape(12.dp), color = Color.White),
+                        ) {
+                            Icon(AppIcons.PlayArrow, null, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = when {
+                                    queueItems.size > 1 -> "立即播放（连播 ${queueItems.size} 首）"
+                                    localMatches.isNotEmpty() -> "立即播放（本机已匹配）"
+                                    else -> "立即播放"
+                                },
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = { playDialogOpen = true },
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                            modifier = Modifier
+                                .height(44.dp)
+                                .tvFocusRing(RoundedCornerShape(12.dp)),
+                        ) {
+                            Text("切换音源", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        }
                     }
 
                     statusTip?.let { tip ->
@@ -1380,6 +1594,18 @@ fun MusicDiscoverDetailScreen(
                 onOpenSettings = onOpenSettings,
                 onSelectSong = onSelectSong,
                 onSelectSongWithQueue = onSelectSongWithQueue,
+                onPlaySongWithQueue = { song, list, idx ->
+                    val played = trySmartPlayDiscoverMusic(
+                        context = context,
+                        item = song,
+                        queueItems = list,
+                        queueIndex = idx,
+                        localAudios = libState.audios,
+                        historyEntries = libState.history.map { it.entry },
+                        onPlayEntries = play,
+                    )
+                    if (!played) onSelectSongWithQueue(song, list, idx)
+                },
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
         }
@@ -1825,6 +2051,7 @@ fun MusicRecommendationsSection(
     onOpenSettings: (() -> Unit)? = null,
     onSelectSong: (DiscoverItem) -> Unit,
     onSelectSongWithQueue: (DiscoverItem, List<DiscoverItem>, Int) -> Unit = { s, _, _ -> onSelectSong(s) },
+    onPlaySongWithQueue: ((DiscoverItem, List<DiscoverItem>, Int) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val tv = LocalTv.current
@@ -1938,7 +2165,11 @@ fun MusicRecommendationsSection(
                                 MusicSquareCard(
                                     item = sim,
                                     width = cardWidth,
-                                    onClick = { onSelectSongWithQueue(sim, similarSongs, idx) },
+                                    onClick = {
+                                        if (onPlaySongWithQueue != null) onPlaySongWithQueue(sim, similarSongs, idx)
+                                        else onSelectSongWithQueue(sim, similarSongs, idx)
+                                    },
+                                    onLongClick = { onSelectSongWithQueue(sim, similarSongs, idx) },
                                 )
                             }
                         }
@@ -2080,7 +2311,11 @@ fun MusicRecommendationsSection(
                                 MusicAiSongCard(
                                     rec = rec,
                                     width = if (wide || tv) 262.dp else 232.dp,
-                                    onClick = { onSelectSongWithQueue(rec.item, aiQueue, idx) },
+                                    onClick = {
+                                        if (onPlaySongWithQueue != null) onPlaySongWithQueue(rec.item, aiQueue, idx)
+                                        else onSelectSongWithQueue(rec.item, aiQueue, idx)
+                                    },
+                                    onLongClick = { onSelectSongWithQueue(rec.item, aiQueue, idx) },
                                 )
                             }
                         }
@@ -2119,13 +2354,16 @@ fun MusicRecommendationsSection(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MusicAiSongCard(
     rec: AiRecommendedItem,
     width: Dp,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
 ) {
     val item = rec.item
+    val haptic = LocalHapticFeedback.current
     Row(
         Modifier
             .width(width)
@@ -2133,7 +2371,15 @@ private fun MusicAiSongCard(
             .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.85f))
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick?.let { fn ->
+                    {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        fn()
+                    }
+                },
+            )
             .padding(9.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.Top,
@@ -2197,7 +2443,7 @@ private fun MusicAiSongCard(
 }
 
 /** 音乐发现页「AI 推荐音乐」独立交互页面 */
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 fun MusicDiscoverAiRecommendScreen(
     initialPrompt: String = "",
@@ -2208,8 +2454,10 @@ fun MusicDiscoverAiRecommendScreen(
     onOpenDetailWithQueue: (DiscoverItem, List<DiscoverItem>, Int) -> Unit = { item, _, _ -> onOpenDetail(item) },
     onOpenSettings: () -> Unit,
     onUpdateSettings: ((AppSettings) -> Unit)? = null,
+    play: ((List<MediaEntry>, Int) -> Unit)? = null,
 ) {
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val focusManager = LocalFocusManager.current
     val scope = rememberCoroutineScope()
     val libState by lib.state.collectAsStateWithLifecycle()
@@ -2487,7 +2735,28 @@ fun MusicDiscoverAiRecommendScreen(
                             Modifier
                                 .fillMaxWidth()
                                 .tvFocusRing(RoundedCornerShape(14.dp))
-                                .clickable { onOpenDetailWithQueue(song, recSongs, idx) }
+                                .combinedClickable(
+                                    onClick = {
+                                        if (play != null) {
+                                            val played = trySmartPlayDiscoverMusic(
+                                                context = context,
+                                                item = song,
+                                                queueItems = recSongs,
+                                                queueIndex = idx,
+                                                localAudios = libState.audios,
+                                                historyEntries = libState.history.map { it.entry },
+                                                onPlayEntries = play,
+                                            )
+                                            if (!played) onOpenDetailWithQueue(song, recSongs, idx)
+                                        } else {
+                                            onOpenDetailWithQueue(song, recSongs, idx)
+                                        }
+                                    },
+                                    onLongClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        onOpenDetailWithQueue(song, recSongs, idx)
+                                    },
+                                )
                                 .padding(12.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                             verticalAlignment = Alignment.CenterVertically,

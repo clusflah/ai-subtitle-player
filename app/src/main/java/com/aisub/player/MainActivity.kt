@@ -395,6 +395,7 @@ class MainActivity : ComponentActivity() {
                             musicMode = screen.musicMode,
                             settings = ui.settings,
                             lib = lib,
+                            play = play,
                             onBack = back,
                             onOpenDetail = { item -> nav.push(Screen.DiscoverDetail(item)) },
                             onOpenDetailWithQueue = { item, q, idx -> nav.push(Screen.DiscoverDetail(item, q, idx)) },

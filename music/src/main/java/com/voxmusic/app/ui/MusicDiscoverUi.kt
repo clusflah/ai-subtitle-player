@@ -100,6 +100,7 @@ import kotlinx.coroutines.withContext
 fun MusicDiscoverTab(
     vm: MusicViewModel,
     bottomPadding: Dp = 88.dp,
+    embeddedInPlayer: Boolean = false,
     onSmartPlay: (DiscoverItem, List<DiscoverItem>, Int) -> Unit,
     onOpenDetail: (DiscoverItem, List<DiscoverItem>, Int) -> Unit,
     onOpenChart: (String) -> Unit,
@@ -228,35 +229,44 @@ fun MusicDiscoverTab(
         }
     }
 
-    Column(Modifier.fillMaxSize().statusBarsPadding()) {
-        // 顶栏：发现标题 + 当前智能播放源标识 + 搜索 + AI 荐歌
+    Column(
+        Modifier
+            .fillMaxSize()
+            .let { if (embeddedInPlayer) it else it.statusBarsPadding() },
+    ) {
+        // 顶栏：独立页显示「发现」标题；嵌入播放器左滑页时使用紧凑操作条（避免与顶部「发现/歌曲/歌词/乐库」重复）
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 8.dp),
+                .padding(horizontal = 14.dp, vertical = if (embeddedInPlayer) 4.dp else 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(
-                text = "发现",
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
+            if (!embeddedInPlayer) {
+                Text(
+                    text = "发现",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onBackground,
+                )
+            }
             if (smartTarget != null) {
                 Row(
                     Modifier
                         .clip(RoundedCornerShape(50))
-                        .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.8f))
-                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                        .background(
+                            if (embeddedInPlayer) Color(0x24FFFFFF)
+                            else MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.8f),
+                        )
+                        .padding(horizontal = 9.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
                     WebMusicServiceIcon(smartTarget, size = 14.dp)
                     Text(
                         text = "直连 ${smartTarget.label}",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.5.sp,
+                        color = if (embeddedInPlayer) Color(0xDDFFFFFF) else MaterialTheme.colorScheme.onSurfaceVariant,
                         fontWeight = FontWeight.Medium,
                     )
                 }
@@ -275,7 +285,7 @@ fun MusicDiscoverTab(
                 Icon(
                     if (searchExpanded) AppIcons.Close else AppIcons.Search,
                     contentDescription = if (searchExpanded) "关闭搜索" else "搜索",
-                    tint = MaterialTheme.colorScheme.onBackground,
+                    tint = if (embeddedInPlayer) Color.White else MaterialTheme.colorScheme.onBackground,
                 )
             }
         }
@@ -496,7 +506,11 @@ fun MusicDiscoverTab(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             items(MusicDiscoverCharts.quickTags, key = { it.chartId }) { tag ->
-                                MusicQuickTagCard(tag = tag, onClick = { onOpenChart(tag.chartId) })
+                                MusicQuickTagCard(
+                                    tag = tag,
+                                    embeddedInPlayer = embeddedInPlayer,
+                                    onClick = { onOpenChart(tag.chartId) },
+                                )
                             }
                         }
                     }
@@ -562,11 +576,23 @@ fun MusicDiscoverTab(
 }
 
 @Composable
-private fun MusicQuickTagCard(tag: MusicQuickTag, onClick: () -> Unit) {
+private fun MusicQuickTagCard(
+    tag: MusicQuickTag,
+    embeddedInPlayer: Boolean = false,
+    onClick: () -> Unit,
+) {
     val palette = currentVisualPalette()
     val dark = isAppDarkTheme()
-    val cardBg = if (dark) Color(0xFF151922) else palette.cardTint
-    val borderColor = if (dark) Color(0x24FFFFFF) else Color(0x16000000)
+    val cardBg = when {
+        embeddedInPlayer -> Color(0x22FFFFFF)
+        dark -> Color(0xFF151922)
+        else -> palette.cardTint
+    }
+    val borderColor = when {
+        embeddedInPlayer -> Color(0x28FFFFFF)
+        dark -> Color(0x24FFFFFF)
+        else -> Color(0x16000000)
+    }
 
     Row(
         Modifier

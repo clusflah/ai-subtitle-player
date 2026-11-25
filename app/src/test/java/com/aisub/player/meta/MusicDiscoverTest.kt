@@ -740,4 +740,27 @@ class MusicDiscoverTest {
         assertTrue(cycledIdx in 0..2)
         assertEquals(setOf("spotify://track/D"), played)
     }
+
+    @Test
+    fun smartMusicSourceResolverPrefersActiveThenSingleThenPriorityOrder() {
+        val resolver = com.aisub.player.music.SmartMusicSourceResolver
+        val apple = com.aisub.player.music.WebMusicService.APPLE_MUSIC
+        val spotify = com.aisub.player.music.WebMusicService.SPOTIFY
+        val netease = com.aisub.player.music.WebMusicService.NETEASE_MUSIC
+
+        // 无已登录音源 -> null
+        assertEquals(null, resolver.resolve(emptySet(), apple))
+
+        // 当前激活源已登录 -> 优先使用当前激活源
+        assertEquals(spotify, resolver.resolve(setOf(apple, spotify), spotify))
+        assertEquals(netease, resolver.resolve(setOf(apple, netease), netease))
+
+        // 仅登录单个音源 -> 直接使用该源（即使当前激活源不是流媒体或未登录）
+        assertEquals(spotify, resolver.resolve(setOf(spotify), null))
+        assertEquals(netease, resolver.resolve(setOf(netease), apple))
+
+        // 多个音源已登录且当前激活源未登录/为本地 -> 按优先级 Apple Music > Spotify > 网易云
+        assertEquals(apple, resolver.resolve(setOf(spotify, apple, netease), null))
+        assertEquals(spotify, resolver.resolve(setOf(spotify, netease), apple))
+    }
 }

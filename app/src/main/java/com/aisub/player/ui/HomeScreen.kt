@@ -611,6 +611,7 @@ fun HomeScreen(
                             discoverSearching = it
                             com.aisub.player.meta.DiscoverRepository.setSessionSearchExpanded(it)
                         },
+                        play = { list, i -> main.play(list, i); selectTab(Tab.MUSIC) },
                         onOpenDetail = { nav.push(Screen.DiscoverDetail(it)) },
                         onOpenDetailWithQueue = { item, q, idx -> nav.push(Screen.DiscoverDetail(item, q, idx)) },
                         onOpenChart = { nav.push(Screen.DiscoverChart(it)) },
@@ -618,6 +619,7 @@ fun HomeScreen(
                             com.aisub.player.web.WebLaunch.open(url, mangaMode = false, allowOpenApp = true)
                             nav.push(Screen.Web)
                         },
+                        onOpenMusicLibrary = { selectTab(Tab.MUSIC) },
                         onOpenAiRecommend = { prompt -> nav.push(Screen.DiscoverAiRecommend(prompt, musicMode = true)) },
                     )
                 } else {

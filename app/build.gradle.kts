@@ -113,8 +113,8 @@ android {
         applicationId = "com.aisub.player"
         minSdk = 23
         targetSdk = 36
-        versionCode = 198
-        versionName = "2.10.34"
+        versionCode = 199
+        versionName = "2.10.35"
 
         ndk {
             // 真机基本都是 arm64；armeabi-v7a 给 32 位老电视用；x86_64 给模拟器用

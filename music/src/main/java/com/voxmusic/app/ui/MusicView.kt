@@ -140,12 +140,8 @@ enum class MusicAction {
 private val Dim = Color(0x99FFFFFF)
 private val Faint = Color(0x66FFFFFF)
 
-/** 上方标签页：0 歌曲（唱片），1 歌词，2 乐库（仅音乐主页面提供） */
-private const val LYRICS_PAGE = 1
-private const val LIBRARY_PAGE = 2
-
 /**
- * 播放音乐时的整页：上方「歌曲 / 歌词」（音乐主页含「乐库」）左右滑，
+ * 播放音乐时的整页：上方「发现 / 歌曲 / 歌词 / 乐库」左右滑，
  * 下方固定显示歌名、喜欢、菜单、进度条和播放按钮。背景是模糊的封面。
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
@@ -173,6 +169,7 @@ fun MusicView(
     externalPager: androidx.compose.foundation.pager.PagerState? = null,
     externalTvPage: Int? = null,
     onExternalTvPageChange: ((Int) -> Unit)? = null,
+    discoverTabContent: (@Composable () -> Unit)? = null,
     libraryTabContent: (@Composable () -> Unit)? = null,
 ) {
     val activeMusic = music.tags != null
@@ -189,10 +186,16 @@ fun MusicView(
     val landscape = config.orientation == Configuration.ORIENTATION_LANDSCAPE || tv
     val screenH = config.screenHeightDp.dp
     val scope = rememberCoroutineScope()
-    val pageCount = if (libraryTabContent != null) 3 else 2
-    val internalPager = rememberPagerState(initialPage = 0) { pageCount }
+    val hasDiscover = discoverTabContent != null
+    val hasLibrary = libraryTabContent != null
+    val discoverPageIdx = if (hasDiscover) 0 else -1
+    val songPageIdx = if (hasDiscover) 1 else 0
+    val lyricsPageIdx = songPageIdx + 1
+    val libraryPageIdx = if (hasLibrary) lyricsPageIdx + 1 else -1
+    val pageCount = (if (hasDiscover) 1 else 0) + 2 + (if (hasLibrary) 1 else 0)
+    val internalPager = rememberPagerState(initialPage = songPageIdx) { pageCount }
     val pager = externalPager ?: internalPager
-    var internalTvPage by rememberSaveable { mutableIntStateOf(0) }
+    var internalTvPage by rememberSaveable { mutableIntStateOf(songPageIdx) }
     val currentPage = if (tv) (externalTvPage ?: internalTvPage).coerceIn(0, pageCount - 1) else pager.currentPage
     val selectPage: (Int) -> Unit = { targetPage ->
         val safeTarget = targetPage.coerceIn(0, pageCount - 1)
@@ -202,8 +205,10 @@ fun MusicView(
             scope.launch { pager.animateScrollToPage(safeTarget) }
         }
     }
-    val onLyricsPage = currentPage == LYRICS_PAGE
-    val onLibraryPage = libraryTabContent != null && currentPage == LIBRARY_PAGE
+    val onDiscoverPage = hasDiscover && currentPage == discoverPageIdx
+    val onLyricsPage = currentPage == lyricsPageIdx
+    val onLibraryPage = hasLibrary && currentPage == libraryPageIdx
+    val onBrowsePage = onDiscoverPage || onLibraryPage
     var showQueue by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var liked by remember(effectiveEntry?.uri) { mutableStateOf(effectiveEntry?.let { vm.isLiked(it.uri) } == true) }
@@ -217,12 +222,12 @@ fun MusicView(
     }
     val lyrics = if (!activeMusic) null else music.lyrics
     val translations = if (!activeMusic) null else music.translations
-    // 播放满 3 秒无操作时自动隐藏顶部栏与底部按钮行（TV 遥控器交互下保持控件常显，防止焦点丢失跳动）
+    // 播放满 3 秒无操作时自动隐藏顶部栏与底部按钮行（浏览发现/乐库或 TV 遥控器交互下保持控件常显）
     var touches by remember { mutableIntStateOf(0) }
     var seekDragging by remember { mutableStateOf(false) }
     var barsVisible by remember { mutableStateOf(true) }
-    LaunchedEffect(currentPage, touches, effectiveWantsPlay, showMenu, showQueue, seekDragging, externalHoldVisible, onLibraryPage, tv) {
-        if (onLibraryPage || tv) {
+    LaunchedEffect(currentPage, touches, effectiveWantsPlay, showMenu, showQueue, seekDragging, externalHoldVisible, onBrowsePage, tv) {
+        if (onBrowsePage || tv) {
             barsVisible = true
             return@LaunchedEffect
         }
@@ -232,11 +237,11 @@ fun MusicView(
             barsVisible = false
         }
     }
-    LaunchedEffect(barsVisible, onLibraryPage) {
-        onBarsVisibleChange?.invoke(barsVisible || onLibraryPage)
+    LaunchedEffect(barsVisible, onBrowsePage) {
+        onBarsVisibleChange?.invoke(barsVisible || onBrowsePage)
     }
     val controlsPanelShown = when {
-        onLibraryPage && !landscape -> false
+        onBrowsePage && !landscape -> false
         onLyricsPage && !landscape -> barsVisible
         else -> true
     }
@@ -264,7 +269,7 @@ fun MusicView(
         Box(Modifier.fillMaxSize()) {
             Backdrop(displayCover)
         }
-        val immersive = !barsVisible && !onLibraryPage && !tv
+        val immersive = !barsVisible && !onBrowsePage && !tv
         val immersiveVinyl = immersive && !onLyricsPage
         val vinylWidthFraction by animateFloatAsState(
             targetValue = when {
@@ -323,13 +328,14 @@ fun MusicView(
         val pages: @Composable (Modifier) -> Unit = { mod ->
             Column(mod) {
                 AnimatedVisibility(
-                    visible = barsVisible || onLibraryPage,
+                    visible = barsVisible || onBrowsePage,
                     enter = fadeIn(tween(240)) + expandVertically(tween(280)),
                     exit = fadeOut(tween(340)) + shrinkVertically(tween(360)),
                 ) {
                     TopTabs(
                         page = currentPage,
-                        showLibraryTab = libraryTabContent != null,
+                        showDiscoverTab = hasDiscover,
+                        showLibraryTab = hasLibrary,
                         onBack = onBack,
                         trailingContent = topTrailingContent,
                     ) { targetPage ->
@@ -337,10 +343,11 @@ fun MusicView(
                         selectPage(targetPage)
                     }
                 }
-                val vinylVisible = if (tv) currentPage == 0 else (pager.currentPage == 0 || pager.targetPage == 0)
+                val vinylVisible = if (tv) currentPage == songPageIdx else (pager.currentPage == songPageIdx || pager.targetPage == songPageIdx)
                 val renderPageContent: @Composable (Int) -> Unit = { page ->
                     when (page) {
-                        LYRICS_PAGE -> LyricsPage(
+                        discoverPageIdx -> discoverTabContent?.invoke()
+                        lyricsPageIdx -> LyricsPage(
                             vm = vm,
                             music = music,
                             lyrics = lyrics,
@@ -356,7 +363,7 @@ fun MusicView(
                             toolsShown = barsVisible,
                             activeMusic = activeMusic,
                         )
-                        LIBRARY_PAGE -> libraryTabContent?.invoke()
+                        libraryPageIdx -> libraryTabContent?.invoke()
                         else -> Box(Modifier.fillMaxSize(), contentAlignment = BiasAlignment(0f, vinylBiasY)) {
                             Vinyl(
                                 cover = displayCover,
@@ -457,7 +464,7 @@ fun MusicView(
                         onQueue = {
                             touches++
                             if (activeMusic && vm.queueSize > 0) showQueue = true
-                            else if (libraryTabContent != null) selectPage(LIBRARY_PAGE)
+                            else if (hasLibrary) selectPage(libraryPageIdx)
                         },
                     )
                 }
@@ -470,7 +477,7 @@ fun MusicView(
         if (landscape) {
             // 横屏与 TV 下左侧 Pager 宽度保持恒定，严禁随 pager.currentPage 动态跳变，彻底消除 Pager 重测导致的 60Hz 抖动重叠
             Row(insetMod.padding(horizontal = landscapeOuterPad)) {
-                pages(Modifier.weight(if (libraryTabContent != null) 1.25f else 1f).fillMaxHeight())
+                pages(Modifier.weight(if (hasDiscover || hasLibrary) 1.25f else 1f).fillMaxHeight())
                 controls(Modifier.weight(1f).align(Alignment.CenterVertically).padding(bottom = controlsBottomPad))
             }
         } else {
@@ -522,19 +529,26 @@ private fun Backdrop(bmp: android.graphics.Bitmap?) {
 @Composable
 private fun TopTabs(
     page: Int,
+    showDiscoverTab: Boolean = false,
     showLibraryTab: Boolean,
     onBack: (() -> Unit)?,
     trailingContent: (@Composable () -> Unit)?,
     onSelect: (Int) -> Unit,
 ) {
-    val tabs = if (showLibraryTab) listOf("歌曲", "歌词", "乐库") else listOf("歌曲", "歌词")
+    val tabs = buildList {
+        if (showDiscoverTab) add("发现")
+        add("歌曲")
+        add("歌词")
+        if (showLibraryTab) add("乐库")
+    }
+    val compact = tabs.size >= 4
     if (onBack == null && trailingContent != null) {
         Row(
-            Modifier.fillMaxWidth().height(56.dp).padding(start = 22.dp, end = 16.dp),
+            Modifier.fillMaxWidth().height(56.dp).padding(start = if (compact) 16.dp else 22.dp, end = if (compact) 12.dp else 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Row(
-                horizontalArrangement = Arrangement.spacedBy(24.dp),
+                horizontalArrangement = Arrangement.spacedBy(if (compact) 16.dp else 24.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 tabs.forEachIndexed { i, label ->
@@ -542,8 +556,10 @@ private fun TopTabs(
                     Text(
                         label,
                         color = if (selected) Color.White else Dim,
-                        fontSize = if (selected) 19.sp else 17.sp,
+                        fontSize = if (selected) (if (compact) 18.sp else 19.sp) else (if (compact) 16.sp else 17.sp),
                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier
                             .tvFocusRing(RoundedCornerShape(6.dp), color = Color.White)
                             .clip(RoundedCornerShape(6.dp))
@@ -562,11 +578,13 @@ private fun TopTabs(
                     Icon(AppIcons.ExpandMore, "返回", tint = Color.White, modifier = Modifier.size(30.dp))
                 }
             }
-            Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(if (showLibraryTab) 22.dp else 28.dp)) {
+            Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(if (compact) 16.dp else if (showLibraryTab) 22.dp else 28.dp)) {
                 tabs.forEachIndexed { i, label ->
                     Text(
-                        label, color = if (i == page) Color.White else Dim, fontSize = 18.sp,
+                        label, color = if (i == page) Color.White else Dim, fontSize = if (compact) 17.sp else 18.sp,
                         fontWeight = if (i == page) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier
                             .tvFocusRing(RoundedCornerShape(6.dp), color = Color.White)
                             .clip(RoundedCornerShape(6.dp))

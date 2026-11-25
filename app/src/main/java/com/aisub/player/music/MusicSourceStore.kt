@@ -88,6 +88,35 @@ enum class WebMusicService(
 }
 
 /**
+ * 智能音乐源决策器：点击榜单/歌单/搜索/AI 荐歌时自动选用已登录音源直接开播，无需弹窗选源。
+ */
+object SmartMusicSourceResolver {
+    private val priorityOrder: List<WebMusicService> = listOf(
+        WebMusicService.APPLE_MUSIC,
+        WebMusicService.SPOTIFY,
+        WebMusicService.NETEASE_MUSIC,
+        WebMusicService.QQ_MUSIC,
+        WebMusicService.YOUTUBE_MUSIC,
+    )
+
+    fun resolve(
+        loggedIn: Set<WebMusicService>,
+        activeService: WebMusicService?,
+    ): WebMusicService? {
+        if (loggedIn.isEmpty()) return null
+        if (activeService != null && activeService in loggedIn) return activeService
+        if (loggedIn.size == 1) return loggedIn.first()
+        return priorityOrder.firstOrNull { it in loggedIn } ?: loggedIn.first()
+    }
+
+    fun resolveForContext(context: Context): WebMusicService? {
+        val loggedIn = WebStreamingMusic.refreshAuthState(context)
+        val active = MusicSourceStore.active(context).webService
+        return resolve(loggedIn, active)
+    }
+}
+
+/**
  * 音乐页当前选中的音乐源：
  * - [MusicSourceKind.LOCAL]：本机音乐库；
  * - [MusicSourceKind.SERVER]：Plex、Navidrome / Subsonic、Emby、Jellyfin 音乐库，或 WebDAV / OpenList / 网盘音乐目录；
