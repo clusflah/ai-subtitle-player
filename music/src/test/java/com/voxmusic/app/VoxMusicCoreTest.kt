@@ -4,6 +4,7 @@ import com.voxmusic.app.media.MediaEntry
 import com.voxmusic.app.media.MusicAppStore
 import com.voxmusic.app.media.SavedPlaybackSession
 import com.voxmusic.app.media.TrackMetadataRegistry
+import com.voxmusic.app.media.WebStreamingMusicPlayer
 import com.voxmusic.app.meta.DiscoverItem
 import com.voxmusic.app.meta.MusicDiscoverCharts
 import com.voxmusic.app.meta.MusicDiscoverRepository
@@ -224,6 +225,61 @@ class VoxMusicCoreTest {
                 currentUri = "spotify://search?title=Song4",
                 playerMediaItemCount = 6,
                 playerIndex = 4,
+            ),
+        )
+    }
+
+    @Test
+    fun normalizeAppleStorefrontValidatesTwoLetterCodes() {
+        assertEquals("tr", WebStreamingMusic.normalizeAppleStorefront("TR"))
+        assertEquals("tw", WebStreamingMusic.normalizeAppleStorefront(" tw "))
+        assertNull(WebStreamingMusic.normalizeAppleStorefront("library"))
+        assertNull(WebStreamingMusic.normalizeAppleStorefront(""))
+        assertNull(WebStreamingMusic.normalizeAppleStorefront(null))
+    }
+
+    @Test
+    fun externalPauseAndResumeSyncPlayWhenReadyCorrectly() {
+        // 底层已暂停且超出起播保护期 -> 同步为暂停（false）
+        assertEquals(
+            false,
+            WebStreamingMusicPlayer.resolveExternalPlayWhenReady(
+                currentPlayWhenReady = true,
+                hasStartedAudio = true,
+                snapPlaying = false,
+                snapBuffering = false,
+                snapEnded = false,
+                inSeekHold = false,
+                sinceUserPlayMs = 2_000L,
+                sinceUserPauseMs = 10_000L,
+            ),
+        )
+        // 用户刚点播放的保护期内不误判为外部暂停
+        assertEquals(
+            true,
+            WebStreamingMusicPlayer.resolveExternalPlayWhenReady(
+                currentPlayWhenReady = true,
+                hasStartedAudio = true,
+                snapPlaying = false,
+                snapBuffering = false,
+                snapEnded = false,
+                inSeekHold = false,
+                sinceUserPlayMs = 300L,
+                sinceUserPauseMs = 10_000L,
+            ),
+        )
+        // 外部蓝牙/客户端恢复播放 -> 同步为播放（true）
+        assertEquals(
+            true,
+            WebStreamingMusicPlayer.resolveExternalPlayWhenReady(
+                currentPlayWhenReady = false,
+                hasStartedAudio = true,
+                snapPlaying = true,
+                snapBuffering = false,
+                snapEnded = false,
+                inSeekHold = false,
+                sinceUserPlayMs = 10_000L,
+                sinceUserPauseMs = 2_000L,
             ),
         )
     }

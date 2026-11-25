@@ -60,6 +60,8 @@ class WebStreamingMusicPlayer(
     private var remoteActuallyPlaying: Boolean = false
     private var lastAnchoredPosMs: Long = 0L
     private var lastAnchoredElapsedMs: Long = 0L
+    private var lastUserPlayCommandElapsedMs: Long = 0L
+    private var lastUserPauseCommandElapsedMs: Long = 0L
     private var trackTransitionPending: Boolean = false
     private var lastSyncedMetaKey: String = ""
     private var consecutiveAutoAdvanceFailures: Int = 0
@@ -140,16 +142,33 @@ class WebStreamingMusicPlayer(
             if (snap.positionMs > maxPosReachedMs) maxPosReachedMs = snap.positionMs
         }
 
-        if (nowFlowing != remoteActuallyPlaying) {
-            remoteActuallyPlaying = nowFlowing
+        // 检测底层播放器被外部暂停或恢复（例如蓝牙耳机按键、Spotify 客户端直接暂停、系统音频焦点抢占），
+        // 及时双向同步 playWhenReady，避免通知栏/灵动岛在已暂停时仍显示「播放中」且进度条反复跳动回弹。
+        val syncedPlayWhenReady = resolveExternalPlayWhenReady(
+            currentPlayWhenReady = playWhenReady,
+            hasStartedAudio = hasStartedCurrentTrackAudio,
+            snapPlaying = snap.playing,
+            snapBuffering = snap.buffering,
+            snapEnded = snap.ended,
+            inSeekHold = nowWall < seekHoldUntilMs,
+            sinceUserPlayMs = (nowElapsed - lastUserPlayCommandElapsedMs).coerceAtLeast(0L),
+            sinceUserPauseMs = (nowElapsed - lastUserPauseCommandElapsedMs).coerceAtLeast(0L),
+        )
+        if (syncedPlayWhenReady != playWhenReady) {
+            playWhenReady = syncedPlayWhenReady
+            changed = true
+        }
+
+        val effectiveFlowing = snap.playing && !snap.buffering && playWhenReady
+        if (effectiveFlowing != remoteActuallyPlaying) {
+            remoteActuallyPlaying = effectiveFlowing
             changed = true
         }
 
         val targetState = when {
             !playWhenReady -> Player.STATE_READY
-            nowFlowing -> Player.STATE_READY
-            snap.buffering -> Player.STATE_BUFFERING
-            else -> Player.STATE_READY
+            effectiveFlowing -> Player.STATE_READY
+            else -> Player.STATE_BUFFERING
         }
         if (playbackState != targetState && playbackState != Player.STATE_ENDED) {
             playbackState = targetState
@@ -240,6 +259,7 @@ class WebStreamingMusicPlayer(
         val safeStart = positionMs.coerceAtLeast(0L)
         currentPosMs = safeStart
         startPositionMs = safeStart
+        lastUserPlayCommandElapsedMs = android.os.SystemClock.elapsedRealtime()
         hasStartedCurrentTrackAudio = false
         remoteActuallyPlaying = false
         maxPosReachedMs = 0L
@@ -454,13 +474,22 @@ class WebStreamingMusicPlayer(
     }
 
     override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
-        this.playWhenReady = playWhenReady
+        val nowElapsed = android.os.SystemClock.elapsedRealtime()
         if (!playWhenReady) {
+            if (remoteActuallyPlaying && hasStartedCurrentTrackAudio && lastAnchoredElapsedMs > 0L) {
+                val delta = ((nowElapsed - lastAnchoredElapsedMs).coerceAtLeast(0L) * speed).toLong()
+                val snapped = lastAnchoredPosMs + delta
+                currentPosMs = if (currentDurMs != C.TIME_UNSET && currentDurMs > 0L) snapped.coerceIn(0L, currentDurMs) else snapped
+            }
+            lastUserPauseCommandElapsedMs = nowElapsed
             remoteActuallyPlaying = false
             if (playbackState == Player.STATE_BUFFERING && items.isNotEmpty()) {
                 playbackState = Player.STATE_READY
             }
+        } else {
+            lastUserPlayCommandElapsedMs = nowElapsed
         }
+        this.playWhenReady = playWhenReady
         val svc = activeService()
         if (playbackState == Player.STATE_ENDED && playWhenReady) {
             startCurrentTrack(0L)
@@ -548,6 +577,32 @@ class WebStreamingMusicPlayer(
     }
 
     companion object {
+        private const val EXTERNAL_SYNC_GRACE_MS = 1_000L
+
+        /**
+         * 根据底层流媒体引擎回传的真实播放态，同步外部暂停/恢复（蓝牙按键、音频焦点丢失、外部客户端暂停等）：
+         * 避免底层已暂停但 playWhenReady 仍为 true 导致系统通知栏/灵动岛误显「正在播放」并来回跳动。
+         */
+        internal fun resolveExternalPlayWhenReady(
+            currentPlayWhenReady: Boolean,
+            hasStartedAudio: Boolean,
+            snapPlaying: Boolean,
+            snapBuffering: Boolean,
+            snapEnded: Boolean,
+            inSeekHold: Boolean,
+            sinceUserPlayMs: Long,
+            sinceUserPauseMs: Long,
+        ): Boolean {
+            if (!hasStartedAudio || snapBuffering || snapEnded || inSeekHold) return currentPlayWhenReady
+            if (currentPlayWhenReady && !snapPlaying && sinceUserPlayMs >= EXTERNAL_SYNC_GRACE_MS) {
+                return false
+            }
+            if (!currentPlayWhenReady && snapPlaying && sinceUserPauseMs >= EXTERNAL_SYNC_GRACE_MS) {
+                return true
+            }
+            return currentPlayWhenReady
+        }
+
         /**
          * 随机切歌时优先从未播放过的曲目中挑选（使无限随机新追加的推荐曲目优先被播到）；
          * 若队列内曲目均已播过一轮，则清空本轮记录后在非当前曲目中重新随机。
