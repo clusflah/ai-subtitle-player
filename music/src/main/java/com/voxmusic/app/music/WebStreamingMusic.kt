@@ -1907,6 +1907,27 @@ object WebStreamingMusic {
     }
   } catch (e) {}
 
+  try {
+    if (navigator.requestMediaKeySystemAccess) {
+      var origRmksa = navigator.requestMediaKeySystemAccess.bind(navigator);
+      navigator.requestMediaKeySystemAccess = function(keySystem, configs) {
+        return origRmksa(keySystem, configs).catch(function(err) {
+          if (Array.isArray(configs)) {
+            var relaxed = configs.map(function(c) {
+              if (!c || c.persistentState !== 'required') return c;
+              var copy = {};
+              Object.keys(c).forEach(function(k) { copy[k] = c[k]; });
+              copy.persistentState = 'optional';
+              return copy;
+            });
+            return origRmksa(keySystem, relaxed);
+          }
+          throw err;
+        });
+      };
+    }
+  } catch (e) {}
+
   function inspectHeaderPair(k, v) {
     if (!k || !v) return;
     var kl = String(k).toLowerCase();
@@ -2173,6 +2194,38 @@ object WebStreamingMusic {
     return clean;
   }
 
+  // 解除 Apple Music 网页前端 setPreviewOnlyBasedOnSF 在跨区路径（如页面为 /cn/ 或 /tw/，账号为 tr）时强制开启的 previewOnly（会导致曲目退回 1:30 试听 .ep.m4a），并解除土耳其等区的年龄限制拦截
+  function unlockAppleFullPlayback(inst, wantSf) {
+    if (!inst) return;
+    try { inst.restrictedEnabled = false; } catch (e) {}
+    try { inst.playbackMode = 1; } catch (e) {}
+    try { inst.previewOnly = false; } catch (e) {}
+    try {
+      if (inst._services && inst._services.mediaItemPlayback) {
+        inst._services.mediaItemPlayback.previewOnly = false;
+      }
+      if (wantSf && inst._services && inst._services.apiManager && inst._services.apiManager.store && inst._services.apiManager.store.storekit) {
+        inst._services.apiManager.store.storekit.storefrontCountryCode = wantSf;
+      }
+    } catch (e) {}
+    if (!inst.__voxPreviewUnlocked) {
+      inst.__voxPreviewUnlocked = true;
+      try {
+        Object.defineProperty(inst, 'previewOnly', {
+          get: function() { return false; },
+          set: function() {
+            try {
+              if (this._services && this._services.mediaItemPlayback) {
+                this._services.mediaItemPlayback.previewOnly = false;
+              }
+            } catch (e2) {}
+          },
+          configurable: true
+        });
+      } catch (e) {}
+    }
+  }
+
   async function syncAppleMusicKitAuth(inst, sf, args) {
     if (!inst) return inst;
     var mut = getAppleUserToken(inst, args);
@@ -2180,13 +2233,16 @@ object WebStreamingMusic {
       try { inst.musicUserToken = mut; } catch (e) {}
     }
     var wantSf = window.__voxAppleAccountStorefront || sf || '';
+    if (mut) {
+      unlockAppleFullPlayback(inst, wantSf);
+    }
     if (wantSf && inst.storefrontId !== wantSf) {
       try {
         if (typeof inst.changeUserStorefront === 'function') await inst.changeUserStorefront(wantSf);
       } catch (e) {}
       try { inst.storefrontId = wantSf; } catch (e) {}
     }
-    // 主动刷新 MusicKit 内部订阅与账号区域缓存，避免未代理访问 /cn/ 时 hasMusicSubscription() 误判为未订阅而退回 30 秒试听
+    // 主动刷新 MusicKit 内部订阅与账号区域缓存，避免未代理访问 /cn/ 时 hasMusicSubscription() 误判为未订阅而退回试听
     if (mut && (!window.__voxAppleMeSynced || !window.__voxAppleAccountStorefront)) {
       try {
         if (typeof inst.me === 'function') {
@@ -2200,12 +2256,16 @@ object WebStreamingMusic {
               } catch (e) {}
               try { inst.storefrontId = realSf; } catch (e) {}
             }
+            unlockAppleFullPlayback(inst, realSf || wantSf);
           }
           if (meRes && meRes.subscription && meRes.subscription.active) {
             window.__voxAppleMeSynced = true;
           }
         }
       } catch (e) {}
+    }
+    if (mut) {
+      unlockAppleFullPlayback(inst, window.__voxAppleAccountStorefront || wantSf);
     }
     return inst;
   }
@@ -2840,29 +2900,62 @@ object WebStreamingMusic {
   async function resolveAppleTrackIdForStorefront(mk, sf, rawTrackId, args) {
     var tid = String(rawTrackId || '').trim();
     if (tid && tid.indexOf('i.') === 0) return tid;
-    // 若榜单来自其他区（例如台湾区 tw 榜单，但用户是土耳其区 tr 账号），验证该 songId 在用户所属区是否可完整播放；不可用时自动按歌名/歌手在用户所属区检索等价曲目 ID
+    // 1. 优先通过官方 filter[equivalents] 获取目标账号区（如 tr）的等价可播曲目 ID，防止跨区榜单 ID 落入试听或无授权
     if (tid && sf) {
+      var eqCheck = await appleApi(mk, '/v1/catalog/' + sf + '/songs', { 'filter[equivalents]': tid, platform: 'web' }, args);
+      var eqSong = eqCheck && eqCheck.data && eqCheck.data[0];
+      if (eqSong && eqSong.attributes && eqSong.attributes.playParams && eqSong.id) {
+        return String(eqSong.id);
+      }
       var songCheck = await appleApi(mk, '/v1/catalog/' + sf + '/songs/' + encodeURIComponent(tid), { platform: 'web' }, args);
       var songObj = songCheck && songCheck.data && songCheck.data[0];
       if (songObj && songObj.attributes && songObj.attributes.playParams) {
         return String(songObj.id || tid);
       }
+      // 2. 若不同发行商导致跨区 ID 不同且歌手名存在本地化差异（如台湾榜「防彈少年團」对应土耳其区「BTS」），用原曲 ISRC 精确映射
+      var twLookup = await appleApi(mk, '/v1/catalog/tw/songs/' + encodeURIComponent(tid), { platform: 'web' }, args);
+      var isrc = twLookup && twLookup.data && twLookup.data[0] && twLookup.data[0].attributes && twLookup.data[0].attributes.isrc;
+      if (isrc) {
+        var isrcCheck = await appleApi(mk, '/v1/catalog/' + sf + '/songs', { 'filter[isrc]': isrc, platform: 'web' }, args);
+        var isrcSong = isrcCheck && isrcCheck.data && isrcCheck.data[0];
+        if (isrcSong && isrcSong.attributes && isrcSong.attributes.playParams && isrcSong.id) {
+          return String(isrcSong.id);
+        }
+      }
     }
     if (args && args.title) {
-      var q = (args.title + ' ' + (args.artist || '')).trim();
-      var sData = await appleApi(mk, '/v1/catalog/' + sf + '/search', { term: q, types: 'songs', limit: 6 }, args);
-      var songs = (((sData || {}).results || {}).songs || {}).data || [];
-      if (songs.length) {
-        var wantT = normTrackTitle(args.title);
-        var matched = songs.find(function(s) {
-          return s && s.attributes && s.attributes.playParams && normTrackTitle(s.attributes.name) === wantT;
-        }) || songs.find(function(s) {
-          return s && s.attributes && s.attributes.playParams;
-        }) || songs[0];
-        if (matched && matched.id) return String(matched.id);
+      var queries = [];
+      var fullQ = (args.title + ' ' + (args.artist || '')).trim();
+      if (fullQ) queries.push(fullQ);
+      if (args.artist && String(args.title).trim()) queries.push(String(args.title).trim());
+      var wantT = normTrackTitle(args.title);
+      for (var qi = 0; qi < queries.length; qi++) {
+        var sData = await appleApi(mk, '/v1/catalog/' + sf + '/search', { term: queries[qi], types: 'songs', limit: 8 }, args);
+        var songs = (((sData || {}).results || {}).songs || {}).data || [];
+        if (songs.length) {
+          var matched = songs.find(function(s) {
+            return s && s.attributes && s.attributes.playParams && normTrackTitle(s.attributes.name) === wantT;
+          }) || (qi === 0 ? songs.find(function(s) {
+            return s && s.attributes && s.attributes.playParams;
+          }) : null);
+          if (matched && matched.id) return String(matched.id);
+        }
       }
     }
     return tid;
+  }
+
+  function isApplePreviewActive(mk) {
+    if (!mk) return false;
+    var curItem = runSafe(function() { return mk.nowPlayingItem; });
+    if (curItem && curItem.playbackType === 1) return true;
+    var mediaEl = bestMedia();
+    var src = String((mediaEl && (mediaEl.currentSrc || mediaEl.src)) || '');
+    if (/AudioPreview|\.ep\.m4a|plus\.aac\.p\.m4a/i.test(src)) return true;
+    var catDurMs = Number((curItem && curItem.attributes && curItem.attributes.durationInMillis) || 0);
+    var playDurSec = Number(mk.currentPlaybackDuration || (mediaEl && mediaEl.duration) || 0);
+    if (catDurMs > 110000 && playDurSec > 5 && playDurSec <= 95) return true;
+    return false;
   }
 
   async function playOnApple(args) {
@@ -2873,14 +2966,20 @@ object WebStreamingMusic {
     if (!mut && (!mk || !mk.isAuthorized)) {
       return { ok: false, error: 'Apple Music 登录状态已失效，请在音源设置中重新登录' };
     }
-    sf = window.__voxAppleAccountStorefront || (mk && mk.storefrontId) || sf || 'us';
+    sf = window.__voxAppleAccountStorefront || sf || (mk && mk.storefrontId) || 'us';
+    if (mk && mut) {
+      unlockAppleFullPlayback(mk, sf);
+      try { mk.storefrontId = sf; } catch (e) {}
+    }
     var trackId = await resolveAppleTrackIdForStorefront(mk, sf, args && args.trackId, args);
     if (!trackId) return { ok: false, error: '未在 Apple Music 曲库中找到该歌曲' };
 
     if (mk && typeof mk.setQueue === 'function') {
       var playOnce = async function(idToPlay) {
+        if (mut) unlockAppleFullPlayback(mk, sf);
         var queueArg = idToPlay.indexOf('i.') === 0 ? { librarySong: idToPlay, startPlaying: true } : { song: idToPlay, startPlaying: true };
         await mk.setQueue(queueArg);
+        if (mut) unlockAppleFullPlayback(mk, sf);
         await mk.play();
       };
       try {
@@ -2890,17 +2989,18 @@ object WebStreamingMusic {
         window.__voxAppleMeSynced = false;
         sf = await detectAppleStorefront(mk, args);
         await syncAppleMusicKitAuth(mk, sf, args);
-        sf = window.__voxAppleAccountStorefront || (mk && mk.storefrontId) || sf;
+        sf = window.__voxAppleAccountStorefront || sf || (mk && mk.storefrontId);
         trackId = await resolveAppleTrackIdForStorefront(mk, sf, args && args.trackId, args);
         await playOnce(trackId);
       }
-      // 自愈检查：若已登录会员却落入 30 秒试听 (PlaybackType.preview === 1)，强制刷新订阅状态与账号区域并重播一次
-      var curItem = runSafe(function() { return mk.nowPlayingItem; });
-      if (mut && curItem && curItem.playbackType === 1) {
+      // 自愈检查：短暂等待流媒体源确定后，若仍误落入 30 秒或 1 分半（90 秒 .ep.m4a）试听，强制解锁 previewOnly 并重播完整曲目
+      await sleep(350);
+      if (mut && !isPlayCancelled(reqSeq) && isApplePreviewActive(mk)) {
         window.__voxAppleMeSynced = false;
         await syncAppleMusicKitAuth(mk, sf, args);
-        sf = window.__voxAppleAccountStorefront || (mk && mk.storefrontId) || sf;
-        var resolvedRetryId = await resolveAppleTrackIdForStorefront(mk, sf, '', args) || trackId;
+        sf = window.__voxAppleAccountStorefront || sf || (mk && mk.storefrontId);
+        unlockAppleFullPlayback(mk, sf);
+        var resolvedRetryId = await resolveAppleTrackIdForStorefront(mk, sf, trackId, args) || trackId;
         try { await playOnce(resolvedRetryId); } catch (eRetry) {}
       }
       if (args.startPositionMs > 1000 && typeof mk.seekToTime === 'function') {

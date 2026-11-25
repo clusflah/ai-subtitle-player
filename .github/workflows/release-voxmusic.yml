@@ -75,9 +75,8 @@ jobs:
 
           ## VoxMusic v${VERSION} 更新内容
 
-          - **新增跨源自动兜底播放**：同时登录多个音乐源（Apple Music / Spotify / YouTube Music）时，若首选音源因无版权、搜不到或超时无法播放，自动按优先级切换至其余已登录音源接管播放并同步所有播控/进度，且不覆盖你的默认选中音源。
-          - **新增发现页全源融合搜索**：在发现页搜歌时并行融合榜单目录与已登录的 Spotify / YouTube Music 曲库结果，自动去重并按匹配度优先展示精准命中；即使 Apple Music 没有该曲目，只要 Spotify 或 YouTube Music 有即可搜出并直连独占源秒播。
-          - **延续三音源与无底栏体验**：完整支持 Apple Music、Spotify 与 YouTube Music 原生直连播放，无底栏四页布局（发现 / 歌曲 / 歌词 / 乐库）。
+          - **彻底修复 Apple Music 跨区变成 1 分半（90 秒）试听的问题**：拦截并锁定解除 Apple 网页前端跨区时强制开启的 `previewOnly` 限制，解除土耳其等区 `restrictedEnabled` Explicit 年龄拦截；播放前优先通过官方 `filter[equivalents]` 与原曲 `ISRC` 精准映射账号所属区曲目 ID（兼容繁简/多语种歌手名差异），并将试听自愈检测扩展覆盖 `30 秒` 与 `90 秒 (.ep.m4a)` 加长试听流，同时补齐 Android WebView Widevine `persistentState` 自动回退兼容。
+          - **延续跨源兜底与全源融合搜索**：支持 Apple Music / Spotify / YouTube Music 三源智能选源、失败自动跨源兜底接管及发现页并行全源融合搜索。
 
           > Spotify 官方客户端联动请在开发者后台添加包名 \`com.voxmusic.app\` 与 Redirect URI \`voxmusic://spotify-callback\`（App 登录页内置一键复制）。
           EOF

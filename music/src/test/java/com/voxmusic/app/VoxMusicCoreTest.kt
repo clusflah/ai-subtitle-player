@@ -447,4 +447,11 @@ class VoxMusicCoreTest {
             SmartMusicSourceResolver.resolveForItem(mergedYt.first(), allThree, activeService = WebMusicService.SPOTIFY),
         )
     }
+
+    @Test
+    fun appleDocumentStartScriptContainsWidevinePersistentStateFallback() {
+        assertTrue(WebStreamingMusic.DOCUMENT_START_SCRIPT.contains("requestMediaKeySystemAccess"))
+        assertTrue(WebStreamingMusic.DOCUMENT_START_SCRIPT.contains("persistentState"))
+        assertTrue(WebStreamingMusic.DOCUMENT_START_SCRIPT.toByteArray(Charsets.UTF_8).size < 65_000)
+    }
 }
