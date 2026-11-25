@@ -319,7 +319,8 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * 智能播放发现/榜单歌曲或列表：
-     * 自动选用已登录的 Apple Music 或 Spotify 源直接开播；若均未登录则返回 false 由界面引导登录。
+     * 自动选用已登录的 Apple Music / Spotify / YouTube Music 源直接开播；
+     * 若点击的是某已登录流媒体的独占搜索曲目，直接用该源播放且不覆盖用户的默认激活音源。
      */
     fun smartPlayDiscover(
         item: DiscoverItem,
@@ -327,8 +328,13 @@ class MusicViewModel(app: Application) : AndroidViewModel(app) {
         preferredIndex: Int = 0,
     ): WebMusicService? {
         val app = getApplication<Application>()
-        val service = SmartMusicSourceResolver.resolveForContext(app) ?: return null
-        MusicSourceStore.select(app, service)
+        val logged = WebStreamingMusic.refreshAuthState(app)
+        val active = MusicSourceStore.active(app)
+        val spotifyRemote = com.voxmusic.app.music.SpotifyAppRemoteBridge.refreshStatus(app).canAttemptRemotePlayback
+        val service = SmartMusicSourceResolver.resolveForItem(item, logged, active, spotifyRemote) ?: return null
+        if (active !in logged) {
+            MusicSourceStore.select(app, service)
+        }
         val (entries, startIdx) = WebStreamingMusic.buildQueueFromDiscoverItems(
             service = service,
             currentItem = item,

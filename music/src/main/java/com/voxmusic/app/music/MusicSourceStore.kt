@@ -1,6 +1,7 @@
 package com.voxmusic.app.music
 
 import android.content.Context
+import com.voxmusic.app.meta.DiscoverItem
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -123,6 +124,30 @@ object SmartMusicSourceResolver {
         return priorityOrder.firstOrNull { it in loggedIn } ?: loggedIn.first()
     }
 
+    /**
+     * 跨源自动兜底候选序列：
+     * 当首选音源 [primary] 搜索不到曲目、无版权或播放失败时，按优先级依次尝试其余已登录音源。
+     */
+    fun fallbackOrder(
+        primary: WebMusicService,
+        loggedIn: Set<WebMusicService>,
+        spotifyRemoteReady: Boolean = false,
+    ): List<WebMusicService> {
+        val others = loggedIn.filter { it != primary }
+        if (others.size <= 1) return others
+        return buildList(others.size) {
+            if (spotifyRemoteReady && WebMusicService.SPOTIFY in others) {
+                add(WebMusicService.SPOTIFY)
+            }
+            priorityOrder.forEach { svc ->
+                if (svc in others && svc !in this) add(svc)
+            }
+            others.forEach { svc ->
+                if (svc !in this) add(svc)
+            }
+        }
+    }
+
     fun resolveForContext(context: Context): WebMusicService? {
         val logged = WebStreamingMusic.refreshAuthState(context)
         val active = MusicSourceStore.active(context)
@@ -132,5 +157,66 @@ object SmartMusicSourceResolver {
             activeService = active,
             spotifyRemoteReady = spotifyRemote,
         )
+    }
+
+    /**
+     * 结合单曲来源信息解析最优播放源：
+     * - 若曲目仅来自单一流媒体独占搜索结果（例如 Apple Music/常规目录没有，仅在 YouTube Music 或 Spotify 搜到），
+     *   且该独占源已登录，则直接优先用该源播放，避免在其它源空搜或播错版本；
+     * - 若曲目在多源/通用榜单均存在，仍严格遵循用户当前激活音源。
+     */
+    fun resolveForItem(
+        item: DiscoverItem,
+        loggedIn: Set<WebMusicService>,
+        activeService: WebMusicService,
+        spotifyRemoteReady: Boolean = false,
+    ): WebMusicService? {
+        if (loggedIn.isEmpty()) return null
+        val exclusive = exclusiveServiceOf(item)
+        if (exclusive != null && exclusive in loggedIn) {
+            return exclusive
+        }
+        return resolve(
+            loggedIn = loggedIn,
+            activeService = activeService,
+            spotifyRemoteReady = spotifyRemoteReady,
+        )
+    }
+
+    fun resolveForItemInContext(context: Context, item: DiscoverItem): WebMusicService? {
+        val logged = WebStreamingMusic.refreshAuthState(context)
+        val active = MusicSourceStore.active(context)
+        val spotifyRemote = SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback
+        return resolveForItem(
+            item = item,
+            loggedIn = logged,
+            activeService = active,
+            spotifyRemoteReady = spotifyRemote,
+        )
+    }
+
+    internal fun exclusiveServiceOf(item: DiscoverItem): WebMusicService? {
+        val hasApple = !item.appleUrl.isNullOrBlank() ||
+            item.id.startsWith("apple:") ||
+            item.id.startsWith("itunes:") ||
+            item.platforms.any { it.name.contains("Apple", ignoreCase = true) }
+        val hasCnCatalog = !item.neteaseId.isNullOrBlank() ||
+            item.id.startsWith("netease:") ||
+            item.id.startsWith("qq:") ||
+            item.platforms.any { it.name.contains("网易") || it.name.contains("QQ", ignoreCase = true) }
+        if (hasApple || hasCnCatalog) return null
+
+        val hasSpotify = item.id.startsWith("spotify:") ||
+            item.platforms.any { it.name.equals("Spotify", ignoreCase = true) }
+        val hasYouTube = item.id.startsWith("yt:") ||
+            item.id.startsWith("youtube:") ||
+            item.id.startsWith("ytmusic:") ||
+            item.platforms.any { it.name.contains("YouTube", ignoreCase = true) }
+
+        return when {
+            hasYouTube && !hasSpotify -> WebMusicService.YOUTUBE_MUSIC
+            hasSpotify && !hasYouTube -> WebMusicService.SPOTIFY
+            else -> null
+        }
     }
 }

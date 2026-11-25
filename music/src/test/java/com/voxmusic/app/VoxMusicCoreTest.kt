@@ -351,4 +351,100 @@ class VoxMusicCoreTest {
         assertTrue(ytQueue[0].uri.startsWith("ytmusic://track/dQw4w9WgXcQ"))
         assertEquals(WebMusicService.YOUTUBE_MUSIC, WebMusicService.fromUri(ytQueue[0].uri))
     }
+
+    @Test
+    fun crossSourceFallbackOrderCoversRemainingLoggedInServices() {
+        val allThree = setOf(
+            WebMusicService.APPLE_MUSIC,
+            WebMusicService.SPOTIFY,
+            WebMusicService.YOUTUBE_MUSIC,
+        )
+        // 首选 Spotify 失败 -> 先兜底 Apple Music，再兜底 YouTube Music
+        assertEquals(
+            listOf(WebMusicService.APPLE_MUSIC, WebMusicService.YOUTUBE_MUSIC),
+            SmartMusicSourceResolver.fallbackOrder(WebMusicService.SPOTIFY, allThree),
+        )
+        // 首选 Apple Music 失败 -> 先兜底 Spotify，再兜底 YouTube Music
+        assertEquals(
+            listOf(WebMusicService.SPOTIFY, WebMusicService.YOUTUBE_MUSIC),
+            SmartMusicSourceResolver.fallbackOrder(WebMusicService.APPLE_MUSIC, allThree),
+        )
+        // 首选 YouTube Music 失败 -> 未启用 Spotify Remote 时按 Apple Music > Spotify；启用时 Spotify 优先
+        assertEquals(
+            listOf(WebMusicService.APPLE_MUSIC, WebMusicService.SPOTIFY),
+            SmartMusicSourceResolver.fallbackOrder(WebMusicService.YOUTUBE_MUSIC, allThree, spotifyRemoteReady = false),
+        )
+        assertEquals(
+            listOf(WebMusicService.SPOTIFY, WebMusicService.APPLE_MUSIC),
+            SmartMusicSourceResolver.fallbackOrder(WebMusicService.YOUTUBE_MUSIC, allThree, spotifyRemoteReady = true),
+        )
+        // 仅登录 1 个音源时无兜底候选
+        assertEquals(
+            emptyList<WebMusicService>(),
+            SmartMusicSourceResolver.fallbackOrder(WebMusicService.SPOTIFY, setOf(WebMusicService.SPOTIFY)),
+        )
+    }
+
+    @Test
+    fun discoverSearchMergesLoggedInStreamingAndRoutesExclusiveItemsDirectly() {
+        val appleLoose = listOf(
+            DiscoverItem(
+                id = "apple:1",
+                title = "Completely Different Song",
+                artist = "Other Artist",
+                appleUrl = "https://music.apple.com/tw/song/1",
+            ),
+            DiscoverItem(
+                id = "apple:2",
+                title = "晴天",
+                artist = "周杰伦",
+                appleUrl = "https://music.apple.com/tw/song/2",
+            ),
+        )
+        val spotifyHits = listOf(
+            DiscoverItem(
+                id = "spotify:spQingtian",
+                title = "晴天",
+                artist = "周杰伦",
+                platforms = listOf(PlatformSource("Spotify", "https://open.spotify.com/track/spQingtian")),
+            ),
+        )
+        val ytHits = listOf(
+            DiscoverItem(
+                id = "yt:ytExclusive99",
+                title = "神秘翻唱Live",
+                artist = "独立音乐人",
+                platforms = listOf(PlatformSource("YouTube Music", "https://music.youtube.com/watch?v=ytExclusive99")),
+            ),
+        )
+
+        // 搜索 YouTube Music 独占歌曲时：即使 Apple Music 排在前面，精准命中的 YT 曲目排到首位且保留完整直达 ID
+        val mergedYt = WebStreamingMusic.mergeDiscoverSearchResults(
+            query = "神秘翻唱Live",
+            catalog = appleLoose,
+            streamingGroups = listOf(spotifyHits, ytHits),
+        )
+        assertEquals("yt:ytExclusive99", mergedYt.first().id)
+
+        // 苹果与 Spotify 均有的「晴天」自动去重合并并保留双平台链接
+        val qingtian = mergedYt.first { it.title == "晴天" }
+        assertEquals("https://music.apple.com/tw/song/2", qingtian.appleUrl)
+        assertTrue(qingtian.platforms.any { it.name == "Spotify" })
+
+        val allThree = setOf(
+            WebMusicService.APPLE_MUSIC,
+            WebMusicService.SPOTIFY,
+            WebMusicService.YOUTUBE_MUSIC,
+        )
+        // 多源共有歌曲 -> 仍遵循当前激活的 Spotify
+        assertEquals(
+            WebMusicService.SPOTIFY,
+            SmartMusicSourceResolver.resolveForItem(qingtian, allThree, activeService = WebMusicService.SPOTIFY),
+        )
+        // 仅在 YouTube Music 搜到的独占曲目 -> 直接由 YouTube Music 播放，避免在 Spotify 空搜
+        assertEquals(
+            WebMusicService.YOUTUBE_MUSIC,
+            SmartMusicSourceResolver.resolveForItem(mergedYt.first(), allThree, activeService = WebMusicService.SPOTIFY),
+        )
+    }
 }

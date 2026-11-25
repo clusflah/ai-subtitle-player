@@ -86,9 +86,11 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import com.voxmusic.app.MusicDiscoverSource
 import com.voxmusic.app.media.MediaEntry
 import com.voxmusic.app.meta.DiscoverItem
 import com.voxmusic.app.meta.MusicDiscoverRepository
+import com.voxmusic.app.meta.PlatformSource
 import com.voxmusic.app.media.CatalogItem
 import com.voxmusic.app.media.TrackMetadataRegistry
 import com.voxmusic.app.net.AppProxy
@@ -151,6 +153,7 @@ object WebStreamingMusic {
     private val engines = ConcurrentHashMap<WebMusicService, ServiceWebEngine>()
     private val pendingRpc = ConcurrentHashMap<String, CompletableDeferred<String>>()
     private val containerChildrenCache = ConcurrentHashMap<String, List<CatalogItem>>()
+    private val mergedDiscoverSearchCache = ConcurrentHashMap<String, List<DiscoverItem>>()
 
     @Volatile
     internal var activePlaySeq: Long = 0L
@@ -420,7 +423,14 @@ object WebStreamingMusic {
             ?: preferredIndex.coerceIn(queueItems.indices)
         val entries = queueItems.mapIndexed { i, q ->
             val src = if (i == matchedIndex) currentItem else q
-            buildEntryFromDiscoverItem(service, src)
+            val itemService = if (i == matchedIndex) {
+                service
+            } else {
+                SmartMusicSourceResolver.exclusiveServiceOf(src)
+                    ?.takeIf { it in _loggedIn.value }
+                    ?: service
+            }
+            buildEntryFromDiscoverItem(itemService, src)
         }
         return entries to matchedIndex
     }
@@ -755,6 +765,156 @@ object WebStreamingMusic {
         }
     }
 
+    private fun discoverSearchCacheKey(
+        query: String,
+        sourcePref: MusicDiscoverSource,
+        loggedIn: Set<WebMusicService>,
+    ): String {
+        val loggedTag = loggedIn.map { it.name }.sorted().joinToString(",")
+        return "${sourcePref.name}|$loggedTag|${query.trim().lowercase()}"
+    }
+
+    fun peekDiscoverSearchMerged(
+        query: String,
+        sourcePref: MusicDiscoverSource,
+        loggedIn: Set<WebMusicService> = _loggedIn.value,
+    ): List<DiscoverItem>? {
+        val q = query.trim()
+        if (q.isEmpty()) return null
+        return mergedDiscoverSearchCache[discoverSearchCacheKey(q, sourcePref, loggedIn)]
+    }
+
+    /**
+     * 发现页全源融合搜索：
+     * 并行查询榜单目录（Apple Music / 网易云 / QQ）与已登录的 Spotify / YouTube Music 目录，
+     * 合并去重并保留跨平台直达链接；即使 Apple Music 没有该曲目，只要 Spotify 或 YouTube Music 有即可展示并直连播放。
+     */
+    suspend fun searchDiscoverMerged(
+        context: Context,
+        query: String,
+        sourcePref: MusicDiscoverSource = MusicDiscoverSource.AUTO,
+        limit: Int = 40,
+    ): List<DiscoverItem> {
+        val q = query.trim()
+        if (q.isEmpty()) return emptyList()
+        val loggedIn = refreshAuthState(context)
+        val cacheKey = discoverSearchCacheKey(q, sourcePref, loggedIn)
+        mergedDiscoverSearchCache[cacheKey]?.let { return it }
+
+        val active = MusicSourceStore.active(context)
+        val (catalogHits, spotifyHits, ytHits) = coroutineScope {
+            val catalogDeferred = async(Dispatchers.IO) {
+                runCatching {
+                    MusicDiscoverRepository.search(q, limit = 30, sourcePref = sourcePref)
+                }.getOrDefault(emptyList())
+            }
+            val spotifyDeferred = async(Dispatchers.IO) {
+                if (WebMusicService.SPOTIFY !in loggedIn) return@async emptyList<DiscoverItem>()
+                withTimeoutOrNull(4_500L) {
+                    val oauth = runCatching { SpotifyAppRemoteBridge.searchViaOAuth(context, q) }.getOrDefault(emptyList())
+                    val raw = if (oauth.isNotEmpty()) {
+                        oauth
+                    } else if (isWebSpotifyLoggedIn(context)) {
+                        runCatching {
+                            val eng = ensureEngine(context, WebMusicService.SPOTIFY)
+                            val resp = eng.callRpc("search", JSONObject().put("query", q), timeoutMs = 4_000L)
+                            parseCatalogItemsJson(WebMusicService.SPOTIFY, resp)
+                        }.getOrDefault(emptyList())
+                    } else {
+                        emptyList()
+                    }
+                    raw.filter { it.type == "track" }.take(20).map { catalogTrackToDiscoverItem(WebMusicService.SPOTIFY, it) }
+                }.orEmpty()
+            }
+            val ytDeferred = async(Dispatchers.IO) {
+                if (WebMusicService.YOUTUBE_MUSIC !in loggedIn) return@async emptyList<DiscoverItem>()
+                withTimeoutOrNull(4_500L) {
+                    runCatching { YouTubeMusicApi.search(q) }
+                        .getOrDefault(emptyList())
+                        .filter { it.type == "track" }
+                        .take(20)
+                        .map { catalogTrackToDiscoverItem(WebMusicService.YOUTUBE_MUSIC, it) }
+                }.orEmpty()
+            }
+            Triple(catalogDeferred.await(), spotifyDeferred.await(), ytDeferred.await())
+        }
+
+        val streamingGroups = if (active == WebMusicService.YOUTUBE_MUSIC) {
+            listOf(ytHits, spotifyHits)
+        } else {
+            listOf(spotifyHits, ytHits)
+        }
+        val merged = mergeDiscoverSearchResults(
+            query = q,
+            catalog = catalogHits,
+            streamingGroups = streamingGroups,
+            limit = limit,
+        )
+        if (merged.isNotEmpty()) {
+            mergedDiscoverSearchCache[cacheKey] = merged
+        }
+        return merged
+    }
+
+    private fun catalogTrackToDiscoverItem(service: WebMusicService, c: CatalogItem): DiscoverItem {
+        val idPrefix = when (service) {
+            WebMusicService.SPOTIFY -> "spotify"
+            WebMusicService.YOUTUBE_MUSIC -> "yt"
+            WebMusicService.APPLE_MUSIC -> "apple"
+        }
+        val webUrl = when (service) {
+            WebMusicService.SPOTIFY -> "https://open.spotify.com/track/${c.ratingKey}"
+            WebMusicService.YOUTUBE_MUSIC -> "https://music.youtube.com/watch?v=${c.ratingKey}"
+            WebMusicService.APPLE_MUSIC -> "https://music.apple.com/tw/song/${c.ratingKey}"
+        }
+        return DiscoverItem(
+            id = "$idPrefix:${c.ratingKey}",
+            kind = "music",
+            title = c.title,
+            originalTitle = c.grandparentTitle.orEmpty(),
+            year = c.year,
+            posterUrl = c.thumb,
+            backdropUrl = c.thumb,
+            artist = c.grandparentTitle.orEmpty(),
+            album = c.parentTitle.orEmpty(),
+            durationMs = c.durationMs,
+            appleUrl = if (service == WebMusicService.APPLE_MUSIC) webUrl else null,
+            platforms = listOf(PlatformSource(service.label, webUrl)),
+        )
+    }
+
+    /**
+     * 合并发现目录与已登录流媒体（Spotify / YouTube Music）的搜索结果：
+     * 1. 先按歌名+歌手去重合并跨平台链接（保留常规目录的高清封面与主顺序）；
+     * 2. 对查询词做稳定相关度分层（精确歌名 > 歌名包含 > 歌手包含 > 其余），
+     *    避免 Apple Music 返回大量弱相关结果时把 Spotify / YouTube Music 的精准命中挤到末尾或截断。
+     */
+    internal fun mergeDiscoverSearchResults(
+        query: String,
+        catalog: List<DiscoverItem>,
+        streamingGroups: List<List<DiscoverItem>>,
+        limit: Int = 40,
+    ): List<DiscoverItem> {
+        val combined = ArrayList<DiscoverItem>(catalog.size + streamingGroups.sumOf { it.size })
+        combined.addAll(catalog)
+        streamingGroups.forEach { combined.addAll(it) }
+        val deduped = MusicDiscoverRepository.deduplicateSongs(combined)
+        val normQ = MusicDiscoverRepository.normMusicText(query)
+        if (normQ.isEmpty()) return deduped.take(limit)
+
+        val ranked = deduped.sortedBy { item ->
+            val normT = MusicDiscoverRepository.normMusicText(item.title)
+            val normA = MusicDiscoverRepository.normMusicText(item.artist)
+            when {
+                normT == normQ -> 0
+                normT.contains(normQ) || (normT.length >= 2 && normQ.contains(normT)) -> 1
+                normA.isNotEmpty() && (normA.contains(normQ) || normQ.contains(normA)) -> 2
+                else -> 3
+            }
+        }
+        return ranked.take(limit)
+    }
+
     private fun discoverToCatalogItem(service: WebMusicService, item: DiscoverItem): CatalogItem {
         val tid = when (service) {
             WebMusicService.APPLE_MUSIC -> extractAppleSongId(item)
@@ -846,22 +1006,105 @@ object WebStreamingMusic {
         uriString: String,
         startPositionMs: Long = 0L,
         playSeq: Long = 0L,
-    ): Result<Unit> {
-        val service = WebMusicService.fromUri(uriString)
+        onServiceAttempt: ((WebMusicService) -> Unit)? = null,
+    ): Result<WebMusicService> {
+        val primaryService = WebMusicService.fromUri(uriString)
             ?: return Result.failure(IllegalArgumentException("不支持的流媒体协议: $uriString"))
-        if (!isLoggedIn(context, service)) {
-            return Result.failure(IllegalStateException("请先登录 ${service.label} 账号后再播放"))
-        }
         val effectiveSeq = if (playSeq > 0L) playSeq else (activePlaySeq + 1L)
         activePlaySeq = effectiveSeq
 
         val parsed = Uri.parse(uriString)
-        var trackId = if (parsed.host == "track") parsed.pathSegments.firstOrNull()?.let(::decodeParam).orEmpty() else ""
-        val title = parsed.getQueryParameter("title")?.let(::decodeParam).orEmpty()
-        val artist = parsed.getQueryParameter("artist")?.let(::decodeParam).orEmpty()
-        val album = parsed.getQueryParameter("album")?.let(::decodeParam).orEmpty()
-        val webUrl = parsed.getQueryParameter("url")?.let(::decodeParam).orEmpty()
+        val rawTrackId = if (parsed.host == "track") parsed.pathSegments.firstOrNull()?.let(::decodeParam).orEmpty() else ""
         val meta = TrackMetadataRegistry.find(uriString)
+        val effectiveTitle = parsed.getQueryParameter("title")?.let(::decodeParam).orEmpty()
+            .ifBlank { meta?.title.orEmpty() }
+        val effectiveArtist = parsed.getQueryParameter("artist")?.let(::decodeParam).orEmpty()
+            .ifBlank { meta?.artist.orEmpty() }
+        val effectiveAlbum = parsed.getQueryParameter("album")?.let(::decodeParam).orEmpty()
+            .ifBlank { meta?.album.orEmpty() }
+        val rawWebUrl = parsed.getQueryParameter("url")?.let(::decodeParam).orEmpty()
+
+        val loggedIn = refreshAuthState(context)
+        val spotifyRemoteReady = SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback
+        val fallbacks = if (effectiveTitle.isNotBlank()) {
+            SmartMusicSourceResolver.fallbackOrder(primaryService, loggedIn, spotifyRemoteReady)
+        } else {
+            emptyList()
+        }
+        val candidates = buildList {
+            if (primaryService in loggedIn) add(primaryService)
+            addAll(fallbacks)
+        }
+        if (candidates.isEmpty()) {
+            return Result.failure(IllegalStateException("请先登录 ${primaryService.label} 账号后再播放"))
+        }
+
+        var primaryFailure: Throwable? = null
+        val attemptedFallbacks = ArrayList<String>()
+
+        for (candidate in candidates) {
+            if (activePlaySeq != effectiveSeq) {
+                return Result.failure(IllegalStateException("播放请求已被新切歌取代"))
+            }
+            onServiceAttempt?.invoke(candidate)
+            val isPrimary = candidate == primaryService
+            val attemptRes = playOnSingleService(
+                context = context,
+                service = candidate,
+                effectiveSeq = effectiveSeq,
+                initialTrackId = if (isPrimary) rawTrackId else "",
+                title = effectiveTitle,
+                artist = effectiveArtist,
+                album = effectiveAlbum,
+                webUrl = if (isPrimary) rawWebUrl else "",
+                meta = meta,
+                startPositionMs = startPositionMs,
+            )
+            if (attemptRes.isSuccess) {
+                if (!isPrimary && activePlaySeq == effectiveSeq) {
+                    val notice = if (primaryService in loggedIn) {
+                        "${primaryService.label} 暂不可播，已自动切换 ${candidate.label} 播放"
+                    } else {
+                        "${primaryService.label} 未登录，已自动通过 ${candidate.label} 播放"
+                    }
+                    mainHandler.post {
+                        Toast.makeText(context.applicationContext, notice, Toast.LENGTH_SHORT).show()
+                    }
+                }
+                return Result.success(candidate)
+            }
+            val err = attemptRes.exceptionOrNull()
+            if (isPrimary) {
+                primaryFailure = err
+            } else {
+                attemptedFallbacks += candidate.label
+                if (primaryFailure == null) primaryFailure = err
+            }
+        }
+
+        val baseMsg = primaryFailure?.message?.takeIf { it.isNotBlank() }
+            ?: "无法播放该曲目，请确认账号会员状态或网络后重试"
+        val fullMsg = if (attemptedFallbacks.isNotEmpty()) {
+            "$baseMsg（已自动尝试 ${attemptedFallbacks.joinToString(" / ")} 兜底仍未播成）"
+        } else {
+            baseMsg
+        }
+        return Result.failure(IllegalStateException(fullMsg, primaryFailure))
+    }
+
+    private suspend fun playOnSingleService(
+        context: Context,
+        service: WebMusicService,
+        effectiveSeq: Long,
+        initialTrackId: String,
+        title: String,
+        artist: String,
+        album: String,
+        webUrl: String,
+        meta: TrackMetadataRegistry.Entry?,
+        startPositionMs: Long,
+    ): Result<Unit> {
+        var trackId = initialTrackId
 
         // 先停止原生直连播放器与本机 Spotify 遥控快照，并通知后台网页引擎进入切歌冻结态，彻底阻断旧曲目出声与旧进度/旧歌名上报
         NativeDirectAudioPlayer.pauseIfActive()
@@ -917,9 +1160,9 @@ object WebStreamingMusic {
                     seq = effectiveSeq,
                     stream = enriched,
                     startPositionMs = startPositionMs,
-                    title = title.ifBlank { meta?.title.orEmpty() },
-                    artist = artist.ifBlank { meta?.artist.orEmpty() },
-                    album = album.ifBlank { meta?.album.orEmpty() },
+                    title = title,
+                    artist = artist,
+                    album = album,
                     coverUrl = meta?.coverUrl,
                 )
                 if (nativeRes.isSuccess) {
