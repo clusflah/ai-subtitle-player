@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/icon.png" width="128" alt="译幕 Voxtitle 图标">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/icon-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/icon-light.png">
+    <img src="docs/icon.png" width="128" alt="译幕 Voxtitle 图标">
+  </picture>
 </p>
 
 <h1 align="center">译幕 Voxtitle</h1>

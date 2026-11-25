@@ -136,14 +136,21 @@ object DesktopGlobalSubtitles {
     var onDisableClickThrough: () -> Unit = {}
 }
 
-private fun createAppIconImage(): BufferedImage {
+private fun createAppIconImage(darkTheme: Boolean = true): BufferedImage {
+    val resPath = if (darkTheme) "/logo_dark.png" else "/logo_light.png"
+    runCatching {
+        DesktopAppRestarter::class.java.getResourceAsStream(resPath)?.use { input ->
+            javax.imageio.ImageIO.read(input)
+        }
+    }.getOrNull()?.let { return it }
+
     val size = 64
     val img = BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
     val g = img.createGraphics()
     g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-    g.color = java.awt.Color(0x16, 0x18, 0x24)
+    g.color = if (darkTheme) java.awt.Color(0x0C, 0x09, 0x20) else java.awt.Color(0xF5, 0xF3, 0xFC)
     g.fillRoundRect(0, 0, size, size, 16, 16)
-    g.color = java.awt.Color(0xFF, 0x98, 0x00)
+    g.color = java.awt.Color(0x9E, 0x5A, 0xEE)
     val xPoints = intArrayOf(22, 22, 46)
     val yPoints = intArrayOf(16, 48, 32)
     g.fillPolygon(xPoints, yPoints, 3)
@@ -546,7 +553,8 @@ fun main(args: Array<String>) {
 
     val liveTranscriber = DesktopLiveTranscriber(voxApp)
     val settingsStore = SettingsStore(voxApp)
-    val appIcon = createAppIconImage()
+    val darkAppIcon = createAppIconImage(darkTheme = true)
+    val lightAppIcon = createAppIconImage(darkTheme = false)
 
     application {
         var activeActivity by remember { mutableStateOf(mainActivity) }
@@ -571,7 +579,6 @@ fun main(args: Array<String>) {
             size = DpSize(1280.dp, 820.dp),
             position = WindowPosition(Alignment.Center),
         )
-        val iconPainter = remember { BitmapPainter(appIcon.toComposeImageBitmap()) }
         var mainAwtWindow by remember { mutableStateOf<java.awt.Window?>(null) }
         val restoreMainWindow: () -> Unit = {
             showMainWindow = true
@@ -610,6 +617,8 @@ fun main(args: Array<String>) {
             }
         }
         val windowDark = savedDarkMode.isDarkResolved(winSystemDark)
+        val appIcon = if (windowDark) darkAppIcon else lightAppIcon
+        val iconPainter = remember(windowDark) { BitmapPainter(appIcon.toComposeImageBitmap()) }
 
         DisposableEffect(Unit) {
             DesktopAppRestarter.onRestart = {

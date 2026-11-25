@@ -1,5 +1,6 @@
 package com.voxmusic.app.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -47,8 +48,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -61,6 +64,7 @@ import com.voxmusic.app.BuildConfig
 import com.voxmusic.app.MusicDiscoverSource
 import com.voxmusic.app.MusicViewModel
 import com.voxmusic.app.Provider
+import com.voxmusic.app.R
 import com.voxmusic.app.media.LIKED_PLAYLIST
 import com.voxmusic.app.media.MediaEntry
 import com.voxmusic.app.media.TrackMetadataRegistry
@@ -108,12 +112,19 @@ fun MusicMeTab(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item(key = "me_header") {
+            val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Image(
+                    painter = painterResource(if (isDark) R.drawable.ic_app_logo_dark else R.drawable.ic_app_logo_light),
+                    contentDescription = "VoxMusic",
+                    modifier = Modifier.size(40.dp),
+                )
+                Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text("我的", fontSize = 22.sp, fontWeight = FontWeight.Bold)
                     val mins = uiState.stats.musicMs / 60_000L
                     Text(
-                        text = if (mins > 0L) "累计收听 $mins 分钟 · 播放 ${uiState.stats.starts} 次" else "VoxMusic · Apple Music & Spotify",
+                        text = if (mins > 0L) "累计收听 $mins 分钟 · 播放 ${uiState.stats.starts} 次" else "VoxMusic · Apple Music / Spotify / YouTube Music",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -862,9 +873,21 @@ fun MusicSettingsScreen(
 
             // 6. 关于
             SurfaceCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("VoxMusic v${BuildConfig.VERSION_NAME}", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Text("专注 Apple Music、Spotify 与 YouTube Music 的纯净音乐播放器，支持榜单智能选源即点即播、黑胶唱机、双语同步歌词、AI 荐歌与桌面小组件。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+                Row(
+                    Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Image(
+                        painter = painterResource(if (isDark) R.drawable.ic_app_logo_dark else R.drawable.ic_app_logo_light),
+                        contentDescription = "VoxMusic",
+                        modifier = Modifier.size(48.dp),
+                    )
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("VoxMusic v${BuildConfig.VERSION_NAME}", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Text("专注 Apple Music、Spotify 与 YouTube Music 的纯净音乐播放器，支持榜单智能选源即点即播、黑胶唱机、双语同步歌词、AI 荐歌与桌面小组件。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
         }

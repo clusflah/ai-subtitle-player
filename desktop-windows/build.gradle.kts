@@ -13,7 +13,7 @@ plugins {
 }
 
 group = "com.aisub.player"
-version = "2.10.35"
+version = "2.10.36"
 
 // 复用或准备 TDLib Java 源码与 sherpa-onnx Java 接口
 val tdlibTag = "tdlib-1.8.69-4c6377aa73"
@@ -297,6 +297,7 @@ compose.desktop {
             vendor = "Voxtitle"
             includeAllModules = true
             windows {
+                iconFile.set(project.file("src/main/resources/voxtitle.ico"))
                 menuGroup = "Voxtitle"
                 shortcut = true
                 dirChooser = true

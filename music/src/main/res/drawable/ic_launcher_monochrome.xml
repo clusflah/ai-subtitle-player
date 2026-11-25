@@ -1,19 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- VoxMusic 单色主题图标：双层流光声波曲线（位于 66dp 安全区内） -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- 副谐波曲线 -->
     <path
         android:fillColor="#00000000"
-        android:pathData="M54,25.6 A28.4,28.4 0 1,1 53.99,25.6 Z"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="2.6" />
-    <path
-        android:fillColor="#00000000"
-        android:pathData="M45.5,42.2 C45.5,38.9 48.9,36.9 51.8,38.5 L70.2,49.8 C73.0,51.5 73.0,56.5 70.2,58.2 L51.8,69.5 C48.9,71.1 45.5,69.1 45.5,65.8 Z"
+        android:pathData="M29,55 C33,55 35,51.5 38.5,51.5 C42,51.5 44,57.5 47.5,57.5 C51,57.5 53.5,48.5 57.5,48.5 C61.5,48.5 64,58.5 67.5,58.5 C71,58.5 73.5,51.5 76.5,51.5 C79.5,51.5 81,55 83,55"
+        android:strokeAlpha="0.52"
         android:strokeColor="#FFFFFFFF"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:strokeWidth="3.4" />
+        android:strokeWidth="2.0" />
+    <!-- 主声波曲线 -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M24,55 L29.5,55 C32,55 33.2,58.5 35.5,58.5 C38,58.5 39.5,48 42.2,48 C45,48 46.8,63 49.5,63 C52.4,63 54.2,37.5 57.2,37.5 C60.2,37.5 62.2,65 65.2,65 C68.2,65 70.2,43.5 73.2,43.5 C76,43.5 77.8,60 80.5,60 C82.6,60 83.8,53 85.8,53 C87.2,53 88,55 90,55"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="3.0" />
 </vector>

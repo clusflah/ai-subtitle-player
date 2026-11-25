@@ -1,21 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 启动图标背景：品牌橙色渐变（API 24+ 支持 VectorDrawable gradient） -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path android:pathData="M0,0h108v108h-108z">
+    <path android:pathData="M0,0 L108,0 L108,108 L0,108 Z">
         <aapt:attr name="android:fillColor">
             <gradient
-                android:endColor="#FFF26A00"
                 android:endX="108"
                 android:endY="108"
-                android:startColor="#FFFFB040"
                 android:startX="0"
                 android:startY="0"
-                android:type="linear" />
+                android:type="linear">
+                <item android:color="#FFFDFCFF" android:offset="0.0" />
+                <item android:color="#FFF5F3FC" android:offset="0.55" />
+                <item android:color="#FFEBE8F7" android:offset="1.0" />
+            </gradient>
         </aapt:attr>
     </path>
 </vector>

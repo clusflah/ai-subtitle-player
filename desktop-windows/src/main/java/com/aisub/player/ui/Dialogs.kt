@@ -31,6 +31,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
@@ -219,13 +221,34 @@ fun AboutDialog(onDismiss: () -> Unit) {
         title = { Text("关于") },
         text = {
             val c = LocalPopupColors.current
+            val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+            val desktopLogo = remember(isDark) {
+                val res = if (isDark) "/logo_dark.png" else "/logo_light.png"
+                runCatching {
+                    BuildConfig::class.java.getResourceAsStream(res)?.use { javax.imageio.ImageIO.read(it) }?.let {
+                        androidx.compose.ui.graphics.painter.BitmapPainter(it.toComposeImageBitmap())
+                    }
+                }.getOrNull()
+            }
             val linkShape = RoundedCornerShape(12.dp)
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    "译幕 Voxtitle ${BuildConfig.VERSION_NAME}（${com.aisub.player.download.Downloaders.EDITION}）",
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.SemiBold,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    if (desktopLogo != null) {
+                        androidx.compose.foundation.Image(
+                            painter = desktopLogo,
+                            contentDescription = "译幕 Voxtitle",
+                            modifier = Modifier.size(48.dp),
+                        )
+                    }
+                    Text(
+                        "译幕 Voxtitle ${BuildConfig.VERSION_NAME}（${com.aisub.player.download.Downloaders.EDITION}）",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
                 Text(
                     "本地 / 云端语音识别生成字幕，大模型翻译。\n\n" +
                         "开源组件：Media3 ExoPlayer、sherpa-onnx、SenseVoice、Silero VAD、OkHttp、Apache Commons Compress。\n\n" +

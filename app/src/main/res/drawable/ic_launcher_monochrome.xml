@@ -1,34 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android 13 主题图标：单色，系统按壁纸着色 -->
+<!-- 译幕 Voxtitle 单色主题图标：流光胶片波带（位于 66dp 安全区内） -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <group
-        android:pivotX="57"
-        android:pivotY="51.5"
-        android:scaleX="0.66"
-        android:scaleY="0.66"
-        android:translateX="-3"
-        android:translateY="2.5">
-        <!-- 播放键：描边加圆角让三角形不那么尖 -->
-        <path
-            android:fillColor="#FF000000"
-            android:pathData="M46,28 L46,54 L69,41 Z"
-            android:strokeColor="#FF000000"
-            android:strokeLineJoin="round"
-            android:strokeWidth="7" />
-        <!-- 两行字幕 -->
-        <path
-            android:fillColor="#FF000000"
-            android:pathData="M33,64 L75,64 A3,3 0 0 1 75,70 L33,70 A3,3 0 0 1 33,64 Z" />
-        <path
-            android:fillColor="#FF000000"
-            android:pathData="M41,76 L67,76 A3,3 0 0 1 67,82 L41,82 A3,3 0 0 1 41,76 Z" />
-        <!-- AI 星光 -->
-        <path
-            android:fillColor="#FF000000"
-            android:pathData="M77,21 Q77,29 85,29 Q77,29 77,37 Q77,29 69,29 Q77,29 77,21 Z" />
-    </group>
+    <!-- 胶片波带外沿与扭转曲线 -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M24,58 C31,58 35,66 43,66 C53,66 57,41 69,41 C76,41 80,49 85,49"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="2.8" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M28,59 C34,61 40,61 47,54 C54,47 60,46 67,46 C74,46 79,50 85,49"
+        android:strokeAlpha="0.85"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="2.2" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,58 C60,62 67,61 73,55 C77,51 81,49 85,49"
+        android:strokeAlpha="0.65"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="2.0" />
+    <!-- 胶片画格横隔线 -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M45,63 L49,56 M51,58 L55,50 M57,51 L62,44 M64,46 L69,42"
+        android:strokeAlpha="0.72"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="1.6" />
 </vector>
