@@ -140,6 +140,17 @@ enum class MusicAction {
 private val Dim = Color(0x99FFFFFF)
 private val Faint = Color(0x66FFFFFF)
 
+/**
+ * 计算当前应展示的封面：只要已有正在播放/切歌中的曲目，绝不回退到待机列表首曲封面（standbyCover），
+ * 避免新曲目封面异步加载期间闪现列表第 1 首歌的封面。
+ */
+internal fun <T> resolveDisplayCover(
+    activeMusic: Boolean,
+    hasCurrentEntry: Boolean,
+    activeCover: T?,
+    standbyCover: T?,
+): T? = if (activeMusic || hasCurrentEntry) activeCover else standbyCover
+
 /** 上方标签页：0 歌曲（唱片），1 歌词，2 乐库（仅音乐主页面提供） */
 private const val LYRICS_PAGE = 1
 private const val LIBRARY_PAGE = 2
@@ -179,7 +190,12 @@ fun MusicView(
 ) {
     val activeMusic = music.tags != null
     val tags = music.tags ?: standbyTags ?: return
-    val displayCover = music.cover ?: standbyCover
+    val displayCover = resolveDisplayCover(
+        activeMusic = activeMusic,
+        hasCurrentEntry = current != null && !current.isVideo && !current.isLive,
+        activeCover = music.cover,
+        standbyCover = standbyCover,
+    )
     val effectiveEntry = current?.takeIf { activeMusic && !it.isVideo && !it.isLive }
     val effectiveWantsPlay = activeMusic && wantsPlay
     val mainState by vm.state.collectAsStateWithLifecycle()
@@ -1156,7 +1172,7 @@ private fun LyricsPage(
                         when {
                             music.translating -> MenuRow("正在翻译…", AppIcons.Translate, enabled = false) {}
                             music.translations != null -> MenuRow("隐藏翻译", AppIcons.Translate) { menu = false; vm.music.clearTranslations() }
-                            else -> MenuRow("生成翻译", AppIcons.Translate, enabled = own != null) {
+                            else -> MenuRow("翻译歌词", AppIcons.Translate, enabled = own != null) {
                                 menu = false
                                 onMessage("正在翻译歌词…")
                                 scope.launch { vm.music.translateLyrics()?.let(onMessage) }

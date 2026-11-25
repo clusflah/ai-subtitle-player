@@ -189,9 +189,14 @@ private fun trySmartPlayDiscoverMusic(
     historyEntries: List<MediaEntry>,
     onPlayEntries: (List<MediaEntry>, Int) -> Unit,
 ): Boolean {
-    val service = SmartMusicSourceResolver.resolveForContext(context)
+    val logged = WebStreamingMusic.refreshAuthState(context)
+    val active = MusicSourceStore.active(context).webService
+    val spotifyRemote = com.aisub.player.music.SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback
+    val service = SmartMusicSourceResolver.resolveForItem(item, logged, active, spotifyRemote)
     if (service != null) {
-        MusicSourceStore.selectWebService(context, service)
+        if (active == null || active !in logged) {
+            MusicSourceStore.selectWebService(context, service)
+        }
         val (entries, startIdx) = WebStreamingMusic.buildQueueFromDiscoverItems(
             service = service,
             currentItem = item,
@@ -293,8 +298,10 @@ fun MusicDiscoverTab(
     var homeRefreshing by remember(sourcePref) { mutableStateOf(false) }
     var homeError by remember(sourcePref) { mutableStateOf<String?>(null) }
 
-    val initialSearch = remember(appliedQuery, sourcePref) {
-        MusicDiscoverRepository.peekSearchResults(appliedQuery, sourcePref)
+    val loggedInServices by WebStreamingMusic.loggedInServices.collectAsStateWithLifecycle()
+    val initialSearch = remember(appliedQuery, sourcePref, loggedInServices) {
+        WebStreamingMusic.peekDiscoverSearchMerged(appliedQuery, sourcePref, loggedInServices)
+            ?: MusicDiscoverRepository.peekSearchResults(appliedQuery, sourcePref)
     }
     var searchResults by remember(sourcePref) { mutableStateOf(initialSearch.orEmpty()) }
     var searchLoading by remember { mutableStateOf(false) }
@@ -357,7 +364,7 @@ fun MusicDiscoverTab(
         homeRefreshing = false
     }
 
-    LaunchedEffect(appliedQuery, sourcePref) {
+    LaunchedEffect(appliedQuery, sourcePref, loggedInServices) {
         val q = appliedQuery.trim()
         MusicDiscoverRepository.sessionAppliedQuery = q
         if (q.isEmpty()) {
@@ -366,7 +373,7 @@ fun MusicDiscoverTab(
             searchLoading = false
             return@LaunchedEffect
         }
-        MusicDiscoverRepository.peekSearchResults(q, sourcePref)?.let { cached ->
+        WebStreamingMusic.peekDiscoverSearchMerged(q, sourcePref, loggedInServices)?.let { cached ->
             searchResults = cached
             searchError = null
             searchLoading = false
@@ -375,9 +382,7 @@ fun MusicDiscoverTab(
         searchLoading = true
         searchError = null
         runCatching {
-            withContext(Dispatchers.IO) {
-                MusicDiscoverRepository.search(q, sourcePref = sourcePref)
-            }
+            WebStreamingMusic.searchDiscoverMerged(context, q, sourcePref = sourcePref)
         }.onSuccess { list ->
             searchResults = list
         }.onFailure { e ->

@@ -1,37 +1,41 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 译幕 Voxtitle 单色主题图标：流光胶片波带（位于 66dp 安全区内） -->
+<!-- 译幕 Voxtitle 单色主题图标：45° 流光三格电影胶片（位于 66dp 安全区内） -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- 胶片波带外沿与扭转曲线 -->
-    <path
-        android:fillColor="#00000000"
-        android:pathData="M24,58 C31,58 35,66 43,66 C53,66 57,41 69,41 C76,41 80,49 85,49"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeLineCap="round"
-        android:strokeWidth="2.8" />
-    <path
-        android:fillColor="#00000000"
-        android:pathData="M28,59 C34,61 40,61 47,54 C54,47 60,46 67,46 C74,46 79,50 85,49"
-        android:strokeAlpha="0.85"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeLineCap="round"
-        android:strokeWidth="2.2" />
-    <path
-        android:fillColor="#00000000"
-        android:pathData="M54,58 C60,62 67,61 73,55 C77,51 81,49 85,49"
-        android:strokeAlpha="0.65"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeLineCap="round"
-        android:strokeWidth="2.0" />
-    <!-- 胶片画格横隔线 -->
-    <path
-        android:fillColor="#00000000"
-        android:pathData="M45,63 L49,56 M51,58 L55,50 M57,51 L62,44 M64,46 L69,42"
-        android:strokeAlpha="0.72"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeLineCap="round"
-        android:strokeWidth="1.6" />
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:rotation="-45">
+        <!-- 外框胶片带 -->
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M31,38 C31,35.8 32.8,34 35,34 L73,34 C75.2,34 77,35.8 77,38 L77,70 C77,72.2 75.2,74 73,74 L35,74 C32.8,74 31,72.2 31,70 Z"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeLineJoin="round"
+            android:strokeWidth="2.8" />
+        <!-- 齿孔轨道内边线 -->
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M31,41.5 L77,41.5 M31,66.5 L77,66.5"
+            android:strokeAlpha="0.88"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="1.8" />
+        <!-- 三格画幅分隔线 -->
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M46.3,41.5 L46.3,66.5 M61.7,41.5 L61.7,66.5"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2.2" />
+        <!-- 上下齿孔虚线 -->
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M36,37.8 L38,37.8 M42,37.8 L44,37.8 M48,37.8 L50,37.8 M54,37.8 L56,37.8 M60,37.8 L62,37.8 M66,37.8 L68,37.8 M71,37.8 L73,37.8 M36,70.2 L38,70.2 M42,70.2 L44,70.2 M48,70.2 L50,70.2 M54,70.2 L56,70.2 M60,70.2 L62,70.2 M66,70.2 L68,70.2 M71,70.2 L73,70.2"
+            android:strokeAlpha="0.82"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeLineCap="round"
+            android:strokeWidth="2.2" />
+    </group>
 </vector>

@@ -66,6 +66,8 @@ class WebStreamingMusicPlayer(
     private var lastSyncedMetaKey: String = ""
     private var consecutiveAutoAdvanceFailures: Int = 0
     private val shufflePlayedUris = HashSet<String>()
+    @Volatile
+    private var resolvedPlaybackService: WebMusicService? = null
 
     init {
         WebStreamingMusic.setSnapshotListener { snap ->
@@ -81,7 +83,7 @@ class WebStreamingMusicPlayer(
         itemUriAt(currentIndex).takeIf { it.isNotBlank() }
 
     private fun activeService(): WebMusicService? =
-        WebMusicService.fromUri(currentUriString())
+        resolvedPlaybackService ?: WebMusicService.fromUri(currentUriString())
 
     private fun onSnapshot(snap: WebStreamingMusic.PlaybackSnapshot) {
         val curService = activeService() ?: return
@@ -253,6 +255,7 @@ class WebStreamingMusicPlayer(
         shufflePlayedUris.add(uri)
         val gen = ++activePlayGeneration
         launchJob?.cancel()
+        resolvedPlaybackService = WebMusicService.fromUri(uri)
         error = null
         val safeStart = positionMs.coerceAtLeast(0L)
         currentPosMs = safeStart
@@ -271,9 +274,20 @@ class WebStreamingMusicPlayer(
         invalidateState()
 
         launchJob = scope.launch {
-            val result = WebStreamingMusic.playUri(appContext, uri, safeStart, gen)
+            val result = WebStreamingMusic.playUri(
+                context = appContext,
+                uriString = uri,
+                startPositionMs = safeStart,
+                playSeq = gen,
+                onServiceAttempt = { attemptService ->
+                    if (gen == activePlayGeneration) {
+                        resolvedPlaybackService = attemptService
+                    }
+                },
+            )
             if (gen != activePlayGeneration) return@launch
-            result.onSuccess {
+            result.onSuccess { playedService ->
+                resolvedPlaybackService = playedService
                 consecutiveAutoAdvanceFailures = 0
                 error = null
                 // 保持 STATE_BUFFERING 直至首帧真实音频开始推进，防止缓冲静默期进度条提前空跑
@@ -281,12 +295,9 @@ class WebStreamingMusicPlayer(
                     playbackState = Player.STATE_READY
                     remoteActuallyPlaying = false
                 }
-                val svc = activeService()
-                if (svc != null) {
-                    if (!playWhenReady) WebStreamingMusic.setPlaying(svc, false)
-                    if (speed != 1f) WebStreamingMusic.setSpeed(svc, speed)
-                    if (volume != 1f) WebStreamingMusic.setVolume(svc, volume)
-                }
+                if (!playWhenReady) WebStreamingMusic.setPlaying(playedService, false)
+                if (speed != 1f) WebStreamingMusic.setSpeed(playedService, speed)
+                if (volume != 1f) WebStreamingMusic.setVolume(playedService, volume)
                 invalidateState()
             }.onFailure { e ->
                 remoteActuallyPlaying = false
@@ -311,6 +322,7 @@ class WebStreamingMusicPlayer(
     fun deactivateForKernelSwitch(notify: Boolean = true) {
         activePlayGeneration++
         launchJob?.cancel()
+        resolvedPlaybackService = null
         playWhenReady = false
         hasStartedCurrentTrackAudio = false
         remoteActuallyPlaying = false
@@ -412,6 +424,7 @@ class WebStreamingMusicPlayer(
         // 切换播放列表/新曲目前立即中断上一首后台播放与残留快照，避免 prepare() 前的 playWhenReady=true 误唤醒旧曲目
         activePlayGeneration++
         launchJob?.cancel()
+        resolvedPlaybackService = null
         WebStreamingMusic.stopAll()
         items = mediaItems.toList()
         val retainedUris = items.indices.mapTo(HashSet(items.size)) { idx -> itemUriAt(idx) }
@@ -558,6 +571,7 @@ class WebStreamingMusicPlayer(
     override fun handleStop(): ListenableFuture<*> {
         activePlayGeneration++
         launchJob?.cancel()
+        resolvedPlaybackService = null
         WebStreamingMusic.stopAll()
         hasStartedCurrentTrackAudio = false
         remoteActuallyPlaying = false

@@ -763,4 +763,95 @@ class MusicDiscoverTest {
         assertEquals(apple, resolver.resolve(setOf(spotify, apple, netease), null))
         assertEquals(spotify, resolver.resolve(setOf(spotify, netease), apple))
     }
+
+    @Test
+    fun crossSourceFallbackMergedSearchAndCoverGuardWorkInMainPlayer() {
+        val resolver = com.aisub.player.music.SmartMusicSourceResolver
+        val apple = com.aisub.player.music.WebMusicService.APPLE_MUSIC
+        val spotify = com.aisub.player.music.WebMusicService.SPOTIFY
+        val yt = com.aisub.player.music.WebMusicService.YOUTUBE_MUSIC
+        val netease = com.aisub.player.music.WebMusicService.NETEASE_MUSIC
+        val qq = com.aisub.player.music.WebMusicService.QQ_MUSIC
+        val allFive = setOf(apple, spotify, yt, netease, qq)
+
+        assertEquals(
+            listOf(apple, netease, qq, yt),
+            resolver.fallbackOrder(spotify, allFive, spotifyRemoteReady = false),
+        )
+        assertEquals(
+            listOf(spotify, apple, qq, yt),
+            resolver.fallbackOrder(netease, allFive, spotifyRemoteReady = true),
+        )
+
+        val looseApple = listOf(
+            DiscoverItem(
+                id = "apple:1",
+                kind = "music",
+                title = "Other Track",
+                artist = "Someone",
+                appleUrl = "https://music.apple.com/tw/song/1",
+            ),
+            DiscoverItem(
+                id = "apple:2",
+                kind = "music",
+                title = "晴天",
+                artist = "周杰伦",
+                appleUrl = "https://music.apple.com/tw/song/2",
+            ),
+        )
+        val spotifyQingtian = listOf(
+            DiscoverItem(
+                id = "spotify:sp2",
+                kind = "music",
+                title = "晴天",
+                artist = "周杰伦",
+                platforms = listOf(PlatformSource("Spotify", "https://open.spotify.com/track/sp2")),
+            ),
+        )
+        val ytExclusive = listOf(
+            DiscoverItem(
+                id = "yt:ytOnly99",
+                kind = "music",
+                title = "独占翻唱Live",
+                artist = "独立乐队",
+                platforms = listOf(PlatformSource("YouTube Music", "https://music.youtube.com/watch?v=ytOnly99")),
+            ),
+        )
+
+        val merged = com.aisub.player.music.WebStreamingMusic.mergeDiscoverSearchResults(
+            query = "独占翻唱Live",
+            catalog = looseApple,
+            streamingGroups = listOf(spotifyQingtian, ytExclusive),
+        )
+        assertEquals("yt:ytOnly99", merged.first().id)
+        assertEquals(yt, resolver.resolveForItem(merged.first(), allFive, activeService = spotify))
+
+        val qingtian = merged.first { it.title == "晴天" }
+        assertTrue(qingtian.platforms.any { it.name == "Spotify" })
+        assertEquals(spotify, resolver.resolveForItem(qingtian, allFive, activeService = spotify))
+
+        // Apple Music 跨区 Widevine 回退脚本与字节长度校验
+        assertTrue(com.aisub.player.music.WebStreamingMusic.DOCUMENT_START_SCRIPT.contains("persistentState"))
+        assertTrue(com.aisub.player.music.WebStreamingMusic.DOCUMENT_START_SCRIPT.toByteArray(Charsets.UTF_8).size < 65_000)
+
+        // 待机首曲封面隔离校验
+        assertEquals(
+            "standby",
+            com.aisub.player.ui.resolveDisplayCover(
+                activeMusic = false,
+                hasCurrentEntry = false,
+                activeCover = null,
+                standbyCover = "standby",
+            ),
+        )
+        assertEquals(
+            null,
+            com.aisub.player.ui.resolveDisplayCover(
+                activeMusic = true,
+                hasCurrentEntry = true,
+                activeCover = null,
+                standbyCover = "standby",
+            ),
+        )
+    }
 }

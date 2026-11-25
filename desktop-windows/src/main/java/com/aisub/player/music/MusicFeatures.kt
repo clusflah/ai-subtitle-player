@@ -65,6 +65,7 @@ class MusicFeatures(
 
     private var entry: MediaEntry? = null
     private var loadJob: Job? = null
+    private var coverJob: Job? = null
     private var lyricsJob: Job? = null
     private var metadataReady = CompletableDeferred<List<Metadata>>()
 
@@ -72,13 +73,22 @@ class MusicFeatures(
         if (entry?.uri == e.uri) return
         entry = e
         loadJob?.cancel()
+        coverJob?.cancel()
         lyricsJob?.cancel()
         metadataReady = CompletableDeferred()
         if (e.isVideo || e.isLive) {
             _state.value = MusicState()
             return
         }
-        _state.value = MusicState(tags = TrackTags.fromMetadata(e.title, 0, emptyList()))
+        val preloadCoverUrl = com.aisub.player.remote.cloud.ServerProgress.find(e.uri)?.coverUrl
+        val instantCover = preloadCoverUrl
+            ?.takeIf { it.isNotBlank() }
+            ?.let { com.aisub.player.ui.ImageLoader.cachedAnyBitmap(it) }
+        _state.value = MusicState(
+            tags = TrackTags.fromMetadata(e.title, 0, emptyList()),
+            cover = instantCover,
+            coverSource = if (instantCover != null) "音乐库" else null,
+        )
         val ready = metadataReady
         loadJob = scope.launch {
             // 等播放器读出音轨的元数据；VLC 内核、Web 流媒体或读得慢时改用已登记元数据或系统接口
@@ -104,9 +114,14 @@ class MusicFeatures(
             val shown = withContext(Dispatchers.IO) { applySavedInfo(e, tags) }
             if (entry?.uri != e.uri) return@launch
             _state.update { it.copy(tags = shown, edited = shown !== tags) }
-            launch { loadCover(e, shown) }
+            launchCoverLoad(e, shown)
             launchLyricsLoad(e, shown)
         }
+    }
+
+    private fun launchCoverLoad(e: MediaEntry, tags: TrackTags) {
+        coverJob?.cancel()
+        coverJob = scope.launch { loadCover(e, tags) }
     }
 
     private fun launchLyricsLoad(e: MediaEntry, tags: TrackTags) {
@@ -150,7 +165,7 @@ class MusicFeatures(
         rawTags = updatedTags
         _state.update { it.copy(tags = updatedTags) }
         if (cur.cover == null && !coverUrl.isNullOrBlank()) {
-            scope.launch { loadCover(e, updatedTags) }
+            launchCoverLoad(e, updatedTags)
         }
         if ((titleOrArtistChanged || (cur.lyrics == null && lyricsJob?.isActive != true)) && settings().musicOnlineLookup && updatedTags.title.isNotBlank()) {
             launchLyricsLoad(e, updatedTags)
@@ -372,7 +387,7 @@ class MusicFeatures(
         } catch (ex: Exception) {
             if (ex is kotlinx.coroutines.CancellationException) throw ex
             val done = _state.value.translations?.count { it != null } ?: 0
-            return "翻译失败：${ex.message}" + if (done > 0) "\n已翻译的部分已保存，再点「生成翻译」会接着翻剩下的" else ""
+            return "翻译失败：${ex.message}" + if (done > 0) "\n已翻译的部分已保存，再点「翻译歌词」会接着翻剩下的" else ""
         } finally {
             _state.update { it.copy(translating = false) }
         }
@@ -388,6 +403,7 @@ class MusicFeatures(
     // ---------------- 封面 ----------------
 
     private suspend fun loadCover(e: MediaEntry, tags: TrackTags) {
+        if (entry?.uri != e.uri) return
         val cached = withContext(Dispatchers.IO) { coverFile(e).takeIf { it.exists() }?.readBytes()?.let(::decode) }
         val (bitmap, source) = when {
             cached != null -> cached to "已保存"
@@ -397,6 +413,7 @@ class MusicFeatures(
                     ?: serverCover(e)?.let { it to "音乐库" }
             } ?: (null to null)
         }
+        if (entry?.uri != e.uri) return
         if (bitmap != null) {
             _state.update { it.copy(cover = bitmap, coverSource = source) }
             withContext(Dispatchers.IO) { saveThumb(app, e.uri, bitmap) }
@@ -405,13 +422,15 @@ class MusicFeatures(
         if (!settings().musicOnlineLookup) return
         val bytes = withContext(Dispatchers.IO) { MusicLookup.bestCover(tags) } ?: return
         val online = withContext(Dispatchers.IO) { decode(bytes)?.also { coverFile(e).writeBytes(bytes) } } ?: return
-        if (entry == e) _state.update { it.copy(cover = online, coverSource = "在线") }
+        if (entry?.uri == e.uri) _state.update { it.copy(cover = online, coverSource = "在线") }
     }
 
     /** Plex / Emby / Jellyfin / Navidrome / Subsonic 音乐库提供的专辑封面 */
     private fun serverCover(e: MediaEntry): Bitmap? {
         val coverUrl = com.aisub.player.remote.cloud.ServerProgress.find(e.uri)?.coverUrl ?: return null
-        val bytes = fetchServerImageBytes(coverUrl) ?: return null
+        val bytes = com.aisub.player.ui.ImageLoader.cachedBytes(app, coverUrl)
+            ?: fetchServerImageBytes(coverUrl)
+            ?: return null
         return decode(bytes)?.also { runCatching { coverFile(e).writeBytes(bytes) } }
     }
 

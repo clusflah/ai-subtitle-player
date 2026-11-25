@@ -5,21 +5,21 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- 副谐波曲线 -->
+    <!-- 副谐波丝带曲线 -->
     <path
         android:fillColor="#00000000"
-        android:pathData="M29,55 C33,55 35,51.5 38.5,51.5 C42,51.5 44,57.5 47.5,57.5 C51,57.5 53.5,48.5 57.5,48.5 C61.5,48.5 64,58.5 67.5,58.5 C71,58.5 73.5,51.5 76.5,51.5 C79.5,51.5 81,55 83,55"
+        android:pathData="M24,56 C28,53 33,61 39,58 C46,54 50,49 56,50 C62,51 67,61 73,59 C78,57 81,51 85,54"
         android:strokeAlpha="0.52"
         android:strokeColor="#FFFFFFFF"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:strokeWidth="2.0" />
-    <!-- 主声波曲线 -->
+        android:strokeWidth="2.2" />
+    <!-- 主流光声波曲线（三峰两谷） -->
     <path
         android:fillColor="#00000000"
-        android:pathData="M24,55 L29.5,55 C32,55 33.2,58.5 35.5,58.5 C38,58.5 39.5,48 42.2,48 C45,48 46.8,63 49.5,63 C52.4,63 54.2,37.5 57.2,37.5 C60.2,37.5 62.2,65 65.2,65 C68.2,65 70.2,43.5 73.2,43.5 C76,43.5 77.8,60 80.5,60 C82.6,60 83.8,53 85.8,53 C87.2,53 88,55 90,55"
+        android:pathData="M23,55 C26,48 31,48 35,57 C38,65 40,68 43,66 C46,63 49,35 53,35 C57,35 61,69 65,69 C69,69 73,43 78,43 C81,43 83,49 85,53"
         android:strokeColor="#FFFFFFFF"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
-        android:strokeWidth="3.0" />
+        android:strokeWidth="3.4" />
 </vector>
