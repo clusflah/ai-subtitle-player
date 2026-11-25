@@ -407,7 +407,7 @@ fun VoxMusicBottomDock(
     }
 }
 
-/** 未登录任何流媒体源时的极简快捷登录弹窗（仅 Apple Music 与 Spotify）。 */
+/** 未登录任何流媒体源时的极简快捷登录弹窗（Apple Music / Spotify / YouTube Music）。 */
 @Composable
 fun QuickLoginPromptDialog(
     songTitle: String?,
@@ -421,9 +421,9 @@ fun QuickLoginPromptDialog(
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
                     text = if (!songTitle.isNullOrBlank()) {
-                        "登录 Apple Music 或 Spotify 后，将立即为你播放「$songTitle」，之后点击榜单也会直接智能选择已登录源开播。"
+                        "登录 Apple Music、Spotify 或 YouTube Music 后，将立即为你播放「$songTitle」，之后点击榜单也会直接智能选择已登录源开播。"
                     } else {
-                        "登录 Apple Music 或 Spotify 账号后即可直接播放榜单与个人乐库。"
+                        "登录 Apple Music、Spotify 或 YouTube Music 账号后即可直接播放榜单与个人乐库。"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

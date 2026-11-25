@@ -18,7 +18,7 @@ import androidx.compose.ui.unit.dp
 import com.voxmusic.app.music.WebMusicService
 
 /**
- * Apple Music / Spotify 官方品牌矢量图标。
+ * Apple Music / Spotify / YouTube Music 官方品牌矢量图标。
  */
 @Composable
 fun WebMusicServiceIcon(
@@ -31,6 +31,7 @@ fun WebMusicServiceIcon(
         when (service) {
             WebMusicService.APPLE_MUSIC -> buildAppleMusicOfficialVector(insetScale)
             WebMusicService.SPOTIFY -> buildSpotifyOfficialVector(insetScale)
+            WebMusicService.YOUTUBE_MUSIC -> buildYouTubeMusicOfficialVector(insetScale)
         }
     }
     Image(
@@ -45,6 +46,9 @@ internal const val OFFICIAL_APPLE_MUSIC_PATH =
 
 internal const val OFFICIAL_SPOTIFY_PATH =
     "M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"
+
+internal const val OFFICIAL_YOUTUBE_MUSIC_PATH =
+    "M12 0C5.376 0 0 5.376 0 12s5.376 12 12 12 12-5.376 12-12S18.624 0 12 0zm0 19.104c-3.924 0-7.104-3.18-7.104-7.104S8.076 4.896 12 4.896s7.104 3.18 7.104 7.104-3.18 7.104-7.104 7.104zm0-13.332c-3.432 0-6.228 2.796-6.228 6.228S8.568 18.228 12 18.228s6.228-2.796 6.228-6.228S15.432 5.772 12 5.772zM9.684 15.54V8.46L15.816 12l-6.132 3.54z"
 
 internal fun buildAppleMusicOfficialVector(scale: Float = 1f): ImageVector = ImageVector.Builder(
     defaultWidth = 24.dp,
@@ -84,6 +88,25 @@ internal fun buildSpotifyOfficialVector(scale: Float = 1f): ImageVector = ImageV
             pathData = addPathNodes(OFFICIAL_SPOTIFY_PATH),
             pathFillType = PathFillType.EvenOdd,
             fill = SolidColor(Color(0xFF1ED760)),
+        )
+    }
+}.build()
+
+internal fun buildYouTubeMusicOfficialVector(scale: Float = 1f): ImageVector = ImageVector.Builder(
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    group(scaleX = scale, scaleY = scale, pivotX = 12f, pivotY = 12f) {
+        addPath(
+            pathData = addPathNodes("M12,3 C16.97,3 21,7.03 21,12 C21,16.97 16.97,21 12,21 C7.03,21 3,16.97 3,12 C3,7.03 7.03,3 12,3 Z"),
+            fill = SolidColor(Color.White),
+        )
+        addPath(
+            pathData = addPathNodes(OFFICIAL_YOUTUBE_MUSIC_PATH),
+            pathFillType = PathFillType.EvenOdd,
+            fill = SolidColor(Color(0xFFFF0000)),
         )
     }
 }.build()

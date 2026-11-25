@@ -1077,7 +1077,7 @@ private fun LyricsPage(
                         when {
                             music.translating -> MenuRow("正在翻译…", AppIcons.Translate, enabled = false) {}
                             music.translations != null -> MenuRow("隐藏翻译", AppIcons.Translate) { menu = false; vm.music.clearTranslations() }
-                            else -> MenuRow("生成翻译", AppIcons.Translate, enabled = own != null) {
+                            else -> MenuRow("翻译歌词", AppIcons.Translate, enabled = own != null) {
                                 menu = false
                                 onMessage("正在翻译歌词…")
                                 scope.launch { vm.music.translateLyrics()?.let(onMessage) }

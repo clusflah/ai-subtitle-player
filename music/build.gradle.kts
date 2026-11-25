@@ -15,8 +15,8 @@ android {
         applicationId = "com.voxmusic.app"
         minSdk = 23
         targetSdk = 36
-        versionCode = 5
-        versionName = "1.0.4"
+        versionCode = 6
+        versionName = "1.0.5"
     }
 
     signingConfigs {
@@ -91,8 +91,10 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
 
-    // Media3 核心与后台媒体会话（通知栏、锁屏、耳机按键）
+    // Media3 核心、直连音频流播放与后台媒体会话（通知栏、锁屏、耳机按键）
     implementation("androidx.media3:media3-common:1.9.0")
+    implementation("androidx.media3:media3-exoplayer:1.9.0")
+    implementation("androidx.media3:media3-datasource-okhttp:1.9.0")
     implementation("androidx.media3:media3-session:1.9.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")

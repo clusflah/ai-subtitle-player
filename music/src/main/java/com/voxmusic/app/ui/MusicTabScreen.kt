@@ -297,31 +297,10 @@ fun MusicTabScreen(
             externalHoldVisible = anyOverlayOpen,
             onBarsVisibleChange = onBarsVisibleChange,
             topTrailingContent = {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    MusicSourcePill(
-                        service = activeService,
-                        onClick = { showSourceSettings = true },
-                    )
-                    val settingsShape = RoundedCornerShape(10.dp)
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .tvFocusRing(settingsShape, color = Color.White)
-                            .clip(settingsShape)
-                            .clickable(onClick = onOpenAppSettings),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            AppIcons.Settings,
-                            contentDescription = "设置与我的",
-                            tint = Color(0xCCFFFFFF),
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
-                }
+                MusicSourcePill(
+                    service = activeService,
+                    onClick = { showSourceSettings = true },
+                )
             },
             discoverTabContent = {
                 AppTheme(uiState.settings.appBackground, AppDarkMode.DARK, uiState.settings.liquidGlass) {
@@ -632,44 +611,53 @@ private fun StreamingLibraryBrowser(
             .fillMaxSize()
             .padding(horizontal = 16.dp, vertical = 4.dp),
     ) {
-        // 顶部音源快速切换条 + 刷新
+        // 顶部音源快速切换条 + 刷新（支持横向滚动以完整容纳三音源）
         Row(
             Modifier.fillMaxWidth().padding(bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            WebMusicService.entries.forEach { svc ->
-                val selected = svc == service
-                val svcLogged = svc in loggedInServices
-                val shape = RoundedCornerShape(50)
-                Row(
-                    Modifier
-                        .clip(shape)
-                        .liquidGlass(
-                            shape = shape,
-                            style = GlassStyle.Pill,
-                            tint = if (selected) Color(0x45FFFFFF) else Color(0x1CFFFFFF),
+            Row(
+                Modifier
+                    .weight(1f)
+                    .horizontalScroll(rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                WebMusicService.entries.forEach { svc ->
+                    val selected = svc == service
+                    val svcLogged = svc in loggedInServices
+                    val shape = RoundedCornerShape(50)
+                    Row(
+                        Modifier
+                            .clip(shape)
+                            .liquidGlass(
+                                shape = shape,
+                                style = GlassStyle.Pill,
+                                tint = if (selected) Color(0x45FFFFFF) else Color(0x1CFFFFFF),
+                            )
+                            .clickable { onSwitchService(svc) }
+                            .padding(horizontal = 11.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        WebMusicServiceIcon(svc, size = 16.dp)
+                        Text(
+                            text = svc.label,
+                            color = if (selected) Color.White else Color(0xAAFFFFFF),
+                            fontSize = 12.5.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 1,
+                            softWrap = false,
                         )
-                        .clickable { onSwitchService(svc) }
-                        .padding(horizontal = 11.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    WebMusicServiceIcon(svc, size = 16.dp)
-                    Text(
-                        text = svc.label,
-                        color = if (selected) Color.White else Color(0xAAFFFFFF),
-                        fontSize = 12.5.sp,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                    )
-                    if (svcLogged) {
-                        Box(
-                            Modifier.size(6.dp).clip(CircleShape).background(Color(0xFF1ED760)),
-                        )
+                        if (svcLogged) {
+                            Box(
+                                Modifier.size(6.dp).clip(CircleShape).background(Color(0xFF1ED760)),
+                            )
+                        }
                     }
                 }
             }
-            Spacer(Modifier.weight(1f))
             IconButton(
                 onClick = {
                     refreshTick++
@@ -929,7 +917,7 @@ private fun MusicSourceSettingsSheet(
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
         )
 
-        SheetSectionTitle("流媒体音乐源（Apple Music / Spotify）")
+        SheetSectionTitle("流媒体音乐源（Apple Music / Spotify / YouTube Music）")
         WebMusicService.entries.forEach { svc ->
             val logged = svc in loggedInServices
             SourceOptionRow(

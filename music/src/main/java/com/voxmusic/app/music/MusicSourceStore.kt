@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-/** 音乐源：仅保留 Apple Music 与 Spotify 两大流媒体服务。 */
+/** 音乐源：Apple Music、Spotify 与 YouTube Music 三大流媒体服务。 */
 enum class WebMusicService(
     val label: String,
     val badge: String,
@@ -26,6 +26,13 @@ enum class WebMusicService(
         accentHex = 0xFF1DB954,
         homeUrl = "https://open.spotify.com/",
         uriScheme = "spotify",
+    ),
+    YOUTUBE_MUSIC(
+        label = "YouTube Music",
+        badge = "YM",
+        accentHex = 0xFFFF0000,
+        homeUrl = "https://music.youtube.com/",
+        uriScheme = "ytmusic",
     ),
     ;
 
@@ -89,12 +96,18 @@ object MusicSourceStore {
  */
 object SmartMusicSourceResolver {
 
+    private val priorityOrder = listOf(
+        WebMusicService.APPLE_MUSIC,
+        WebMusicService.SPOTIFY,
+        WebMusicService.YOUTUBE_MUSIC,
+    )
+
     /**
      * 智能决策顺序：
-     * 1. 若无任何已登录源，返回 null（由界面提示登录 Apple Music 或 Spotify，登录后自动开播）；
+     * 1. 若无任何已登录源，返回 null（由界面提示登录 Apple Music / Spotify / YouTube Music，登录后自动开播）；
      * 2. 若当前激活的音乐源已登录，优先使用该源；
      * 3. 若仅登录了一个源，直接选择该已登录源；
-     * 4. 若两个源均已登录且未命中上述条件，优先本机 Spotify 官方客户端高音质联动，否则 Apple Music。
+     * 4. 若多个源均已登录且未命中上述条件，优先本机 Spotify 官方客户端高音质联动，否则按 Apple Music > Spotify > YouTube Music 顺序。
      */
     fun resolve(
         loggedIn: Set<WebMusicService>,
@@ -104,11 +117,10 @@ object SmartMusicSourceResolver {
         if (loggedIn.isEmpty()) return null
         if (activeService in loggedIn) return activeService
         if (loggedIn.size == 1) return loggedIn.first()
-        return if (spotifyRemoteReady && WebMusicService.SPOTIFY in loggedIn) {
-            WebMusicService.SPOTIFY
-        } else {
-            WebMusicService.APPLE_MUSIC
+        if (spotifyRemoteReady && WebMusicService.SPOTIFY in loggedIn) {
+            return WebMusicService.SPOTIFY
         }
+        return priorityOrder.firstOrNull { it in loggedIn } ?: loggedIn.first()
     }
 
     fun resolveForContext(context: Context): WebMusicService? {

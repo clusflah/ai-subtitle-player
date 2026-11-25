@@ -650,7 +650,7 @@ fun MusicSettingsScreen(
             SurfaceCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("发现页榜单数据源", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Orange)
-                    Text("仅决定发现页展示的榜单和搜索目录；点击播放时始终智能选用已登录的 Apple Music / Spotify 源。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("仅决定发现页展示的榜单和搜索目录；点击播放时始终智能选用已登录的 Apple Music / Spotify / YouTube Music 源。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         MusicDiscoverSource.entries.forEach { src ->
                             FilterChip(
@@ -864,7 +864,7 @@ fun MusicSettingsScreen(
             SurfaceCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("VoxMusic v${BuildConfig.VERSION_NAME}", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Text("专注 Apple Music 与 Spotify 的纯净音乐播放器，支持榜单智能选源即点即播、黑胶唱机、双语同步歌词、AI 荐歌与桌面小组件。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("专注 Apple Music、Spotify 与 YouTube Music 的纯净音乐播放器，支持榜单智能选源即点即播、黑胶唱机、双语同步歌词、AI 荐歌与桌面小组件。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }

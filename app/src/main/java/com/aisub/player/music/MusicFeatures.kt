@@ -378,7 +378,7 @@ class MusicFeatures(
         } catch (ex: Exception) {
             if (ex is kotlinx.coroutines.CancellationException) throw ex
             val done = _state.value.translations?.count { it != null } ?: 0
-            return "翻译失败：${ex.message}" + if (done > 0) "\n已翻译的部分已保存，再点「生成翻译」会接着翻剩下的" else ""
+            return "翻译失败：${ex.message}" + if (done > 0) "\n已翻译的部分已保存，再点「翻译歌词」会接着翻剩下的" else ""
         } finally {
             _state.update { it.copy(translating = false) }
         }

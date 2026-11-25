@@ -23,9 +23,13 @@ import org.junit.Test
 class VoxMusicCoreTest {
 
     @Test
-    fun onlyAppleMusicAndSpotifySourcesExist() {
+    fun supportedSourcesIncludeAppleSpotifyAndYouTubeMusic() {
         assertEquals(
-            listOf(WebMusicService.APPLE_MUSIC, WebMusicService.SPOTIFY),
+            listOf(
+                WebMusicService.APPLE_MUSIC,
+                WebMusicService.SPOTIFY,
+                WebMusicService.YOUTUBE_MUSIC,
+            ),
             WebMusicService.entries,
         )
     }
@@ -68,6 +72,22 @@ class VoxMusicCoreTest {
             SmartMusicSourceResolver.resolve(
                 loggedIn = setOf(WebMusicService.APPLE_MUSIC, WebMusicService.SPOTIFY),
                 activeService = WebMusicService.APPLE_MUSIC,
+            ),
+        )
+        // 仅登录 YouTube Music -> 自动选 YouTube Music
+        assertEquals(
+            WebMusicService.YOUTUBE_MUSIC,
+            SmartMusicSourceResolver.resolve(
+                loggedIn = setOf(WebMusicService.YOUTUBE_MUSIC),
+                activeService = WebMusicService.APPLE_MUSIC,
+            ),
+        )
+        // 三个均已登录且当前激活 YouTube Music -> 优先 YouTube Music
+        assertEquals(
+            WebMusicService.YOUTUBE_MUSIC,
+            SmartMusicSourceResolver.resolve(
+                loggedIn = setOf(WebMusicService.APPLE_MUSIC, WebMusicService.SPOTIFY, WebMusicService.YOUTUBE_MUSIC),
+                activeService = WebMusicService.YOUTUBE_MUSIC,
             ),
         )
     }
@@ -282,5 +302,53 @@ class VoxMusicCoreTest {
                 sinceUserPauseMs = 2_000L,
             ),
         )
+    }
+
+    @Test
+    fun youtubeMusicApiAuthHashItemParsingAndBestAudioFormatWork() {
+        val hash = com.voxmusic.app.music.YouTubeMusicApi.buildSapisidHash(
+            cookies = "SID=abc; SAPISID=test_sapisid_123; HSID=xyz",
+            origin = "https://music.youtube.com",
+            nowSec = 1_700_000_000L,
+        )
+        assertNotNull(hash)
+        assertTrue(hash!!.startsWith("SAPISIDHASH 1700000000_"))
+
+        val playerJson = org.json.JSONObject(
+            """
+            {
+              "playabilityStatus": { "status": "OK" },
+              "videoDetails": { "lengthSeconds": "215" },
+              "streamingData": {
+                "adaptiveFormats": [
+                  { "itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "bitrate": 129000, "url": "https://rr1.googlevideo.com/140" },
+                  { "itag": 251, "mimeType": "audio/webm; codecs=\"opus\"", "bitrate": 160000, "url": "https://rr1.googlevideo.com/251" },
+                  { "itag": 774, "mimeType": "audio/webm; codecs=\"opus\"", "bitrate": 256000, "url": "https://rr1.googlevideo.com/774" }
+                ]
+              }
+            }
+            """.trimIndent(),
+        )
+        val best = com.voxmusic.app.music.YouTubeMusicApi.parseBestYouTubeAudioFormat(playerJson)
+        assertNotNull(best)
+        assertEquals("https://rr1.googlevideo.com/774", best!!.url)
+        assertEquals("256k Opus", best.qualityLabel)
+        assertEquals(215_000L, best.durationMs)
+
+        val ytDiscover = DiscoverItem(
+            id = "yt:dQw4w9WgXcQ",
+            title = "Never Gonna Give You Up",
+            artist = "Rick Astley",
+            platforms = listOf(PlatformSource("YouTube Music", "https://music.youtube.com/watch?v=dQw4w9WgXcQ")),
+        )
+        val (ytQueue, ytIdx) = WebStreamingMusic.buildQueueFromDiscoverItems(
+            service = WebMusicService.YOUTUBE_MUSIC,
+            currentItem = ytDiscover,
+            queueItems = listOf(ytDiscover),
+            preferredIndex = 0,
+        )
+        assertEquals(0, ytIdx)
+        assertTrue(ytQueue[0].uri.startsWith("ytmusic://track/dQw4w9WgXcQ"))
+        assertEquals(WebMusicService.YOUTUBE_MUSIC, WebMusicService.fromUri(ytQueue[0].uri))
     }
 }

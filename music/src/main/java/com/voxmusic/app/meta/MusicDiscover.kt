@@ -93,7 +93,7 @@ object DiscoverModeStore {
     }
 }
 
-/** 音乐流媒体平台规范化目录（仅保留 Apple Music 与 Spotify）。 */
+/** 音乐流媒体平台规范化目录（Apple Music / Spotify / YouTube Music）。 */
 object MusicPlatformCatalog {
     data class Spec(
         val canonical: String,
@@ -105,6 +105,7 @@ object MusicPlatformCatalog {
     val specs: List<Spec> = listOf(
         Spec("Apple Music", "AM", 0xFFFA243C, "https://music.apple.com/tw/search?term={q}"),
         Spec("Spotify", "SP", 0xFF1DB954, "https://open.spotify.com/search/{q}"),
+        Spec("YouTube Music", "YM", 0xFFFF0000, "https://music.youtube.com/search?q={q}"),
     )
 
     fun specFor(name: String): Spec? = specs.firstOrNull { it.canonical.equals(name.trim(), ignoreCase = true) }

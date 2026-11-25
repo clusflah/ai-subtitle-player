@@ -75,6 +75,15 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.voxmusic.app.media.MediaEntry
@@ -82,9 +91,11 @@ import com.voxmusic.app.meta.DiscoverItem
 import com.voxmusic.app.meta.MusicDiscoverRepository
 import com.voxmusic.app.media.CatalogItem
 import com.voxmusic.app.media.TrackMetadataRegistry
+import com.voxmusic.app.net.AppProxy
 import com.voxmusic.app.ui.AppIcons
 import com.voxmusic.app.ui.Orange
 import com.voxmusic.app.ui.WebMusicServiceIcon
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -164,6 +175,9 @@ object WebStreamingMusic {
             (prefs.getBoolean("logged_SPOTIFY", false) && spotifyOpenCookies.isNotBlank())
     }
 
+    private fun isDirectService(service: WebMusicService): Boolean =
+        service == WebMusicService.YOUTUBE_MUSIC
+
     fun refreshAuthState(context: Context): Set<WebMusicService> {
         val app = context.applicationContext
         val prefs = app.getSharedPreferences(AUTH_PREFS, Context.MODE_PRIVATE)
@@ -189,6 +203,15 @@ object WebStreamingMusic {
             active += WebMusicService.APPLE_MUSIC
         }
 
+        val ytCookies = listOf("https://music.youtube.com", "https://youtube.com")
+            .joinToString("; ") { u -> runCatching { cm?.getCookie(u).orEmpty() }.getOrDefault("") }
+        if (ytCookies.contains("SAPISID=") ||
+            ytCookies.contains("__Secure-3PAPISID=") ||
+            prefs.getBoolean("logged_YOUTUBE_MUSIC", false)
+        ) {
+            active += WebMusicService.YOUTUBE_MUSIC
+        }
+
         _loggedIn.value = active
         return active
     }
@@ -211,6 +234,8 @@ object WebStreamingMusic {
             }
             WebMusicService.APPLE_MUSIC ->
                 if (logged) "已登录 · 应用内直接播放与同步歌词" else "点击登录账号 · 应用内直接播放"
+            WebMusicService.YOUTUBE_MUSIC ->
+                if (logged) "已登录 · 原生直连播放（最高 256k AAC/Opus）" else "点击登录 Google 账号 · 原生直连播放"
         }
     }
 
@@ -256,6 +281,7 @@ object WebStreamingMusic {
         if (service == WebMusicService.SPOTIFY) {
             SpotifyAppRemoteBridge.logoutAll(app)
         }
+        NativeDirectAudioPlayer.pauseIfActive(onlyService = service)
         mainHandler.post {
             engines.remove(service)?.destroy()
             val cm = runCatching { CookieManager.getInstance() }.getOrNull()
@@ -271,6 +297,12 @@ object WebStreamingMusic {
                         "https://open.spotify.com",
                         "https://accounts.spotify.com",
                         "https://spotify.com",
+                    )
+                    WebMusicService.YOUTUBE_MUSIC -> listOf(
+                        "https://music.youtube.com",
+                        "https://youtube.com",
+                        "https://www.youtube.com",
+                        "https://accounts.google.com",
                     )
                 }
                 for (d in domains) {
@@ -350,10 +382,13 @@ object WebStreamingMusic {
         val directId: String? = when (service) {
             WebMusicService.APPLE_MUSIC -> extractAppleSongId(item)
             WebMusicService.SPOTIFY -> extractSpotifyTrackId(item)
+            WebMusicService.YOUTUBE_MUSIC -> extractYouTubeVideoId(item)
         }
         val directUrl: String? = when (service) {
             WebMusicService.APPLE_MUSIC -> item.appleUrl
             WebMusicService.SPOTIFY -> item.platforms.firstOrNull { it.name.equals("Spotify", ignoreCase = true) }?.url
+            WebMusicService.YOUTUBE_MUSIC -> item.platforms.firstOrNull { it.name.contains("YouTube", ignoreCase = true) }?.url
+                ?: directId?.let { "https://music.youtube.com/watch?v=$it" }
         }
         return buildTrackEntry(
             service = service,
@@ -493,7 +528,10 @@ object WebStreamingMusic {
     // ---------------- 个人曲库浏览与目录搜索（供「音乐 → 乐库」调用） ----------------
 
     suspend fun loadLibraryTracks(context: Context, service: WebMusicService): List<CatalogItem> {
-        if (service == WebMusicService.SPOTIFY) {
+        if (isDirectService(service)) {
+            val direct = runCatching { YouTubeMusicApi.loadTracks() }.getOrDefault(emptyList())
+            if (direct.isNotEmpty()) return direct
+        } else if (service == WebMusicService.SPOTIFY) {
             val canRemote = SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback
             val oauthTracks = withTimeoutOrNull(if (canRemote) 4_500L else 10_000L) {
                 runCatching { SpotifyAppRemoteBridge.loadTracksViaOAuth(context) }.getOrDefault(emptyList())
@@ -533,6 +571,9 @@ object WebStreamingMusic {
     }
 
     suspend fun loadLibraryAlbums(context: Context, service: WebMusicService): List<CatalogItem> {
+        if (isDirectService(service)) {
+            return runCatching { YouTubeMusicApi.loadAlbums() }.getOrDefault(emptyList())
+        }
         if (service == WebMusicService.SPOTIFY) {
             val canRemote = SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback
             val oauthAlbums = withTimeoutOrNull(if (canRemote) 4_500L else 10_000L) {
@@ -620,6 +661,9 @@ object WebStreamingMusic {
                 val raw = engine.callRpc("loadPlaylists", JSONObject(), timeoutMs = 20_000L)
                 parseCatalogItemsJson(service, raw)
             }
+            WebMusicService.YOUTUBE_MUSIC -> {
+                runCatching { YouTubeMusicApi.loadPlaylists() }.getOrDefault(emptyList())
+            }
         }
         return pinLikedPlaylistAtTop(service, rawList)
     }
@@ -629,6 +673,10 @@ object WebStreamingMusic {
             return loadLibraryTracks(context, service)
         }
         val cacheKey = "${service.name}|${container.ratingKey}"
+        if (isDirectService(service)) {
+            return runCatching { YouTubeMusicApi.loadContainerChildren(container) }.getOrDefault(emptyList())
+                .also { if (it.isNotEmpty()) containerChildrenCache[cacheKey] = it }
+        }
         if (service == WebMusicService.SPOTIFY) {
             val canRemote = SpotifyAppRemoteBridge.refreshStatus(context).canAttemptRemotePlayback
             if (canRemote) {
@@ -689,14 +737,19 @@ object WebStreamingMusic {
     suspend fun searchMusic(context: Context, service: WebMusicService, query: String): List<CatalogItem> {
         val q = query.trim()
         if (q.isEmpty()) return emptyList()
-        if (service == WebMusicService.SPOTIFY) {
-            val oauthHits = runCatching { SpotifyAppRemoteBridge.searchViaOAuth(context, q) }.getOrDefault(emptyList())
-            if (oauthHits.isNotEmpty()) return oauthHits
+        if (isDirectService(service)) {
+            val direct = runCatching { YouTubeMusicApi.search(q) }.getOrDefault(emptyList())
+            if (direct.isNotEmpty()) return direct
+        } else {
+            if (service == WebMusicService.SPOTIFY) {
+                val oauthHits = runCatching { SpotifyAppRemoteBridge.searchViaOAuth(context, q) }.getOrDefault(emptyList())
+                if (oauthHits.isNotEmpty()) return oauthHits
+            }
+            val engine = ensureEngine(context, service)
+            val raw = engine.callRpc("search", JSONObject().put("query", q), timeoutMs = 16_000L)
+            val parsed = parseCatalogItemsJson(service, raw)
+            if (parsed.isNotEmpty()) return parsed
         }
-        val engine = ensureEngine(context, service)
-        val raw = engine.callRpc("search", JSONObject().put("query", q), timeoutMs = 16_000L)
-        val parsed = parseCatalogItemsJson(service, raw)
-        if (parsed.isNotEmpty()) return parsed
         return withContext(Dispatchers.IO) {
             MusicDiscoverRepository.fetchItunesSearch(q, 25).map { discoverToCatalogItem(service, it) }
         }
@@ -706,6 +759,7 @@ object WebStreamingMusic {
         val tid = when (service) {
             WebMusicService.APPLE_MUSIC -> extractAppleSongId(item)
             WebMusicService.SPOTIFY -> extractSpotifyTrackId(item)
+            WebMusicService.YOUTUBE_MUSIC -> extractYouTubeVideoId(item)
         }
         val entry = buildEntryFromDiscoverItem(service, item)
         return CatalogItem(
@@ -809,7 +863,8 @@ object WebStreamingMusic {
         val webUrl = parsed.getQueryParameter("url")?.let(::decodeParam).orEmpty()
         val meta = TrackMetadataRegistry.find(uriString)
 
-        // 先停止本机 Spotify 遥控快照，并通知后台网页引擎进入切歌冻结态，彻底阻断旧曲目出声与旧进度/旧歌名上报
+        // 先停止原生直连播放器与本机 Spotify 遥控快照，并通知后台网页引擎进入切歌冻结态，彻底阻断旧曲目出声与旧进度/旧歌名上报
+        NativeDirectAudioPlayer.pauseIfActive()
         SpotifyAppRemoteBridge.pauseIfActive()
         engines[service]?.evalFireAndForget(
             "window.__voxBridge && window.__voxBridge.beginSwitch($effectiveSeq, ${JSONObject.quote(trackId)}, ${startPositionMs.coerceAtLeast(0L)}, ${JSONObject.quote(title)})",
@@ -836,6 +891,41 @@ object WebStreamingMusic {
         }
         if (service != WebMusicService.SPOTIFY) {
             SpotifyAppRemoteBridge.pauseIfActive()
+        }
+
+        // YouTube Music：优先原生直连解析高音质音频流交给 ExoPlayer 秒播；受限时自动回退网页引擎
+        if (isDirectService(service)) {
+            if (trackId.isEmpty() && title.isNotBlank()) {
+                val q = listOfNotNull(title, artist.takeIf { it.isNotBlank() }).joinToString(" ")
+                trackId = runCatching {
+                    YouTubeMusicApi.search(q).firstOrNull { it.type == "track" }?.ratingKey.orEmpty()
+                }.getOrDefault("")
+            }
+            val resolved = runCatching {
+                YouTubeMusicApi.resolveAudioStream(trackId, title, artist)
+            }.getOrNull()
+            if (resolved != null) {
+                engines[service]?.pauseOnly()
+                val enriched = if (resolved.durationMs > 0L) {
+                    resolved
+                } else {
+                    resolved.copy(durationMs = meta?.durationMs ?: 0L)
+                }
+                val nativeRes = NativeDirectAudioPlayer.play(
+                    context = context,
+                    service = service,
+                    seq = effectiveSeq,
+                    stream = enriched,
+                    startPositionMs = startPositionMs,
+                    title = title.ifBlank { meta?.title.orEmpty() },
+                    artist = artist.ifBlank { meta?.artist.orEmpty() },
+                    album = album.ifBlank { meta?.album.orEmpty() },
+                    coverUrl = meta?.coverUrl,
+                )
+                if (nativeRes.isSuccess) {
+                    return Result.success(Unit)
+                }
+            }
         }
 
         // Spotify 优先通道（官方客户端联动）：已配置 Client ID 且安装了官方 Spotify 客户端时，联动本机高音质/无损发声
@@ -908,28 +998,33 @@ object WebStreamingMusic {
     }
 
     fun setPlaying(service: WebMusicService, play: Boolean) {
+        if (NativeDirectAudioPlayer.setPlaying(service, play)) return
         if (service == WebMusicService.SPOTIFY && SpotifyAppRemoteBridge.setPlaying(play)) return
         engines[service]?.evalFireAndForget("window.__voxBridge && window.__voxBridge.${if (play) "resume" else "pause"}()")
     }
 
     fun seekTo(service: WebMusicService, positionMs: Long) {
+        if (NativeDirectAudioPlayer.seekTo(service, positionMs)) return
         if (service == WebMusicService.SPOTIFY && SpotifyAppRemoteBridge.seekTo(positionMs)) return
         engines[service]?.evalFireAndForget("window.__voxBridge && window.__voxBridge.seek(${positionMs.coerceAtLeast(0L)})")
     }
 
     fun setVolume(service: WebMusicService, volume: Float) {
+        if (NativeDirectAudioPlayer.setVolume(service, volume)) return
         if (service == WebMusicService.SPOTIFY && SpotifyAppRemoteBridge.setVolume(volume)) return
         val v = volume.coerceIn(0f, 1f)
         engines[service]?.evalFireAndForget("window.__voxBridge && window.__voxBridge.setVolume($v)")
     }
 
     fun setSpeed(service: WebMusicService, speed: Float) {
+        if (NativeDirectAudioPlayer.setSpeed(service, speed)) return
         val s = speed.coerceIn(0.5f, 2f)
         engines[service]?.evalFireAndForget("window.__voxBridge && window.__voxBridge.setSpeed($s)")
     }
 
     fun stopAll() {
         activePlaySeq++
+        NativeDirectAudioPlayer.pauseIfActive()
         SpotifyAppRemoteBridge.pauseIfActive()
         engines.values.forEach { it.pauseOnly() }
     }
@@ -959,6 +1054,7 @@ object WebStreamingMusic {
     }
 
     internal fun dispatchSnapshot(service: WebMusicService, rawJson: String) {
+        if (NativeDirectAudioPlayer.isActiveFor(service)) return
         if (service == WebMusicService.SPOTIFY && SpotifyAppRemoteBridge.status.value.activeForCurrentTrack) {
             return
         }
@@ -983,6 +1079,270 @@ object WebStreamingMusic {
             error = o.optString("error").trim().takeIf { it.isNotEmpty() },
         )
         dispatchSnapshotObj(snap)
+    }
+
+    // ---------------- 原生 Media3 ExoPlayer 直连音频播放引擎（支持 AppProxy 代理） ----------------
+
+    @androidx.annotation.OptIn(UnstableApi::class)
+    private object NativeDirectAudioPlayer {
+        private var exo: ExoPlayer? = null
+
+        private val proxyOkHttp by lazy {
+            AppProxy.builder()
+                .connectTimeout(12, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
+                .build()
+        }
+
+        @Volatile
+        private var activeService: WebMusicService? = null
+
+        @Volatile
+        private var activeSeq: Long = 0L
+
+        @Volatile
+        private var fallbackDurationMs: Long = 0L
+
+        @Volatile
+        private var currentTitle: String = ""
+
+        @Volatile
+        private var currentArtist: String = ""
+
+        @Volatile
+        private var currentAlbum: String = ""
+
+        @Volatile
+        private var currentCoverUrl: String? = null
+
+        @Volatile
+        private var tickerRunning: Boolean = false
+
+        @Volatile
+        private var pendingInitResult: CompletableDeferred<Result<Unit>>? = null
+
+        private val ticker = object : Runnable {
+            override fun run() {
+                if (!tickerRunning) return
+                emitCurrentSnapshot()
+                if (tickerRunning) {
+                    mainHandler.postDelayed(this, 250L)
+                }
+            }
+        }
+
+        fun isActiveFor(service: WebMusicService): Boolean = activeService == service && exo != null
+
+        private fun ensureExo(context: Context): ExoPlayer {
+            exo?.let { return it }
+            val player = ExoPlayer.Builder(context.applicationContext)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                        .build(),
+                    true,
+                )
+                .setHandleAudioBecomingNoisy(true)
+                .build()
+            player.addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_READY) {
+                        pendingInitResult?.complete(Result.success(Unit))
+                        pendingInitResult = null
+                    }
+                    emitCurrentSnapshot(ended = playbackState == Player.STATE_ENDED)
+                    if (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE) {
+                        stopTicker()
+                    }
+                }
+
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    if (isPlaying) {
+                        pendingInitResult?.complete(Result.success(Unit))
+                        pendingInitResult = null
+                        startTicker()
+                    }
+                    emitCurrentSnapshot()
+                }
+
+                override fun onPositionDiscontinuity(
+                    oldPosition: Player.PositionInfo,
+                    newPosition: Player.PositionInfo,
+                    reason: Int,
+                ) {
+                    emitCurrentSnapshot()
+                }
+
+                override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                    emitCurrentSnapshot()
+                }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    val msg = error.message ?: "直连音频流播放失败"
+                    val pending = pendingInitResult
+                    if (pending != null && !pending.isCompleted) {
+                        pendingInitResult = null
+                        pending.complete(Result.failure(error))
+                    } else {
+                        emitCurrentSnapshot(errorMsg = msg)
+                    }
+                    stopTicker()
+                }
+            })
+            exo = player
+            return player
+        }
+
+        private fun startTicker() {
+            if (tickerRunning) return
+            tickerRunning = true
+            mainHandler.removeCallbacks(ticker)
+            mainHandler.postDelayed(ticker, 250L)
+        }
+
+        private fun stopTicker() {
+            tickerRunning = false
+            mainHandler.removeCallbacks(ticker)
+        }
+
+        private fun emitCurrentSnapshot(ended: Boolean = false, errorMsg: String? = null) {
+            val svc = activeService ?: return
+            val seq = activeSeq
+            val p = exo ?: return
+            val state = p.playbackState
+            val rawDur = p.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: fallbackDurationMs
+            val pos = p.currentPosition.coerceAtLeast(0L)
+            val isEnded = ended || state == Player.STATE_ENDED
+            val isBuffering = state == Player.STATE_BUFFERING
+            val isPlaying = p.isPlaying && !isEnded && !isBuffering
+            dispatchSnapshotObj(
+                PlaybackSnapshot(
+                    service = svc,
+                    playSeq = seq,
+                    switching = false,
+                    playing = isPlaying,
+                    buffering = isBuffering,
+                    positionMs = pos,
+                    durationMs = rawDur,
+                    title = currentTitle,
+                    artist = currentArtist,
+                    album = currentAlbum,
+                    coverUrl = currentCoverUrl,
+                    ended = isEnded,
+                    error = errorMsg,
+                ),
+            )
+        }
+
+        suspend fun play(
+            context: Context,
+            service: WebMusicService,
+            seq: Long,
+            stream: YouTubeMusicApi.ResolvedAudioStream,
+            startPositionMs: Long,
+            title: String,
+            artist: String,
+            album: String,
+            coverUrl: String?,
+        ): Result<Unit> {
+            val readyDeferred = CompletableDeferred<Result<Unit>>()
+            withContext(Dispatchers.Main.immediate) {
+                pendingInitResult?.cancel()
+                pendingInitResult = readyDeferred
+                activeService = service
+                activeSeq = seq
+                fallbackDurationMs = stream.durationMs.coerceAtLeast(0L)
+                currentTitle = title
+                currentArtist = artist
+                currentAlbum = album
+                currentCoverUrl = coverUrl
+
+                val player = ensureExo(context)
+                val dsFactory = OkHttpDataSource.Factory(proxyOkHttp)
+                if (stream.headers.isNotEmpty()) {
+                    dsFactory.setDefaultRequestProperties(stream.headers)
+                    stream.headers["User-Agent"]?.let { dsFactory.setUserAgent(it) }
+                }
+                val mediaSource = DefaultMediaSourceFactory(context.applicationContext)
+                    .setDataSourceFactory(dsFactory)
+                    .createMediaSource(MediaItem.fromUri(stream.url))
+
+                player.stop()
+                player.setMediaSource(mediaSource)
+                if (startPositionMs > 0L) {
+                    player.seekTo(startPositionMs)
+                }
+                player.playWhenReady = true
+                player.prepare()
+                startTicker()
+                emitCurrentSnapshot()
+            }
+
+            val res = withTimeoutOrNull(6_500L) { readyDeferred.await() }
+            if (res != null && res.isFailure) {
+                if (activeSeq == seq) pauseIfActive()
+                return res
+            }
+            return Result.success(Unit)
+        }
+
+        fun setPlaying(service: WebMusicService, play: Boolean): Boolean {
+            if (!isActiveFor(service)) return false
+            mainHandler.post {
+                val p = exo ?: return@post
+                if (activeService != service) return@post
+                p.playWhenReady = play
+                if (play) startTicker() else stopTicker()
+                emitCurrentSnapshot()
+            }
+            return true
+        }
+
+        fun seekTo(service: WebMusicService, posMs: Long): Boolean {
+            if (!isActiveFor(service)) return false
+            mainHandler.post {
+                val p = exo ?: return@post
+                if (activeService != service) return@post
+                p.seekTo(posMs.coerceAtLeast(0L))
+                emitCurrentSnapshot()
+            }
+            return true
+        }
+
+        fun setVolume(service: WebMusicService, volume: Float): Boolean {
+            if (!isActiveFor(service)) return false
+            mainHandler.post {
+                val p = exo ?: return@post
+                if (activeService != service) return@post
+                p.volume = volume.coerceIn(0f, 1f)
+            }
+            return true
+        }
+
+        fun setSpeed(service: WebMusicService, speed: Float): Boolean {
+            if (!isActiveFor(service)) return false
+            mainHandler.post {
+                val p = exo ?: return@post
+                if (activeService != service) return@post
+                p.setPlaybackSpeed(speed.coerceIn(0.5f, 2f))
+            }
+            return true
+        }
+
+        fun pauseIfActive(onlyService: WebMusicService? = null) {
+            if (onlyService != null && activeService != onlyService) return
+            activeService = null
+            stopTicker()
+            pendingInitResult?.cancel()
+            pendingInitResult = null
+            mainHandler.post {
+                exo?.let { p ->
+                    p.playWhenReady = false
+                    p.stop()
+                }
+            }
+        }
     }
 
     // ---------------- 隐形保活 DRM WebView 宿主 ----------------
@@ -1190,12 +1550,35 @@ object WebStreamingMusic {
         cm.setAcceptThirdPartyCookies(webView, true)
     }
 
+    /**
+     * 登录弹窗专用 WebView 配置：
+     * - YouTube Music (Google 账号登录) 严禁篡改 UA 伪装桌面 Windows 或注入 navigator/fetch 钩子，
+     *   必须保持原生 Android System WebView 指纹以与 HTTP Sec-CH-UA 客户端提示一致，避免触发 Google「此浏览器或应用可能不安全」拦截；
+     * - 其余服务继续使用桌面 Chrome 视图与完整 Cookie 支持。
+     */
     @SuppressLint("SetJavaScriptEnabled")
     internal fun configureLoginWebView(webView: WebView, service: WebMusicService) {
-        configureDrmWebView(webView, allowPopups = true)
+        if (service == WebMusicService.YOUTUBE_MUSIC) {
+            with(webView.settings) {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                setSupportZoom(true)
+                builtInZoomControls = true
+                displayZoomControls = false
+                javaScriptCanOpenWindowsAutomatically = true
+                setSupportMultipleWindows(true)
+            }
+            val cm = CookieManager.getInstance()
+            cm.setAcceptCookie(true)
+            cm.setAcceptThirdPartyCookies(webView, true)
+        } else {
+            configureDrmWebView(webView, allowPopups = true)
+        }
     }
 
-    internal fun needsLoginHookScript(service: WebMusicService): Boolean = true
+    internal fun needsLoginHookScript(service: WebMusicService): Boolean =
+        service == WebMusicService.APPLE_MUSIC || service == WebMusicService.SPOTIFY
 
     /**
      * 页面最早时机注入：
@@ -3260,6 +3643,18 @@ fun WebMusicLoginDialog(
                         }
                     }
                 }
+                WebMusicService.YOUTUBE_MUSIC -> {
+                    val curUrl = mainWebView?.url.orEmpty()
+                    val ytCookies = listOf("https://music.youtube.com", "https://youtube.com")
+                        .joinToString("; ") { u -> runCatching { cm?.getCookie(u).orEmpty() }.getOrDefault("") }
+                    val hasAuth = ytCookies.contains("SAPISID=") || ytCookies.contains("__Secure-3PAPISID=")
+                    if (hasAuth && curUrl.startsWith("https://music.youtube.com")) {
+                        delay(500L)
+                        runCatching { cm?.flush() }
+                        finishLogin()
+                        break
+                    }
+                }
             }
         }
     }
@@ -3782,6 +4177,7 @@ fun WebMusicLoginDialog(
                                     val entryUrl = pendingWebUrl ?: when (service) {
                                         WebMusicService.SPOTIFY -> "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
                                         WebMusicService.APPLE_MUSIC -> "https://music.apple.com/"
+                                        WebMusicService.YOUTUBE_MUSIC -> "https://accounts.google.com/ServiceLogin?ltmpl=music&service=youtube&passive=true&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26next%3Dhttps%253A%252F%252Fmusic.youtube.com%252F"
                                     }
                                     pendingWebUrl = null
                                     loadUrl(entryUrl)
