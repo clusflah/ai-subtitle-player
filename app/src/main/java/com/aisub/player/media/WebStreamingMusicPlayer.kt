@@ -60,6 +60,8 @@ class WebStreamingMusicPlayer(
     private var remoteActuallyPlaying: Boolean = false
     private var lastAnchoredPosMs: Long = 0L
     private var lastAnchoredElapsedMs: Long = 0L
+    private var lastUserPlayCommandElapsedMs: Long = 0L
+    private var lastUserPauseCommandElapsedMs: Long = 0L
     private var trackTransitionPending: Boolean = false
     private var lastSyncedMetaKey: String = ""
     private var consecutiveAutoAdvanceFailures: Int = 0
@@ -104,6 +106,9 @@ class WebStreamingMusicPlayer(
 
         if (nowFlowing && !hasStartedCurrentTrackAudio) {
             hasStartedCurrentTrackAudio = true
+            if (seekHoldTargetMs != C.TIME_UNSET) {
+                seekHoldUntilMs = nowWall + 3_000L
+            }
             changed = true
         }
 
@@ -137,16 +142,31 @@ class WebStreamingMusicPlayer(
             if (snap.positionMs > maxPosReachedMs) maxPosReachedMs = snap.positionMs
         }
 
-        if (nowFlowing != remoteActuallyPlaying) {
-            remoteActuallyPlaying = nowFlowing
+        val syncedPlayWhenReady = resolveExternalPlayWhenReady(
+            currentPlayWhenReady = playWhenReady,
+            hasStartedAudio = hasStartedCurrentTrackAudio,
+            snapPlaying = snap.playing,
+            snapBuffering = snap.buffering,
+            snapEnded = snap.ended,
+            inSeekHold = nowWall < seekHoldUntilMs,
+            sinceUserPlayMs = (nowElapsed - lastUserPlayCommandElapsedMs).coerceAtLeast(0L),
+            sinceUserPauseMs = (nowElapsed - lastUserPauseCommandElapsedMs).coerceAtLeast(0L),
+        )
+        if (syncedPlayWhenReady != playWhenReady) {
+            playWhenReady = syncedPlayWhenReady
+            changed = true
+        }
+
+        val effectiveFlowing = snap.playing && !snap.buffering && playWhenReady
+        if (effectiveFlowing != remoteActuallyPlaying) {
+            remoteActuallyPlaying = effectiveFlowing
             changed = true
         }
 
         val targetState = when {
             !playWhenReady -> Player.STATE_READY
-            nowFlowing -> Player.STATE_READY
-            snap.buffering -> Player.STATE_BUFFERING
-            else -> Player.STATE_READY
+            effectiveFlowing -> Player.STATE_READY
+            else -> Player.STATE_BUFFERING
         }
         if (playbackState != targetState && playbackState != Player.STATE_ENDED) {
             playbackState = targetState
@@ -236,10 +256,12 @@ class WebStreamingMusicPlayer(
         error = null
         val safeStart = positionMs.coerceAtLeast(0L)
         currentPosMs = safeStart
+        startPositionMs = safeStart
+        lastUserPlayCommandElapsedMs = android.os.SystemClock.elapsedRealtime()
         hasStartedCurrentTrackAudio = false
         remoteActuallyPlaying = false
         maxPosReachedMs = 0L
-        seekHoldTargetMs = C.TIME_UNSET
+        seekHoldTargetMs = if (safeStart > 1_000L) safeStart else C.TIME_UNSET
         seekHoldUntilMs = 0L
         trackTransitionPending = false
         lastSyncedMetaKey = ""
@@ -286,7 +308,7 @@ class WebStreamingMusicPlayer(
         }
     }
 
-    fun deactivateForKernelSwitch() {
+    fun deactivateForKernelSwitch(notify: Boolean = true) {
         activePlayGeneration++
         launchJob?.cancel()
         playWhenReady = false
@@ -300,7 +322,7 @@ class WebStreamingMusicPlayer(
         shufflePlayedUris.clear()
         error = null
         WebStreamingMusic.stopAll()
-        invalidateState()
+        if (notify) invalidateState()
     }
 
     override fun getState(): State {
@@ -450,18 +472,26 @@ class WebStreamingMusicPlayer(
     }
 
     override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
-        this.playWhenReady = playWhenReady
+        val nowElapsed = android.os.SystemClock.elapsedRealtime()
         if (!playWhenReady) {
+            if (remoteActuallyPlaying && hasStartedCurrentTrackAudio && lastAnchoredElapsedMs > 0L) {
+                val delta = ((nowElapsed - lastAnchoredElapsedMs).coerceAtLeast(0L) * speed).toLong()
+                val snapped = lastAnchoredPosMs + delta
+                currentPosMs = if (currentDurMs != C.TIME_UNSET && currentDurMs > 0L) snapped.coerceIn(0L, currentDurMs) else snapped
+            }
+            lastUserPauseCommandElapsedMs = nowElapsed
             remoteActuallyPlaying = false
             if (playbackState == Player.STATE_BUFFERING && items.isNotEmpty()) {
                 playbackState = Player.STATE_READY
             }
+        } else {
+            lastUserPlayCommandElapsedMs = nowElapsed
         }
+        this.playWhenReady = playWhenReady
         val svc = activeService()
         if (playbackState == Player.STATE_ENDED && playWhenReady) {
             startCurrentTrack(0L)
-        } else if (playWhenReady && playbackState == Player.STATE_READY && !hasStartedCurrentTrackAudio && items.isNotEmpty()) {
-            // 若新曲目尚未真正起播（例如缓冲期被暂停后再次点播放），重新下发当前曲目播放而非 resume 旧曲目
+        } else if (playWhenReady && (playbackState == Player.STATE_IDLE || playbackState == Player.STATE_READY) && !hasStartedCurrentTrackAudio && items.isNotEmpty()) {
             startCurrentTrack(currentPosMs)
         } else if (svc != null && playbackState != Player.STATE_IDLE) {
             if (!playWhenReady || hasStartedCurrentTrackAudio) {
@@ -479,15 +509,24 @@ class WebStreamingMusicPlayer(
         if (targetIdx != currentIndex) {
             currentIndex = targetIdx
             startPositionMs = targetPos
-            startCurrentTrack(targetPos)
+            if (playbackState == Player.STATE_IDLE && !playWhenReady) {
+                currentPosMs = targetPos
+                currentDurMs = ServerProgress.find(itemUriAt(targetIdx))?.durationMs?.takeIf { it > 0L } ?: C.TIME_UNSET
+                invalidateState()
+            } else {
+                startCurrentTrack(targetPos)
+            }
         } else {
             currentPosMs = targetPos
+            startPositionMs = targetPos
             seekHoldTargetMs = targetPos
             seekHoldUntilMs = System.currentTimeMillis() + 1_600L
             if (playbackState == Player.STATE_ENDED) {
                 startCurrentTrack(targetPos)
-            } else {
+            } else if (playbackState != Player.STATE_IDLE) {
                 activeService()?.let { WebStreamingMusic.seekTo(it, targetPos) }
+                invalidateState()
+            } else {
                 invalidateState()
             }
         }
@@ -528,13 +567,34 @@ class WebStreamingMusicPlayer(
     }
 
     override fun handleRelease(): ListenableFuture<*> {
-        deactivateForKernelSwitch()
+        deactivateForKernelSwitch(notify = false)
         scope.cancel()
         WebStreamingMusic.setSnapshotListener(null)
         return Futures.immediateVoidFuture()
     }
 
     companion object {
+        private const val EXTERNAL_SYNC_GRACE_MS = 1_000L
+
+        internal fun resolveExternalPlayWhenReady(
+            currentPlayWhenReady: Boolean,
+            hasStartedAudio: Boolean,
+            snapPlaying: Boolean,
+            snapBuffering: Boolean,
+            snapEnded: Boolean,
+            inSeekHold: Boolean,
+            sinceUserPlayMs: Long,
+            sinceUserPauseMs: Long,
+        ): Boolean {
+            if (!hasStartedAudio || snapBuffering || snapEnded || inSeekHold) return currentPlayWhenReady
+            if (currentPlayWhenReady && !snapPlaying && sinceUserPlayMs >= EXTERNAL_SYNC_GRACE_MS) {
+                return false
+            }
+            if (!currentPlayWhenReady && snapPlaying && sinceUserPauseMs >= EXTERNAL_SYNC_GRACE_MS) {
+                return true
+            }
+            return currentPlayWhenReady
+        }
         /**
          * 随机切歌时优先从未播放过的曲目中挑选（使无限随机新追加的推荐曲目优先被播到）；
          * 若队列内曲目均已播过一轮，则清空本轮记录后在非当前曲目中重新随机。

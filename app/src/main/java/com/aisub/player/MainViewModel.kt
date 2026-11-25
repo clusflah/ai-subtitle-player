@@ -558,8 +558,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var pendingJumpAfterReplenish = false
     private val cachedServerTracks = HashMap<String, Pair<Long, List<MediaEntry>>>()
 
+    @Volatile
+    private var cleared: Boolean = false
+    private val taskRemovedCallback: () -> Unit = {
+        savePosition(sync = true)
+    }
+
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            if (cleared) return
             val counting = playbackStatsJob?.isActive == true
             if (counting) savePlaybackStatsCheckpoint()
             // 自动连播下一集：上一集算看完，告诉 Plex
@@ -567,7 +574,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 ServerProgress.find(prev.uri)?.let { p -> reportPlex(prev.uri, "stopped", p.durationMs, p.durationMs) }
             }
             if (!usingExternalKernel) {
+                if (exoPlayer.mediaItemCount == 0) return
                 val nextEntry = queue.getOrNull(exoPlayer.currentMediaItemIndex)
+                val isIdlePaused = exoPlayer.playbackState == Player.STATE_IDLE && !exoPlayer.playWhenReady
+                if (isIdlePaused && nextEntry?.uri == _state.value.current?.uri) return
                 if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO &&
                     _state.value.infiniteShuffle &&
                     nextEntry != null &&
@@ -586,14 +596,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 nextEntry?.let(::onEntryChanged)
             } else if (webMusicPlayer != null && player === webMusicPlayer) {
-                queue.getOrNull(player.currentMediaItemIndex)?.let(::onEntryChanged)
+                if (player.mediaItemCount == 0) return
+                val nextEntry = queue.getOrNull(player.currentMediaItemIndex)
+                val isIdlePaused = player.playbackState == Player.STATE_IDLE && !player.playWhenReady
+                if (isIdlePaused && nextEntry?.uri == _state.value.current?.uri) return
+                nextEntry?.let(::onEntryChanged)
             }
             if (counting) _state.value.current?.let { library.recordPlayback(it, 0, started = true) }
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (cleared) return
             reportPlexNow(if (isPlaying) "playing" else "paused")
             if (isPlaying) watchFirstFrame()
+            else if (_state.value.current?.isMusic == true) savePosition()
             updatePlaybackStats(isPlaying)
         }
 
@@ -755,7 +771,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             exoPlayer.shuffleModeEnabled = true
             exoPlayer.repeatMode = Player.REPEAT_MODE_ALL
         }
+        PlaybackService.onBeforeTaskRemoved = taskRemovedCallback
         exoPlayer.addListener(listener)
+        if (widgetHandover == null) {
+            restoreSavedMusicSession()
+        }
+        // 音乐播放期间每 5 秒轻量持久化当前进度，防止后台划掉或进程被杀丢失进度
+        viewModelScope.launch {
+            while (true) {
+                delay(5_000L)
+                val cur = _state.value.current
+                if (!cleared && cur != null && cur.isMusic && queue.isNotEmpty() && player.isPlaying && player.mediaItemCount > 0) {
+                    val idx = resolveMusicQueueIndex(queue, cur.uri, player.mediaItemCount, player.currentMediaItemIndex)
+                    val dur = player.duration.takeIf { it > 0L } ?: cur.durationMs
+                    library.saveMusicProgress(cur, idx, player.currentPosition.coerceAtLeast(0L), durationMs = dur)
+                }
+            }
+        }
         // 内嵌字幕默认不显示（避免和 AI 字幕重叠），除非设置了首选字幕语言
         extras.applyTrackDefaults()
         // 识别、翻译的进度放到通知栏，离开播放页也看得到（直播实时字幕是持续流，不放通知栏）
@@ -823,6 +855,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             it.addListener(listener)
             webMusicPlayer = it
         }
+
+    /** 冷启动时自动恢复上次音乐播放列表、当前曲目与精确进度（保持暂停态，不自动发声）。 */
+    private fun restoreSavedMusicSession() {
+        val saved = library.loadMusicSession() ?: return
+        if (saved.queue.isEmpty()) return
+        val safeIdx = saved.index.coerceIn(saved.queue.indices)
+        val target = saved.queue[safeIdx]
+        if (!target.isMusic) return
+        val safePos = AppStore.sanitizeMusicResumePosition(saved.positionMs, target.durationMs)
+        queue = saved.queue
+        val items = queue.map(::itemOf)
+        _state.update {
+            it.copy(
+                current = target,
+                videoUri = Uri.parse(target.uri),
+                playbackError = null,
+                videoProblem = null,
+                queueVersion = it.queueVersion + 1,
+            )
+        }
+        if (com.aisub.player.music.WebStreamingMusic.isStreamingUri(target.uri)) {
+            val w = webMusic()
+            if (_state.value.infiniteShuffle) {
+                w.shuffleModeEnabled = true
+                w.repeatMode = Player.REPEAT_MODE_ALL
+            }
+            w.setMediaItems(items, safeIdx, safePos)
+            _player.value = w
+        } else {
+            exoPlayer.setMediaItems(items, safeIdx, safePos)
+            _player.value = exoPlayer
+        }
+        music.onEntryChanged(target)
+    }
 
     private fun itemOf(e: MediaEntry) = MediaItem.Builder()
         .setUri(e.uri)
@@ -1054,6 +1120,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(playbackError = null, videoProblem = null, queueVersion = it.queueVersion + 1) }
         _player.value = w
         onEntryChanged(start)
+        library.saveMusicSession(streamQueue, startIdx, positionMs)
         if (_state.value.infiniteShuffle && start.isMusic) {
             recordInfinitePlayed(start)
             replenishInfiniteShuffleIfNeeded(forceIfSingle = true)
@@ -1273,6 +1340,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         when (player.playbackState) {
             Player.STATE_IDLE -> {
                 _state.update { it.copy(playbackError = null) }
+                startPlaybackService()
                 player.prepare()
                 player.play()
             }
@@ -1375,6 +1443,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         exoPlayer.play()
         startPlaybackService()
         onEntryChanged(start)
+        if (start.isMusic) {
+            val startIdx = queue.indexOf(start).coerceAtLeast(0)
+            library.saveMusicSession(queue, startIdx, resume)
+        }
         if (_state.value.infiniteShuffle && start.isMusic) {
             recordInfinitePlayed(start)
             replenishInfiniteShuffleIfNeeded(forceIfSingle = true)
@@ -1477,6 +1549,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         music.onEntryChanged(entry)
         library.recordHistory(entry, 0)
         if (entry.isMusic) {
+            if (queue.isNotEmpty()) {
+                val idx = resolveMusicQueueIndex(queue, entry.uri, player.mediaItemCount, player.currentMediaItemIndex)
+                val pos = player.currentPosition.coerceAtLeast(0L)
+                library.saveMusicProgress(entry, idx, pos, durationMs = entry.durationMs)
+            }
             recordInfinitePlayed(entry)
             if (_state.value.infiniteShuffle) {
                 replenishInfiniteShuffleIfNeeded()
@@ -1493,12 +1570,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         exoPlayer.pauseAtEndOfMediaItems = busy
     }
 
+    fun seekMusicTo(positionMs: Long) {
+        val target = positionMs.coerceAtLeast(0L)
+        player.seekTo(target)
+        val cur = _state.value.current ?: return
+        if (cur.isMusic && queue.isNotEmpty()) {
+            val idx = resolveMusicQueueIndex(queue, cur.uri, player.mediaItemCount, player.currentMediaItemIndex)
+            val dur = player.duration.takeIf { it > 0L } ?: cur.durationMs
+            library.saveMusicProgress(cur, idx, target, durationMs = dur)
+        }
+    }
+
     /** 记录当前播放进度，离开播放页或切换视频时调用。 */
-    fun savePosition() {
+    fun savePosition(sync: Boolean = false) {
+        if (cleared) return
         val entry = _state.value.current ?: return
         if (player.mediaItemCount == 0) return
         val duration = player.duration.takeIf { it > 0 } ?: entry.durationMs
-        library.recordHistory(entry.copy(durationMs = if (entry.isLive) 0 else duration), if (entry.isLive) 0 else player.currentPosition)
+        val pos = if (entry.isLive) 0L else player.currentPosition.coerceAtLeast(0L)
+        val updatedEntry = entry.copy(durationMs = if (entry.isLive) 0 else duration)
+        if (entry.isMusic && queue.isNotEmpty()) {
+            val idx = resolveMusicQueueIndex(queue, entry.uri, player.mediaItemCount, player.currentMediaItemIndex)
+            if (idx in queue.indices && queue[idx].durationMs != updatedEntry.durationMs) {
+                queue = queue.toMutableList().apply { this[idx] = updatedEntry }
+            }
+            library.saveMusicSession(queue, idx, pos, sync = sync)
+        }
+        library.recordHistory(updatedEntry, pos)
         extras.saveHistoryThumbnail()
         reportPlexNow(if (player.isPlaying) "playing" else "stopped")
         com.aisub.player.sync.MultiDeviceSync.scheduleDebouncedAutoSync(getApplication())
@@ -3818,6 +3916,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             exoPlayer.removeMediaItem(index)
         }
         _state.update { it.copy(queueVersion = it.queueVersion + 1) }
+        val cur = _state.value.current
+        if (cur != null && cur.isMusic && queue.isNotEmpty()) {
+            val idx = resolveMusicQueueIndex(queue, cur.uri, player.mediaItemCount, player.currentMediaItemIndex)
+            library.saveMusicSession(queue, idx, player.currentPosition.coerceAtLeast(0L))
+        }
     }
 
     /** 切换音乐播放模式（顺序 / 列表循环 / 单曲循环 / 随机播放 / 无限随机），同步各内核与队列抽屉状态。 */
@@ -4319,7 +4422,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         ttsReader.stop()
         previewPlayer?.release()
         ttsEngines.values.forEach { it.close() }
-        savePosition()
+        savePosition(sync = true)
+        cleared = true
+        if (PlaybackService.onBeforeTaskRemoved === taskRemovedCallback) {
+            PlaybackService.onBeforeTaskRemoved = null
+        }
+        exoPlayer.removeListener(listener)
+        mpvPlayer?.removeListener(listener)
+        vlcPlayer?.removeListener(listener)
+        webMusicPlayer?.removeListener(listener)
         extras.release()
         // 新界面已经接管了会话（见 session 的注释）时，不动它的会话和后台服务
         val current = PlaybackService.session === session
@@ -4339,6 +4450,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         private const val BATCH_SIZE = 20
         private val LOCAL_SCHEMES = setOf("content", "file", "android.resource")
+
+        internal fun resolveMusicQueueIndex(
+            queue: List<MediaEntry>,
+            currentUri: String,
+            playerMediaItemCount: Int,
+            playerIndex: Int,
+        ): Int {
+            if (queue.isEmpty()) return 0
+            if (playerMediaItemCount > 0 && playerIndex in queue.indices && queue[playerIndex].uri == currentUri) {
+                return playerIndex
+            }
+            return queue.indexOfFirst { it.uri == currentUri }.takeIf { it >= 0 }
+                ?: playerIndex.coerceIn(queue.indices)
+        }
 
         /** 实时翻译（直播、远程文件）一次最多翻几句 */
         private const val REALTIME_BATCH = 6

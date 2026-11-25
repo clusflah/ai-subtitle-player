@@ -152,7 +152,7 @@ enum class MusicDiscoverSource(
     AUTO("自动融合（推荐）", "自动融合", "融合网易云音乐、QQ音乐与 Apple Music 多源榜单与推荐，任一源受限时自动回退"),
     NETEASE("网易云音乐", "网易云音乐", "流行榜单、新音乐、搜索与相似歌曲优先采用网易云音乐"),
     QQ("QQ音乐", "QQ音乐", "流行榜单、新音乐、搜索与推荐优先采用 QQ 音乐巅峰榜"),
-    APPLE("Apple Music / iTunes", "Apple Music", "榜单、搜索与相似推荐优先采用 Apple Music 热播榜与 iTunes 曲库"),
+    APPLE("Apple Music / iTunes", "Apple Music", "榜单、搜索与相似推荐优先采用 Apple Music 台湾区热播榜与 iTunes 曲库"),
     ;
 
     companion object {

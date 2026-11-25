@@ -558,10 +558,15 @@ class MainActivity : ComponentActivity() {
         runCatching { enterPictureInPictureMode(android.app.PictureInPictureParams.Builder().setAspectRatio(ratio).build()) }
     }
 
+    override fun onPause() {
+        super.onPause()
+        main.savePosition(sync = true)
+    }
+
     /** 应用不可见了（回桌面、锁屏、关掉悬浮窗）：按设置决定继续播放还是暂停。 */
     override fun onStop() {
         super.onStop()
-        main.savePosition()
+        main.savePosition(sync = true)
         if (!main.keepPlayingInBackground()) {
             main.stopLiveTasksIfActive()
             main.player.pause()

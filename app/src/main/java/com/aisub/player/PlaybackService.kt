@@ -43,6 +43,7 @@ class PlaybackService : MediaSessionService() {
 
     /** 从最近任务里划掉应用：播放器跟着界面一起释放，服务也结束。 */
     override fun onTaskRemoved(rootIntent: Intent?) {
+        runCatching { onBeforeTaskRemoved?.invoke() }
         session?.player?.pause()
         stopSelf()
     }
@@ -75,5 +76,8 @@ class PlaybackService : MediaSessionService() {
         /** 当前的媒体会话；ViewModel 或 [WidgetPlayback] 创建、释放 */
         @Volatile
         var session: MediaSession? = null
+
+        @Volatile
+        var onBeforeTaskRemoved: (() -> Unit)? = null
     }
 }

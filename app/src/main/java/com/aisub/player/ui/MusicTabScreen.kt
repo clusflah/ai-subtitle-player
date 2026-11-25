@@ -152,7 +152,7 @@ fun MusicTabScreen(
     }
 
     // 播放进度轮询（与 PlayerScreen 一致，仅在音乐标签激活时运行）
-    var positionMs by remember { mutableLongStateOf(0L) }
+    var positionMs by remember(player) { mutableLongStateOf(player.currentPosition.coerceAtLeast(0L)) }
     var wantsPlay by remember { mutableStateOf(player.playWhenReady) }
     var speed by remember(player) { mutableFloatStateOf(player.playbackParameters.speed) }
     LaunchedEffect(player) {
@@ -331,7 +331,11 @@ fun MusicTabScreen(
             positionMs = if (music.tags != null) positionMs else (recentMusicHistory?.takeIf { it.entry.uri == standbyEntry?.uri }?.positionMs ?: 0L),
             wantsPlay = wantsPlay,
             onBack = null,
-            onSeek = { target -> player.seekTo(target.coerceAtLeast(0L)); positionMs = target.coerceAtLeast(0L) },
+            onSeek = { target ->
+                val safe = target.coerceAtLeast(0L)
+                main.seekMusicTo(safe)
+                positionMs = safe
+            },
             onMessage = showToast,
             inHomeTab = true,
             bottomOverlayPadding = bottomOverlayPadding,

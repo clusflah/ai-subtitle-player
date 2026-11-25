@@ -300,7 +300,10 @@ object WebStreamingMusic {
     fun logout(context: Context, service: WebMusicService) {
         val app = context.applicationContext
         val prefs = app.getSharedPreferences(AUTH_PREFS, Context.MODE_PRIVATE)
-        prefs.edit().putBoolean("logged_${service.name}", false).apply()
+        prefs.edit().apply {
+            putBoolean("logged_${service.name}", false)
+            if (service == WebMusicService.APPLE_MUSIC) remove("apple_storefront")
+        }.apply()
         if (service == WebMusicService.SPOTIFY) {
             SpotifyAppRemoteBridge.logoutAll(app)
         }
@@ -606,8 +609,12 @@ object WebStreamingMusic {
         }
         // 新账号或暂未收藏单曲时，自动兜底加载精选热门单曲列表（点击直接通过当前流媒体服务播放）
         return withContext(Dispatchers.IO) {
-            val primaryStore = if (service == WebMusicService.SPOTIFY || service == WebMusicService.YOUTUBE_MUSIC) "tw" else "cn"
+            val primaryStore = if (service == WebMusicService.APPLE_MUSIC ||
+                service == WebMusicService.SPOTIFY ||
+                service == WebMusicService.YOUTUBE_MUSIC
+            ) MusicDiscoverRepository.APPLE_DEFAULT_COUNTRY else "cn"
             MusicDiscoverRepository.fetchAppleMostPlayed(primaryStore, 40)
+                .ifEmpty { MusicDiscoverRepository.fetchItunesTopSongsRss(primaryStore, 40) }
                 .ifEmpty { MusicDiscoverRepository.fetchAppleMostPlayed("us", 40) }
                 .map { discoverToServerItem(service, it) }
         }
@@ -1442,7 +1449,7 @@ object WebStreamingMusic {
                     if (allowed.isNotEmpty()) request.grant(allowed) else request.deny()
                 }
             }
-            loadUrl(service.homeUrl)
+            loadUrl(initialEngineUrl(appContext, service))
         }
 
         suspend fun awaitReady() {
@@ -1455,11 +1462,21 @@ object WebStreamingMusic {
         suspend fun callRpc(method: String, args: JSONObject, timeoutMs: Long): String? {
             if (method == "playTrack") keepAwakeForAudio = true
             if (service == WebMusicService.APPLE_MUSIC) {
-                val rawCookies = runCatching { CookieManager.getInstance().getCookie("https://music.apple.com").orEmpty() }.getOrDefault("")
-                val cookieMut = extractCookieValue(rawCookies, "media-user-token")
-                    ?: extractCookieValue(rawCookies, "music-user-token")
+                val cm = runCatching { CookieManager.getInstance() }.getOrNull()
+                val cookieMut = listOf(
+                    "https://music.apple.com",
+                    "https://amp-api.music.apple.com",
+                    "https://authorize.music.apple.com",
+                ).firstNotNullOfOrNull { domain ->
+                    val raw = runCatching { cm?.getCookie(domain).orEmpty() }.getOrDefault("")
+                    extractCookieValue(raw, "media-user-token")
+                        ?: extractCookieValue(raw, "music-user-token")
+                }
                 if (!cookieMut.isNullOrBlank()) {
                     args.put("_cookieMut", cookieMut)
+                }
+                savedAppleStorefront(appContext)?.let { sf ->
+                    args.put("_savedSf", sf)
                 }
             }
             val reqId = UUID.randomUUID().toString()
@@ -1524,6 +1541,40 @@ object WebStreamingMusic {
                 markLoggedIn(appContext, service, true)
             }
         }
+
+        @JavascriptInterface
+        fun onAppleStorefront(sf: String) {
+            if (service == WebMusicService.APPLE_MUSIC) {
+                saveAppleStorefront(appContext, sf)
+            }
+        }
+    }
+
+    internal fun normalizeAppleStorefront(raw: String?): String? {
+        val clean = raw?.trim()?.lowercase().orEmpty()
+        return clean.takeIf { it.length == 2 && it.all { ch -> ch in 'a'..'z' } }
+    }
+
+    internal fun initialEngineUrl(context: Context, service: WebMusicService): String {
+        if (service == WebMusicService.APPLE_MUSIC) {
+            val sf = savedAppleStorefront(context)
+            if (sf != null) return "https://music.apple.com/$sf/home"
+        }
+        return service.homeUrl
+    }
+
+    private fun savedAppleStorefront(context: Context): String? =
+        normalizeAppleStorefront(
+            context.applicationContext.getSharedPreferences(AUTH_PREFS, Context.MODE_PRIVATE)
+                .getString("apple_storefront", null),
+        )
+
+    private fun saveAppleStorefront(context: Context, raw: String?) {
+        val sf = normalizeAppleStorefront(raw) ?: return
+        context.applicationContext.getSharedPreferences(AUTH_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString("apple_storefront", sf)
+            .apply()
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -1761,6 +1812,30 @@ object WebStreamingMusic {
           if (init && init.headers) scanHeadersObj(init.headers);
           inspectSpotifyUrlAndBody(url, init && init.body);
         } catch (e) {}
+        function retryOnAmpApi() {
+          var altUrl = url.replace(/^https:\/\/api\.music\.apple\.com\//i, 'https://amp-api.music.apple.com/');
+          var altHeaders = new Headers();
+          var srcHeaders = (init && init.headers) || (input && input.headers) || null;
+          if (srcHeaders) {
+            new Headers(srcHeaders).forEach(function(v, k) {
+              var kl = String(k).toLowerCase();
+              if (kl === 'music-user-token' || kl === 'media-user-token') altHeaders.set('media-user-token', v);
+              else if (kl === 'authorization' || kl === 'x-apple-client-version') altHeaders.set(kl, v);
+            });
+          }
+          if (!altHeaders.get('media-user-token') && window.__voxAppleUserToken) {
+            altHeaders.set('media-user-token', window.__voxAppleUserToken);
+          }
+          if (!altHeaders.get('authorization') && window.__voxAppleDevToken) {
+            altHeaders.set('authorization', 'Bearer ' + window.__voxAppleDevToken);
+          }
+          var altInit = {};
+          if (init) {
+            Object.keys(init).forEach(function(k) { if (k !== 'headers') altInit[k] = init[k]; });
+          }
+          altInit.headers = altHeaders;
+          return origFetch.call(window, altUrl, altInit);
+        }
         return origFetch.apply(this, arguments).then(function(resp) {
           try {
             var rUrl = (resp && resp.url) || url || '';
@@ -1769,8 +1844,17 @@ object WebStreamingMusic {
                 inspectSpotifyResponseJson(rUrl, j);
               }).catch(function(){});
             }
+            if (resp && (resp.status === 401 || resp.status === 403 || resp.status >= 500) &&
+                /^https:\/\/api\.music\.apple\.com\//i.test(url) && window.__voxAppleUserToken) {
+              return retryOnAmpApi().catch(function() { return resp; });
+            }
           } catch (e) {}
           return resp;
+        }).catch(function(err) {
+          if (/^https:\/\/api\.music\.apple\.com\//i.test(url)) {
+            try { return retryOnAmpApi(); } catch (e2) {}
+          }
+          throw err;
         });
       };
     }
@@ -1809,7 +1893,11 @@ object WebStreamingMusic {
     /**
      * 运行时控制与曲库读取桥接脚本（同时适配 Apple Music `amp-api` + `MusicKit v3` 与 Spotify `pathfinder/v2/query` + Web API）。
      */
-    private const val ENGINE_RUNTIME_SCRIPT = """
+    private val ENGINE_RUNTIME_SCRIPT: String by lazy {
+        ENGINE_RUNTIME_SCRIPT_PART_1 + ENGINE_RUNTIME_SCRIPT_PART_2
+    }
+
+    private const val ENGINE_RUNTIME_SCRIPT_PART_1 = """
 (function() {
   if (window.__voxBridge) return;
   var isApple = location.hostname.indexOf('apple.com') >= 0;
@@ -1879,9 +1967,60 @@ object WebStreamingMusic {
     return '';
   }
 
+  function reportAppleStorefront(sf) {
+    var clean = String(sf || '').trim().toLowerCase();
+    if (!/^[a-z]{2}$/.test(clean)) return '';
+    window.__voxAppleAccountStorefront = clean;
+    window.__voxAppleStorefront = clean;
+    try {
+      if (window.VoxMusicHost && typeof window.VoxMusicHost.onAppleStorefront === 'function') {
+        window.VoxMusicHost.onAppleStorefront(clean);
+      }
+    } catch (e) {}
+    return clean;
+  }
+
+  async function syncAppleMusicKitAuth(inst, sf, args) {
+    if (!inst) return inst;
+    var mut = getAppleUserToken(inst, args);
+    if (mut && (!inst.musicUserToken || inst.musicUserToken !== mut || !inst.isAuthorized)) {
+      try { inst.musicUserToken = mut; } catch (e) {}
+    }
+    var wantSf = window.__voxAppleAccountStorefront || sf || '';
+    if (wantSf && inst.storefrontId !== wantSf) {
+      try {
+        if (typeof inst.changeUserStorefront === 'function') await inst.changeUserStorefront(wantSf);
+      } catch (e) {}
+      try { inst.storefrontId = wantSf; } catch (e) {}
+    }
+    if (mut && (!window.__voxAppleMeSynced || !window.__voxAppleAccountStorefront)) {
+      try {
+        if (typeof inst.me === 'function') {
+          var meRes = await inst.me();
+          var subSf = meRes && meRes.subscription && meRes.subscription.storefront;
+          if (subSf) {
+            var realSf = reportAppleStorefront(subSf);
+            if (realSf && inst.storefrontId !== realSf) {
+              try {
+                if (typeof inst.changeUserStorefront === 'function') await inst.changeUserStorefront(realSf);
+              } catch (e) {}
+              try { inst.storefrontId = realSf; } catch (e) {}
+            }
+          }
+          if (meRes && meRes.subscription && meRes.subscription.active) {
+            window.__voxAppleMeSynced = true;
+          }
+        }
+      } catch (e) {}
+    }
+    return inst;
+  }
+
   async function ensureAppleMusicKit(sf, args) {
     var existing = window.MusicKit && window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
-    if (existing && (existing.developerToken || existing.api)) return existing;
+    if (existing && (existing.developerToken || existing.api)) {
+      return await syncAppleMusicKitAuth(existing, sf, args);
+    }
 
     // music.apple.com 默认按需懒加载 MusicKit；播放时若尚未加载则主动从同源路径挂载
     if (!window.MusicKit) {
@@ -1908,18 +2047,14 @@ object WebStreamingMusic {
             app: { name: 'Apple Music', build: '2646.4.0' },
             bitrate: 256,
             persist: 'cookie',
-            storefrontId: sf || 'cn'
+            storefrontId: sf || (args && args._savedSf) || 'us'
           });
           inst = cfgRes || (window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null);
         } catch (e) {
           inst = window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
         }
       }
-      var mut = getAppleUserToken(inst, args);
-      if (inst && mut && !inst.musicUserToken) {
-        try { inst.musicUserToken = mut; } catch (e) {}
-      }
-      return inst;
+      return await syncAppleMusicKitAuth(inst, sf, args);
     }
     return null;
   }
@@ -1963,20 +2098,38 @@ object WebStreamingMusic {
   }
 
   async function detectAppleStorefront(mk, args) {
+    if (window.__voxAppleAccountStorefront) return window.__voxAppleAccountStorefront;
+    var mut = getAppleUserToken(mk, args);
+    if (mut) {
+      var acctData = await appleApi(mk, '/v1/me/account', { meta: 'subscription', platform: 'web' }, args);
+      var subSf = acctData && acctData.meta && acctData.meta.subscription && acctData.meta.subscription.storefront;
+      if (subSf) {
+        var normalizedSub = reportAppleStorefront(subSf);
+        if (normalizedSub) return normalizedSub;
+      }
+      var sfData = await appleApi(mk, '/v1/me/storefront', { platform: 'web' }, args);
+      var sfId = sfData && sfData.data && sfData.data[0] && sfData.data[0].id;
+      if (sfId) {
+        var normalizedSf = reportAppleStorefront(sfId);
+        if (normalizedSf) return normalizedSf;
+      }
+    }
+    if (args && args._savedSf && /^[a-z]{2}$/i.test(String(args._savedSf))) {
+      var saved = String(args._savedSf).toLowerCase();
+      window.__voxAppleStorefront = saved;
+      return saved;
+    }
+    if (mk && mk.isAuthorized && mk.storefrontCountryCode && /^[a-z]{2}$/i.test(String(mk.storefrontCountryCode))) {
+      return reportAppleStorefront(mk.storefrontCountryCode);
+    }
     if (window.__voxAppleStorefront) return window.__voxAppleStorefront;
-    if (mk && mk.storefrontId) {
-      window.__voxAppleStorefront = mk.storefrontId;
-      return mk.storefrontId;
+    if (mk && mk.storefrontId && /^[a-z]{2}$/i.test(String(mk.storefrontId))) {
+      window.__voxAppleStorefront = String(mk.storefrontId).toLowerCase();
+      return window.__voxAppleStorefront;
     }
     var seg = (location.pathname || '').split('/').filter(Boolean)[0] || '';
     if (/^[a-z]{2}$/i.test(seg) && seg.toLowerCase() !== 'library') {
       window.__voxAppleStorefront = seg.toLowerCase();
-      return window.__voxAppleStorefront;
-    }
-    var sfData = await appleApi(mk, '/v1/me/storefront', { platform: 'web' }, args);
-    var sfId = sfData && sfData.data && sfData.data[0] && sfData.data[0].id;
-    if (sfId) {
-      window.__voxAppleStorefront = String(sfId).toLowerCase();
       return window.__voxAppleStorefront;
     }
     var itua = readDocCookie('itua');
@@ -1984,7 +2137,7 @@ object WebStreamingMusic {
       window.__voxAppleStorefront = itua.toLowerCase();
       return window.__voxAppleStorefront;
     }
-    return 'cn';
+    return 'us';
   }
 
   function mapAppleResource(r) {
@@ -2486,29 +2639,82 @@ object WebStreamingMusic {
     }
     return sOut.filter(Boolean);
   }
+"""
+
+    private const val ENGINE_RUNTIME_SCRIPT_PART_2 = """
+  async function resolveAppleTrackIdForStorefront(mk, sf, rawTrackId, args) {
+    var tid = String(rawTrackId || '').trim();
+    if (tid && tid.indexOf('i.') === 0) return tid;
+    if (tid && sf) {
+      var songCheck = await appleApi(mk, '/v1/catalog/' + sf + '/songs/' + encodeURIComponent(tid), { platform: 'web' }, args);
+      var songObj = songCheck && songCheck.data && songCheck.data[0];
+      if (songObj && songObj.attributes && songObj.attributes.playParams) {
+        return String(songObj.id || tid);
+      }
+    }
+    if (args && args.title) {
+      var q = (args.title + ' ' + (args.artist || '')).trim();
+      var sData = await appleApi(mk, '/v1/catalog/' + sf + '/search', { term: q, types: 'songs', limit: 6 }, args);
+      var songs = (((sData || {}).results || {}).songs || {}).data || [];
+      if (songs.length) {
+        var wantT = normTrackTitle(args.title);
+        var matched = songs.find(function(s) {
+          return s && s.attributes && s.attributes.playParams && normTrackTitle(s.attributes.name) === wantT;
+        }) || songs.find(function(s) {
+          return s && s.attributes && s.attributes.playParams;
+        }) || songs[0];
+        if (matched && matched.id) return String(matched.id);
+      }
+    }
+    return tid;
+  }
 
   async function playOnApple(args) {
+    var reqSeq = Number(args && args.playSeq) || voxPlaySeq;
     var sf = await detectAppleStorefront(null, args);
     var mk = await ensureAppleMusicKit(sf, args);
     var mut = getAppleUserToken(mk, args);
     if (!mut && (!mk || !mk.isAuthorized)) {
       return { ok: false, error: 'Apple Music 登录状态已失效，请在音源设置中重新登录' };
     }
-    var trackId = String(args.trackId || '').trim();
-    if (!trackId && args.title) {
-      var q = (args.title + ' ' + (args.artist || '')).trim();
-      var sData = await appleApi(mk, '/v1/catalog/' + sf + '/search', { term: q, types: 'songs', limit: 5 }, args);
-      var songs = (((sData || {}).results || {}).songs || {}).data || [];
-      if (songs.length) trackId = songs[0].id;
-    }
+    sf = window.__voxAppleAccountStorefront || (mk && mk.storefrontId) || sf || 'us';
+    var trackId = await resolveAppleTrackIdForStorefront(mk, sf, args && args.trackId, args);
     if (!trackId) return { ok: false, error: '未在 Apple Music 曲库中找到该歌曲' };
 
     if (mk && typeof mk.setQueue === 'function') {
-      var queueArg = trackId.indexOf('i.') === 0 ? { librarySong: trackId, startPlaying: true } : { song: trackId, startPlaying: true };
-      await mk.setQueue(queueArg);
-      await mk.play();
+      var playOnce = async function(idToPlay) {
+        var queueArg = idToPlay.indexOf('i.') === 0 ? { librarySong: idToPlay, startPlaying: true } : { song: idToPlay, startPlaying: true };
+        await mk.setQueue(queueArg);
+        await mk.play();
+      };
+      try {
+        await playOnce(trackId);
+      } catch (playErr) {
+        window.__voxAppleMeSynced = false;
+        sf = await detectAppleStorefront(mk, args);
+        await syncAppleMusicKitAuth(mk, sf, args);
+        sf = window.__voxAppleAccountStorefront || (mk && mk.storefrontId) || sf;
+        trackId = await resolveAppleTrackIdForStorefront(mk, sf, args && args.trackId, args);
+        await playOnce(trackId);
+      }
+      var curItem = runSafe(function() { return mk.nowPlayingItem; });
+      if (mut && curItem && curItem.playbackType === 1) {
+        window.__voxAppleMeSynced = false;
+        await syncAppleMusicKitAuth(mk, sf, args);
+        sf = window.__voxAppleAccountStorefront || (mk && mk.storefrontId) || sf;
+        var resolvedRetryId = await resolveAppleTrackIdForStorefront(mk, sf, '', args) || trackId;
+        try { await playOnce(resolvedRetryId); } catch (eRetry) {}
+      }
       if (args.startPositionMs > 1000 && typeof mk.seekToTime === 'function') {
-        mk.seekToTime(args.startPositionMs / 1000.0);
+        var targetSec = args.startPositionMs / 1000.0;
+        try { await mk.seekToTime(targetSec); } catch(e) {}
+        setTimeout(function() {
+          try {
+            if (!isPlayCancelled(reqSeq) && mk.currentPlaybackTime < Math.max(0, targetSec - 3)) {
+              mk.seekToTime(targetSec);
+            }
+          } catch(e) {}
+        }, 650);
       }
       return { ok: true };
     }

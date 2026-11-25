@@ -621,10 +621,51 @@ class MusicDiscoverTest {
         assertEquals("http://aqqmusic.tc.qq.com/RS02003yrAfR3G899X.mp3?vkey=RS02KEY", qqRs02!!.url)
         assertEquals("试听版", qqRs02.qualityLabel)
 
-        // 4b. Apple Music 流行热歌榜不再默认指向中国区（避免全中文老歌）
+        // 4b. Apple Music 流行热歌榜统一指向台湾区（tw）榜单
         val hotChart = MusicDiscoverCharts.findChart("music_hot")
         assertNotNull(hotChart)
-        assertEquals("us", hotChart!!.fallbackAppleCountry)
+        assertEquals("tw", hotChart!!.fallbackAppleCountry)
+        assertEquals("tr", com.aisub.player.music.WebStreamingMusic.normalizeAppleStorefront("TR"))
+        assertEquals(
+            false,
+            com.aisub.player.media.WebStreamingMusicPlayer.resolveExternalPlayWhenReady(
+                currentPlayWhenReady = true,
+                hasStartedAudio = true,
+                snapPlaying = false,
+                snapBuffering = false,
+                snapEnded = false,
+                inSeekHold = false,
+                sinceUserPlayMs = 2_000L,
+                sinceUserPauseMs = 10_000L,
+            ),
+        )
+        val musicQueue = listOf(
+            com.aisub.player.media.MediaEntry(uri = "applemusic://track/tw_1", title = "Song 1.mp3", isVideo = false, durationMs = 200_000L),
+            com.aisub.player.media.MediaEntry(uri = "spotify://search?title=Song2", title = "Song 2.mp3", isVideo = false, durationMs = 210_000L),
+        )
+        val sessionJson = com.aisub.player.media.AppStore.encodeMusicSessionJson(
+            com.aisub.player.media.SavedMusicSession(musicQueue, index = 0, positionMs = 15_000L, savedAt = 1_000L),
+        )
+        val progressJson = com.aisub.player.media.AppStore.encodeMusicProgressJson(
+            uri = musicQueue[1].uri,
+            index = 1,
+            positionMs = 88_000L,
+            durationMs = 210_000L,
+            savedAt = 2_000L,
+        )
+        val restoredSession = com.aisub.player.media.AppStore.decodeMusicSessionJson(sessionJson, progressJson)
+        assertNotNull(restoredSession)
+        assertEquals(1, restoredSession!!.index)
+        assertEquals(88_000L, restoredSession.positionMs)
+        assertEquals(
+            1,
+            com.aisub.player.MainViewModel.resolveMusicQueueIndex(
+                queue = musicQueue,
+                currentUri = musicQueue[1].uri,
+                playerMediaItemCount = 0,
+                playerIndex = 0,
+            ),
+        )
 
         // 5. 歌单顶部固定「已点赞的歌曲」逻辑
         val normalPlaylists = listOf(

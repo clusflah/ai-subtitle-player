@@ -5,11 +5,20 @@ import com.aisub.player.remote.AuthRegistry
 import com.aisub.player.remote.Endpoints
 import com.aisub.player.remote.Server
 import com.aisub.player.remote.cloud.CloudRegistry
+import com.aisub.player.remote.cloud.ServerProgress
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
 data class HistoryItem(val entry: MediaEntry, val positionMs: Long, val playedAt: Long)
+
+/** 上次音乐播放队列、当前曲目下标与播放进度快照（用于应用关闭重开后恢复）。 */
+data class SavedMusicSession(
+    val queue: List<MediaEntry>,
+    val index: Int,
+    val positionMs: Long,
+    val savedAt: Long = System.currentTimeMillis(),
+)
 
 data class PlaybackStats(val videoMs: Long = 0, val musicMs: Long = 0, val liveMs: Long = 0, val starts: Long = 0) {
     val totalMs get() = videoMs + musicMs + liveMs
@@ -208,6 +217,70 @@ class AppStore(context: Context) {
         saveHiddenFolders(hiddenFolders().filter { it.serverId != id })
     }
 
+    // ---- 音乐播放列表与进度恢复 ----
+
+    @Synchronized
+    fun saveMusicSession(
+        queue: List<MediaEntry>,
+        index: Int,
+        positionMs: Long,
+        sync: Boolean = false,
+    ) {
+        val musicQueue = queue.filter { it.isMusic }
+        if (musicQueue.isEmpty()) {
+            clearMusicSession(sync)
+            return
+        }
+        val origCurUri = queue.getOrNull(index)?.uri
+        val mappedIdx = origCurUri?.let { u -> musicQueue.indexOfFirst { it.uri == u }.takeIf { it >= 0 } }
+            ?: index.coerceIn(musicQueue.indices)
+        val (trimmed, safeIdx) = trimMusicQueueAroundIndex(musicQueue, mappedIdx, MAX_SAVED_MUSIC_QUEUE)
+        val safePos = positionMs.coerceAtLeast(0L)
+        val now = System.currentTimeMillis()
+        val sessionJson = encodeMusicSessionJson(SavedMusicSession(trimmed, safeIdx, safePos, now))
+        val cur = trimmed[safeIdx]
+        val progressJson = encodeMusicProgressJson(cur.uri, safeIdx, safePos, cur.durationMs, now)
+        val editor = prefs.edit()
+            .putString(KEY_MUSIC_SESSION, sessionJson)
+            .putString(KEY_MUSIC_PROGRESS, progressJson)
+        if (sync) editor.commit() else editor.apply()
+    }
+
+    @Synchronized
+    fun saveMusicProgress(
+        entry: MediaEntry,
+        index: Int,
+        positionMs: Long,
+        durationMs: Long = entry.durationMs,
+        sync: Boolean = false,
+    ) {
+        if (!entry.isMusic) return
+        val progressJson = encodeMusicProgressJson(
+            uri = entry.uri,
+            index = index.coerceAtLeast(0),
+            positionMs = positionMs.coerceAtLeast(0L),
+            durationMs = durationMs.coerceAtLeast(0L),
+            savedAt = System.currentTimeMillis(),
+        )
+        val editor = prefs.edit().putString(KEY_MUSIC_PROGRESS, progressJson)
+        if (sync) editor.commit() else editor.apply()
+    }
+
+    @Synchronized
+    fun loadMusicSession(): SavedMusicSession? {
+        val rawSession = prefs.getString(KEY_MUSIC_SESSION, null) ?: return null
+        val rawProgress = prefs.getString(KEY_MUSIC_PROGRESS, null)
+        return decodeMusicSessionJson(rawSession, rawProgress)
+    }
+
+    @Synchronized
+    fun clearMusicSession(sync: Boolean = false) {
+        val editor = prefs.edit()
+            .remove(KEY_MUSIC_SESSION)
+            .remove(KEY_MUSIC_PROGRESS)
+        if (sync) editor.commit() else editor.apply()
+    }
+
     private fun readArray(key: String): List<JSONObject> = try {
         val arr = JSONArray(prefs.getString(key, "[]"))
         List(arr.length()) { arr.getJSONObject(it) }
@@ -221,6 +294,133 @@ class AppStore(context: Context) {
 
     companion object {
         private const val MAX_HISTORY = 50
+        private const val MAX_SAVED_MUSIC_QUEUE = 200
+        private const val KEY_MUSIC_SESSION = "music_playback_session"
+        private const val KEY_MUSIC_PROGRESS = "music_playback_progress"
+
+        internal fun trimMusicQueueAroundIndex(
+            queue: List<MediaEntry>,
+            index: Int,
+            maxItems: Int = MAX_SAVED_MUSIC_QUEUE,
+        ): Pair<List<MediaEntry>, Int> {
+            if (queue.isEmpty()) return emptyList<MediaEntry>() to 0
+            val safeIdx = index.coerceIn(queue.indices)
+            if (queue.size <= maxItems) return queue.toList() to safeIdx
+            val start = (safeIdx - maxItems / 2).coerceIn(0, queue.size - maxItems)
+            return queue.subList(start, start + maxItems).toList() to (safeIdx - start)
+        }
+
+        internal fun sanitizeMusicResumePosition(positionMs: Long, durationMs: Long): Long {
+            val safePos = positionMs.coerceAtLeast(0L)
+            if (durationMs > 10_000L && safePos >= durationMs - 2_000L) return 0L
+            return safePos
+        }
+
+        internal fun encodeMusicSessionJson(session: SavedMusicSession): String {
+            val itemsArr = JSONArray()
+            for (entry in session.queue) {
+                val obj = entry.toJson()
+                val meta = ServerProgress.find(entry.uri)
+                if (meta != null) {
+                    val m = JSONObject()
+                        .put("serverId", meta.serverId)
+                        .put("ratingKey", meta.ratingKey)
+                        .put("durationMs", meta.durationMs)
+                    if (!meta.title.isNullOrBlank()) m.put("title", meta.title)
+                    if (!meta.artist.isNullOrBlank()) m.put("artist", meta.artist)
+                    if (!meta.album.isNullOrBlank()) m.put("album", meta.album)
+                    if (!meta.coverUrl.isNullOrBlank()) m.put("coverUrl", meta.coverUrl)
+                    obj.put("meta", m)
+                }
+                itemsArr.put(obj)
+            }
+            return JSONObject()
+                .put("queue", itemsArr)
+                .put("index", session.index)
+                .put("positionMs", session.positionMs.coerceAtLeast(0L))
+                .put("savedAt", session.savedAt)
+                .toString()
+        }
+
+        internal fun encodeMusicProgressJson(
+            uri: String,
+            index: Int,
+            positionMs: Long,
+            durationMs: Long,
+            savedAt: Long = System.currentTimeMillis(),
+        ): String = JSONObject()
+            .put("uri", uri)
+            .put("index", index)
+            .put("positionMs", positionMs.coerceAtLeast(0L))
+            .put("durationMs", durationMs.coerceAtLeast(0L))
+            .put("savedAt", savedAt)
+            .toString()
+
+        internal fun decodeMusicSessionJson(
+            rawSession: String,
+            rawProgress: String? = null,
+        ): SavedMusicSession? = runCatching {
+            val root = JSONObject(rawSession)
+            val arr = root.optJSONArray("queue") ?: return null
+            if (arr.length() == 0) return null
+            val queue = ArrayList<MediaEntry>(arr.length())
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val entry = runCatching { MediaEntry.fromJson(o) }.getOrNull() ?: continue
+                if (entry.uri.isBlank() || !entry.isMusic) continue
+                queue += entry
+                val metaObj = o.optJSONObject("meta")
+                if (metaObj != null) {
+                    ServerProgress.register(
+                        entry.uri,
+                        ServerProgress.Entry(
+                            serverId = metaObj.optString("serverId").ifBlank { entry.uri.substringBefore("://", "web") },
+                            ratingKey = metaObj.optString("ratingKey"),
+                            durationMs = metaObj.optLong("durationMs").takeIf { it > 0L } ?: entry.durationMs,
+                            viewOffsetMs = 0L,
+                            title = metaObj.optString("title").takeIf { it.isNotBlank() } ?: entry.displayTitle,
+                            artist = metaObj.optString("artist").takeIf { it.isNotBlank() },
+                            album = metaObj.optString("album").takeIf { it.isNotBlank() },
+                            coverUrl = metaObj.optString("coverUrl").takeIf { it.isNotBlank() },
+                        ),
+                    )
+                }
+            }
+            if (queue.isEmpty()) return null
+
+            var index = root.optInt("index", 0).coerceIn(queue.indices)
+            var positionMs = root.optLong("positionMs", 0L).coerceAtLeast(0L)
+            var savedAt = root.optLong("savedAt", 0L)
+
+            if (!rawProgress.isNullOrBlank()) {
+                runCatching {
+                    val p = JSONObject(rawProgress)
+                    val pSavedAt = p.optLong("savedAt", 0L)
+                    if (pSavedAt >= savedAt) {
+                        val pUri = p.optString("uri")
+                        val pIdx = p.optInt("index", index)
+                        val matchedIdx = when {
+                            pIdx in queue.indices && (pUri.isBlank() || queue[pIdx].uri == pUri) -> pIdx
+                            pUri.isNotBlank() -> queue.indexOfFirst { it.uri == pUri }.takeIf { it >= 0 }
+                            else -> null
+                        }
+                        if (matchedIdx != null) {
+                            index = matchedIdx
+                            positionMs = p.optLong("positionMs", positionMs).coerceAtLeast(0L)
+                            savedAt = pSavedAt
+                            val pDur = p.optLong("durationMs", 0L)
+                            if (pDur > 0L && queue[matchedIdx].durationMs <= 0L) {
+                                queue[matchedIdx] = queue[matchedIdx].copy(durationMs = pDur)
+                            }
+                        }
+                    }
+                }
+            }
+
+            val target = queue[index]
+            val finalPos = sanitizeMusicResumePosition(positionMs, target.durationMs)
+            SavedMusicSession(queue = queue, index = index, positionMs = finalPos, savedAt = savedAt)
+        }.getOrNull()
     }
 }
 
