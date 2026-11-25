@@ -141,6 +141,17 @@ private val Dim = Color(0x99FFFFFF)
 private val Faint = Color(0x66FFFFFF)
 
 /**
+ * 计算当前应展示的封面：只要已有正在播放/切歌中的曲目，绝不回退到待机列表首曲封面（standbyCover），
+ * 避免新曲目封面异步加载期间闪现列表第 1 首歌的封面。
+ */
+internal fun <T> resolveDisplayCover(
+    activeMusic: Boolean,
+    hasCurrentEntry: Boolean,
+    activeCover: T?,
+    standbyCover: T?,
+): T? = if (activeMusic || hasCurrentEntry) activeCover else standbyCover
+
+/**
  * 播放音乐时的整页：上方「发现 / 歌曲 / 歌词 / 乐库」左右滑，
  * 下方固定显示歌名、喜欢、菜单、进度条和播放按钮。背景是模糊的封面。
  */
@@ -174,7 +185,12 @@ fun MusicView(
 ) {
     val activeMusic = music.tags != null
     val tags = music.tags ?: standbyTags ?: return
-    val displayCover = music.cover ?: standbyCover
+    val displayCover = resolveDisplayCover(
+        activeMusic = activeMusic,
+        hasCurrentEntry = current != null,
+        activeCover = music.cover,
+        standbyCover = standbyCover,
+    )
     val effectiveEntry = current?.takeIf { activeMusic }
     val effectiveWantsPlay = activeMusic && wantsPlay
     val mainState by vm.state.collectAsStateWithLifecycle()

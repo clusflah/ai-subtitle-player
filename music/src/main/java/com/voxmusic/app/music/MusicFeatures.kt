@@ -63,15 +63,25 @@ class MusicFeatures(
     private var entry: MediaEntry? = null
     private var rawTags: TrackTags? = null
     private var loadJob: Job? = null
+    private var coverJob: Job? = null
     private var lyricsJob: Job? = null
 
     fun onEntryChanged(e: MediaEntry) {
         if (entry?.uri == e.uri) return
         entry = e
         loadJob?.cancel()
+        coverJob?.cancel()
         lyricsJob?.cancel()
         val initialTags = TrackTags.fromFileName(e.title, e.durationMs)
-        _state.value = MusicState(tags = initialTags)
+        val preloadCoverUrl = TrackMetadataRegistry.find(e.uri)?.coverUrl ?: e.coverUrl
+        val instantCover = preloadCoverUrl
+            ?.takeIf { it.isNotBlank() }
+            ?.let { com.voxmusic.app.ui.ImageLoader.cachedAnyBitmap(it) }
+        _state.value = MusicState(
+            tags = initialTags,
+            cover = instantCover,
+            coverSource = if (instantCover != null) "专辑封面" else null,
+        )
         loadJob = scope.launch {
             val duration = player().duration.takeIf { it > 0L } ?: e.durationMs
             val meta = TrackMetadataRegistry.find(e.uri)
@@ -91,9 +101,14 @@ class MusicFeatures(
             val shown = withContext(Dispatchers.IO) { applySavedInfo(e, tags) }
             if (entry?.uri != e.uri) return@launch
             _state.update { it.copy(tags = shown, edited = shown !== tags) }
-            launch { loadCover(e, shown) }
+            launchCoverLoad(e, shown)
             launchLyricsLoad(e, shown)
         }
+    }
+
+    private fun launchCoverLoad(e: MediaEntry, tags: TrackTags) {
+        coverJob?.cancel()
+        coverJob = scope.launch { loadCover(e, tags) }
     }
 
     private fun launchLyricsLoad(e: MediaEntry, tags: TrackTags) {
@@ -137,7 +152,7 @@ class MusicFeatures(
         rawTags = updatedTags
         _state.update { it.copy(tags = updatedTags) }
         if (cur.cover == null && !coverUrl.isNullOrBlank()) {
-            scope.launch { loadCover(e, updatedTags) }
+            launchCoverLoad(e, updatedTags)
         }
         if ((titleOrArtistChanged || (cur.lyrics == null && lyricsJob?.isActive != true)) && settings().musicOnlineLookup && updatedTags.title.isNotBlank()) {
             launchLyricsLoad(e, updatedTags)
@@ -331,6 +346,7 @@ class MusicFeatures(
     // ---------------- 封面 ----------------
 
     private suspend fun loadCover(e: MediaEntry, tags: TrackTags) {
+        if (entry?.uri != e.uri) return
         val cached = withContext(Dispatchers.IO) { coverFile(e).takeIf { it.exists() }?.readBytes()?.let(::decode) }
         val (bitmap, source) = when {
             cached != null -> cached to "已保存"
@@ -338,6 +354,7 @@ class MusicFeatures(
                 remoteCover(e)?.let { it to "专辑封面" }
             } ?: (null to null)
         }
+        if (entry?.uri != e.uri) return
         if (bitmap != null) {
             _state.update { it.copy(cover = bitmap, coverSource = source) }
             withContext(Dispatchers.IO) { saveThumb(app, e.uri, bitmap) }
@@ -346,7 +363,7 @@ class MusicFeatures(
         if (!settings().musicOnlineLookup) return
         val bytes = withContext(Dispatchers.IO) { MusicLookup.bestCover(tags) } ?: return
         val online = withContext(Dispatchers.IO) { decode(bytes)?.also { coverFile(e).writeBytes(bytes) } } ?: return
-        if (entry == e) {
+        if (entry?.uri == e.uri) {
             _state.update { it.copy(cover = online, coverSource = "在线") }
             withContext(Dispatchers.IO) { saveThumb(app, e.uri, online) }
         }
@@ -354,7 +371,9 @@ class MusicFeatures(
 
     private fun remoteCover(e: MediaEntry): Bitmap? {
         val coverUrl = TrackMetadataRegistry.find(e.uri)?.coverUrl ?: e.coverUrl ?: return null
-        val bytes = fetchImageBytes(coverUrl) ?: return null
+        val bytes = com.voxmusic.app.ui.ImageLoader.cachedBytes(app, coverUrl)
+            ?: fetchImageBytes(coverUrl)
+            ?: return null
         return decode(bytes)?.also { runCatching { coverFile(e).writeBytes(bytes) } }
     }
 

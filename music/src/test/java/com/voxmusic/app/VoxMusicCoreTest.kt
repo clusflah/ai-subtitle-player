@@ -454,4 +454,49 @@ class VoxMusicCoreTest {
         assertTrue(WebStreamingMusic.DOCUMENT_START_SCRIPT.contains("persistentState"))
         assertTrue(WebStreamingMusic.DOCUMENT_START_SCRIPT.toByteArray(Charsets.UTF_8).size < 65_000)
     }
+
+    @Test
+    fun resolveDisplayCoverNeverLeaksFirstSongStandbyCoverDuringPlayback() {
+        val standby = "first_song_in_list_cover"
+        val clickedCover = "clicked_song_cover"
+        // 纯待机未点播任何歌曲时：允许展示待机封面
+        assertEquals(
+            standby,
+            com.voxmusic.app.ui.resolveDisplayCover(
+                activeMusic = false,
+                hasCurrentEntry = false,
+                activeCover = null,
+                standbyCover = standby,
+            ),
+        )
+        // 点击任意歌曲刚开播、自身封面尚在加载（activeCover == null）时：绝不回退到列表第 1 首歌的待机封面
+        assertEquals(
+            null,
+            com.voxmusic.app.ui.resolveDisplayCover(
+                activeMusic = true,
+                hasCurrentEntry = true,
+                activeCover = null,
+                standbyCover = standby,
+            ),
+        )
+        assertEquals(
+            null,
+            com.voxmusic.app.ui.resolveDisplayCover(
+                activeMusic = false,
+                hasCurrentEntry = true,
+                activeCover = null,
+                standbyCover = standby,
+            ),
+        )
+        // 当前歌曲封面加载完成后：正常展示当前歌曲封面
+        assertEquals(
+            clickedCover,
+            com.voxmusic.app.ui.resolveDisplayCover(
+                activeMusic = true,
+                hasCurrentEntry = true,
+                activeCover = clickedCover,
+                standbyCover = standby,
+            ),
+        )
+    }
 }

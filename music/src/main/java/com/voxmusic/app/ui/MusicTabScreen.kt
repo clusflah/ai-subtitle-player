@@ -620,6 +620,7 @@ private fun StreamingLibraryBrowser(
             Row(
                 Modifier
                     .weight(1f)
+                    .clip(RoundedCornerShape(50))
                     .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

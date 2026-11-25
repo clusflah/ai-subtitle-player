@@ -21,6 +21,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -50,6 +51,30 @@ object ImageLoader {
     private val gate = Semaphore(4)
 
     fun cached(url: String, maxSize: Int): ImageBitmap? = cache.get("$maxSize|$url")
+
+    /** 同步命中内存中任意尺寸的已加载位图（优先取最高分辨率），供点击列表歌曲时首帧立显封面 */
+    fun cachedAnyBitmap(url: String): Bitmap? {
+        val suffix = "|$url"
+        var best: ImageBitmap? = null
+        var bestPx = 0
+        for ((k, v) in cache.snapshot()) {
+            if (k.endsWith(suffix)) {
+                val px = v.width * v.height
+                if (px > bestPx) {
+                    bestPx = px
+                    best = v
+                }
+            }
+        }
+        return best?.asAndroidBitmap()
+    }
+
+    /** 读取磁盘缓存中的原始图片字节，避免播放器封面发起二次网络请求 */
+    fun cachedBytes(context: Context, url: String): ByteArray? {
+        if (!isPublicHttpImage(url)) return null
+        val f = runCatching { diskFileFor(context, url) }.getOrNull() ?: return null
+        return if (f.isFile && f.length() > 0L) runCatching { f.readBytes() }.getOrNull() else null
+    }
 
     suspend fun load(context: Context, url: String, maxSize: Int): ImageBitmap? {
         val key = "$maxSize|$url"
