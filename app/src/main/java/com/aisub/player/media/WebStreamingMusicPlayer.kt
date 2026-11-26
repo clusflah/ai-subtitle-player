@@ -62,8 +62,12 @@ class WebStreamingMusicPlayer(
     private var lastAnchoredElapsedMs: Long = 0L
     private var lastUserPlayCommandElapsedMs: Long = 0L
     private var lastUserPauseCommandElapsedMs: Long = 0L
+    private var lastUserSeekElapsedMs: Long = 0L
     private var trackTransitionPending: Boolean = false
     private var lastSyncedMetaKey: String = ""
+    private var confirmedSnapTitleNorm: String = ""
+    private var expectedTrackTitleNorm: String = ""
+    private var pendingAutoTransitionDiscontinuity: Boolean = false
     private var consecutiveAutoAdvanceFailures: Int = 0
     private val shufflePlayedUris = HashSet<String>()
     @Volatile
@@ -84,6 +88,15 @@ class WebStreamingMusicPlayer(
 
     private fun activeService(): WebMusicService? =
         resolvedPlaybackService ?: WebMusicService.fromUri(currentUriString())
+
+    private fun resolveExpectedTitleForCurrentTrack(uri: String): String {
+        val spTitle = ServerProgress.find(uri)?.title?.trim().orEmpty()
+        if (spTitle.isNotEmpty()) return spTitle
+        val queryTitle = runCatching { Uri.parse(uri).getQueryParameter("title")?.trim().orEmpty() }.getOrDefault("")
+        if (queryTitle.isNotEmpty()) return queryTitle
+        return items.getOrNull(currentIndex)?.mediaMetadata?.title?.toString()?.trim().orEmpty()
+            .substringBeforeLast('.')
+    }
 
     private fun onSnapshot(snap: WebStreamingMusic.PlaybackSnapshot) {
         val curService = activeService() ?: return
@@ -135,6 +148,32 @@ class WebStreamingMusicPlayer(
             }
         }
 
+        val effectiveDurMs = if (snap.durationMs > 0L) {
+            snap.durationMs
+        } else {
+            currentDurMs.takeIf { it != C.TIME_UNSET } ?: 0L
+        }
+        val incomingTitleNorm = normalizeTrackTitle(snap.title)
+
+        // 先于外部暂停同步检测单曲自然播完或底层网页自动连播接管，避免末尾瞬间 !playing 先把 playWhenReady 翻成 false 导致漏切歌
+        val naturalEnd = detectNaturalTrackEnd(
+            snapEnded = snap.ended,
+            snapPlaying = snap.playing,
+            snapPositionMs = snap.positionMs,
+            effectiveDurationMs = effectiveDurMs,
+            maxPosReachedMs = maxPosReachedMs,
+            confirmedTitleNorm = confirmedSnapTitleNorm,
+            expectedTitleNorm = expectedTrackTitleNorm,
+            incomingTitleNorm = incomingTitleNorm,
+            inSeekHold = nowWall < seekHoldUntilMs,
+            sinceUserSeekMs = (nowElapsed - lastUserSeekElapsedMs).coerceAtLeast(0L),
+        )
+        if (naturalEnd && !trackTransitionPending && playWhenReady) {
+            trackTransitionPending = true
+            advanceOnTrackEnd()
+            return
+        }
+
         if (snap.durationMs > 0L && snap.durationMs != currentDurMs) {
             currentDurMs = snap.durationMs
             changed = true
@@ -143,13 +182,19 @@ class WebStreamingMusicPlayer(
             currentPosMs = snap.positionMs
             if (snap.positionMs > maxPosReachedMs) maxPosReachedMs = snap.positionMs
         }
+        if (confirmedSnapTitleNorm.isEmpty() && incomingTitleNorm.isNotEmpty() &&
+            (maxPosReachedMs >= 3_000L || (expectedTrackTitleNorm.isNotEmpty() && titlesLooselyMatch(expectedTrackTitleNorm, incomingTitleNorm)))
+        ) {
+            confirmedSnapTitleNorm = incomingTitleNorm
+        }
 
+        val isNearEnd = effectiveDurMs > 15_000L && maxPosReachedMs > 5_000L && snap.positionMs >= effectiveDurMs - 1_500L
         val syncedPlayWhenReady = resolveExternalPlayWhenReady(
             currentPlayWhenReady = playWhenReady,
             hasStartedAudio = hasStartedCurrentTrackAudio,
             snapPlaying = snap.playing,
             snapBuffering = snap.buffering,
-            snapEnded = snap.ended,
+            snapEnded = snap.ended || isNearEnd,
             inSeekHold = nowWall < seekHoldUntilMs,
             sinceUserPlayMs = (nowElapsed - lastUserPlayCommandElapsedMs).coerceAtLeast(0L),
             sinceUserPauseMs = (nowElapsed - lastUserPauseCommandElapsedMs).coerceAtLeast(0L),
@@ -207,15 +252,6 @@ class WebStreamingMusicPlayer(
             }
         }
 
-        // 检测单曲自然播完并自动切入队列下一首
-        val naturalEnd = snap.ended ||
-            (snap.durationMs > 15_000L && maxPosReachedMs > 5_000L && snap.positionMs >= snap.durationMs - 650L && !snap.playing)
-        if (naturalEnd && !trackTransitionPending && playWhenReady) {
-            trackTransitionPending = true
-            advanceOnTrackEnd()
-            return
-        }
-
         if (changed) invalidateState()
     }
 
@@ -240,12 +276,17 @@ class WebStreamingMusicPlayer(
         if (nextIdx in items.indices) {
             currentIndex = nextIdx
             startPositionMs = 0L
+            pendingAutoTransitionDiscontinuity = true
             invalidateState()
             startCurrentTrack(0L, autoAdvanced = true)
         } else {
+            // 顺序播放到队列末尾时必须立刻停掉底层引擎，防止 YouTube Music / Spotify 网页自动连播下一首而界面停在最后一首
+            activePlayGeneration++
+            launchJob?.cancel()
             remoteActuallyPlaying = false
             playbackState = Player.STATE_ENDED
             playWhenReady = false
+            WebStreamingMusic.stopAll()
             invalidateState()
         }
     }
@@ -261,6 +302,7 @@ class WebStreamingMusicPlayer(
         currentPosMs = safeStart
         startPositionMs = safeStart
         lastUserPlayCommandElapsedMs = android.os.SystemClock.elapsedRealtime()
+        lastUserSeekElapsedMs = 0L
         hasStartedCurrentTrackAudio = false
         remoteActuallyPlaying = false
         maxPosReachedMs = 0L
@@ -268,6 +310,8 @@ class WebStreamingMusicPlayer(
         seekHoldUntilMs = 0L
         trackTransitionPending = false
         lastSyncedMetaKey = ""
+        confirmedSnapTitleNorm = ""
+        expectedTrackTitleNorm = normalizeTrackTitle(resolveExpectedTitleForCurrentTrack(uri))
         val knownDur = ServerProgress.find(uri)?.durationMs?.takeIf { it > 0L } ?: C.TIME_UNSET
         currentDurMs = knownDur
         playbackState = Player.STATE_BUFFERING
@@ -332,6 +376,9 @@ class WebStreamingMusicPlayer(
         currentPosMs = 0L
         currentDurMs = C.TIME_UNSET
         shufflePlayedUris.clear()
+        confirmedSnapTitleNorm = ""
+        expectedTrackTitleNorm = ""
+        pendingAutoTransitionDiscontinuity = false
         error = null
         WebStreamingMusic.stopAll()
         if (notify) invalidateState()
@@ -394,6 +441,8 @@ class WebStreamingMusicPlayer(
             lastAnchoredPosMs = effectivePos
             lastAnchoredElapsedMs = android.os.SystemClock.elapsedRealtime()
         }
+        val autoDiscontinuity = pendingAutoTransitionDiscontinuity
+        pendingAutoTransitionDiscontinuity = false
         return State.Builder()
             .setAvailableCommands(commands)
             .setPlayWhenReady(playWhenReady, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
@@ -411,6 +460,11 @@ class WebStreamingMusicPlayer(
                     PositionSupplier.getConstant(effectivePos)
                 },
             )
+            .apply {
+                if (autoDiscontinuity) {
+                    setPositionDiscontinuity(Player.DISCONTINUITY_REASON_AUTO_TRANSITION, effectivePos)
+                }
+            }
             .setPlaybackParameters(PlaybackParameters(speed))
             .setVolume(volume)
             .build()
@@ -440,6 +494,10 @@ class WebStreamingMusicPlayer(
         seekHoldUntilMs = 0L
         trackTransitionPending = false
         lastSyncedMetaKey = ""
+        confirmedSnapTitleNorm = ""
+        expectedTrackTitleNorm = currentUriString()?.let(::resolveExpectedTitleForCurrentTrack)?.let(::normalizeTrackTitle).orEmpty()
+        pendingAutoTransitionDiscontinuity = false
+        lastUserSeekElapsedMs = 0L
         consecutiveAutoAdvanceFailures = 0
         error = null
         playbackState = Player.STATE_IDLE
@@ -532,6 +590,8 @@ class WebStreamingMusicPlayer(
         } else {
             currentPosMs = targetPos
             startPositionMs = targetPos
+            maxPosReachedMs = minOf(maxPosReachedMs, targetPos)
+            lastUserSeekElapsedMs = android.os.SystemClock.elapsedRealtime()
             seekHoldTargetMs = targetPos
             seekHoldUntilMs = System.currentTimeMillis() + 1_600L
             if (playbackState == Player.STATE_ENDED) {
@@ -589,6 +649,61 @@ class WebStreamingMusicPlayer(
 
     companion object {
         private const val EXTERNAL_SYNC_GRACE_MS = 1_000L
+
+        internal fun normalizeTrackTitle(raw: String?): String =
+            raw.orEmpty().trim().lowercase()
+                .replace(Regex("[\\s\\-_()（）\\[\\]【】《》·.,，。!?！？'\"/]+"), "")
+
+        internal fun titlesLooselyMatch(aNorm: String, bNorm: String): Boolean {
+            if (aNorm.isEmpty() || bNorm.isEmpty()) return true
+            if (aNorm == bNorm) return true
+            val shorter = if (aNorm.length <= bNorm.length) aNorm else bNorm
+            val longer = if (aNorm.length <= bNorm.length) bNorm else aNorm
+            return shorter.length >= 2 && longer.contains(shorter)
+        }
+
+        /**
+         * 判断当前流媒体曲目是否已自然播完（含底层网页引擎私自连播下一首 / 结尾处自动归零的接管兜底）：
+         * 必须在外部暂停同步（resolveExternalPlayWhenReady）之前执行，防止末尾短暂 !playing 先将 playWhenReady 置为 false。
+         */
+        internal fun detectNaturalTrackEnd(
+            snapEnded: Boolean,
+            snapPlaying: Boolean,
+            snapPositionMs: Long,
+            effectiveDurationMs: Long,
+            maxPosReachedMs: Long,
+            confirmedTitleNorm: String,
+            expectedTitleNorm: String,
+            incomingTitleNorm: String,
+            inSeekHold: Boolean,
+            sinceUserSeekMs: Long,
+        ): Boolean {
+            if (snapEnded) return true
+            if (effectiveDurationMs > 15_000L &&
+                maxPosReachedMs > 5_000L &&
+                snapPositionMs >= effectiveDurationMs - 650L &&
+                !snapPlaying
+            ) {
+                return true
+            }
+            if (!inSeekHold &&
+                sinceUserSeekMs > 3_500L &&
+                effectiveDurationMs > 15_000L &&
+                maxPosReachedMs >= effectiveDurationMs - 4_000L &&
+                snapPositionMs < 2_500L
+            ) {
+                return true
+            }
+            if (maxPosReachedMs > 5_000L &&
+                confirmedTitleNorm.isNotEmpty() &&
+                incomingTitleNorm.isNotEmpty() &&
+                !titlesLooselyMatch(confirmedTitleNorm, incomingTitleNorm) &&
+                (expectedTitleNorm.isEmpty() || !titlesLooselyMatch(expectedTitleNorm, incomingTitleNorm))
+            ) {
+                return true
+            }
+            return false
+        }
 
         internal fun resolveExternalPlayWhenReady(
             currentPlayWhenReady: Boolean,

@@ -499,4 +499,60 @@ class VoxMusicCoreTest {
             ),
         )
     }
+
+    @Test
+    fun detectNaturalTrackEndCatchesEofPauseAndWebAutoplayHijack() {
+        val first = WebStreamingMusicPlayer.normalizeTrackTitle("因為你 所以我")
+        val second = WebStreamingMusicPlayer.normalizeTrackTitle("突然好想你")
+        val officialMv = WebStreamingMusicPlayer.normalizeTrackTitle("因為你 所以我 (Official MV)")
+
+        // 曲末短暂 !playing 且未发 ended 时直接判定自然播完
+        assertTrue(
+            WebStreamingMusicPlayer.detectNaturalTrackEnd(
+                snapEnded = false,
+                snapPlaying = false,
+                snapPositionMs = 285_600L,
+                effectiveDurationMs = 286_000L,
+                maxPosReachedMs = 285_600L,
+                confirmedTitleNorm = first,
+                expectedTitleNorm = first,
+                incomingTitleNorm = first,
+                inSeekHold = false,
+                sinceUserSeekMs = 30_000L,
+            ),
+        )
+
+        // YouTube Music / Spotify 网页端私自连播切到下一首：歌名变化触发交回应用队列切歌
+        assertTrue(
+            WebStreamingMusicPlayer.detectNaturalTrackEnd(
+                snapEnded = false,
+                snapPlaying = true,
+                snapPositionMs = 12_000L,
+                effectiveDurationMs = 858_000L,
+                maxPosReachedMs = 285_000L,
+                confirmedTitleNorm = first,
+                expectedTitleNorm = first,
+                incomingTitleNorm = second,
+                inSeekHold = false,
+                sinceUserSeekMs = 30_000L,
+            ),
+        )
+
+        // 同一首歌仅带版本后缀时绝不误判
+        assertEquals(
+            false,
+            WebStreamingMusicPlayer.detectNaturalTrackEnd(
+                snapEnded = false,
+                snapPlaying = true,
+                snapPositionMs = 45_000L,
+                effectiveDurationMs = 286_000L,
+                maxPosReachedMs = 45_000L,
+                confirmedTitleNorm = first,
+                expectedTitleNorm = first,
+                incomingTitleNorm = officialMv,
+                inSeekHold = false,
+                sinceUserSeekMs = 30_000L,
+            ),
+        )
+    }
 }

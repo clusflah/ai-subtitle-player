@@ -2123,12 +2123,18 @@ object WebStreamingMusic {
   function runSafe(fn) { try { return fn(); } catch (e) { return null; } }
 
   function bestMedia() {
-    if (window.__voxActiveMedia && !isNaN(window.__voxActiveMedia.duration)) return window.__voxActiveMedia;
     var dom = document.querySelectorAll('audio,video');
+    for (var a = 0; a < dom.length; a++) {
+      if (!dom[a].paused && !dom[a].ended && dom[a].readyState >= 2) return dom[a];
+    }
+    var pool = window.__voxMediaPool || [];
+    for (var b = pool.length - 1; b >= 0; b--) {
+      if (!pool[b].paused && !pool[b].ended && pool[b].readyState >= 2) return pool[b];
+    }
+    if (window.__voxActiveMedia && !isNaN(window.__voxActiveMedia.duration)) return window.__voxActiveMedia;
     for (var i = 0; i < dom.length; i++) {
       if (!dom[i].paused || dom[i].currentTime > 0 || dom[i].duration > 0) return dom[i];
     }
-    var pool = window.__voxMediaPool || [];
     for (var j = pool.length - 1; j >= 0; j--) {
       if (!pool[j].paused || pool[j].duration > 0) return pool[j];
     }
@@ -3226,15 +3232,54 @@ object WebStreamingMusic {
     return { ok: true };
   }
 
+  var isYouTubeMusic = location.hostname.indexOf('youtube.com') >= 0;
+  var isNetEase = location.hostname.indexOf('163.com') >= 0;
+  var isQqMusic = location.hostname.indexOf('qq.com') >= 0;
+
   var voxPlaySeq = 0;
   var voxSwitching = false;
   var voxSwitchStartedAt = 0;
   var voxTargetTrackId = '';
   var voxTargetTitle = '';
+  var voxActiveTrackId = '';
+  var voxActiveMediaTitle = '';
   var voxStalePrevId = '';
   var voxStalePrevTitle = '';
   var voxStartPosMs = 0;
+  var voxMaxPosMs = 0;
+  var voxLastDurMs = 0;
+  var voxLastSeekAt = 0;
+  var voxEndedDispatched = false;
   var voxSawTargetProgress = false;
+
+  function currentYoutubeVideoId() {
+    if (!isYouTubeMusic) return '';
+    try {
+      var m = String(location.search || location.href || '').match(/[?&]v=([^&#]+)/);
+      return m && m[1] ? decodeURIComponent(m[1]).trim() : '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function isYoutubeAdShowing() {
+    return isYouTubeMusic && !!document.querySelector('.ad-showing, .ad-interrupting');
+  }
+
+  function pauseAllWebMedia() {
+    try {
+      var bm = bestMedia();
+      if (bm && !bm.paused) bm.pause();
+    } catch (e) {}
+    var dom = document.querySelectorAll('audio,video');
+    for (var i = 0; i < dom.length; i++) {
+      try { if (!dom[i].paused) dom[i].pause(); } catch (e) {}
+    }
+    var pool = window.__voxMediaPool || [];
+    for (var j = 0; j < pool.length; j++) {
+      try { if (!pool[j].paused) pool[j].pause(); } catch (e) {}
+    }
+  }
 
   function currentAppleNowPlayingId() {
     if (!isApple || !window.MusicKit || !window.MusicKit.getInstance) return '';
@@ -3270,6 +3315,12 @@ object WebStreamingMusic {
     }
     if (nextTarget) voxTargetTrackId = nextTarget;
     if (nextTitleNorm) voxTargetTitle = nextTitleNorm;
+    voxActiveTrackId = '';
+    voxActiveMediaTitle = '';
+    voxMaxPosMs = 0;
+    voxLastDurMs = 0;
+    voxLastSeekAt = 0;
+    voxEndedDispatched = false;
     voxSwitching = true;
     voxSwitchStartedAt = Date.now();
     voxStartPosMs = Math.max(0, Number(startPosMs) || 0);
@@ -3312,14 +3363,24 @@ object WebStreamingMusic {
         });
         return;
       }
+      if (voxEndedDispatched) {
+        if (isApple && window.MusicKit && window.MusicKit.getInstance) {
+          var mkDone = runSafe(function(){ return window.MusicKit.getInstance(); });
+          if (mkDone && mkDone.isPlaying) runSafe(function(){ mkDone.pause(); });
+        } else {
+          pauseAllWebMedia();
+        }
+        return;
+      }
 
       var playing = false, buffering = false, posMs = 0, durMs = 0;
       var title = '', artist = '', album = '', coverUrl = '';
       var ended = !!endedFlag;
       var usedMusicKit = false;
+      var mk = null;
 
       if (isApple && window.MusicKit && window.MusicKit.getInstance) {
-        var mk = runSafe(function(){ return window.MusicKit.getInstance(); });
+        mk = runSafe(function(){ return window.MusicKit.getInstance(); });
         if (mk && (mk.nowPlayingItem || typeof mk.playbackState === 'number')) {
           usedMusicKit = true;
           var np = mk.nowPlayingItem;
@@ -3348,6 +3409,7 @@ object WebStreamingMusic {
           if (!voxSawTargetProgress) {
             if (mkPlaying && !mkBuffering && (voxStartPosMs > 0 || rawPos < 2500 || (Date.now() - voxSwitchStartedAt) > 5000)) {
               voxSawTargetProgress = true;
+              voxActiveTrackId = npId || voxTargetTrackId;
             } else {
               emitHostSnapshot({
                 playSeq: voxPlaySeq,
@@ -3360,8 +3422,16 @@ object WebStreamingMusic {
               });
               return;
             }
-          } else if (mkState === 5 || mkState === 10) {
-            ended = true;
+          } else {
+            if (mkState === 5 || mkState === 10) {
+              ended = true;
+            } else if (voxActiveTrackId && npId && npId !== voxActiveTrackId && voxMaxPosMs > 5000) {
+              ended = true;
+            }
+          }
+          if (!ended) {
+            if (rawPos > voxMaxPosMs) voxMaxPosMs = rawPos;
+            if (rawDur > 0) voxLastDurMs = rawDur;
           }
 
           playing = mkPlaying && !ended;
@@ -3369,7 +3439,7 @@ object WebStreamingMusic {
           // 严禁在 posMs===0 时回退读取页面残留的旧 <audio> 节点，彻底消除起播瞬间跳到上一首秒数
           posMs = rawPos;
           durMs = rawDur;
-          if (np && np.attributes) {
+          if (np && np.attributes && !ended) {
             title = np.attributes.name || '';
             artist = np.attributes.artistName || '';
             album = np.attributes.albumName || '';
@@ -3380,7 +3450,9 @@ object WebStreamingMusic {
 
       if (!usedMusicKit) {
         var msNowTitle = normTrackTitle(navigator.mediaSession && navigator.mediaSession.metadata && navigator.mediaSession.metadata.title);
-        // Spotify 切歌初期若 MediaSession 仍指向切歌前的旧歌名，继续冻结在缓冲态，避免旧歌进度串扰到新歌
+        var adShowing = isYoutubeAdShowing();
+        var curYtId = isYouTubeMusic ? currentYoutubeVideoId() : '';
+        // 切歌初期若 MediaSession 仍指向切歌前的旧歌名，继续冻结在缓冲态，避免旧歌进度串扰到新歌
         if (!voxSawTargetProgress && voxStalePrevTitle && msNowTitle && msNowTitle === voxStalePrevTitle && (Date.now() - voxSwitchStartedAt) < 7000) {
           emitHostSnapshot({
             playSeq: voxPlaySeq,
@@ -3398,7 +3470,7 @@ object WebStreamingMusic {
           if (!m.__voxEndedHooked) {
             m.__voxEndedHooked = true;
             m.addEventListener('ended', function() {
-              if (voxSawTargetProgress) pushSnapshot(true);
+              if (voxSawTargetProgress && !isYoutubeAdShowing()) pushSnapshot(true);
             });
           }
           var mReady = m.readyState >= 3 && !m.seeking;
@@ -3412,6 +3484,12 @@ object WebStreamingMusic {
           if (!voxSawTargetProgress) {
             if (mPlaying && !sameStale && (voxStartPosMs > 0 || mPos < 2500 || (Date.now() - voxSwitchStartedAt) > 5000)) {
               voxSawTargetProgress = true;
+              if (!adShowing) {
+                voxActiveTrackId = curYtId || voxTargetTrackId;
+                if (msNowTitle && (!voxStalePrevTitle || msNowTitle !== voxStalePrevTitle)) {
+                  voxActiveMediaTitle = msNowTitle;
+                }
+              }
             } else {
               emitHostSnapshot({
                 playSeq: voxPlaySeq,
@@ -3424,11 +3502,35 @@ object WebStreamingMusic {
               });
               return;
             }
-          } else if (m.ended) {
-            ended = true;
+          } else if (!adShowing) {
+            if (!voxActiveTrackId && (curYtId || voxTargetTrackId)) {
+              voxActiveTrackId = curYtId || voxTargetTrackId;
+            }
+            if (!voxActiveMediaTitle && msNowTitle && (!voxStalePrevTitle || msNowTitle !== voxStalePrevTitle)) {
+              voxActiveMediaTitle = msNowTitle;
+            }
+            if (m.ended) {
+              ended = true;
+            } else if (isYouTubeMusic && voxActiveTrackId && curYtId && curYtId !== voxActiveTrackId && voxMaxPosMs > 2000) {
+              // YouTube Music 网页端自动连播切到下一支视频（URL ?v= 已变）：立刻上报播完交回应用队列切歌
+              ended = true;
+            } else if (voxMaxPosMs > 5000 && voxActiveMediaTitle && msNowTitle && msNowTitle !== voxActiveMediaTitle &&
+                       (!voxTargetTitle || (msNowTitle.indexOf(voxTargetTitle) < 0 && voxTargetTitle.indexOf(msNowTitle) < 0))) {
+              // Spotify / 网页播放器在单曲结束后自动切到推荐曲目（MediaSession 歌名变化）：交回应用队列切歌
+              ended = true;
+            } else if ((Date.now() - voxLastSeekAt) > 3500 && voxLastDurMs > 15000 &&
+                       voxMaxPosMs >= voxLastDurMs - 4000 &&
+                       (mPos < 2500 || (mDur > 0 && Math.abs(mDur - voxLastDurMs) > 4000))) {
+              // 曲末未抛出 ended 即被网页端切流/重播：交回应用队列切歌
+              ended = true;
+            }
+            if (!ended) {
+              if (mPos > voxMaxPosMs) voxMaxPosMs = mPos;
+              if (mDur > 0) voxLastDurMs = mDur;
+            }
           }
           playing = mPlaying && !ended;
-          buffering = mBuffering;
+          buffering = mBuffering && !ended;
           posMs = mPos;
           durMs = mDur;
         } else if (!voxSawTargetProgress) {
@@ -3443,6 +3545,29 @@ object WebStreamingMusic {
           });
           return;
         }
+      }
+
+      if (ended) {
+        voxEndedDispatched = true;
+        if (usedMusicKit && mk) {
+          runSafe(function(){ mk.pause(); });
+        } else {
+          pauseAllWebMedia();
+        }
+        emitHostSnapshot({
+          playSeq: voxPlaySeq,
+          switching: false,
+          playing: false,
+          buffering: false,
+          posMs: voxLastDurMs || posMs,
+          durMs: voxLastDurMs || durMs,
+          title: '',
+          artist: '',
+          album: '',
+          coverUrl: '',
+          ended: true
+        });
+        return;
       }
 
       var ms = navigator.mediaSession && navigator.mediaSession.metadata;
@@ -3471,10 +3596,6 @@ object WebStreamingMusic {
   }
 
   setInterval(function() { pushSnapshot(false); }, 250);
-
-  var isYouTubeMusic = location.hostname.indexOf('youtube.com') >= 0;
-  var isNetEase = location.hostname.indexOf('163.com') >= 0;
-  var isQqMusic = location.hostname.indexOf('qq.com') >= 0;
 
   async function tryStartGenericWebMedia(reqSeq, startPosMs, maxWaitMs) {
     var deadline = Date.now() + (maxWaitMs || 8000);
@@ -3520,7 +3641,7 @@ object WebStreamingMusic {
     if (!targetUrl) {
       return { ok: false, error: '未找到可播放曲目链接，请重试或重新登录' };
     }
-    if (isYouTubeMusic && location.href.indexOf('v=' + trackId) >= 0) {
+    if (isYouTubeMusic && trackId && currentYoutubeVideoId() === trackId) {
       var okSame = await tryStartGenericWebMedia(reqSeq, startPosMs, 6500);
       return okSame ? { ok: true } : { ok: false, error: 'YouTube Music 网页播放启动超时' };
     }
@@ -3540,7 +3661,7 @@ object WebStreamingMusic {
       return { ok: true };
     }
     location.href = targetUrl;
-    return { ok: true };
+    return { ok: true, navigating: true };
   }
 
   // 若上一步是通过整页跳转直达 /track/<id>，新页面加载完毕后自动接续执行精确点播
@@ -3577,9 +3698,17 @@ object WebStreamingMusic {
       try {
         var raw = sessionStorage.getItem('__voxPendingWebPlay');
         if (!raw) return;
-        sessionStorage.removeItem('__voxPendingWebPlay');
         var p = JSON.parse(raw);
-        if (!p || (Date.now() - (p.ts || 0)) > 20000) return;
+        if (!p || (Date.now() - (p.ts || 0)) > 35000) {
+          sessionStorage.removeItem('__voxPendingWebPlay');
+          return;
+        }
+        if (isYouTubeMusic && p.trackId) {
+          var curYt = currentYoutubeVideoId();
+          if (curYt && curYt !== p.trackId) return;
+          if (!curYt && location.pathname.indexOf('/watch') < 0) return;
+        }
+        sessionStorage.removeItem('__voxPendingWebPlay');
         if (p.playSeq && p.playSeq > voxPlaySeq) {
           markTrackSwitching(p.playSeq, p.trackId || '', p.startPosMs || 0, p.title || '');
         }
@@ -3620,7 +3749,10 @@ object WebStreamingMusic {
       if (m) m.pause();
     },
     seek: function(ms) {
-      var sec = Math.max(0, (ms || 0) / 1000.0);
+      var targetMs = Math.max(0, Number(ms) || 0);
+      voxLastSeekAt = Date.now();
+      voxMaxPosMs = Math.min(voxMaxPosMs, targetMs);
+      var sec = targetMs / 1000.0;
       if (isApple && window.MusicKit) {
         var mk = runSafe(function(){ return window.MusicKit.getInstance(); });
         if (mk && typeof mk.seekToTime === 'function') { mk.seekToTime(sec); return; }
@@ -3651,12 +3783,14 @@ object WebStreamingMusic {
             else if (isSpotify) out = await playOnSpotify(args);
             else out = await playOnGenericWeb(args);
           } finally {
-            if (!isPlayCancelled(reqSeq)) {
+            if (!isPlayCancelled(reqSeq) && !(out && out.navigating)) {
               voxSwitching = false;
               voxSwitchStartedAt = Date.now();
             }
           }
-          setTimeout(function(){ pushSnapshot(false); }, 150);
+          if (!(out && out.navigating)) {
+            setTimeout(function(){ pushSnapshot(false); }, 150);
+          }
         } else if (isApple) {
           var mk = window.MusicKit && window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
           var sf = await detectAppleStorefront(mk, args);
