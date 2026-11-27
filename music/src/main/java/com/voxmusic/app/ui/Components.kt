@@ -43,6 +43,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -162,23 +163,41 @@ fun DiscoverQuickJumpButton(
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(50)
+    val playerAccent = LocalPlayerAccentColor.current
+    val dark = isAppDarkTheme()
+    val borderBrush = if (accent) {
+        Brush.linearGradient(
+            colors = listOf(
+                playerAccent.copy(alpha = if (dark) 0.65f else 0.75f),
+                Color.White.copy(alpha = if (dark) 0.24f else 0.45f),
+                playerAccent.copy(alpha = if (dark) 0.32f else 0.45f),
+            ),
+        )
+    } else {
+        Brush.linearGradient(listOf(Color.White.copy(alpha = 0.14f), Color.White.copy(alpha = 0.06f)))
+    }
     Row(
         Modifier
             .clip(shape)
-            .background(if (accent) Orange.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerHigh)
-            .border(1.dp, if (accent) Orange.copy(alpha = 0.45f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), shape)
+            .background(if (dark) Color.White.copy(alpha = 0.08f) else MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.85f))
+            .border(0.75.dp, borderBrush, shape)
             .tvFocusRing(shape)
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 7.dp),
+            .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        Icon(icon, null, tint = if (accent) Orange else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(15.dp))
+        Icon(
+            icon,
+            null,
+            tint = if (accent) playerAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(14.dp),
+        )
         Text(
             label,
-            fontSize = 12.5.sp,
-            fontWeight = if (accent) FontWeight.SemiBold else FontWeight.Medium,
-            color = if (accent) Orange else MaterialTheme.colorScheme.onSurface,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            color = if (dark) Color.White.copy(alpha = 0.90f) else MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
         )
     }

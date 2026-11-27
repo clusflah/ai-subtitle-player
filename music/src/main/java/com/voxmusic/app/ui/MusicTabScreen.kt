@@ -6,8 +6,11 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
@@ -298,6 +301,7 @@ fun MusicTabScreen(
             topTrailingContent = {
                 MusicSourcePill(
                     service = activeService,
+                    loggedIn = activeService in loggedInServices,
                     onClick = { showSourceSettings = true },
                 )
             },
@@ -305,7 +309,7 @@ fun MusicTabScreen(
                 AppTheme(uiState.settings.appBackground, AppDarkMode.DARK, uiState.settings.liquidGlass) {
                     MusicDiscoverTab(
                         vm = vm,
-                        bottomPadding = 16.dp,
+                        bottomPadding = if (!isLandscape && music.tags != null) 88.dp else 20.dp,
                         embeddedInPlayer = true,
                         onSmartPlay = onSmartPlay,
                         onOpenDetail = onOpenDetail,
@@ -320,6 +324,7 @@ fun MusicTabScreen(
                     loggedInServices = loggedInServices,
                     currentPlayingUri = uiState.current?.takeIf { music.tags != null }?.uri,
                     reloadNonce = reloadNonce,
+                    bottomPadding = if (!isLandscape && music.tags != null) 88.dp else 20.dp,
                     onOpenSourceSettings = { showSourceSettings = true },
                     onSwitchService = { svc ->
                         MusicSourceStore.select(context, svc)
@@ -517,23 +522,44 @@ fun MusicTabScreen(
 @Composable
 private fun MusicSourcePill(
     service: WebMusicService,
+    loggedIn: Boolean,
     onClick: () -> Unit,
 ) {
-    val hitShape = RoundedCornerShape(10.dp)
-    Box(
+    val accent = LocalPlayerAccentColor.current
+    val shape = RoundedCornerShape(50)
+    // 统一顶栏右侧音源状态微胶囊：半透明无框微磨砂，点击切换音源与设置
+    Row(
         modifier = Modifier
-            .size(34.dp)
-            .tvFocusRing(hitShape, color = Color.White)
-            .clip(hitShape)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
+            .tvFocusRing(shape, color = Color.White)
+            .clip(shape)
+            .background(Color.White.copy(alpha = 0.08f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        WebMusicServiceIcon(service, size = 22.dp)
+        WebMusicServiceIcon(service, size = 16.dp)
+        Text(
+            text = service.label,
+            color = Color.White.copy(alpha = 0.86f),
+            fontSize = 11.5.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            softWrap = false,
+        )
+        if (loggedIn) {
+            Box(
+                Modifier
+                    .size(5.dp)
+                    .clip(CircleShape)
+                    .background(accent),
+            )
+        }
     }
 }
 
 // ============================================================================
-// 「乐库」内嵌浏览页（Apple Music / Spotify 个人曲库、专辑、歌单与目录搜索）
+// 「乐库」内嵌浏览页（去四层胶囊堆叠 + 去卡片化通透列表 + 折叠式磨砂搜索）
 // ============================================================================
 
 @Composable
@@ -542,6 +568,7 @@ private fun StreamingLibraryBrowser(
     loggedInServices: Set<WebMusicService>,
     currentPlayingUri: String?,
     reloadNonce: Int,
+    bottomPadding: Dp = 20.dp,
     onOpenSourceSettings: () -> Unit,
     onSwitchService: (WebMusicService) -> Unit,
     onRequestLogin: (WebMusicService) -> Unit,
@@ -551,10 +578,12 @@ private fun StreamingLibraryBrowser(
     onShowMessage: (String) -> Unit,
 ) {
     val context = LocalContext.current
+    val accent = LocalPlayerAccentColor.current
     val isLogged = service in loggedInServices
+    var searchExpanded by rememberSaveable(service) { mutableStateOf(false) }
     var searchQuery by rememberSaveable(service) { mutableStateOf("") }
     var refreshTick by remember { mutableIntStateOf(0) }
-    var tab by rememberSaveable(service) { mutableIntStateOf(0) } // 0=歌曲 1=专辑 2=歌单
+    var tab by rememberSaveable(service) { mutableIntStateOf(0) } // 0=单曲 1=专辑 2=歌单
     var tracks by remember(service) { mutableStateOf<List<CatalogItem>>(emptyList()) }
     var albums by remember(service) { mutableStateOf<List<CatalogItem>>(emptyList()) }
     var playlists by remember(service) { mutableStateOf<List<CatalogItem>>(emptyList()) }
@@ -568,6 +597,10 @@ private fun StreamingLibraryBrowser(
     var containerLoading by remember(service, openedContainer?.ratingKey) { mutableStateOf(false) }
 
     BackHandler(enabled = openedContainer != null) { openedContainer = null }
+    BackHandler(enabled = openedContainer == null && searchExpanded) {
+        searchExpanded = false
+        searchQuery = ""
+    }
 
     LaunchedEffect(service, isLogged, reloadNonce, refreshTick) {
         if (!isLogged) {
@@ -608,21 +641,20 @@ private fun StreamingLibraryBrowser(
     Column(
         Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp, vertical = 4.dp),
+            .padding(horizontal = 16.dp, vertical = 2.dp),
     ) {
-        // 顶部音源快速切换条 + 刷新（支持横向滚动以完整容纳三音源）
+        // 顶部精简控制行：无描边音源切换 + 收纳式搜索图标 + 极简刷新图标
         Row(
-            Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            Modifier.fillMaxWidth().padding(bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Row(
                 Modifier
                     .weight(1f)
-                    .clip(RoundedCornerShape(50))
                     .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 WebMusicService.entries.forEach { svc ->
                     val selected = svc == service
@@ -631,31 +663,47 @@ private fun StreamingLibraryBrowser(
                     Row(
                         Modifier
                             .clip(shape)
-                            .liquidGlass(
-                                shape = shape,
-                                style = GlassStyle.Pill,
-                                tint = if (selected) Color(0x45FFFFFF) else Color(0x1CFFFFFF),
-                            )
+                            .background(if (selected) Color.White.copy(alpha = 0.10f) else Color.Transparent)
                             .clickable { onSwitchService(svc) }
-                            .padding(horizontal = 11.dp, vertical = 6.dp),
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
                     ) {
-                        WebMusicServiceIcon(svc, size = 16.dp)
+                        WebMusicServiceIcon(svc, size = 15.dp)
                         Text(
                             text = svc.label,
-                            color = if (selected) Color.White else Color(0xAAFFFFFF),
+                            color = if (selected) Color.White else Color.White.copy(alpha = 0.48f),
                             fontSize = 12.5.sp,
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                             maxLines = 1,
                             softWrap = false,
                         )
-                        if (svcLogged) {
+                        if (svcLogged && selected) {
                             Box(
-                                Modifier.size(6.dp).clip(CircleShape).background(Color(0xFF1ED760)),
+                                Modifier.size(4.5.dp).clip(CircleShape).background(accent),
                             )
                         }
                     }
+                }
+            }
+            if (isLogged) {
+                IconButton(
+                    onClick = {
+                        if (searchExpanded) {
+                            searchExpanded = false
+                            searchQuery = ""
+                        } else {
+                            searchExpanded = true
+                        }
+                    },
+                    modifier = Modifier.size(34.dp),
+                ) {
+                    Icon(
+                        if (searchExpanded) AppIcons.Close else AppIcons.Search,
+                        contentDescription = if (searchExpanded) "关闭搜索" else "搜索乐库",
+                        tint = if (searchExpanded) accent else Color.White.copy(alpha = 0.72f),
+                        modifier = Modifier.size(19.dp),
+                    )
                 }
             }
             IconButton(
@@ -663,11 +711,9 @@ private fun StreamingLibraryBrowser(
                     refreshTick++
                     onShowMessage("正在刷新 ${service.label} 乐库…")
                 },
-                modifier = Modifier
-                    .size(36.dp)
-                    .liquidGlass(shape = CircleShape, style = GlassStyle.Pill, tint = Color(0x28FFFFFF)),
+                modifier = Modifier.size(34.dp),
             ) {
-                Icon(AppIcons.Refresh, "刷新", tint = Color.White, modifier = Modifier.size(18.dp))
+                Icon(AppIcons.Refresh, "刷新", tint = Color.White.copy(alpha = 0.72f), modifier = Modifier.size(18.dp))
             }
         }
 
@@ -678,7 +724,7 @@ private fun StreamingLibraryBrowser(
                     Text("登录 ${service.label}", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     Text(
                         WebStreamingMusic.serviceStatusSubtitle(context, service, false),
-                        color = Color(0xAAFFFFFF),
+                        color = Color.White.copy(alpha = 0.62f),
                         fontSize = 13.sp,
                     )
                     DarkActionChip("立即登录 ${service.label}", AppIcons.Person) {
@@ -689,44 +735,51 @@ private fun StreamingLibraryBrowser(
             return
         }
 
-        // 搜索栏
-        val searchShape = RoundedCornerShape(50)
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(bottom = 10.dp)
-                .height(42.dp)
-                .liquidGlass(shape = searchShape, style = GlassStyle.Pill, tint = Color(0x28FFFFFF))
-                .padding(start = 14.dp, end = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        // 收纳式无描边极淡磨砂搜索条：平时折叠释放空间，点击搜索图标丝滑展开
+        AnimatedVisibility(
+            visible = searchExpanded || searchQuery.isNotEmpty(),
+            enter = fadeIn(tween(200)) + expandVertically(tween(220)),
+            exit = fadeOut(tween(160)) + shrinkVertically(tween(200)),
         ) {
-            Icon(AppIcons.Search, null, tint = Color(0xB3FFFFFF), modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            BasicTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                singleLine = true,
-                textStyle = TextStyle(color = Color.White, fontSize = 14.sp, lineHeight = 18.sp),
-                cursorBrush = SolidColor(Orange),
-                modifier = Modifier.weight(1f),
-                decorationBox = { inner ->
-                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
-                        if (searchQuery.isEmpty()) {
-                            Text(
-                                "在 ${service.label} 中搜索歌曲、歌手、专辑",
-                                color = Color(0x99FFFFFF),
-                                fontSize = 13.5.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+            val searchShape = RoundedCornerShape(50)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+                    .height(40.dp)
+                    .clip(searchShape)
+                    .background(Color.White.copy(alpha = 0.08f))
+                    .padding(start = 14.dp, end = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(AppIcons.Search, null, tint = Color.White.copy(alpha = 0.56f), modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(8.dp))
+                BasicTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    singleLine = true,
+                    textStyle = TextStyle(color = Color.White, fontSize = 14.sp, lineHeight = 18.sp),
+                    cursorBrush = SolidColor(accent),
+                    modifier = Modifier.weight(1f),
+                    decorationBox = { inner ->
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+                            if (searchQuery.isEmpty()) {
+                                Text(
+                                    "在 ${service.label} 中搜索歌曲、歌手、专辑",
+                                    color = Color.White.copy(alpha = 0.48f),
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            inner()
                         }
-                        inner()
+                    },
+                )
+                if (searchQuery.isNotEmpty()) {
+                    IconButton(onClick = { searchQuery = "" }, modifier = Modifier.size(30.dp)) {
+                        Icon(AppIcons.Close, "清除", tint = Color.White.copy(alpha = 0.72f), modifier = Modifier.size(16.dp))
                     }
-                },
-            )
-            if (searchQuery.isNotEmpty()) {
-                IconButton(onClick = { searchQuery = "" }, modifier = Modifier.size(30.dp)) {
-                    Icon(AppIcons.Close, "清除", tint = Color(0xCCFFFFFF), modifier = Modifier.size(16.dp))
                 }
             }
         }
@@ -745,12 +798,12 @@ private fun StreamingLibraryBrowser(
             )
             if (containerLoading) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = Orange)
+                    CircularProgressIndicator(color = accent)
                 }
             } else if (entries.isEmpty()) {
                 DarkLibraryEmptyBox("该列表暂无可播曲目", primaryLabel = "返回", onPrimary = { openedContainer = null })
             } else {
-                DarkTrackList(entries, currentPlayingUri) { idx -> onPlayQueue(entries, idx) }
+                DarkTrackList(entries, currentPlayingUri, bottomPadding = bottomPadding) { idx -> onPlayQueue(entries, idx) }
             }
             return
         }
@@ -758,7 +811,7 @@ private fun StreamingLibraryBrowser(
         if (searchQuery.isNotBlank()) {
             if (searching) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = Orange)
+                    CircularProgressIndicator(color = accent)
                 }
             } else if (searchHits.isEmpty()) {
                 DarkLibraryEmptyBox("未搜到「$searchQuery」", "试试换个关键词")
@@ -768,9 +821,11 @@ private fun StreamingLibraryBrowser(
                 }
                 val containerHits = remember(searchHits) { searchHits.filter { it.type != "track" } }
                 LazyColumn(
-                    Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    Modifier
+                        .fillMaxSize()
+                        .verticalEdgeFade(topFade = 24.dp, bottomFade = 36.dp),
+                    contentPadding = PaddingValues(top = 6.dp, bottom = bottomPadding),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
                     itemsIndexed(trackHits, key = { i, e -> "st:$i:${e.uri}" }) { idx, entry ->
                         val sp = TrackMetadataRegistry.find(entry.uri)
@@ -795,33 +850,43 @@ private fun StreamingLibraryBrowser(
             return
         }
 
-        // 个人乐库子分类：单曲 / 专辑 / 歌单
+        // 子分类栏：未选中仅留纯净文字，仅选中态以柔和毛玻璃底托承接；右侧极简无框「播放全部」
         Row(
             Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(bottom = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            listOf("单曲", "专辑", "歌单").forEachIndexed { i, label ->
-                DarkFilterChip(label = label, selected = tab == i) { tab = i }
-            }
-            Spacer(Modifier.width(4.dp))
-            if (tab == 0 && tracks.isNotEmpty()) {
-                val entries = remember(tracks) { tracks.mapNotNull { it.toMusicMediaEntry(service.label) } }
-                DarkActionChip("播放全部", AppIcons.PlayArrow) {
-                    if (entries.isNotEmpty()) onPlayQueue(entries, 0)
+            Row(
+                Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                listOf("单曲", "专辑", "歌单").forEachIndexed { i, label ->
+                    DarkFilterChip(label = label, selected = tab == i) { tab = i }
                 }
             }
-            DarkActionChip("账号设置", AppIcons.Settings) { onOpenSourceSettings() }
+            if (tab == 0 && tracks.isNotEmpty()) {
+                val entries = remember(tracks) { tracks.mapNotNull { it.toMusicMediaEntry(service.label) } }
+                Row(
+                    Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable { if (entries.isNotEmpty()) onPlayQueue(entries, 0) }
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Icon(AppIcons.PlayArrow, null, tint = accent, modifier = Modifier.size(16.dp))
+                    Text("播放全部", color = Color.White.copy(alpha = 0.82f), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                }
+            }
         }
 
         if (loading && tracks.isEmpty() && albums.isEmpty() && playlists.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    CircularProgressIndicator(color = Orange)
-                    Text("正在加载 ${service.label} 个人曲库…", color = Color(0xAAFFFFFF), fontSize = 13.sp)
+                    CircularProgressIndicator(color = accent)
+                    Text("正在加载 ${service.label} 个人曲库…", color = Color.White.copy(alpha = 0.62f), fontSize = 13.sp)
                 }
             }
         } else {
@@ -829,9 +894,9 @@ private fun StreamingLibraryBrowser(
                 0 -> {
                     val entries = remember(tracks) { tracks.mapNotNull { it.toMusicMediaEntry(service.label) } }
                     if (entries.isEmpty()) {
-                        DarkLibraryEmptyBox("暂无单曲", "可在上方搜索或到「发现」榜单播放", primaryLabel = "刷新", onPrimary = { refreshTick++ })
+                        DarkLibraryEmptyBox("暂无单曲", "可点右上角搜索或到「发现」榜单播放", primaryLabel = "刷新", onPrimary = { refreshTick++ })
                     } else {
-                        DarkTrackList(entries, currentPlayingUri) { idx -> onPlayQueue(entries, idx) }
+                        DarkTrackList(entries, currentPlayingUri, bottomPadding = bottomPadding) { idx -> onPlayQueue(entries, idx) }
                     }
                 }
                 1 -> {
@@ -839,9 +904,11 @@ private fun StreamingLibraryBrowser(
                         DarkLibraryEmptyBox("暂无收藏专辑", primaryLabel = "刷新", onPrimary = { refreshTick++ })
                     } else {
                         LazyColumn(
-                            Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(bottom = 16.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            Modifier
+                                .fillMaxSize()
+                                .verticalEdgeFade(topFade = 24.dp, bottomFade = 36.dp),
+                            contentPadding = PaddingValues(top = 6.dp, bottom = bottomPadding),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
                             items(albums, key = { it.ratingKey }) { item ->
                                 DarkContainerRow(
@@ -858,9 +925,11 @@ private fun StreamingLibraryBrowser(
                         DarkLibraryEmptyBox("暂无歌单", primaryLabel = "刷新", onPrimary = { refreshTick++ })
                     } else {
                         LazyColumn(
-                            Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(bottom = 16.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            Modifier
+                                .fillMaxSize()
+                                .verticalEdgeFade(topFade = 24.dp, bottomFade = 36.dp),
+                            contentPadding = PaddingValues(top = 6.dp, bottom = bottomPadding),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
                             items(playlists, key = { it.ratingKey }) { item ->
                                 DarkContainerRow(
@@ -977,14 +1046,18 @@ private fun MusicSourceSettingsSheet(
 @Composable
 private fun DarkFilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
     val shape = RoundedCornerShape(50)
+    // 未选中态彻底去除描边与灰框，仅保留纯净文字；选中态以柔和液态毛玻璃底托承接
     Text(
         text = label,
-        color = if (selected) Color.White else Color(0xBBFFFFFF),
-        fontSize = 13.sp,
+        color = if (selected) Color.White else Color.White.copy(alpha = 0.50f),
+        fontSize = 13.5.sp,
         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         modifier = Modifier
             .tvFocusRing(shape, color = Color.White)
-            .liquidGlass(shape = shape, style = GlassStyle.Pill, tint = if (selected) Color(0x48FFFFFF) else Color(0x1FFFFFFF))
+            .let {
+                if (selected) it.liquidGlass(shape = shape, style = GlassStyle.Pill, tint = Color.White.copy(alpha = 0.14f))
+                else it.clip(shape)
+            }
             .clickable(onClick = onClick)
             .padding(horizontal = 13.dp, vertical = 6.dp),
     )
@@ -1000,9 +1073,10 @@ private fun DarkActionChip(
     Row(
         Modifier
             .tvFocusRing(shape, color = Color.White)
-            .liquidGlass(shape = shape, style = GlassStyle.Pill, tint = Color(0x30FFFFFF))
+            .clip(shape)
+            .background(Color.White.copy(alpha = 0.10f))
             .clickable(onClick = onClick)
-            .padding(horizontal = 11.dp, vertical = 6.dp),
+            .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) {
@@ -1025,7 +1099,8 @@ private fun DrilldownHeader(
         Modifier
             .fillMaxWidth()
             .padding(bottom = 8.dp)
-            .liquidGlass(shape = RoundedCornerShape(14.dp), style = GlassStyle.Card, tint = Color(0x28FFFFFF))
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color.White.copy(alpha = 0.08f))
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1043,7 +1118,7 @@ private fun DrilldownHeader(
         Column(Modifier.weight(1f)) {
             Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (subtitle.isNotEmpty()) {
-                Text(subtitle, color = Color(0x99FFFFFF), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(subtitle, color = Color.White.copy(alpha = 0.56f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
         if (onPlayAll != null) {
@@ -1057,12 +1132,15 @@ private fun DrilldownHeader(
 private fun DarkTrackList(
     tracks: List<MediaEntry>,
     currentPlayingUri: String?,
+    bottomPadding: Dp = 20.dp,
     onSelect: (Int) -> Unit,
 ) {
     LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp),
+        Modifier
+            .fillMaxSize()
+            .verticalEdgeFade(topFade = 24.dp, bottomFade = 36.dp),
+        contentPadding = PaddingValues(top = 6.dp, bottom = bottomPadding),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         itemsIndexed(tracks, key = { i, e -> "$i:${e.uri}" }) { index, entry ->
             val sp = TrackMetadataRegistry.find(entry.uri)
@@ -1087,37 +1165,39 @@ private fun DarkTrackRow(
     active: Boolean,
     onClick: () -> Unit,
 ) {
+    val accent = LocalPlayerAccentColor.current
     val shape = RoundedCornerShape(12.dp)
+    // 去卡片化列表：去掉每首单曲独立的深灰圆角底块，仅用舒适留白与通透封面呈现层次
     Row(
         Modifier
             .fillMaxWidth()
             .tvFocusRing(shape, color = Color.White)
             .clip(shape)
-            .background(if (active) Color(0x36F28C00) else Color(0x1CFFFFFF))
+            .background(if (active) accent.copy(alpha = 0.11f) else Color.Transparent)
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = 6.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.size(44.dp).clip(RoundedCornerShape(8.dp)).background(Color(0x33000000)),
+            Modifier.size(46.dp).clip(RoundedCornerShape(8.dp)).background(Color.White.copy(alpha = 0.06f)),
             contentAlignment = Alignment.Center,
         ) {
             if (!thumbUrl.isNullOrBlank()) {
                 NetImage(url = thumbUrl, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, fallback = AppIcons.MusicNote)
             } else {
-                Icon(AppIcons.MusicNote, null, tint = Color(0x88FFFFFF), modifier = Modifier.size(22.dp))
+                Icon(AppIcons.MusicNote, null, tint = Color.White.copy(alpha = 0.48f), modifier = Modifier.size(20.dp))
             }
         }
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(13.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (active) {
-                    Icon(AppIcons.Equalizer, "正在播放", tint = Orange, modifier = Modifier.size(16.dp))
+                    Icon(AppIcons.Equalizer, "正在播放", tint = accent, modifier = Modifier.size(15.dp))
                     Spacer(Modifier.width(5.dp))
                 }
                 Text(
                     text = title,
-                    color = if (active) Orange else Color.White,
+                    color = if (active) accent else Color.White.copy(alpha = 0.94f),
                     fontSize = 15.sp,
                     fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1,
@@ -1125,12 +1205,19 @@ private fun DarkTrackRow(
                 )
             }
             if (subtitle.isNotBlank()) {
-                Text(subtitle, color = Color(0x99FFFFFF), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    subtitle,
+                    color = Color.White.copy(alpha = 0.52f),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
             }
         }
         if (durationMs > 0L) {
             Spacer(Modifier.width(8.dp))
-            Text(formatDuration(durationMs), color = Color(0x88FFFFFF), fontSize = 12.sp)
+            Text(formatDuration(durationMs), color = Color.White.copy(alpha = 0.42f), fontSize = 11.5.sp)
         }
     }
 }
@@ -1143,30 +1230,30 @@ private fun DarkContainerRow(
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(12.dp)
+    // 专辑/歌单行同样去卡片化，融入深邃背景
     Row(
         Modifier
             .fillMaxWidth()
             .tvFocusRing(shape, color = Color.White)
             .clip(shape)
-            .background(Color(0x1FFFFFFF))
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 9.dp),
+            .padding(horizontal = 6.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(Color(0x33000000)),
+            Modifier.size(50.dp).clip(RoundedCornerShape(9.dp)).background(Color.White.copy(alpha = 0.06f)),
             contentAlignment = Alignment.Center,
         ) {
             NetImage(url = item.thumb, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, fallback = AppIcons.MusicNote)
         }
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(13.dp))
         Column(Modifier.weight(1f)) {
-            Text(item.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(item.title, color = Color.White.copy(alpha = 0.94f), fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (subtitle.isNotBlank()) {
                 Spacer(Modifier.height(2.dp))
                 Text(
                     text = subtitle,
-                    color = Color(0x99FFFFFF),
+                    color = Color.White.copy(alpha = 0.52f),
                     fontSize = 12.sp,
                     maxLines = 1,
                     softWrap = false,
@@ -1176,7 +1263,7 @@ private fun DarkContainerRow(
             }
         }
         Spacer(Modifier.width(6.dp))
-        Icon(AppIcons.ChevronRight, null, tint = Color(0x88FFFFFF), modifier = Modifier.size(20.dp))
+        Icon(AppIcons.ChevronRight, null, tint = Color.White.copy(alpha = 0.40f), modifier = Modifier.size(19.dp))
     }
 }
 

@@ -106,6 +106,9 @@ object AppIcons {
     val StopSquare = icon("M6,6h12v12H6z")
     val Tune = icon("M3,17v2h6v-2H3zM3,5v2h10V5H3zM13,21v-2h8v-2h-8v-2h-2v6h2zM7,9v2H3v2h4v2h2V9H7zM21,13v-2H11v2h10zM15,9h2V7h4V5h-4V3h-2v6z")
     val FilterList = icon("M10,18h4v-2h-4v2zM3,6v2h18V6H3zM6,13h12v-2H6v2z")
+    val LocalFire = icon("M13.5,0.67s0.74,2.65 0.74,4.8c0,2.06 -1.35,3.73 -3.41,3.73 -2.07,0 -3.63,-1.67 -3.63,-3.73l0.03,-0.36C5.21,7.51 4,10.62 4,14c0,4.42 3.58,8 8,8s8,-3.58 8,-8C20,8.61 17.41,3.8 13.5,0.67zM11.71,19c-1.78,0 -3.22,-1.4 -3.22,-3.14 0,-1.62 1.05,-2.76 2.81,-3.12 1.77,-0.36 3.6,-1.21 4.62,-2.58 0.39,1.29 0.59,2.65 0.59,4.04 0,2.65 -2.15,4.8 -4.8,4.8z")
+    val TrendingUp = icon("M16,6l2.29,2.29 -4.88,4.88 -4,-4L2,16.59 3.41,18l6,-6 4,4 6.3,-6.29L22,12V6z")
+    val Lyrics = icon("M14,4H4C2.9,4 2,4.9 2,6v16l4,-4h8c1.1,0 2,-0.9 2,-2v-2.06c-0.32,0.04 -0.66,0.06 -1,0.06 -3.31,0 -6,-2.69 -6,-6 0,-1.54 0.58,-2.94 1.54,-4H14zM6,9h4v2H6V9zM10,14H6v-2h4v2zM20,6.18C19.69,6.07 19.35,6 19,6c-1.66,0 -3,1.34 -3,3s1.34,3 3,3 3,-1.34 3,-3V3h2V1h-4v5.18z")
 
     private fun icon(path: String): ImageVector = ImageVector.Builder(
         defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f,

@@ -666,4 +666,34 @@ class VoxMusicCoreTest {
             ),
         )
     }
+
+    @Test
+    fun ambientPaletteExtractsDarkAuroraWithinLuminanceBudget() {
+        // 空像素数组回退默认极光色板
+        assertEquals(
+            com.voxmusic.app.ui.AmbientPalettes.Default,
+            com.voxmusic.app.ui.AmbientPalettes.extractFromPixels(IntArray(0)),
+        )
+
+        // 模拟高饱和暖红 + 深蓝 + 翡翠绿封面像素，验证极光色明度均收敛在 14%–24% 暗调区间
+        val pixels = IntArray(30) { i ->
+            when {
+                i < 12 -> 0xFFFF3B30.toInt()
+                i < 22 -> 0xFF0A84FF.toInt()
+                else -> 0xFF30D158.toInt()
+            }
+        }
+        val palette = com.voxmusic.app.ui.AmbientPalettes.extractFromPixels(pixels)
+        fun hslLightness(c: androidx.compose.ui.graphics.Color): Float {
+            val mx = maxOf(c.red, c.green, c.blue)
+            val mn = minOf(c.red, c.green, c.blue)
+            return (mx + mn) / 2f
+        }
+        listOf(palette.aurora1, palette.aurora2, palette.aurora3).forEach { c ->
+            val l = hslLightness(c)
+            assertTrue("Aurora lightness $l should stay in [0.14, 0.24]", l in 0.14f..0.24f)
+        }
+        val accentL = hslLightness(palette.accent)
+        assertTrue("Accent lightness $accentL should be clearly legible [0.60, 0.82]", accentL in 0.60f..0.82f)
+    }
 }
