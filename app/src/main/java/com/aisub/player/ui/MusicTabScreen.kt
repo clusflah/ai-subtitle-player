@@ -239,7 +239,7 @@ fun MusicTabScreen(
         }
     }
 
-    val pager = rememberPagerState(initialPage = 0) { 3 }
+    val pager = rememberPagerState(initialPage = 0) { 2 }
     var tvPage by rememberSaveable { mutableIntStateOf(0) }
     var toastMessage by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(toastMessage) {
@@ -274,7 +274,7 @@ fun MusicTabScreen(
     }
 
     val jumpToPage: (Int) -> Unit = { targetPage ->
-        val safeTarget = targetPage.coerceIn(0, 2)
+        val safeTarget = targetPage.coerceIn(0, 1)
         if (tv) {
             tvPage = safeTarget
         } else {
@@ -309,7 +309,7 @@ fun MusicTabScreen(
                 startQueuePlayback(queue, idx, false)
             }
             effectiveSpec.isLocal && !libState.hasPermission -> onRequestPermission()
-            else -> jumpToPage(2)
+            else -> jumpToPage(1)
         }
     }
 
@@ -345,7 +345,7 @@ fun MusicTabScreen(
             onIdlePlay = handleIdlePlay,
             externalPager = pager,
             externalTvPage = tvPage,
-            onExternalTvPageChange = { tvPage = it.coerceIn(0, 2) },
+            onExternalTvPageChange = { tvPage = it.coerceIn(0, 1) },
             externalHoldVisible = anyOverlayOpen,
             onBarsVisibleChange = onBarsVisibleChange,
             topTrailingContent = {
@@ -451,7 +451,7 @@ fun MusicTabScreen(
                     if (svc in loggedInWebServices) {
                         MusicSourceStore.selectWebService(context, svc)
                         reloadNonce++
-                        jumpToPage(2)
+                        jumpToPage(1)
                         showToast("已切换音乐源：${svc.label}")
                     } else {
                         loginWebService = svc
@@ -477,7 +477,7 @@ fun MusicTabScreen(
                     reloadNonce++
                     showSourceSettings = false
                     if (!MusicSourceStore.isStructuredMusicServer(srv.type) && folderPath.isEmpty()) {
-                        jumpToPage(2)
+                        jumpToPage(1)
                     }
                     showToast("已切换音乐源：${customLabel ?: srv.name}")
                 },
@@ -523,7 +523,7 @@ fun MusicTabScreen(
                 loginWebService = null
                 MusicSourceStore.selectWebService(context, targetService)
                 reloadNonce++
-                jumpToPage(2)
+                jumpToPage(1)
                 showToast("${targetService.label} 登录成功，已切换为当前音源")
             },
         )
@@ -543,7 +543,7 @@ fun MusicTabScreen(
                 }
                 reloadNonce++
                 addServerFlow = null
-                jumpToPage(2)
+                jumpToPage(1)
                 showToast(if (flow.existing != null) "已重新登录 ${saved.name}" else "已接入并切换至 ${saved.name}")
             },
         )
@@ -558,7 +558,7 @@ fun MusicTabScreen(
                 }
                 reloadNonce++
                 addServerFlow = null
-                jumpToPage(2)
+                jumpToPage(1)
                 showToast("已更新 ${saved.name}")
             },
         )

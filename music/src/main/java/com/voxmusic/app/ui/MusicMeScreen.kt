@@ -1,5 +1,11 @@
 package com.voxmusic.app.ui
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -50,9 +56,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -75,6 +85,8 @@ import com.voxmusic.app.music.WebMusicService
 import com.voxmusic.app.music.WebStreamingMusic
 import com.voxmusic.app.net.AppProxy
 import com.voxmusic.app.net.ProxyType
+import com.voxmusic.app.update.GITHUB_REPO_URL
+import com.voxmusic.app.update.appUpdater
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -871,22 +883,96 @@ fun MusicSettingsScreen(
                 }
             }
 
-            // 6. 关于
+            // 6. 更新与关于
             SurfaceCard(Modifier.fillMaxWidth()) {
                 val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-                Row(
-                    Modifier.padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Image(
-                        painter = painterResource(if (isDark) R.drawable.ic_app_logo_dark else R.drawable.ic_app_logo_light),
-                        contentDescription = "VoxMusic",
-                        modifier = Modifier.size(48.dp),
+                val uriHandler = LocalUriHandler.current
+                val clipboard = LocalClipboardManager.current
+                var githubCopied by remember { mutableStateOf(false) }
+                val openGitHub = {
+                    val opened = runCatching {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(GITHUB_REPO_URL)))
+                        true
+                    }.getOrDefault(false) || runCatching {
+                        uriHandler.openUri(GITHUB_REPO_URL)
+                        true
+                    }.getOrDefault(false)
+                    if (!opened) {
+                        clipboard.setText(AnnotatedString(GITHUB_REPO_URL))
+                        githubCopied = true
+                        Toast.makeText(context, "未找到可用浏览器，已复制 GitHub 地址", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                Column(Modifier.padding(vertical = 4.dp)) {
+                    Text(
+                        "更新与关于",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Orange,
+                        modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 4.dp),
                     )
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("VoxMusic v${BuildConfig.VERSION_NAME}", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                        Text("专注 Apple Music、Spotify 与 YouTube Music 的纯净音乐播放器，支持榜单智能选源即点即播、黑胶唱机、双语同步歌词、AI 荐歌与桌面小组件。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(
+                        Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Image(
+                            painter = painterResource(if (isDark) R.drawable.ic_app_logo_dark else R.drawable.ic_app_logo_light),
+                            contentDescription = "VoxMusic",
+                            modifier = Modifier.size(48.dp),
+                        )
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("VoxMusic v${BuildConfig.VERSION_NAME}", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text("专注 Apple Music、Spotify 与 YouTube Music 的纯净音乐播放器，支持榜单智能选源即点即播、黑胶唱机、双语同步歌词、AI 荐歌与桌面小组件。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    CardDivider(inset = 14.dp)
+                    MeListRow(
+                        icon = AppIcons.SystemUpdate,
+                        iconTint = Orange,
+                        title = "检查更新",
+                        subtitle = "当前版本 v${BuildConfig.VERSION_NAME} · 检查 GitHub Releases 新版本",
+                        onClick = { context.findActivity()?.let { appUpdater.checkNow(it) } },
+                    )
+                    CardDivider(inset = 54.dp)
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .tvFocusRing(RoundedCornerShape(10.dp))
+                            .clickable(onClick = openGitHub)
+                            .padding(start = 14.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(Orange.copy(alpha = 0.14f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(AppIcons.Link, null, tint = Orange, modifier = Modifier.size(19.dp))
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("GitHub 项目地址", fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                            Text(
+                                GITHUB_REPO_URL,
+                                fontSize = 12.sp,
+                                color = Orange,
+                                textDecoration = TextDecoration.Underline,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        TextButton(
+                            onClick = {
+                                clipboard.setText(AnnotatedString(GITHUB_REPO_URL))
+                                githubCopied = true
+                                Toast.makeText(context, "已复制 GitHub 地址", Toast.LENGTH_SHORT).show()
+                            },
+                        ) {
+                            Text(if (githubCopied) "已复制" else "复制", fontSize = 12.5.sp)
+                        }
+                        IconButton(onClick = openGitHub, modifier = Modifier.size(34.dp)) {
+                            Icon(AppIcons.OpenInNew, "打开 GitHub", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                        }
                     }
                 }
             }
@@ -935,4 +1021,10 @@ private fun SettingsSwitchRow(
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

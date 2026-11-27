@@ -3,13 +3,17 @@ package com.aisub.player.ui
 import android.content.Context
 import android.content.res.Configuration
 import android.media.AudioManager
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -152,13 +156,42 @@ internal fun <T> resolveDisplayCover(
     standbyCover: T?,
 ): T? = if (activeMusic || hasCurrentEntry) activeCover else standbyCover
 
-/** 上方标签页：0 歌曲（唱片），1 歌词，2 乐库（仅音乐主页面提供） */
-private const val LYRICS_PAGE = 1
-private const val LIBRARY_PAGE = 2
+/** 上方标签页：0 歌曲（黑胶唱机与歌词融合），1 乐库（仅音乐主页面提供） */
+private const val LIBRARY_PAGE = 1
+
+/** 融合播放页（歌曲 + 歌词）自动切歌词等待时长（毫秒） */
+internal const val AUTO_LYRICS_DELAY_MS = 5_500L
 
 /**
- * 播放音乐时的整页：上方「歌曲 / 歌词」（音乐主页含「乐库」）左右滑，
- * 下方固定显示歌名、喜欢、菜单、进度条和播放按钮。背景是模糊的封面。
+ * 判断当前是否满足「播放数秒后自动从黑胶唱片切到歌词视图」的条件（防打扰约束）：
+ * 1. 处于歌曲页（非乐库浏览页），且非 TV 遥控器模式
+ * 2. 有正在播放的曲目（暂停时不自动切换）
+ * 3. 拥有非空的同步歌词（纯音乐、暂无歌词、无时间戳纯文本歌词时不自动隐藏黑胶）
+ * 4. 当前处于唱片视图，且用户本首歌尚未手动切回唱片锁定
+ * 5. 没有菜单/队列/外部弹层打开，且未在拖动进度条
+ */
+internal fun shouldScheduleAutoLyrics(
+    onBrowsePage: Boolean,
+    isTv: Boolean,
+    activeMusic: Boolean,
+    isPlaying: Boolean,
+    hasSyncedLyrics: Boolean,
+    showLyrics: Boolean,
+    suppressedForTrack: Boolean,
+    hasOverlayOrDragging: Boolean,
+): Boolean = !onBrowsePage &&
+    !isTv &&
+    activeMusic &&
+    isPlaying &&
+    hasSyncedLyrics &&
+    !showLyrics &&
+    !suppressedForTrack &&
+    !hasOverlayOrDragging
+
+/**
+ * 播放音乐时的整页：上方「歌曲 / 乐库」左右滑，
+ * 歌曲页内融合黑胶唱片与滚动歌词（播放数秒自动切歌词，点空白或小黑胶切回唱片且本首不再自动切走）；
+ * 下方常驻显示歌名、喜欢、菜单、进度条和播放按钮。背景是模糊的封面。
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -206,9 +239,8 @@ fun MusicView(
     val config = LocalConfiguration.current
     val tv = LocalTv.current
     val landscape = config.orientation == Configuration.ORIENTATION_LANDSCAPE || tv
-    val screenH = config.screenHeightDp.dp
     val scope = rememberCoroutineScope()
-    val pageCount = if (libraryTabContent != null) 3 else 2
+    val pageCount = if (libraryTabContent != null) 2 else 1
     val internalPager = rememberPagerState(initialPage = 0) { pageCount }
     val pager = externalPager ?: internalPager
     var internalTvPage by rememberSaveable { mutableIntStateOf(0) }
@@ -221,7 +253,6 @@ fun MusicView(
             scope.launch { pager.animateScrollToPage(safeTarget) }
         }
     }
-    val onLyricsPage = currentPage == LYRICS_PAGE
     val onLibraryPage = libraryTabContent != null && currentPage == LIBRARY_PAGE
     var showQueue by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
@@ -241,156 +272,126 @@ fun MusicView(
     val translations = if (!activeMusic) null else if (music.lyrics != null) music.translations else remember(cues) {
         cues.sortedBy { it.startMs }.map { it.translation }.takeIf { t -> t.any { it != null } }
     }
-    // 播放满 3 秒无操作时自动隐藏顶部栏与底部按钮行（TV 遥控器交互下保持控件常显，防止焦点丢失跳动）
-    var touches by remember { mutableIntStateOf(0) }
+    val hasSyncedLyrics = lyrics != null && lyrics.synced && lyrics.lines.isNotEmpty()
+
+    // 融合歌曲页状态：切歌重置为黑胶唱片；播放满数秒自动切歌词；手动点回唱片后本首歌不再自动跳走
+    val trackKey = effectiveEntry?.uri ?: "${tags.title}|${tags.artist.orEmpty()}"
+    var showLyrics by remember(trackKey) { mutableStateOf(false) }
+    var autoLyricsSuppressed by remember(trackKey) { mutableStateOf(false) }
+    var interactNonce by remember { mutableIntStateOf(0) }
     var seekDragging by remember { mutableStateOf(false) }
-    var barsVisible by remember { mutableStateOf(true) }
-    LaunchedEffect(currentPage, touches, effectiveWantsPlay, showMenu, showQueue, seekDragging, externalHoldVisible, onLibraryPage, tv) {
-        if (onLibraryPage || tv) {
-            barsVisible = true
-            return@LaunchedEffect
-        }
-        barsVisible = true
-        if (effectiveWantsPlay && !showMenu && !showQueue && !seekDragging && !externalHoldVisible) {
-            delay(3_000)
-            barsVisible = false
-        }
+
+    val enterLyrics: () -> Unit = {
+        showLyrics = true
+        interactNonce++
     }
-    LaunchedEffect(barsVisible, onLibraryPage) {
-        onBarsVisibleChange?.invoke(barsVisible || onLibraryPage)
-    }
-    val controlsPanelShown = when {
-        onLibraryPage && !landscape -> false
-        onLyricsPage && !landscape -> barsVisible
-        else -> true
+    val returnToVinyl: () -> Unit = {
+        showLyrics = false
+        autoLyricsSuppressed = true
+        interactNonce++
     }
 
-    val onLyricsPageState by rememberUpdatedState(onLyricsPage)
-    Box(
-        Modifier.fillMaxSize().background(Color(0xFF1E201F))
-            .pointerInput(Unit) {
-                // 只观察、不消费。非歌词页轻点任意处即重新显示控件；
-                // 歌词页改由 LyricsPage 区分「点歌词跳转」与「点空白处显示控件」，避免点歌词时控件弹出导致列表跳动
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                    var dragged = false
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        if ((change.position - down.position).getDistance() > viewConfiguration.touchSlop) dragged = true
-                        if (!change.pressed) break
-                    }
-                    if (!dragged && !onLyricsPageState) touches++
-                }
-            }
-            .pointerInput(Unit) { detectTapGestures { } },
-    ) {
+    val canAutoLyrics = shouldScheduleAutoLyrics(
+        onBrowsePage = onLibraryPage,
+        isTv = tv,
+        activeMusic = activeMusic,
+        isPlaying = effectiveWantsPlay,
+        hasSyncedLyrics = hasSyncedLyrics,
+        showLyrics = showLyrics,
+        suppressedForTrack = autoLyricsSuppressed,
+        hasOverlayOrDragging = showMenu || showQueue || seekDragging || externalHoldVisible,
+    )
+    LaunchedEffect(trackKey, canAutoLyrics, interactNonce) {
+        if (canAutoLyrics) {
+            delay(AUTO_LYRICS_DELAY_MS)
+            showLyrics = true
+        }
+    }
+    LaunchedEffect(onBarsVisibleChange) {
+        onBarsVisibleChange?.invoke(true)
+    }
+    val controlsPanelShown = !onLibraryPage || landscape
+
+    Box(Modifier.fillMaxSize().background(Color(0xFF1E201F))) {
         Box(Modifier.fillMaxSize()) {
             Backdrop(displayCover)
         }
-        val immersive = !barsVisible && !onLibraryPage && !tv
-        val immersiveVinyl = immersive && !onLyricsPage
-        val vinylWidthFraction by animateFloatAsState(
-            targetValue = when {
-                landscape && immersiveVinyl -> 0.78f
-                landscape -> 0.70f
-                immersiveVinyl -> 0.88f
-                else -> 0.82f
-            },
-            animationSpec = tween(360),
-            label = "vinylWidthFraction",
-        )
-        val vinylMaxHeightFraction by animateFloatAsState(
-            targetValue = when {
-                landscape -> 0.86f
-                immersiveVinyl -> 0.78f
-                else -> 0.85f
-            },
-            animationSpec = tween(360),
-            label = "vinylMaxHeightFraction",
-        )
-        val vinylMaxDiameter by animateDpAsState(
-            targetValue = if (immersiveVinyl) 440.dp else 400.dp,
-            animationSpec = tween(360),
-            label = "vinylMaxDiameter",
-        )
-        val vinylBiasY by animateFloatAsState(
-            targetValue = if (immersiveVinyl && !landscape) 0.22f else 0f,
-            animationSpec = tween(360),
-            label = "vinylBiasY",
-        )
-        val controlsBottomPad by animateDpAsState(
-            targetValue = when {
-                landscape -> 8.dp
-                immersiveVinyl -> ((screenH - 480.dp) * 0.30f).coerceIn(28.dp, 124.dp)
-                inHomeTab -> 10.dp
-                else -> 20.dp
-            },
-            animationSpec = tween(360),
-            label = "controlsBottomPad",
-        )
-        val landscapeOuterPad by animateDpAsState(
-            targetValue = if (landscape && immersive) 20.dp else 0.dp,
-            animationSpec = tween(360),
-            label = "landscapeOuterPad",
-        )
-        val lyricTopPad by animateDpAsState(
-            targetValue = if (immersiveVinyl) 18.dp else 12.dp,
-            animationSpec = tween(340),
-            label = "lyricTopPad",
-        )
-        val lyricBottomPad by animateDpAsState(
-            targetValue = if (immersiveVinyl) 10.dp else 4.dp,
-            animationSpec = tween(340),
-            label = "lyricBottomPad",
-        )
+        val controlsBottomPad = when {
+            landscape -> 8.dp
+            inHomeTab -> 10.dp
+            else -> 20.dp
+        }
+        val songPageVisible = if (tv) currentPage == 0 else (pager.currentPage == 0 || pager.targetPage == 0)
         val pages: @Composable (Modifier) -> Unit = { mod ->
             Column(mod) {
-                AnimatedVisibility(
-                    visible = barsVisible || onLibraryPage,
-                    enter = fadeIn(tween(240)) + expandVertically(tween(280)),
-                    exit = fadeOut(tween(340)) + shrinkVertically(tween(360)),
-                ) {
-                    TopTabs(
-                        page = currentPage,
-                        showLibraryTab = libraryTabContent != null,
-                        onBack = onBack,
-                        trailingContent = topTrailingContent,
-                    ) { targetPage ->
-                        touches++
-                        selectPage(targetPage)
-                    }
+                TopTabs(
+                    page = currentPage,
+                    showLibraryTab = libraryTabContent != null,
+                    onBack = onBack,
+                    trailingContent = topTrailingContent,
+                ) { targetPage ->
+                    interactNonce++
+                    selectPage(targetPage)
                 }
-                val vinylVisible = if (tv) currentPage == 0 else (pager.currentPage == 0 || pager.targetPage == 0)
                 val renderPageContent: @Composable (Int) -> Unit = { page ->
                     when (page) {
-                        LYRICS_PAGE -> LyricsPage(
-                            vm = vm,
-                            music = music,
-                            lyrics = lyrics,
-                            translations = translations,
-                            positionMs = positionMs,
-                            durationMs = effectiveDuration,
-                            loopA = loopA,
-                            loopB = loopB,
-                            onSeek = onSeek,
-                            onBlankTap = { touches++ },
-                            onAction = { touches++; onAction(it) },
-                            onMessage = onMessage,
-                            toolsShown = barsVisible,
-                            activeMusic = activeMusic,
-                        )
                         LIBRARY_PAGE -> libraryTabContent?.invoke()
-                        else -> Box(Modifier.fillMaxSize(), contentAlignment = BiasAlignment(0f, vinylBiasY)) {
-                            Vinyl(
-                                cover = displayCover,
-                                playing = effectiveWantsPlay && vinylVisible,
-                                modifier = Modifier.vinylSquareSize(
-                                    widthFraction = vinylWidthFraction,
-                                    maxDiameter = vinylMaxDiameter,
-                                    maxHeightFraction = vinylMaxHeightFraction,
-                                ),
-                            )
+                        else -> AnimatedContent(
+                            targetState = showLyrics,
+                            transitionSpec = {
+                                if (targetState) {
+                                    (fadeIn(tween(380, delayMillis = 80)) + scaleIn(tween(380, delayMillis = 80), initialScale = 0.96f)) togetherWith
+                                        (fadeOut(tween(300)) + scaleOut(tween(320), targetScale = 0.86f))
+                                } else {
+                                    (fadeIn(tween(320, delayMillis = 60)) + scaleIn(tween(340, delayMillis = 60), initialScale = 0.88f)) togetherWith
+                                        fadeOut(tween(240))
+                                }
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                            label = "songLyricsFusion",
+                        ) { lyricsMode ->
+                            if (lyricsMode) {
+                                LyricsPage(
+                                    vm = vm,
+                                    music = music,
+                                    lyrics = lyrics,
+                                    translations = translations,
+                                    positionMs = positionMs,
+                                    durationMs = effectiveDuration,
+                                    loopA = loopA,
+                                    loopB = loopB,
+                                    onSeek = { target ->
+                                        interactNonce++
+                                        onSeek(target)
+                                    },
+                                    onBlankTap = returnToVinyl,
+                                    onInteract = { interactNonce++ },
+                                    onAction = { interactNonce++; onAction(it) },
+                                    onMessage = onMessage,
+                                    toolsShown = true,
+                                    activeMusic = activeMusic,
+                                )
+                            } else {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Vinyl(
+                                        cover = displayCover,
+                                        playing = effectiveWantsPlay && songPageVisible && !showLyrics,
+                                        modifier = Modifier
+                                            .vinylSquareSize(
+                                                widthFraction = if (landscape) 0.70f else 0.82f,
+                                                maxDiameter = 400.dp,
+                                                maxHeightFraction = if (landscape) 0.86f else 0.85f,
+                                            )
+                                            .tvFocusRing(CircleShape, color = Color.White)
+                                            .clip(CircleShape)
+                                            .clickable(
+                                                interactionSource = remember { MutableInteractionSource() },
+                                                indication = null,
+                                                onClick = enterLyrics,
+                                            ),
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -416,75 +417,74 @@ fun MusicView(
                     title = tags.title,
                     subtitle = listOfNotNull(tags.artist, tags.album).joinToString(" - "),
                     liked = liked,
-                    immersive = immersive,
-                    onLike = { touches++; toggleLike() },
-                    onMenu = { touches++; showMenu = true },
+                    cover = displayCover,
+                    showMiniVinyl = showLyrics && !onLibraryPage,
+                    playing = effectiveWantsPlay && songPageVisible && showLyrics,
+                    onMiniVinylClick = returnToVinyl,
+                    onLike = { interactNonce++; toggleLike() },
+                    onMenu = { interactNonce++; showMenu = true },
                 )
-                // 歌词页以外，在歌名下面显示正在唱的一句（沉浸态字号与留白放大，并可带出译文）
-                val lyricIdx = lyrics?.takeIf { it.synced && !onLyricsPage }?.indexAt(positionMs) ?: -1
+                // 黑胶唱片态下在歌名下方显示正在唱的一句，轻点即可平滑展开完整歌词
+                val lyricIdx = lyrics?.takeIf { it.synced && !showLyrics }?.indexAt(positionMs) ?: -1
                 val line = if (lyricIdx >= 0) lyrics?.lines?.getOrNull(lyricIdx)?.text else null
-                val transLine = if (lyricIdx >= 0) translations?.getOrNull(lyricIdx)?.takeIf { it.isNotBlank() } else null
-                if (line != null) {
-                    Column(
-                        Modifier.fillMaxWidth()
-                            .padding(start = 28.dp, end = 28.dp, top = lyricTopPad, bottom = lyricBottomPad),
+                AnimatedVisibility(
+                    visible = !showLyrics && line != null,
+                    enter = fadeIn(tween(240)) + expandVertically(tween(260)),
+                    exit = fadeOut(tween(200)) + shrinkVertically(tween(240)),
+                ) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp, vertical = 4.dp)
+                            .tvFocusRing(RoundedCornerShape(8.dp), color = Color.White)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = enterLyrics,
+                            )
+                            .padding(horizontal = 4.dp, vertical = 6.dp),
                     ) {
                         Text(
-                            line.ifEmpty { "♪" },
-                            color = if (immersiveVinyl) Color(0xEBFFFFFF) else Color(0xCCFFFFFF),
-                            fontSize = if (immersiveVinyl) 16.5.sp else 15.sp,
-                            fontWeight = if (immersiveVinyl) FontWeight.Medium else FontWeight.Normal,
+                            line.orEmpty().ifEmpty { "♪" },
+                            color = Color(0xCCFFFFFF),
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Normal,
                             lineHeight = 23.sp,
-                            maxLines = if (immersiveVinyl) 2 else 1,
+                            maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        if (immersiveVinyl && transLine != null) {
-                            Text(
-                                transLine,
-                                color = Color(0x99FFFFFF),
-                                fontSize = 14.sp,
-                                lineHeight = 19.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(top = 3.dp),
-                            )
-                        }
                     }
-                } else {
-                    Spacer(Modifier.height(if (immersiveVinyl) 18.dp else 14.dp))
+                }
+                if (showLyrics || line == null) {
+                    Spacer(Modifier.height(10.dp))
                 }
                 MusicSeekBar(
                     positionMs = if (activeMusic) positionMs else positionMs.coerceAtMost(effectiveDuration),
                     durationMs = effectiveDuration,
-                    immersive = immersive,
+                    immersive = false,
                     loopA = loopA,
                     loopB = loopB,
                     onSeek = { target ->
-                        touches++
+                        interactNonce++
                         if (activeMusic) onSeek(target) else onIdlePlay?.invoke()
                     },
-                    onDragActiveChange = { seekDragging = it; touches++ },
+                    onDragActiveChange = { seekDragging = it; interactNonce++ },
                 )
-                AnimatedVisibility(
-                    visible = barsVisible,
-                    enter = fadeIn(tween(240)) + expandVertically(tween(280)),
-                    exit = fadeOut(tween(340)) + shrinkVertically(tween(360)),
-                ) {
-                    PlayControls(
-                        vm = vm,
-                        player = player,
-                        wantsPlay = effectiveWantsPlay,
-                        activeMusic = activeMusic,
-                        onIdlePlay = onIdlePlay,
-                        onInteract = { touches++ },
-                        onMessage = { touches++; onMessage(it) },
-                        onQueue = {
-                            touches++
-                            if (activeMusic && vm.queueSize > 0) showQueue = true
-                            else if (libraryTabContent != null) selectPage(LIBRARY_PAGE)
-                        },
-                    )
-                }
+                PlayControls(
+                    vm = vm,
+                    player = player,
+                    wantsPlay = effectiveWantsPlay,
+                    activeMusic = activeMusic,
+                    onIdlePlay = onIdlePlay,
+                    onInteract = { interactNonce++ },
+                    onMessage = { interactNonce++; onMessage(it) },
+                    onQueue = {
+                        interactNonce++
+                        if (activeMusic && vm.queueSize > 0) showQueue = true
+                        else if (libraryTabContent != null) selectPage(LIBRARY_PAGE)
+                    },
+                )
             }
         }
         val insetMod = Modifier.fillMaxSize()
@@ -493,7 +493,7 @@ fun MusicView(
             .padding(bottom = bottomOverlayPadding)
         if (landscape) {
             // 横屏与 TV 下左侧 Pager 宽度保持恒定，严禁随 pager.currentPage 动态跳变，彻底消除 Pager 重测导致的 60Hz 抖动重叠
-            Row(insetMod.padding(horizontal = landscapeOuterPad)) {
+            Row(insetMod) {
                 pages(Modifier.weight(if (libraryTabContent != null) 1.25f else 1f).fillMaxHeight())
                 controls(Modifier.weight(1f).align(Alignment.CenterVertically).padding(bottom = controlsBottomPad))
             }
@@ -551,7 +551,7 @@ private fun TopTabs(
     trailingContent: (@Composable () -> Unit)?,
     onSelect: (Int) -> Unit,
 ) {
-    val tabs = if (showLibraryTab) listOf("歌曲", "歌词", "乐库") else listOf("歌曲", "歌词")
+    val tabs = if (showLibraryTab) listOf("歌曲", "乐库") else listOf("歌曲")
     if (onBack == null && trailingContent != null) {
         Row(
             Modifier.fillMaxWidth().height(56.dp).padding(start = 22.dp, end = 16.dp),
@@ -667,6 +667,57 @@ private fun Vinyl(cover: android.graphics.Bitmap?, playing: Boolean, modifier: M
     }
 }
 
+@Composable
+private fun MiniVinyl(
+    cover: android.graphics.Bitmap?,
+    playing: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val angle = remember { Animatable(0f) }
+    LaunchedEffect(playing) {
+        while (playing) {
+            angle.animateTo(angle.value + 360f, tween(24_000, easing = LinearEasing))
+            angle.snapTo(angle.value % 360f)
+        }
+    }
+    val coverBitmap = remember(cover) {
+        cover?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }?.asImageBitmap()
+    }
+    Box(
+        modifier
+            .size(44.dp)
+            .tvFocusRing(CircleShape, color = Color.White)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer { rotationZ = angle.value }
+                .background(Color(0xFF0E0E0E), CircleShape)
+                .border(1.dp, Color(0x3DFFFFFF), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                Modifier
+                    .fillMaxSize(0.72f)
+                    .clip(CircleShape)
+                    .background(Color(0xFF2A2A2A))
+                    .border(1.5.dp, Color(0xFF050505), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (coverBitmap != null) {
+                    Image(coverBitmap, "切回黑胶唱片", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                } else {
+                    Icon(AppIcons.MusicNote, "切回黑胶唱片", tint = Color(0xFF888888), modifier = Modifier.size(18.dp))
+                }
+            }
+        }
+    }
+}
+
 // ---------------- 歌名、喜欢、菜单 ----------------
 
 @Composable
@@ -674,21 +725,37 @@ private fun SongTitleRow(
     title: String,
     subtitle: String,
     liked: Boolean,
-    immersive: Boolean = false,
+    cover: android.graphics.Bitmap? = null,
+    showMiniVinyl: Boolean = false,
+    playing: Boolean = false,
+    onMiniVinylClick: () -> Unit = {},
     onLike: () -> Unit,
     onMenu: () -> Unit,
 ) {
-    val endPad by animateDpAsState(if (immersive) 28.dp else 16.dp, tween(280), label = "titleEndPad")
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(start = 28.dp, end = endPad),
+        Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(start = 28.dp, end = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        AnimatedVisibility(
+            visible = showMiniVinyl,
+            enter = fadeIn(tween(260)) + expandHorizontally(tween(280)) + scaleIn(tween(280), initialScale = 0.72f),
+            exit = fadeOut(tween(200)) + shrinkHorizontally(tween(240)) + scaleOut(tween(220), targetScale = 0.72f),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                MiniVinyl(
+                    cover = cover,
+                    playing = playing,
+                    onClick = onMiniVinylClick,
+                )
+                Spacer(Modifier.width(12.dp))
+            }
+        }
         Column(Modifier.weight(1f)) {
             // 放不下时来回滚动显示全名（只在放不下时才动）
             Text(
                 title,
                 color = Color.White,
-                fontSize = if (immersive) 24.sp else 22.sp,
+                fontSize = 22.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 0.2.sp,
                 maxLines = 1,
@@ -699,18 +766,12 @@ private fun SongTitleRow(
                 modifier = Modifier.padding(top = 4.dp).basicMarquee(iterations = Int.MAX_VALUE, initialDelayMillis = 1_500, repeatDelayMillis = 2_000),
             )
         }
-        AnimatedVisibility(
-            visible = !immersive,
-            enter = fadeIn(tween(220)) + expandHorizontally(tween(260)),
-            exit = fadeOut(tween(220)) + shrinkHorizontally(tween(260)),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onLike, modifier = Modifier.tvFocusRing(CircleShape, color = Color.White)) {
-                    Icon(if (liked) AppIcons.Favorite else AppIcons.FavoriteBorder, if (liked) "取消喜欢" else "喜欢", tint = if (liked) Color(0xFFFF5A6E) else Color.White, modifier = Modifier.size(26.dp))
-                }
-                IconButton(onClick = onMenu, modifier = Modifier.tvFocusRing(CircleShape, color = Color.White)) {
-                    Icon(AppIcons.MoreVert, "更多", tint = Color.White)
-                }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onLike, modifier = Modifier.tvFocusRing(CircleShape, color = Color.White)) {
+                Icon(if (liked) AppIcons.Favorite else AppIcons.FavoriteBorder, if (liked) "取消喜欢" else "喜欢", tint = if (liked) Color(0xFFFF5A6E) else Color.White, modifier = Modifier.size(26.dp))
+            }
+            IconButton(onClick = onMenu, modifier = Modifier.tvFocusRing(CircleShape, color = Color.White)) {
+                Icon(AppIcons.MoreVert, "更多", tint = Color.White)
             }
         }
     }
@@ -933,6 +994,7 @@ private fun LyricsPage(
     loopB: Long?,
     onSeek: (Long) -> Unit,
     onBlankTap: () -> Unit,
+    onInteract: () -> Unit = {},
     onAction: (MusicAction) -> Unit,
     onMessage: (String) -> Unit,
     /** 下方控件淡出时，LRC、音量这一行也一起收起 */
@@ -1065,11 +1127,11 @@ private fun LyricsPage(
         }
         if (adjusting && lyrics?.synced == true && music.lyrics != null) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically) {
-                Pill("提前 0.5 秒") { onBlankTap(); vm.music.shiftLyrics(-500) }
+                Pill("提前 0.5 秒") { onInteract(); vm.music.shiftLyrics(-500) }
                 Spacer(Modifier.width(10.dp))
-                Pill("延后 0.5 秒") { onBlankTap(); vm.music.shiftLyrics(500) }
+                Pill("延后 0.5 秒") { onInteract(); vm.music.shiftLyrics(500) }
                 Spacer(Modifier.weight(1f))
-                TextButton(onClick = { onBlankTap(); adjusting = false }) { Text("完成", color = Color.White) }
+                TextButton(onClick = { onInteract(); adjusting = false }) { Text("完成", color = Color.White) }
             }
         }
         var menu by remember { mutableStateOf(false) }
@@ -1085,7 +1147,7 @@ private fun LyricsPage(
                         "LRC", color = Color(0xCCFFFFFF), fontSize = 13.sp,
                         modifier = Modifier
                             .liquidGlass(shape = RoundedCornerShape(6.dp), style = GlassStyle.Pill, tint = Color(0x28FFFFFF))
-                            .clickable { onBlankTap(); menu = true }.padding(horizontal = 8.dp, vertical = 4.dp),
+                            .clickable { onInteract(); menu = true }.padding(horizontal = 8.dp, vertical = 4.dp),
                     )
                     AppMenu(menu, onDismissRequest = { menu = false }) {
                         val own = music.lyrics
@@ -1105,7 +1167,7 @@ private fun LyricsPage(
                 }
                 Spacer(Modifier.width(16.dp))
                 IconButton(onClick = {
-                    onBlankTap()
+                    onInteract()
                     // 系统音量条
                     (context.getSystemService(Context.AUDIO_SERVICE) as AudioManager)
                         .adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_SAME, AudioManager.FLAG_SHOW_UI)

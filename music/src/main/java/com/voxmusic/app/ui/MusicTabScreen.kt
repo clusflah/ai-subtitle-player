@@ -102,12 +102,11 @@ private enum class MusicTabDialog {
 
 private const val TAB_DISCOVER_PAGE = 0
 private const val TAB_SONG_PAGE = 1
-private const val TAB_LYRICS_PAGE = 2
-private const val TAB_LIBRARY_PAGE = 3
+private const val TAB_LIBRARY_PAGE = 2
 
 /**
- * 音乐播放器主页面（无底栏全屏四页横向滑动）：
- * 发现（左侧） / 歌曲（默认黑胶唱机） / 歌词 / 乐库，右上角低调收起音乐源与设置入口。
+ * 音乐播放器主页面（无底栏全屏三页横向滑动）：
+ * 发现（左侧） / 歌曲（黑胶唱机与歌词融合） / 乐库，右上角低调收起音乐源与设置入口。
  */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -191,7 +190,7 @@ fun MusicTabScreen(
         }
     }
 
-    val pager = rememberPagerState(initialPage = TAB_SONG_PAGE) { 4 }
+    val pager = rememberPagerState(initialPage = TAB_SONG_PAGE) { 3 }
     var tvPage by rememberSaveable { mutableIntStateOf(TAB_SONG_PAGE) }
     var toastMessage by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(toastMessage) {
@@ -225,7 +224,7 @@ fun MusicTabScreen(
     }
 
     val jumpToPage: (Int) -> Unit = { targetPage ->
-        val safeTarget = targetPage.coerceIn(0, 3)
+        val safeTarget = targetPage.coerceIn(0, 2)
         if (tv) tvPage = safeTarget else scope.launch { pager.animateScrollToPage(safeTarget) }
     }
 
@@ -293,7 +292,7 @@ fun MusicTabScreen(
             onIdlePlay = handleIdlePlay,
             externalPager = pager,
             externalTvPage = tvPage,
-            onExternalTvPageChange = { tvPage = it.coerceIn(0, 3) },
+            onExternalTvPageChange = { tvPage = it.coerceIn(0, 2) },
             externalHoldVisible = anyOverlayOpen,
             onBarsVisibleChange = onBarsVisibleChange,
             topTrailingContent = {

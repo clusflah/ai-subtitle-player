@@ -555,4 +555,115 @@ class VoxMusicCoreTest {
             ),
         )
     }
+
+    @Test
+    fun autoLyricsOnlySchedulesWhenPlayingWithSyncedLyricsAndNotSuppressed() {
+        // 正常条件：歌曲页、手机/平板端、正在播放、有同步歌词、当前为黑胶、本首未锁定、无弹层/拖动 -> 允许自动切歌词
+        assertTrue(
+            com.voxmusic.app.ui.shouldScheduleAutoLyrics(
+                onBrowsePage = false,
+                isTv = false,
+                activeMusic = true,
+                isPlaying = true,
+                hasSyncedLyrics = true,
+                showLyrics = false,
+                suppressedForTrack = false,
+                hasOverlayOrDragging = false,
+            ),
+        )
+        // 手动切回唱片后（本首锁定）-> 不再自动跳走
+        assertEquals(
+            false,
+            com.voxmusic.app.ui.shouldScheduleAutoLyrics(
+                onBrowsePage = false,
+                isTv = false,
+                activeMusic = true,
+                isPlaying = true,
+                hasSyncedLyrics = true,
+                showLyrics = false,
+                suppressedForTrack = true,
+                hasOverlayOrDragging = false,
+            ),
+        )
+        // 暂停或纯音乐无同步歌词 -> 不自动切换
+        assertEquals(
+            false,
+            com.voxmusic.app.ui.shouldScheduleAutoLyrics(
+                onBrowsePage = false,
+                isTv = false,
+                activeMusic = true,
+                isPlaying = false,
+                hasSyncedLyrics = true,
+                showLyrics = false,
+                suppressedForTrack = false,
+                hasOverlayOrDragging = false,
+            ),
+        )
+        assertEquals(
+            false,
+            com.voxmusic.app.ui.shouldScheduleAutoLyrics(
+                onBrowsePage = false,
+                isTv = false,
+                activeMusic = true,
+                isPlaying = true,
+                hasSyncedLyrics = false,
+                showLyrics = false,
+                suppressedForTrack = false,
+                hasOverlayOrDragging = false,
+            ),
+        )
+        // 浏览发现/乐库、TV 遥控器、已在歌词态、弹层打开或拖动进度条 -> 不触发自动切换
+        assertEquals(
+            false,
+            com.voxmusic.app.ui.shouldScheduleAutoLyrics(
+                onBrowsePage = true,
+                isTv = false,
+                activeMusic = true,
+                isPlaying = true,
+                hasSyncedLyrics = true,
+                showLyrics = false,
+                suppressedForTrack = false,
+                hasOverlayOrDragging = false,
+            ),
+        )
+        assertEquals(
+            false,
+            com.voxmusic.app.ui.shouldScheduleAutoLyrics(
+                onBrowsePage = false,
+                isTv = true,
+                activeMusic = true,
+                isPlaying = true,
+                hasSyncedLyrics = true,
+                showLyrics = false,
+                suppressedForTrack = false,
+                hasOverlayOrDragging = false,
+            ),
+        )
+        assertEquals(
+            false,
+            com.voxmusic.app.ui.shouldScheduleAutoLyrics(
+                onBrowsePage = false,
+                isTv = false,
+                activeMusic = true,
+                isPlaying = true,
+                hasSyncedLyrics = true,
+                showLyrics = true,
+                suppressedForTrack = false,
+                hasOverlayOrDragging = false,
+            ),
+        )
+        assertEquals(
+            false,
+            com.voxmusic.app.ui.shouldScheduleAutoLyrics(
+                onBrowsePage = false,
+                isTv = false,
+                activeMusic = true,
+                isPlaying = true,
+                hasSyncedLyrics = true,
+                showLyrics = false,
+                suppressedForTrack = false,
+                hasOverlayOrDragging = true,
+            ),
+        )
+    }
 }

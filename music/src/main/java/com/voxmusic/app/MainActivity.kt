@@ -70,6 +70,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // 有新版本时提示（一天最多查一次）
+        com.voxmusic.app.update.appUpdater.autoCheck(this)
         vm.resumeWidgetPlayback()
         if (savedInstanceState == null) handleIntent(intent)
 
