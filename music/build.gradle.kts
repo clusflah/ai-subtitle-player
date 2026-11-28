@@ -15,8 +15,8 @@ android {
         applicationId = "com.voxmusic.app"
         minSdk = 23
         targetSdk = 36
-        versionCode = 17
-        versionName = "1.0.16"
+        versionCode = 18
+        versionName = "1.0.17"
     }
 
     signingConfigs {

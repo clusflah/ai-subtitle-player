@@ -75,13 +75,9 @@ jobs:
 
           ## VoxMusic v${VERSION} 更新内容
 
-          - **Apple Music / Spotify / YouTube Music 起播全面提速**：
-            - **Spotify**：进入音乐页后台静默预连本机 Spotify App Remote，首次切设备改为非阻塞异步下发，冷启首曲实测从 `4.44s` 降至 `0.28s`（秒开）；
-            - **Apple Music**：后台静默预热隐藏 WebView 与 `MusicKit v3`，新增同区曲目缓存跳过每首 2.5s 冗余查询并将试听校验移出热路径，实测冷启从 `13.69s` 降至 `4.56s`、热切从 `5.49s` 降至 `2.76s`；
-            - **YouTube Music**：直连流改为多客户端并行竞速 + 5 分钟失败熔断，后台 WebView 拦截广告/字体/不可见缩略图，热切歌改用 `loadVideoById()` 原地 SPA 切换，实测热切从 `6.64s` 降至 `2.38s`。
-          - **播放页布局与状态记忆优化**：
-            - 底部歌词/唱片切换、LRC、音量三个功能图标上移至歌名上方，单手操作更顺手；
-            - 手动点击显示歌词后，播放下一曲保持歌词视图；调整音量后，切歌自动维持所设音量。
+          - **全新深空藏青（Deep Space Navy）品牌 Logo，大幅提升手机桌面小尺寸清晰度**：
+            - 图标背景统一升级为深空藏青渐变（`#0E1733 → #070C1E`）搭配中心柔光微晕（`#25428A`），并采用高饱和锐利版霓虹声波前景，解决原 `#2DA0D8` 浅蓝底吞没青色星尘与声波细节的问题；
+            - 全面覆盖 Android Adaptive Icon（API 24+ 径向微光渐变矢量底与低版本渐变兜底）、全密度圆角/圆形桌面图标及应用内双态 Logo。
 
           > Spotify 官方客户端联动请在开发者后台添加包名 \`com.voxmusic.app\` 与 Redirect URI \`voxmusic://spotify-callback\`（App 登录页内置一键复制）。
           EOF
