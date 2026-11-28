@@ -717,6 +717,77 @@ class VoxMusicCoreTest {
     }
 
     @Test
+    fun immersiveLyricsWeakensBottomControlsUnlessInteractingOrOnBrowseOrTv() {
+        // 歌曲页展示歌词且无交互/唤醒时 -> 弱化下方播放控件
+        assertEquals(
+            true,
+            com.voxmusic.app.ui.shouldWeakenLyricsControls(
+                onBrowsePage = false,
+                isTv = false,
+                showLyrics = true,
+                hasActiveControlInteraction = false,
+                temporarilyAwake = false,
+            ),
+        )
+        // 黑胶唱片态不弱化下方播放控件
+        assertEquals(
+            false,
+            com.voxmusic.app.ui.shouldWeakenLyricsControls(
+                onBrowsePage = false,
+                isTv = false,
+                showLyrics = false,
+                hasActiveControlInteraction = false,
+                temporarilyAwake = false,
+            ),
+        )
+        // 发现/乐库页、TV 模式、拖动进度条/打开菜单或点击控件短暂唤醒期内 -> 恢复完整清晰度
+        assertEquals(
+            false,
+            com.voxmusic.app.ui.shouldWeakenLyricsControls(
+                onBrowsePage = true,
+                isTv = false,
+                showLyrics = true,
+                hasActiveControlInteraction = false,
+                temporarilyAwake = false,
+            ),
+        )
+        assertEquals(
+            false,
+            com.voxmusic.app.ui.shouldWeakenLyricsControls(
+                onBrowsePage = false,
+                isTv = true,
+                showLyrics = true,
+                hasActiveControlInteraction = false,
+                temporarilyAwake = false,
+            ),
+        )
+        assertEquals(
+            false,
+            com.voxmusic.app.ui.shouldWeakenLyricsControls(
+                onBrowsePage = false,
+                isTv = false,
+                showLyrics = true,
+                hasActiveControlInteraction = true,
+                temporarilyAwake = false,
+            ),
+        )
+        assertEquals(
+            false,
+            com.voxmusic.app.ui.shouldWeakenLyricsControls(
+                onBrowsePage = false,
+                isTv = false,
+                showLyrics = true,
+                hasActiveControlInteraction = false,
+                temporarilyAwake = true,
+            ),
+        )
+        assertEquals(1f, com.voxmusic.app.ui.resolveLyricsControlsAlpha(weakened = false, isDark = false), 1e-4f)
+        assertEquals(1f, com.voxmusic.app.ui.resolveLyricsControlsAlpha(weakened = false, isDark = true), 1e-4f)
+        assertTrue(com.voxmusic.app.ui.resolveLyricsControlsAlpha(weakened = true, isDark = false) in 0.30f..0.45f)
+        assertTrue(com.voxmusic.app.ui.resolveLyricsControlsAlpha(weakened = true, isDark = true) in 0.30f..0.45f)
+    }
+
+    @Test
     fun headlessResourceBlockerAndYoutubeDirectCircuitWork() {
         // 广告与字体域名应被后台隐形 WebView 拦截，音视频流域名必须放行
         assertTrue(WebStreamingMusic.shouldBlockHeadlessResource(WebMusicService.YOUTUBE_MUSIC, "https://googleads.g.doubleclick.net/pagead/id"))

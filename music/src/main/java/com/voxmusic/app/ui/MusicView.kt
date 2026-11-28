@@ -106,6 +106,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -163,6 +164,31 @@ internal fun <T> resolveDisplayCover(
 
 /** 融合播放页（歌曲 + 歌词）自动切歌词等待时长（毫秒） */
 internal const val AUTO_LYRICS_DELAY_MS = 5_500L
+
+/** 沉浸歌词态下点击下方播放控件后的短暂高亮唤醒保持时长（毫秒） */
+internal const val LYRICS_CONTROLS_WAKE_HOLD_MS = 2_200L
+
+/** 沉浸歌词态下方播放控件弱化目标不透明度 */
+internal fun resolveLyricsControlsAlpha(weakened: Boolean, isDark: Boolean): Float =
+    if (!weakened) 1f else if (isDark) 0.36f else 0.38f
+
+/**
+ * 判断当前是否应弱化下方播放控件（沉浸歌词模式）：
+ * 1. 处于歌曲页（非发现/乐库浏览页），且非 TV 遥控器模式
+ * 2. 当前正在展示沉浸歌词视图（[showLyrics] == true）
+ * 3. 未在拖动进度条、未打开菜单/队列/歌词时间微调/外部弹层，且不在点按控件后的短暂唤醒窗口内
+ */
+internal fun shouldWeakenLyricsControls(
+    onBrowsePage: Boolean,
+    isTv: Boolean,
+    showLyrics: Boolean,
+    hasActiveControlInteraction: Boolean,
+    temporarilyAwake: Boolean,
+): Boolean = !onBrowsePage &&
+    !isTv &&
+    showLyrics &&
+    !hasActiveControlInteraction &&
+    !temporarilyAwake
 
 /**
  * 切歌后决定是否保持歌词视图：
@@ -304,6 +330,22 @@ fun MusicView(
     val tokens = playerSurfaceTokens(isDark)
     var adjustingLyrics by remember(trackKey) { mutableStateOf(false) }
     var showLyricsMenu by remember { mutableStateOf(false) }
+    var controlWakeSeq by remember { mutableIntStateOf(0) }
+    var controlsTemporarilyAwake by remember { mutableStateOf(false) }
+    val wakeControls: () -> Unit = {
+        interactNonce++
+        if (showLyrics) controlWakeSeq++
+    }
+    LaunchedEffect(showLyrics, trackKey) {
+        if (!showLyrics) controlsTemporarilyAwake = false
+    }
+    LaunchedEffect(controlWakeSeq) {
+        if (controlWakeSeq > 0 && showLyrics) {
+            controlsTemporarilyAwake = true
+            delay(LYRICS_CONTROLS_WAKE_HOLD_MS)
+            controlsTemporarilyAwake = false
+        }
+    }
     val ambientPalette = remember(displayCover, isDark) { AmbientPalettes.extract(displayCover, dark = isDark) }
     val accentColor by animateColorAsState(ambientPalette.accent, tween(750), label = "playerAccent")
 
@@ -311,12 +353,14 @@ fun MusicView(
         showLyrics = true
         lyricsPinnedByUser = true
         autoLyricsSuppressed = false
+        controlsTemporarilyAwake = false
         interactNonce++
     }
     val returnToVinyl: () -> Unit = {
         showLyrics = false
         lyricsPinnedByUser = false
         autoLyricsSuppressed = true
+        controlsTemporarilyAwake = false
         interactNonce++
     }
 
@@ -340,6 +384,21 @@ fun MusicView(
         onBarsVisibleChange?.invoke(true)
     }
     val controlsPanelShown = !onBrowsePage || landscape
+    val controlsWeakened = shouldWeakenLyricsControls(
+        onBrowsePage = onBrowsePage,
+        isTv = tv,
+        showLyrics = showLyrics,
+        hasActiveControlInteraction = seekDragging || showMenu || showQueue || showLyricsMenu || adjustingLyrics || externalHoldVisible,
+        temporarilyAwake = controlsTemporarilyAwake,
+    )
+    val controlsAlpha by animateFloatAsState(
+        targetValue = resolveLyricsControlsAlpha(weakened = controlsWeakened, isDark = tokens.isDark),
+        animationSpec = tween(
+            durationMillis = if (controlsWeakened) 420 else 220,
+            easing = FastOutSlowInEasing,
+        ),
+        label = "lyricsControlsAlpha",
+    )
 
     CompositionLocalProvider(LocalPlayerAccentColor provides accentColor) {
         Box(Modifier.fillMaxSize().background(if (isDark) tokens.baseBg else MaterialTheme.colorScheme.background)) {
@@ -364,8 +423,12 @@ fun MusicView(
                         tokens = tokens,
                         onBack = onBack,
                         trailingContent = topTrailingContent,
+                        modifier = Modifier.graphicsLayer {
+                            compositingStrategy = if (controlsAlpha < 0.995f) CompositingStrategy.Offscreen else CompositingStrategy.Auto
+                            alpha = controlsAlpha
+                        },
                     ) { targetPage ->
-                        interactNonce++
+                        wakeControls()
                         selectPage(targetPage)
                     }
                     val renderPageContent: @Composable (Int) -> Unit = { page ->
@@ -451,7 +514,17 @@ fun MusicView(
                 }
             }
             val controls: @Composable (Modifier) -> Unit = { mod ->
-                Column(mod) {
+                val albumSwitchTint by animateColorAsState(
+                    targetValue = if (showLyrics && !controlsWeakened) accentColor else tokens.inkSecondary,
+                    animationSpec = tween(320),
+                    label = "albumSwitchTint",
+                )
+                Column(
+                    mod.graphicsLayer {
+                        compositingStrategy = if (controlsAlpha < 0.995f) CompositingStrategy.Offscreen else CompositingStrategy.Auto
+                        alpha = controlsAlpha
+                    },
+                ) {
                     // 三个极简无框微图标移至歌名正上方：唱片/歌词切换、LRC 歌词选项、系统音量
                     Row(
                         Modifier
@@ -467,7 +540,7 @@ fun MusicView(
                             Icon(
                                 if (showLyrics) AppIcons.Album else AppIcons.Lyrics,
                                 contentDescription = if (showLyrics) "切回黑胶唱片" else "展开滚动歌词",
-                                tint = if (showLyrics) accentColor else tokens.inkSecondary,
+                                tint = albumSwitchTint,
                                 modifier = Modifier.size(19.dp),
                             )
                         }
@@ -479,7 +552,7 @@ fun MusicView(
                                 Icon(
                                     AppIcons.Subtitles,
                                     contentDescription = "歌词选项",
-                                    tint = if (music.translations != null || adjustingLyrics) accentColor else tokens.inkSecondary,
+                                    tint = if ((music.translations != null || adjustingLyrics) && !controlsWeakened) accentColor else tokens.inkSecondary,
                                     modifier = Modifier.size(19.dp),
                                 )
                             }
@@ -515,7 +588,7 @@ fun MusicView(
                         }
                         IconButton(
                             onClick = {
-                                interactNonce++
+                                wakeControls()
                                 (context.getSystemService(Context.AUDIO_SERVICE) as AudioManager)
                                     .adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_SAME, AudioManager.FLAG_SHOW_UI)
                             },
@@ -537,8 +610,9 @@ fun MusicView(
                         accent = accentColor,
                         tokens = tokens,
                         showMiniCover = showLyrics && !onBrowsePage,
+                        weakened = controlsWeakened,
                         onMiniCoverClick = returnToVinyl,
-                        onLike = { interactNonce++; toggleLike() },
+                        onLike = { wakeControls(); toggleLike() },
                         onMenu = { interactNonce++; showMenu = true },
                     )
                     // 黑胶唱片态下在歌名下方显示正在唱的一句，轻点即可平滑展开完整歌词
@@ -584,10 +658,13 @@ fun MusicView(
                         loopA = loopA,
                         loopB = loopB,
                         onSeek = { target ->
-                            interactNonce++
+                            wakeControls()
                             if (activeMusic) onSeek(target) else onIdlePlay?.invoke()
                         },
-                        onDragActiveChange = { seekDragging = it; interactNonce++ },
+                        onDragActiveChange = { active ->
+                            seekDragging = active
+                            if (!active) wakeControls() else interactNonce++
+                        },
                     )
                     PlayControls(
                         vm = vm,
@@ -596,9 +673,10 @@ fun MusicView(
                         activeMusic = activeMusic,
                         accent = accentColor,
                         tokens = tokens,
+                        weakened = controlsWeakened,
                         onIdlePlay = onIdlePlay,
-                        onInteract = { interactNonce++ },
-                        onMessage = { interactNonce++; onMessage(it) },
+                        onInteract = wakeControls,
+                        onMessage = { wakeControls(); onMessage(it) },
                         onQueue = {
                             interactNonce++
                             if (activeMusic && vm.queueSize > 0) showQueue = true
@@ -912,6 +990,7 @@ private fun TopTabs(
     tokens: PlayerSurfaceTokens,
     onBack: (() -> Unit)?,
     trailingContent: (@Composable () -> Unit)?,
+    modifier: Modifier = Modifier,
     onSelect: (Int) -> Unit,
 ) {
     val tabs = buildList {
@@ -922,7 +1001,7 @@ private fun TopTabs(
     val compact = tabs.size >= 4
     if (onBack == null && trailingContent != null) {
         Row(
-            Modifier.fillMaxWidth().height(56.dp).padding(start = if (compact) 16.dp else 22.dp, end = if (compact) 12.dp else 16.dp),
+            modifier.fillMaxWidth().height(56.dp).padding(start = if (compact) 16.dp else 22.dp, end = if (compact) 12.dp else 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Row(
@@ -950,7 +1029,7 @@ private fun TopTabs(
             trailingContent()
         }
     } else {
-        Box(Modifier.fillMaxWidth().height(56.dp)) {
+        Box(modifier.fillMaxWidth().height(56.dp)) {
             if (onBack != null) {
                 IconButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterStart).padding(start = 8.dp)) {
                     Icon(AppIcons.ExpandMore, "返回", tint = tokens.inkPrimary, modifier = Modifier.size(30.dp))
@@ -1047,6 +1126,7 @@ private fun MiniAlbumThumb(
     cover: android.graphics.Bitmap?,
     accent: Color,
     tokens: PlayerSurfaceTokens,
+    weakened: Boolean = false,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1054,10 +1134,19 @@ private fun MiniAlbumThumb(
     val coverBitmap = remember(cover) {
         cover?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }?.asImageBitmap()
     }
+    val thumbElevation by animateDpAsState(
+        targetValue = if (weakened) 0.dp else 14.dp,
+        animationSpec = tween(320),
+        label = "miniCoverShadow",
+    )
     Box(
         modifier
             .size(48.dp)
-            .shadow(14.dp, shape, ambientColor = accent.copy(alpha = 0.45f), spotColor = accent.copy(alpha = 0.55f))
+            .let {
+                if (thumbElevation > 0.2.dp) {
+                    it.shadow(thumbElevation, shape, ambientColor = accent.copy(alpha = 0.45f), spotColor = accent.copy(alpha = 0.55f))
+                } else it
+            }
             .tvFocusRing(shape, color = tokens.focusRing)
             .clip(shape)
             .background(if (tokens.isDark) Color(0xFF1A1E28) else Color(0xFFE7ECF4))
@@ -1088,6 +1177,7 @@ private fun SongTitleRow(
     accent: Color = LocalPlayerAccentColor.current,
     tokens: PlayerSurfaceTokens = playerSurfaceTokens(isAppDarkTheme()),
     showMiniCover: Boolean = false,
+    weakened: Boolean = false,
     onMiniCoverClick: () -> Unit = {},
     onLike: () -> Unit,
     onMenu: () -> Unit,
@@ -1106,6 +1196,7 @@ private fun SongTitleRow(
                     cover = cover,
                     accent = accent,
                     tokens = tokens,
+                    weakened = weakened,
                     onClick = onMiniCoverClick,
                 )
                 Spacer(Modifier.width(13.dp))
@@ -1330,6 +1421,7 @@ private fun PlayControls(
     activeMusic: Boolean = true,
     accent: Color = LocalPlayerAccentColor.current,
     tokens: PlayerSurfaceTokens = playerSurfaceTokens(isAppDarkTheme()),
+    weakened: Boolean = false,
     onIdlePlay: (() -> Unit)? = null,
     onInteract: () -> Unit = {},
     onMessage: (String) -> Unit,
@@ -1340,6 +1432,25 @@ private fun PlayControls(
     val hasMultiQueue = mainState.queueVersion >= 0 && vm.queueSize > 1
     val canSkipPrev = activeMusic && hasMultiQueue
     val canSkipNext = activeMusic && (hasMultiQueue || mode == PlayMode.INFINITE)
+    val playBtnShadow by animateDpAsState(
+        targetValue = if (!tokens.isDark && !weakened) 10.dp else 0.dp,
+        animationSpec = tween(320),
+        label = "playBtnShadow",
+    )
+    val playBtnBgColor by animateColorAsState(
+        targetValue = when {
+            weakened -> tokens.pillBg
+            wantsPlay -> tokens.playBtnActiveBg
+            else -> tokens.playBtnBg
+        },
+        animationSpec = tween(320),
+        label = "playBtnBgColor",
+    )
+    val playBtnBorderAlpha by animateFloatAsState(
+        targetValue = if (weakened) 0.35f else 1f,
+        animationSpec = tween(320),
+        label = "playBtnBorderAlpha",
+    )
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically,
@@ -1366,17 +1477,27 @@ private fun PlayControls(
         ) {
             Icon(AppIcons.SkipPrevious, "上一首", tint = tokens.inkPrimary.copy(alpha = 0.92f), modifier = Modifier.size(34.dp))
         }
-        // 去厚重灰框：0.5dp 顶部亮到底部暗的极细高光折射液态玻璃圆钮（双态自适应）
+        // 去厚重灰框：0.5dp 顶部亮到底部暗的极细高光折射液态玻璃圆钮（沉浸歌词弱化态收敛白底与阴影）
         Box(
             modifier = Modifier
                 .size(64.dp)
-                .let { if (!tokens.isDark) it.shadow(10.dp, CircleShape, ambientColor = tokens.miniBarShadowAmbient, spotColor = tokens.miniBarShadowSpot) else it }
+                .let {
+                    if (playBtnShadow > 0.2.dp) {
+                        it.shadow(playBtnShadow, CircleShape, ambientColor = tokens.miniBarShadowAmbient, spotColor = tokens.miniBarShadowSpot)
+                    } else it
+                }
                 .tvFocusRing(CircleShape, color = tokens.focusRing)
                 .clip(CircleShape)
-                .background(if (wantsPlay) tokens.playBtnActiveBg else tokens.playBtnBg)
+                .background(playBtnBgColor)
                 .border(
                     width = 0.5.dp,
-                    brush = Brush.verticalGradient(listOf(tokens.borderTop, tokens.borderMid, tokens.borderBottom)),
+                    brush = Brush.verticalGradient(
+                        listOf(
+                            tokens.borderTop.copy(alpha = tokens.borderTop.alpha * playBtnBorderAlpha),
+                            tokens.borderMid.copy(alpha = tokens.borderMid.alpha * playBtnBorderAlpha),
+                            tokens.borderBottom.copy(alpha = tokens.borderBottom.alpha * playBtnBorderAlpha),
+                        ),
+                    ),
                     shape = CircleShape,
                 )
                 .clickable { onInteract(); if (activeMusic) vm.togglePlay() else onIdlePlay?.invoke() },

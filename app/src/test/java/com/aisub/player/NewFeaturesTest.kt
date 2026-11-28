@@ -300,4 +300,46 @@ class NewFeaturesTest {
         assertEquals(0.0f, parsed!!.lumaPoly0[0], 1e-5f)
         assertEquals(1.0f, parsed.lumaPoly0[1], 1e-5f)
     }
+
+    @Test
+    fun immersiveLyricsWeakensBottomControlsParity() {
+        assertTrue(
+            com.aisub.player.ui.shouldWeakenLyricsControls(
+                onBrowsePage = false,
+                isTv = false,
+                showLyrics = true,
+                hasActiveControlInteraction = false,
+                temporarilyAwake = false,
+            ),
+        )
+        assertFalse(
+            com.aisub.player.ui.shouldWeakenLyricsControls(
+                onBrowsePage = false,
+                isTv = false,
+                showLyrics = false,
+                hasActiveControlInteraction = false,
+                temporarilyAwake = false,
+            ),
+        )
+        assertFalse(
+            com.aisub.player.ui.shouldWeakenLyricsControls(
+                onBrowsePage = false,
+                isTv = false,
+                showLyrics = true,
+                hasActiveControlInteraction = true,
+                temporarilyAwake = false,
+            ),
+        )
+        assertFalse(
+            com.aisub.player.ui.shouldWeakenLyricsControls(
+                onBrowsePage = false,
+                isTv = false,
+                showLyrics = true,
+                hasActiveControlInteraction = false,
+                temporarilyAwake = true,
+            ),
+        )
+        assertEquals(1f, com.aisub.player.ui.resolveLyricsControlsAlpha(weakened = false, isDark = false), 1e-4f)
+        assertTrue(com.aisub.player.ui.resolveLyricsControlsAlpha(weakened = true, isDark = false) in 0.30f..0.45f)
+    }
 }
