@@ -709,4 +709,30 @@ class VoxMusicCoreTest {
         val lightAccentL = hslLightness(lightPalette.accent)
         assertTrue("Light accent lightness $lightAccentL should be crisp on light canvas [0.34, 0.52]", lightAccentL in 0.34f..0.52f)
     }
+
+    @Test
+    fun stickyLyricsPreservesLyricsAcrossTrackChangeOnlyWhenPinnedByUser() {
+        assertEquals(true, com.voxmusic.app.ui.resolveTrackChangeShowLyrics(lyricsPinnedByUser = true))
+        assertEquals(false, com.voxmusic.app.ui.resolveTrackChangeShowLyrics(lyricsPinnedByUser = false))
+    }
+
+    @Test
+    fun headlessResourceBlockerAndYoutubeDirectCircuitWork() {
+        // 广告与字体域名应被后台隐形 WebView 拦截，音视频流域名必须放行
+        assertTrue(WebStreamingMusic.shouldBlockHeadlessResource(WebMusicService.YOUTUBE_MUSIC, "https://googleads.g.doubleclick.net/pagead/id"))
+        assertTrue(WebStreamingMusic.shouldBlockHeadlessResource(WebMusicService.YOUTUBE_MUSIC, "https://fonts.googleapis.com/css2?family=Roboto"))
+        assertTrue(WebStreamingMusic.shouldBlockHeadlessResource(WebMusicService.YOUTUBE_MUSIC, "https://i.ytimg.com/vi/abc/hqdefault.jpg"))
+        assertEquals(false, WebStreamingMusic.shouldBlockHeadlessResource(WebMusicService.YOUTUBE_MUSIC, "https://rr4---sn-a5msen7s.googlevideo.com/videoplayback"))
+        assertEquals(false, WebStreamingMusic.shouldBlockHeadlessResource(WebMusicService.APPLE_MUSIC, "https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback"))
+        assertEquals(false, WebStreamingMusic.shouldBlockHeadlessResource(WebMusicService.APPLE_MUSIC, "https://is1-ssl.mzstatic.com/image/thumb/cover.jpg"))
+
+        // YouTube 直连熔断器：全部直连失败后 5 分钟内跳过探测，成功或重置后立即恢复
+        com.voxmusic.app.music.YouTubeMusicApi.resetDirectStreamCircuit()
+        assertEquals(false, com.voxmusic.app.music.YouTubeMusicApi.shouldSkipDirectStreamProbe(10_000L))
+        com.voxmusic.app.music.YouTubeMusicApi.recordDirectStreamProbeOutcome(succeeded = false, nowMs = 10_000L)
+        assertEquals(true, com.voxmusic.app.music.YouTubeMusicApi.shouldSkipDirectStreamProbe(60_000L))
+        assertEquals(false, com.voxmusic.app.music.YouTubeMusicApi.shouldSkipDirectStreamProbe(320_000L))
+        com.voxmusic.app.music.YouTubeMusicApi.recordDirectStreamProbeOutcome(succeeded = true, nowMs = 60_000L)
+        assertEquals(false, com.voxmusic.app.music.YouTubeMusicApi.shouldSkipDirectStreamProbe(61_000L))
+    }
 }

@@ -5,8 +5,13 @@ import com.aisub.player.meta.DiscoverItem
 import com.aisub.player.meta.MusicDiscoverRepository
 import com.aisub.player.net.AppProxy
 import com.aisub.player.remote.cloud.ServerItem
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicInteger
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -34,9 +39,25 @@ object DirectMusicServiceApi {
     )
 
     private const val BROWSER_UA = WebStreamingMusic.DESKTOP_CHROME_UA
-    private const val YT_ANDROID_MUSIC_UA = "com.google.android.apps.youtube.music/7.27.52 (Linux; U; Android 14) gzip"
-    private const val YT_IOS_MUSIC_UA = "com.google.ios.youtubemusic/7.27 (iPhone16,2; U; CPU iOS 18_1 like Mac OS X)"
+    private const val YT_ANDROID_VR_UA = "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+    private const val YT_ANDROID_MUSIC_UA = "com.google.android.apps.youtube.music/8.05.51 (Linux; U; Android 14) gzip"
+    private const val YT_IOS_MUSIC_UA = "com.google.ios.youtubemusic/8.05 (iPhone16,2; U; CPU iOS 18_3 like Mac OS X)"
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+
+    private const val YT_DIRECT_CIRCUIT_COOLDOWN_MS = 5 * 60_000L
+    @Volatile
+    private var ytDirectStreamBlockedUntilMs: Long = 0L
+
+    fun resetYouTubeDirectCircuit() {
+        ytDirectStreamBlockedUntilMs = 0L
+    }
+
+    internal fun shouldSkipYouTubeDirectProbe(nowMs: Long = System.currentTimeMillis()): Boolean =
+        nowMs < ytDirectStreamBlockedUntilMs
+
+    internal fun recordYouTubeDirectProbeOutcome(succeeded: Boolean, nowMs: Long = System.currentTimeMillis()) {
+        ytDirectStreamBlockedUntilMs = if (succeeded) 0L else nowMs + YT_DIRECT_CIRCUIT_COOLDOWN_MS
+    }
 
     private val http by lazy {
         AppProxy.builder()
@@ -244,7 +265,12 @@ object DirectMusicServiceApi {
     ): ResolvedAudioStream? = withContext(Dispatchers.IO) {
         val cookies = readCookiesFor(service)
         when (service) {
-            WebMusicService.YOUTUBE_MUSIC -> resolveYouTubeStream(cookies, trackId, title, artist)
+            WebMusicService.YOUTUBE_MUSIC -> {
+                if (shouldSkipYouTubeDirectProbe()) return@withContext null
+                val resolved = resolveYouTubeStreamParallel(cookies, trackId, title, artist)
+                recordYouTubeDirectProbeOutcome(resolved != null)
+                resolved
+            }
             WebMusicService.NETEASE_MUSIC -> resolveNetEaseStream(cookies, trackId, title, artist)
             WebMusicService.QQ_MUSIC -> resolveQqStream(cookies, trackId, title, artist)
             else -> null
@@ -617,7 +643,7 @@ object DirectMusicServiceApi {
         return out
     }
 
-    private fun resolveYouTubeStream(
+    private suspend fun resolveYouTubeStreamParallel(
         cookies: String,
         trackId: String,
         title: String,
@@ -632,11 +658,25 @@ object DirectMusicServiceApi {
 
         val clientConfigs = listOf(
             Triple(
+                "ANDROID_VR",
+                YT_ANDROID_VR_UA,
+                JSONObject()
+                    .put("clientName", "ANDROID_VR")
+                    .put("clientVersion", "1.61.48")
+                    .put("deviceMake", "Oculus")
+                    .put("deviceModel", "Quest 3")
+                    .put("androidSdkVersion", 32)
+                    .put("osName", "Android")
+                    .put("osVersion", "12L")
+                    .put("hl", "zh-CN")
+                    .put("gl", "US"),
+            ),
+            Triple(
                 "ANDROID_MUSIC",
                 YT_ANDROID_MUSIC_UA,
                 JSONObject()
                     .put("clientName", "ANDROID_MUSIC")
-                    .put("clientVersion", "7.27.52")
+                    .put("clientVersion", "8.05.51")
                     .put("androidSdkVersion", 34)
                     .put("osName", "Android")
                     .put("osVersion", "14")
@@ -648,48 +688,58 @@ object DirectMusicServiceApi {
                 YT_IOS_MUSIC_UA,
                 JSONObject()
                     .put("clientName", "IOS_MUSIC")
-                    .put("clientVersion", "7.27")
+                    .put("clientVersion", "8.05")
                     .put("deviceModel", "iPhone16,2")
                     .put("osName", "iPhone")
-                    .put("osVersion", "18.1.0.22B83")
-                    .put("hl", "zh-CN")
-                    .put("gl", "US"),
-            ),
-            Triple(
-                "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-                BROWSER_UA,
-                JSONObject()
-                    .put("clientName", "TVHTML5_SIMPLY_EMBEDDED_PLAYER")
-                    .put("clientVersion", "2.0")
+                    .put("osVersion", "18.3.0.22D63")
                     .put("hl", "zh-CN")
                     .put("gl", "US"),
             ),
         )
 
-        for ((clientName, ua, clientJson) in clientConfigs) {
-            val payload = JSONObject()
-                .put("context", JSONObject().put("client", clientJson))
-                .put("videoId", videoId)
-                .put("contentCheckOk", true)
-                .put("racyCheckOk", true)
-            val reqBuilder = Request.Builder()
-                .url("https://music.youtube.com/youtubei/v1/player?prettyPrint=false")
-                .header("User-Agent", ua)
-                .header("Origin", "https://music.youtube.com")
-                .header("Referer", "https://music.youtube.com/")
-                .header("X-Origin", "https://music.youtube.com")
-                .header("X-Goog-AuthUser", "0")
-                .post(payload.toString().toRequestBody(JSON_MEDIA))
-            if (cookies.isNotBlank() && clientName != "TVHTML5_SIMPLY_EMBEDDED_PLAYER") {
-                reqBuilder.header("Cookie", cookies)
-                buildSapisidHash(cookies)?.let { reqBuilder.header("Authorization", it) }
+        return withTimeoutOrNull(2_600L) {
+            coroutineScope {
+                val winner = CompletableDeferred<ResolvedAudioStream?>()
+                val remaining = AtomicInteger(clientConfigs.size)
+                val jobs = clientConfigs.map { (clientName, ua, clientJson) ->
+                    launch(Dispatchers.IO) {
+                        val found = runCatching {
+                            val payload = JSONObject()
+                                .put("context", JSONObject().put("client", clientJson))
+                                .put("videoId", videoId)
+                                .put("contentCheckOk", true)
+                                .put("racyCheckOk", true)
+                            val host = if (clientName == "ANDROID_VR") "https://www.youtube.com" else "https://music.youtube.com"
+                            val reqBuilder = Request.Builder()
+                                .url("$host/youtubei/v1/player?prettyPrint=false")
+                                .header("User-Agent", ua)
+                                .header("Origin", host)
+                                .header("Referer", "$host/")
+                                .header("X-Origin", host)
+                                .header("X-Goog-AuthUser", "0")
+                                .post(payload.toString().toRequestBody(JSON_MEDIA))
+                            if (cookies.isNotBlank() && clientName != "ANDROID_VR") {
+                                reqBuilder.header("Cookie", cookies)
+                                buildSapisidHash(cookies)?.let { reqBuilder.header("Authorization", it) }
+                            }
+                            val text = httpText(reqBuilder.build()) ?: return@runCatching null
+                            val root = runCatching { JSONObject(text) }.getOrNull() ?: return@runCatching null
+                            parseBestYouTubeAudioFormat(root, ua)
+                        }.getOrNull()
+                        if (found != null) {
+                            winner.complete(found)
+                        } else if (remaining.decrementAndGet() == 0) {
+                            winner.complete(null)
+                        }
+                    }
+                }
+                try {
+                    winner.await()
+                } finally {
+                    jobs.forEach { it.cancel() }
+                }
             }
-            val text = httpText(reqBuilder.build()) ?: continue
-            val root = runCatching { JSONObject(text) }.getOrNull() ?: continue
-            val parsed = parseBestYouTubeAudioFormat(root, ua)
-            if (parsed != null) return parsed
         }
-        return null
     }
 
     internal fun parseBestYouTubeAudioFormat(root: JSONObject, ua: String = YT_ANDROID_MUSIC_UA): ResolvedAudioStream? {

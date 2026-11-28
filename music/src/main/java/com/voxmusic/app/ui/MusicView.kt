@@ -165,6 +165,13 @@ internal fun <T> resolveDisplayCover(
 internal const val AUTO_LYRICS_DELAY_MS = 5_500L
 
 /**
+ * 切歌后决定是否保持歌词视图：
+ * - 若用户此前主动点击打开了歌词（[lyricsPinnedByUser] == true），播放下一曲继续显示歌词；
+ * - 否则默认先展示新歌黑胶封面，待播放满 [AUTO_LYRICS_DELAY_MS] 后再按防打扰规则自动切入歌词。
+ */
+internal fun resolveTrackChangeShowLyrics(lyricsPinnedByUser: Boolean): Boolean = lyricsPinnedByUser
+
+/**
  * 判断当前是否满足「播放数秒后自动从黑胶唱片切到歌词视图」的条件（防打扰约束）：
  * 1. 处于歌曲页（非发现/乐库浏览页），且非 TV 遥控器模式
  * 2. 有正在播放的曲目（暂停时不自动切换）
@@ -277,12 +284,20 @@ fun MusicView(
     val translations = if (!activeMusic) null else music.translations
     val hasSyncedLyrics = lyrics != null && lyrics.synced && lyrics.lines.isNotEmpty()
 
-    // 融合歌曲页状态：切歌重置为黑胶唱片；播放满数秒自动切歌词；手动点回唱片后本首歌不再自动跳走
+    // 融合歌曲页状态：
+    // - 用户主动点击进入歌词后（lyricsPinnedByUser = true），播放下一曲也持续显示歌词；
+    // - 用户点击空白处/封面缩略图切回唱片后，取消持续歌词且本首歌不再自动跳走；
+    // - 非手动钉住状态下，切歌展示黑胶封面，播放满数秒有同步歌词后自动平滑切入歌词。
     val trackKey = effectiveEntry?.uri ?: "${tags.title}|${tags.artist.orEmpty()}"
-    var showLyrics by remember(trackKey) { mutableStateOf(false) }
+    var lyricsPinnedByUser by rememberSaveable { mutableStateOf(false) }
+    var showLyrics by remember { mutableStateOf(lyricsPinnedByUser) }
     var autoLyricsSuppressed by remember(trackKey) { mutableStateOf(false) }
     var interactNonce by remember { mutableIntStateOf(0) }
     var seekDragging by remember { mutableStateOf(false) }
+
+    LaunchedEffect(trackKey) {
+        showLyrics = resolveTrackChangeShowLyrics(lyricsPinnedByUser)
+    }
 
     val context = LocalContext.current
     val isDark = isAppDarkTheme()
@@ -294,10 +309,13 @@ fun MusicView(
 
     val enterLyrics: () -> Unit = {
         showLyrics = true
+        lyricsPinnedByUser = true
+        autoLyricsSuppressed = false
         interactNonce++
     }
     val returnToVinyl: () -> Unit = {
         showLyrics = false
+        lyricsPinnedByUser = false
         autoLyricsSuppressed = true
         interactNonce++
     }
@@ -434,6 +452,83 @@ fun MusicView(
             }
             val controls: @Composable (Modifier) -> Unit = { mod ->
                 Column(mod) {
+                    // 三个极简无框微图标移至歌名正上方：唱片/歌词切换、LRC 歌词选项、系统音量
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = 22.dp, end = 22.dp, bottom = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(
+                            onClick = { if (showLyrics) returnToVinyl() else enterLyrics() },
+                            modifier = Modifier.size(34.dp).tvFocusRing(CircleShape, color = tokens.focusRing),
+                        ) {
+                            Icon(
+                                if (showLyrics) AppIcons.Album else AppIcons.Lyrics,
+                                contentDescription = if (showLyrics) "切回黑胶唱片" else "展开滚动歌词",
+                                tint = if (showLyrics) accentColor else tokens.inkSecondary,
+                                modifier = Modifier.size(19.dp),
+                            )
+                        }
+                        Box {
+                            IconButton(
+                                onClick = { interactNonce++; showLyricsMenu = true },
+                                modifier = Modifier.size(34.dp).tvFocusRing(CircleShape, color = tokens.focusRing),
+                            ) {
+                                Icon(
+                                    AppIcons.Subtitles,
+                                    contentDescription = "歌词选项",
+                                    tint = if (music.translations != null || adjustingLyrics) accentColor else tokens.inkSecondary,
+                                    modifier = Modifier.size(19.dp),
+                                )
+                            }
+                            AppMenu(showLyricsMenu, onDismissRequest = { showLyricsMenu = false }) {
+                                val own = music.lyrics
+                                MenuRow("调整歌词时间", AppIcons.SwapVert, enabled = own?.synced == true) {
+                                    showLyricsMenu = false
+                                    enterLyrics()
+                                    adjustingLyrics = true
+                                }
+                                when {
+                                    music.translating -> MenuRow("正在翻译…", AppIcons.Translate, enabled = false) {}
+                                    music.translations != null -> MenuRow("隐藏翻译", AppIcons.Translate) {
+                                        showLyricsMenu = false
+                                        vm.music.clearTranslations()
+                                    }
+                                    else -> MenuRow("翻译歌词", AppIcons.Translate, enabled = own != null) {
+                                        showLyricsMenu = false
+                                        enterLyrics()
+                                        onMessage("正在翻译歌词…")
+                                        scope.launch { vm.music.translateLyrics()?.let(onMessage) }
+                                    }
+                                }
+                                MenuRow("切换歌词", AppIcons.Search) {
+                                    showLyricsMenu = false
+                                    onAction(MusicAction.SEARCH_LYRICS)
+                                }
+                                MenuRow("导入歌词文件", AppIcons.File) {
+                                    showLyricsMenu = false
+                                    onAction(MusicAction.IMPORT_LYRICS)
+                                }
+                            }
+                        }
+                        IconButton(
+                            onClick = {
+                                interactNonce++
+                                (context.getSystemService(Context.AUDIO_SERVICE) as AudioManager)
+                                    .adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_SAME, AudioManager.FLAG_SHOW_UI)
+                            },
+                            modifier = Modifier.size(34.dp).tvFocusRing(CircleShape, color = tokens.focusRing),
+                        ) {
+                            Icon(
+                                AppIcons.Volume,
+                                contentDescription = "音量",
+                                tint = tokens.inkSecondary,
+                                modifier = Modifier.size(19.dp),
+                            )
+                        }
+                    }
                     SongTitleRow(
                         title = tags.title,
                         subtitle = listOfNotNull(tags.artist, tags.album).joinToString(" - "),
@@ -510,86 +605,6 @@ fun MusicView(
                             else if (hasLibrary) selectPage(libraryPageIdx)
                         },
                     )
-                    // 底部极简微工具栏：将 LRC 歌词菜单、音量与封面/歌词切换统一归拢为无外框极简微图标
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 36.dp, vertical = 2.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        // 视图切换微图标（唱片 ↔ 歌词）
-                        IconButton(
-                            onClick = { if (showLyrics) returnToVinyl() else enterLyrics() },
-                            modifier = Modifier.size(36.dp).tvFocusRing(CircleShape, color = tokens.focusRing),
-                        ) {
-                            Icon(
-                                if (showLyrics) AppIcons.Album else AppIcons.Lyrics,
-                                contentDescription = if (showLyrics) "切回黑胶唱片" else "展开滚动歌词",
-                                tint = if (showLyrics) accentColor else tokens.inkSecondary,
-                                modifier = Modifier.size(19.dp),
-                            )
-                        }
-                        // 极简无框 LRC 歌词工具菜单（调整时间 / 翻译 / 搜索 / 导入）
-                        Box {
-                            IconButton(
-                                onClick = { interactNonce++; showLyricsMenu = true },
-                                modifier = Modifier.size(36.dp).tvFocusRing(CircleShape, color = tokens.focusRing),
-                            ) {
-                                Icon(
-                                    AppIcons.Subtitles,
-                                    contentDescription = "歌词选项",
-                                    tint = if (music.translations != null || adjustingLyrics) accentColor else tokens.inkSecondary,
-                                    modifier = Modifier.size(19.dp),
-                                )
-                            }
-                            AppMenu(showLyricsMenu, onDismissRequest = { showLyricsMenu = false }) {
-                                val own = music.lyrics
-                                MenuRow("调整歌词时间", AppIcons.SwapVert, enabled = own?.synced == true) {
-                                    showLyricsMenu = false
-                                    showLyrics = true
-                                    adjustingLyrics = true
-                                }
-                                when {
-                                    music.translating -> MenuRow("正在翻译…", AppIcons.Translate, enabled = false) {}
-                                    music.translations != null -> MenuRow("隐藏翻译", AppIcons.Translate) {
-                                        showLyricsMenu = false
-                                        vm.music.clearTranslations()
-                                    }
-                                    else -> MenuRow("翻译歌词", AppIcons.Translate, enabled = own != null) {
-                                        showLyricsMenu = false
-                                        showLyrics = true
-                                        onMessage("正在翻译歌词…")
-                                        scope.launch { vm.music.translateLyrics()?.let(onMessage) }
-                                    }
-                                }
-                                MenuRow("切换歌词", AppIcons.Search) {
-                                    showLyricsMenu = false
-                                    onAction(MusicAction.SEARCH_LYRICS)
-                                }
-                                MenuRow("导入歌词文件", AppIcons.File) {
-                                    showLyricsMenu = false
-                                    onAction(MusicAction.IMPORT_LYRICS)
-                                }
-                            }
-                        }
-                        // 极简系统音量微图标
-                        IconButton(
-                            onClick = {
-                                interactNonce++
-                                (context.getSystemService(Context.AUDIO_SERVICE) as AudioManager)
-                                    .adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_SAME, AudioManager.FLAG_SHOW_UI)
-                            },
-                            modifier = Modifier.size(36.dp).tvFocusRing(CircleShape, color = tokens.focusRing),
-                        ) {
-                            Icon(
-                                AppIcons.Volume,
-                                contentDescription = "音量",
-                                tint = tokens.inkSecondary,
-                                modifier = Modifier.size(19.dp),
-                            )
-                        }
-                    }
                 }
             }
             val insetMod = Modifier.fillMaxSize()

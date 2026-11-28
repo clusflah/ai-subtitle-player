@@ -137,6 +137,11 @@ fun MusicTabScreen(
     val activeService by sourceFlow.collectAsStateWithLifecycle()
     val loggedInServices by WebStreamingMusic.loggedInServices.collectAsStateWithLifecycle()
     LaunchedEffect(context) { WebStreamingMusic.refreshAuthState(context) }
+    LaunchedEffect(activeService, loggedInServices) {
+        if (loggedInServices.isNotEmpty()) {
+            WebStreamingMusic.prewarmActiveSources(context, activeService)
+        }
+    }
 
     var positionMs by remember(player) { mutableLongStateOf(player.currentPosition.coerceAtLeast(0L)) }
     var wantsPlay by remember { mutableStateOf(player.playWhenReady) }

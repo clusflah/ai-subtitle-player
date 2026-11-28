@@ -33,6 +33,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -67,6 +68,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -882,42 +884,39 @@ private fun MusicQuickTagCard(
     tag: MusicQuickTag,
     onClick: () -> Unit,
 ) {
-    val palette = currentVisualPalette()
-    val dark = isAppDarkTheme()
-    val cardBg = if (dark) Color(0xFF151922) else palette.cardTint
-    val borderColor = if (dark) Color(0x24FFFFFF) else Color(0x16000000)
+    val tokens = playerSurfaceTokens(isAppDarkTheme())
+    val cardBg = if (tokens.isDark) tokens.pillBg else Color.White.copy(alpha = 0.66f)
+    val icon = when (tag.chartId) {
+        "music_hot" -> AppIcons.LocalFire
+        "music_new_express" -> AppIcons.AutoAwesome
+        "music_soar" -> AppIcons.TrendingUp
+        "music_apple_tw" -> AppIcons.MusicNote
+        else -> AppIcons.Web
+    }
+    val contentTint = tokens.inkPrimary.copy(alpha = 0.86f)
 
+    // 去除高饱和红橙紫实心色块与 1px 描边：微磨砂透明胶囊 + 单色极简线性小图标（双态自适应）
     Row(
         Modifier
-            .tvFocusRing(RoundedCornerShape(8.dp), scale = true)
-            .clip(RoundedCornerShape(8.dp))
+            .tvFocusRing(RoundedCornerShape(50), scale = true)
+            .clip(RoundedCornerShape(50))
             .background(cardBg)
-            .border(1.dp, borderColor, RoundedCornerShape(8.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 9.dp, vertical = 5.dp),
+            .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        Box(
-            Modifier
-                .clip(RoundedCornerShape(5.dp))
-                .background(Color(tag.accentHex))
-                .padding(horizontal = 5.dp, vertical = 2.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                tag.badge,
-                color = Color.White,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.ExtraBold,
-                letterSpacing = 0.3.sp,
-            )
-        }
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = contentTint.copy(alpha = 0.72f),
+            modifier = Modifier.size(13.dp),
+        )
         Text(
             tag.name,
             fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurface,
+            fontWeight = FontWeight.Normal,
+            color = contentTint,
             maxLines = 1,
         )
     }
@@ -933,50 +932,47 @@ private fun MusicChartRowSection(
     onPlayWithQueue: (DiscoverItem, Int) -> Unit,
     onOpenDetailWithQueue: (DiscoverItem, Int) -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        // 杂志感可点击主标题行：去掉右侧重复文字按钮，点击主标题进入完整榜单
+        Column(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .padding(horizontal = 16.dp)
+                .tvFocusRing(RoundedCornerShape(8.dp))
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(onClick = onSeeAll)
+                .padding(vertical = 2.dp),
         ) {
-            Row(
-                Modifier.weight(1f),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     section.chart.title,
-                    fontSize = 16.sp,
+                    fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
+                    letterSpacing = (-0.2).sp,
                     color = MaterialTheme.colorScheme.onBackground,
                     maxLines = 1,
                 )
-                Text(
-                    section.chart.subtitle,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(bottom = 1.dp),
+                Spacer(Modifier.width(2.dp))
+                Icon(
+                    AppIcons.ChevronRight,
+                    contentDescription = "查看全部",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    modifier = Modifier.size(20.dp),
                 )
             }
             Text(
-                text = "全部 →",
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                color = Orange,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .tvFocusRing(RoundedCornerShape(6.dp))
-                    .clickable(onClick = onSeeAll)
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                section.chart.subtitle,
+                fontSize = 11.5.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 1.dp),
             )
         }
         LazyRow(
             state = rowState,
-            contentPadding = PaddingValues(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             itemsIndexed(section.items, key = { idx, it -> "${section.chart.id}:$idx:${it.id}" }) { idx, item ->
                 MusicSquareCard(
@@ -985,6 +981,7 @@ private fun MusicChartRowSection(
                     rank = if (showRanks) idx + 1 else null,
                     onClick = { onPlayWithQueue(item, idx) },
                     onLongClick = { onOpenDetailWithQueue(item, idx) },
+                    onQuickPlayAll = if (idx == 0) ({ onPlayWithQueue(item, 0) }) else null,
                 )
             }
         }
@@ -1001,13 +998,15 @@ fun MusicSquareCard(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
+    onQuickPlayAll: (() -> Unit)? = null,
 ) {
     val haptic = LocalHapticFeedback.current
+    val tokens = playerSurfaceTokens(isAppDarkTheme())
     Column(
         modifier
             .let { if (width != null) it.width(width) else it }
-            .tvFocusRing(RoundedCornerShape(10.dp), scale = true)
-            .clip(RoundedCornerShape(10.dp))
+            .tvFocusRing(RoundedCornerShape(12.dp), scale = true)
+            .clip(RoundedCornerShape(12.dp))
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick?.let { fn ->
@@ -1023,8 +1022,8 @@ fun MusicSquareCard(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
-                .clip(RoundedCornerShape(10.dp))
-                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+                .clip(RoundedCornerShape(12.dp))
+                .background(tokens.pillBg),
         ) {
             NetImage(
                 url = item.posterUrl,
@@ -1034,42 +1033,55 @@ fun MusicSquareCard(
                 fallback = AppIcons.MusicNote,
             )
 
+            // 克制毛玻璃排名角标：去除红橙色贴片，采用半透明暗玻璃底 + 纯白粗斜体几何数字
             if (rank != null && rank <= 20) {
-                val rankBg = when (rank) {
-                    1 -> Color(0xFFE63946)
-                    2 -> Orange
-                    3 -> Color(0xFFD97706)
-                    else -> GlassTokens.DarkBadgeTint
-                }
+                val badgeShape = RoundedCornerShape(7.dp)
                 Text(
-                    text = "#$rank",
-                    color = Color.White,
-                    fontSize = 9.5.sp,
-                    fontWeight = FontWeight.Bold,
+                    text = if (rank < 10) "0$rank" else "$rank",
+                    color = if (rank <= 3) Color.White else Color.White.copy(alpha = 0.82f),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    fontStyle = FontStyle.Italic,
+                    letterSpacing = (-0.4).sp,
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .padding(5.dp)
-                        .clip(RoundedCornerShape(5.dp))
-                        .background(rankBg)
-                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                        .padding(6.dp)
+                        .clip(badgeShape)
+                        .background(Color(0x66080A0F))
+                        .border(0.5.dp, Color.White.copy(alpha = if (rank <= 3) 0.28f else 0.14f), badgeShape)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
                 )
             }
 
-            if (item.durationMs > 0L) {
+            if (onQuickPlayAll != null) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(7.dp)
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x780B0E16))
+                        .border(
+                            width = 0.5.dp,
+                            brush = Brush.verticalGradient(listOf(Color(0x66FFFFFF), Color(0x14FFFFFF))),
+                            shape = CircleShape,
+                        )
+                        .clickable(onClick = onQuickPlayAll),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(AppIcons.PlayArrow, "连播榜单", tint = Color.White, modifier = Modifier.size(18.dp))
+                }
+            } else if (item.durationMs > 0L) {
                 Text(
                     text = formatDuration(item.durationMs),
-                    color = Color.White,
+                    color = Color.White.copy(alpha = 0.86f),
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(5.dp)
-                        .liquidGlass(
-                            shape = RoundedCornerShape(4.dp),
-                            style = GlassStyle.Pill,
-                            tint = GlassTokens.DarkBadgeTint,
-                            enableBackdrop = false,
-                        )
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(Color(0x66080A0F))
                         .padding(horizontal = 5.dp, vertical = 1.dp),
                 )
             }
@@ -1081,7 +1093,7 @@ fun MusicSquareCard(
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(top = 5.dp, start = 2.dp, end = 2.dp),
+            modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
         )
         val sub = item.subtitleLine()
         if (sub.isNotEmpty()) {

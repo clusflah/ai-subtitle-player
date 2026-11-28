@@ -169,7 +169,7 @@ class MainActivity : ComponentActivity() {
             AppTheme(ui.settings.appBackground, ui.settings.appDarkMode, ui.settings.liquidGlass) {
                 val view = LocalView.current
                 val isDark = androidx.compose.material3.MaterialTheme.colorScheme.background.luminance() < 0.5f
-                val darkCanvas = nav.current == Screen.Player || nav.current is Screen.MangaRead || nav.current is Screen.ImageViewer || (nav.current == Screen.Home && lib.homeTab == 3)
+                val darkCanvas = nav.current == Screen.Player || nav.current is Screen.MangaRead || nav.current is Screen.ImageViewer
                 SideEffect {
                     val lightBars = !darkCanvas && !isDark
                     runCatching {

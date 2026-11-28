@@ -2467,23 +2467,49 @@ internal fun DiscoverQuickJumpButton(
     onClick: () -> Unit,
 ) {
     val shape = RoundedCornerShape(50)
-    val bg = if (accent) Orange.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerLow
-    val borderColor = if (accent) Orange.copy(alpha = 0.45f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
-    val fg = if (accent) Orange else MaterialTheme.colorScheme.onSurface
+    val playerAccent = LocalPlayerAccentColor.current
+    val dark = isAppDarkTheme()
+    val borderBrush = if (accent) {
+        Brush.linearGradient(
+            colors = listOf(
+                playerAccent.copy(alpha = if (dark) 0.65f else 0.75f),
+                Color.White.copy(alpha = if (dark) 0.24f else 0.45f),
+                playerAccent.copy(alpha = if (dark) 0.32f else 0.45f),
+            ),
+        )
+    } else {
+        Brush.linearGradient(
+            if (dark) listOf(Color.White.copy(alpha = 0.14f), Color.White.copy(alpha = 0.06f))
+            else listOf(Color(0x1E14171F), Color(0x1014171F)),
+        )
+    }
+    val bg = if (dark) Color.White.copy(alpha = 0.08f) else MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.85f)
     Row(
         Modifier
             .height(34.dp)
             .clip(shape)
             .background(bg)
-            .border(1.dp, borderColor, shape)
+            .border(0.75.dp, borderBrush, shape)
             .tvFocusRing(shape)
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        Icon(icon, null, tint = if (accent) Orange else MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
-        Text(label, fontSize = 12.sp, fontWeight = if (accent) FontWeight.SemiBold else FontWeight.Normal, color = fg, maxLines = 1, softWrap = false)
+        Icon(
+            icon,
+            null,
+            tint = if (accent) playerAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(14.dp),
+        )
+        Text(
+            label,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            color = if (dark) Color.White.copy(alpha = 0.90f) else MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            softWrap = false,
+        )
     }
 }
 

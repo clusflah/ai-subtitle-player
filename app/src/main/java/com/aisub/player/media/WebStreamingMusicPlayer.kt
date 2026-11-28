@@ -341,7 +341,9 @@ class WebStreamingMusicPlayer(
                 }
                 if (!playWhenReady) WebStreamingMusic.setPlaying(playedService, false)
                 if (speed != 1f) WebStreamingMusic.setSpeed(playedService, speed)
-                if (volume != 1f) WebStreamingMusic.setVolume(playedService, volume)
+                if (volume != 1f || WebStreamingMusic.currentDesiredVolume() != volume) {
+                    WebStreamingMusic.setVolume(playedService, volume)
+                }
                 invalidateState()
             }.onFailure { e ->
                 remoteActuallyPlaying = false

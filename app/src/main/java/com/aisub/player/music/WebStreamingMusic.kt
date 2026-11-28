@@ -16,9 +16,11 @@ import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import java.io.ByteArrayInputStream
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -98,7 +100,9 @@ import com.aisub.player.ui.AppIcons
 import com.aisub.player.ui.Orange
 import com.aisub.player.ui.WebMusicServiceIcon
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -131,6 +135,7 @@ object WebStreamingMusic {
 
     private const val AUTH_PREFS = "web_music_auth"
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val prewarmScope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
 
     data class PlaybackSnapshot(
         val service: WebMusicService,
@@ -293,6 +298,9 @@ object WebStreamingMusic {
             prefs.edit().putBoolean("logged_${service.name}", loggedIn).apply()
         }
         runCatching { CookieManager.getInstance().flush() }
+        if (service == WebMusicService.YOUTUBE_MUSIC) {
+            DirectMusicServiceApi.resetYouTubeDirectCircuit()
+        }
         if (loggedIn) {
             // 重建后台引擎以确保立即携带最新登录 Cookie 初始化令牌与曲库
             mainHandler.post { engines.remove(service)?.destroy() }
@@ -309,6 +317,8 @@ object WebStreamingMusic {
         }.apply()
         if (service == WebMusicService.SPOTIFY) {
             SpotifyAppRemoteBridge.logoutAll(app)
+        } else if (service == WebMusicService.YOUTUBE_MUSIC) {
+            DirectMusicServiceApi.resetYouTubeDirectCircuit()
         }
         NativeDirectAudioPlayer.pauseIfActive(onlyService = service)
         mainHandler.post {
@@ -1312,11 +1322,19 @@ object WebStreamingMusic {
         engines[service]?.evalFireAndForget("window.__voxBridge && window.__voxBridge.seek(${positionMs.coerceAtLeast(0L)})")
     }
 
+    @Volatile
+    private var desiredVolume: Float = 1f
+
+    fun currentDesiredVolume(): Float = desiredVolume
+
     fun setVolume(service: WebMusicService, volume: Float) {
-        if (NativeDirectAudioPlayer.setVolume(service, volume)) return
-        if (service == WebMusicService.SPOTIFY && SpotifyAppRemoteBridge.setVolume(volume)) return
         val v = volume.coerceIn(0f, 1f)
-        engines[service]?.evalFireAndForget("window.__voxBridge && window.__voxBridge.setVolume($v)")
+        desiredVolume = v
+        NativeDirectAudioPlayer.setVolume(service, v)
+        if (service == WebMusicService.SPOTIFY) SpotifyAppRemoteBridge.setVolume(v)
+        engines.values.forEach { engine ->
+            engine.evalFireAndForget("window.__voxBridge && window.__voxBridge.setVolume($v)")
+        }
     }
 
     fun setSpeed(service: WebMusicService, speed: Float) {
@@ -1330,6 +1348,101 @@ object WebStreamingMusic {
         NativeDirectAudioPlayer.pauseIfActive()
         SpotifyAppRemoteBridge.pauseIfActive()
         engines.values.forEach { it.pauseOnly() }
+    }
+
+    fun prewarmService(context: Context, service: WebMusicService) {
+        val app = context.applicationContext
+        val logged = _loggedIn.value.ifEmpty { refreshAuthState(app) }
+        if (service !in logged) return
+        when (service) {
+            WebMusicService.SPOTIFY -> {
+                SpotifyAppRemoteBridge.prewarmAsync(app)
+            }
+            WebMusicService.APPLE_MUSIC -> {
+                prewarmScope.launch {
+                    runCatching {
+                        val engine = ensureEngine(app, WebMusicService.APPLE_MUSIC)
+                        val args = JSONObject()
+                        attachAppleAuthArgs(app, args)
+                        engine.evalFireAndForget(
+                            "window.__voxBridge && window.__voxBridge.prewarmApple && window.__voxBridge.prewarmApple($args);",
+                        )
+                    }
+                }
+            }
+            WebMusicService.YOUTUBE_MUSIC -> {
+                if (DirectMusicServiceApi.shouldSkipYouTubeDirectProbe()) {
+                    prewarmScope.launch {
+                        runCatching { ensureEngine(app, WebMusicService.YOUTUBE_MUSIC) }
+                    }
+                }
+            }
+            else -> {}
+        }
+    }
+
+    fun prewarmActiveSources(context: Context, preferredService: WebMusicService? = null) {
+        val app = context.applicationContext
+        val logged = _loggedIn.value.ifEmpty { refreshAuthState(app) }
+        if (WebMusicService.SPOTIFY in logged) {
+            SpotifyAppRemoteBridge.prewarmAsync(app)
+        }
+        if (preferredService != null && preferredService in logged && preferredService != WebMusicService.SPOTIFY) {
+            prewarmService(app, preferredService)
+        }
+    }
+
+    private fun attachAppleAuthArgs(appContext: Context, args: JSONObject) {
+        val cm = runCatching { CookieManager.getInstance() }.getOrNull()
+        val cookieMut = listOf(
+            "https://music.apple.com",
+            "https://amp-api.music.apple.com",
+            "https://authorize.music.apple.com",
+        ).firstNotNullOfOrNull { domain ->
+            val raw = runCatching { cm?.getCookie(domain).orEmpty() }.getOrDefault("")
+            extractCookieValue(raw, "media-user-token")
+                ?: extractCookieValue(raw, "music-user-token")
+        }
+        if (!cookieMut.isNullOrBlank()) {
+            args.put("_cookieMut", cookieMut)
+        }
+        savedAppleStorefront(appContext)?.let { sf ->
+            args.put("_savedSf", sf)
+        }
+    }
+
+    internal fun shouldBlockHeadlessResource(service: WebMusicService, rawUrl: String): Boolean {
+        val u = rawUrl.lowercase()
+        if (u.isEmpty() || !u.startsWith("http")) return false
+        val host = runCatching { java.net.URI(u).host.orEmpty() }
+            .getOrElse { "" }
+            .ifEmpty {
+                u.substringAfter("://", "")
+                    .substringBefore('/')
+                    .substringBefore('?')
+                    .substringBefore(':')
+            }
+        if (host.isEmpty()) return false
+        if (host.contains("doubleclick.net") ||
+            host.contains("googlesyndication.com") ||
+            host.contains("googletagmanager.com") ||
+            host.contains("google-analytics.com") ||
+            host.contains("googleadservices.com") ||
+            host.contains("adservice.google.com") ||
+            host == "fonts.googleapis.com" ||
+            host == "fonts.gstatic.com"
+        ) {
+            return true
+        }
+        if (service == WebMusicService.YOUTUBE_MUSIC &&
+            (host == "i.ytimg.com" ||
+                host == "yt3.googleusercontent.com" ||
+                host == "yt3.ggpht.com" ||
+                host == "lh3.googleusercontent.com")
+        ) {
+            return true
+        }
+        return false
     }
 
     private suspend fun ensureEngine(context: Context, service: WebMusicService): ServiceWebEngine {
@@ -1568,6 +1681,7 @@ object WebStreamingMusic {
                     .createMediaSource(MediaItem.fromUri(stream.url))
 
                 player.stop()
+                player.volume = desiredVolume
                 player.setMediaSource(mediaSource)
                 if (startPositionMs > 0L) {
                     player.seekTo(startPositionMs)
@@ -1673,6 +1787,14 @@ object WebStreamingMusic {
                 WebViewCompat.addDocumentStartJavaScript(this, DOCUMENT_START_SCRIPT, setOf("*"))
             }
             webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                    val url = request.url?.toString().orEmpty()
+                    if (shouldBlockHeadlessResource(service, url)) {
+                        return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+                    }
+                    return super.shouldInterceptRequest(view, request)
+                }
+
                 override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                     view.evaluateJavascript(DOCUMENT_START_SCRIPT, null)
@@ -1685,7 +1807,7 @@ object WebStreamingMusic {
                     if (!readySignal.isCompleted) {
                         mainHandler.postDelayed({
                             if (!readySignal.isCompleted) readySignal.complete(Unit)
-                        }, 900L)
+                        }, 300L)
                     }
                 }
             }
@@ -1700,6 +1822,10 @@ object WebStreamingMusic {
             loadUrl(initialEngineUrl(appContext, service))
         }
 
+        fun notifyBridgeReady() {
+            if (!readySignal.isCompleted) readySignal.complete(Unit)
+        }
+
         suspend fun awaitReady() {
             withTimeoutOrNull(14_000L) { readySignal.await() }
             withContext(Dispatchers.Main.immediate) {
@@ -1710,22 +1836,7 @@ object WebStreamingMusic {
         suspend fun callRpc(method: String, args: JSONObject, timeoutMs: Long): String? {
             if (method == "playTrack") keepAwakeForAudio = true
             if (service == WebMusicService.APPLE_MUSIC) {
-                val cm = runCatching { CookieManager.getInstance() }.getOrNull()
-                val cookieMut = listOf(
-                    "https://music.apple.com",
-                    "https://amp-api.music.apple.com",
-                    "https://authorize.music.apple.com",
-                ).firstNotNullOfOrNull { domain ->
-                    val raw = runCatching { cm?.getCookie(domain).orEmpty() }.getOrDefault("")
-                    extractCookieValue(raw, "media-user-token")
-                        ?: extractCookieValue(raw, "music-user-token")
-                }
-                if (!cookieMut.isNullOrBlank()) {
-                    args.put("_cookieMut", cookieMut)
-                }
-                savedAppleStorefront(appContext)?.let { sf ->
-                    args.put("_savedSf", sf)
-                }
+                attachAppleAuthArgs(appContext, args)
             }
             val reqId = UUID.randomUUID().toString()
             val deferred = CompletableDeferred<String>()
@@ -1795,6 +1906,11 @@ object WebStreamingMusic {
             if (service == WebMusicService.APPLE_MUSIC) {
                 saveAppleStorefront(appContext, sf)
             }
+        }
+
+        @JavascriptInterface
+        fun onBridgeReady() {
+            engines[service]?.notifyBridgeReady()
         }
     }
 
@@ -2286,7 +2402,7 @@ object WebStreamingMusic {
     }
   }
 
-  async function syncAppleMusicKitAuth(inst, sf, args) {
+  async function syncAppleMusicKitAuth(inst, sf, args, awaitMe) {
     if (!inst) return inst;
     var mut = getAppleUserToken(inst, args);
     if (mut && (!inst.musicUserToken || inst.musicUserToken !== mut || !inst.isAuthorized)) {
@@ -2297,31 +2413,42 @@ object WebStreamingMusic {
       unlockAppleFullPlayback(inst, wantSf);
     }
     if (wantSf && inst.storefrontId !== wantSf) {
-      try {
-        if (typeof inst.changeUserStorefront === 'function') await inst.changeUserStorefront(wantSf);
-      } catch (e) {}
       try { inst.storefrontId = wantSf; } catch (e) {}
-    }
-    if (mut && (!window.__voxAppleMeSynced || !window.__voxAppleAccountStorefront)) {
       try {
-        if (typeof inst.me === 'function') {
-          var meRes = await inst.me();
-          var subSf = meRes && meRes.subscription && meRes.subscription.storefront;
-          if (subSf) {
-            var realSf = reportAppleStorefront(subSf);
-            if (realSf && inst.storefrontId !== realSf) {
-              try {
-                if (typeof inst.changeUserStorefront === 'function') await inst.changeUserStorefront(realSf);
-              } catch (e) {}
-              try { inst.storefrontId = realSf; } catch (e) {}
-            }
-            unlockAppleFullPlayback(inst, realSf || wantSf);
-          }
-          if (meRes && meRes.subscription && meRes.subscription.active) {
-            window.__voxAppleMeSynced = true;
-          }
+        if (typeof inst.changeUserStorefront === 'function') {
+          if (awaitMe) await inst.changeUserStorefront(wantSf);
+          else inst.changeUserStorefront(wantSf).catch(function(){});
         }
       } catch (e) {}
+    }
+    if (mut && (!window.__voxAppleMeSynced || !window.__voxAppleAccountStorefront)) {
+      var runMeSync = async function() {
+        try {
+          if (typeof inst.me === 'function') {
+            var meRes = await inst.me();
+            var subSf = meRes && meRes.subscription && meRes.subscription.storefront;
+            if (subSf) {
+              var realSf = reportAppleStorefront(subSf);
+              if (realSf && inst.storefrontId !== realSf) {
+                try { inst.storefrontId = realSf; } catch (e) {}
+                try {
+                  if (typeof inst.changeUserStorefront === 'function') await inst.changeUserStorefront(realSf);
+                } catch (e) {}
+              }
+              unlockAppleFullPlayback(inst, realSf || wantSf);
+            }
+            if (meRes && meRes.subscription && meRes.subscription.active) {
+              window.__voxAppleMeSynced = true;
+            }
+          }
+        } catch (e) {}
+      };
+      if (awaitMe) {
+        await runMeSync();
+      } else if (!window.__voxAppleMeInflight) {
+        window.__voxAppleMeInflight = true;
+        runMeSync().finally(function() { window.__voxAppleMeInflight = false; });
+      }
     }
     if (mut) {
       unlockAppleFullPlayback(inst, window.__voxAppleAccountStorefront || wantSf);
@@ -2329,27 +2456,30 @@ object WebStreamingMusic {
     return inst;
   }
 
-  async function ensureAppleMusicKit(sf, args) {
+  async function ensureAppleMusicKit(sf, args, awaitMe) {
     var existing = window.MusicKit && window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
     if (existing && (existing.developerToken || existing.api)) {
-      return await syncAppleMusicKitAuth(existing, sf, args);
+      return await syncAppleMusicKitAuth(existing, sf, args, !!awaitMe);
     }
 
-    // music.apple.com 默认按需懒加载 MusicKit；播放时若尚未加载则主动从同源路径挂载
+    // music.apple.com 默认按需懒加载 MusicKit；预热或播放时若尚未加载则主动从同源路径挂载
     if (!window.MusicKit) {
-      await new Promise(function(resolve) {
-        var s = document.createElement('script');
-        s.src = '/includes/js-cdn/musickit/v3/musickit.js';
-        s.async = true;
-        s.onload = function() { resolve(true); };
-        s.onerror = function() { resolve(false); };
-        (document.head || document.documentElement).appendChild(s);
-        setTimeout(function() { resolve(false); }, 6500);
-      });
+      if (!window.__voxMkLoadPromise) {
+        window.__voxMkLoadPromise = new Promise(function(resolve) {
+          var s = document.createElement('script');
+          s.src = '/includes/js-cdn/musickit/v3/musickit.js';
+          s.async = true;
+          s.onload = function() { resolve(true); };
+          s.onerror = function() { resolve(false); };
+          (document.head || document.documentElement).appendChild(s);
+          setTimeout(function() { resolve(false); }, 6500);
+        });
+      }
+      await window.__voxMkLoadPromise;
     }
     var deadline = Date.now() + 4500;
     while (Date.now() < deadline && !window.MusicKit) {
-      await sleep(200);
+      await sleep(100);
     }
     if (window.MusicKit) {
       var inst = window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
@@ -2367,7 +2497,7 @@ object WebStreamingMusic {
           inst = window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
         }
       }
-      return await syncAppleMusicKitAuth(inst, sf, args);
+      return await syncAppleMusicKitAuth(inst, sf, args, !!awaitMe);
     }
     return null;
   }
@@ -2410,9 +2540,21 @@ object WebStreamingMusic {
     }
   }
 
-  async function detectAppleStorefront(mk, args) {
-    if (window.__voxAppleAccountStorefront) return window.__voxAppleAccountStorefront;
+  async function detectAppleStorefront(mk, args, forceNetwork) {
+    if (!forceNetwork && window.__voxAppleAccountStorefront) return window.__voxAppleAccountStorefront;
     var mut = getAppleUserToken(mk, args);
+    if (!forceNetwork && args && args._savedSf && /^[a-z]{2}$/i.test(String(args._savedSf))) {
+      var savedFast = String(args._savedSf).toLowerCase();
+      window.__voxAppleStorefront = savedFast;
+      if (mut && !window.__voxAppleSfBgChecked) {
+        window.__voxAppleSfBgChecked = true;
+        appleApi(mk, '/v1/me/account', { meta: 'subscription', platform: 'web' }, args).then(function(acctData) {
+          var subSf = acctData && acctData.meta && acctData.meta.subscription && acctData.meta.subscription.storefront;
+          if (subSf) reportAppleStorefront(subSf);
+        }).catch(function(){});
+      }
+      return savedFast;
+    }
     if (mut) {
       var acctData = await appleApi(mk, '/v1/me/account', { meta: 'subscription', platform: 'web' }, args);
       var subSf = acctData && acctData.meta && acctData.meta.subscription && acctData.meta.subscription.storefront;
@@ -2955,19 +3097,35 @@ object WebStreamingMusic {
 """
 
     private const val ENGINE_RUNTIME_SCRIPT_PART_2 = """
+  window.__voxAppleTrackIdCache = window.__voxAppleTrackIdCache || {};
+
+  function extractAppleUrlStorefront(webUrl) {
+    if (!webUrl) return '';
+    var m = String(webUrl).match(/music\.apple\.com\/([a-z]{2})\//i);
+    return m && m[1] ? m[1].toLowerCase() : '';
+  }
+
   async function resolveAppleTrackIdForStorefront(mk, sf, rawTrackId, args) {
     var tid = String(rawTrackId || '').trim();
     if (tid && tid.indexOf('i.') === 0) return tid;
+    var cacheKey = (sf || '') + '|' + tid;
+    if (tid && sf && window.__voxAppleTrackIdCache[cacheKey]) {
+      return window.__voxAppleTrackIdCache[cacheKey];
+    }
     if (tid && sf) {
       var eqCheck = await appleApi(mk, '/v1/catalog/' + sf + '/songs', { 'filter[equivalents]': tid, platform: 'web' }, args);
       var eqSong = eqCheck && eqCheck.data && eqCheck.data[0];
       if (eqSong && eqSong.attributes && eqSong.attributes.playParams && eqSong.id) {
-        return String(eqSong.id);
+        var eqId = String(eqSong.id);
+        window.__voxAppleTrackIdCache[cacheKey] = eqId;
+        return eqId;
       }
       var songCheck = await appleApi(mk, '/v1/catalog/' + sf + '/songs/' + encodeURIComponent(tid), { platform: 'web' }, args);
       var songObj = songCheck && songCheck.data && songCheck.data[0];
       if (songObj && songObj.attributes && songObj.attributes.playParams) {
-        return String(songObj.id || tid);
+        var directId = String(songObj.id || tid);
+        window.__voxAppleTrackIdCache[cacheKey] = directId;
+        return directId;
       }
       var twLookup = await appleApi(mk, '/v1/catalog/tw/songs/' + encodeURIComponent(tid), { platform: 'web' }, args);
       var isrc = twLookup && twLookup.data && twLookup.data[0] && twLookup.data[0].attributes && twLookup.data[0].attributes.isrc;
@@ -2975,7 +3133,9 @@ object WebStreamingMusic {
         var isrcCheck = await appleApi(mk, '/v1/catalog/' + sf + '/songs', { 'filter[isrc]': isrc, platform: 'web' }, args);
         var isrcSong = isrcCheck && isrcCheck.data && isrcCheck.data[0];
         if (isrcSong && isrcSong.attributes && isrcSong.attributes.playParams && isrcSong.id) {
-          return String(isrcSong.id);
+          var isrcId = String(isrcSong.id);
+          window.__voxAppleTrackIdCache[cacheKey] = isrcId;
+          return isrcId;
         }
       }
     }
@@ -2994,7 +3154,11 @@ object WebStreamingMusic {
           }) || (qi === 0 ? songs.find(function(s) {
             return s && s.attributes && s.attributes.playParams;
           }) : null);
-          if (matched && matched.id) return String(matched.id);
+          if (matched && matched.id) {
+            var mId = String(matched.id);
+            if (tid && sf) window.__voxAppleTrackIdCache[cacheKey] = mId;
+            return mId;
+          }
         }
       }
     }
@@ -3016,8 +3180,8 @@ object WebStreamingMusic {
 
   async function playOnApple(args) {
     var reqSeq = Number(args && args.playSeq) || voxPlaySeq;
-    var sf = await detectAppleStorefront(null, args);
-    var mk = await ensureAppleMusicKit(sf, args);
+    var sf = await detectAppleStorefront(null, args, false);
+    var mk = await ensureAppleMusicKit(sf, args, false);
     var mut = getAppleUserToken(mk, args);
     if (!mut && (!mk || !mk.isAuthorized)) {
       return { ok: false, error: 'Apple Music 登录状态已失效，请在音源设置中重新登录' };
@@ -3027,7 +3191,15 @@ object WebStreamingMusic {
       unlockAppleFullPlayback(mk, sf);
       try { mk.storefrontId = sf; } catch (e) {}
     }
-    var trackId = await resolveAppleTrackIdForStorefront(mk, sf, args && args.trackId, args);
+    var rawTid = String((args && args.trackId) || '').trim();
+    var urlSf = extractAppleUrlStorefront(args && args.webUrl);
+    var cacheKey = (sf || '') + '|' + rawTid;
+    var trackId = '';
+    if (rawTid && (rawTid.indexOf('i.') === 0 || window.__voxAppleTrackIdCache[cacheKey] || !urlSf || urlSf === sf)) {
+      trackId = window.__voxAppleTrackIdCache[cacheKey] || rawTid;
+    } else {
+      trackId = await resolveAppleTrackIdForStorefront(mk, sf, rawTid, args);
+    }
     if (!trackId) return { ok: false, error: '未在 Apple Music 曲库中找到该歌曲' };
 
     if (mk && typeof mk.setQueue === 'function') {
@@ -3036,26 +3208,22 @@ object WebStreamingMusic {
         var queueArg = idToPlay.indexOf('i.') === 0 ? { librarySong: idToPlay, startPlaying: true } : { song: idToPlay, startPlaying: true };
         await mk.setQueue(queueArg);
         if (mut) unlockAppleFullPlayback(mk, sf);
-        await mk.play();
+        if (!mk.isPlaying) {
+          await mk.play();
+        }
       };
       try {
         await playOnce(trackId);
+        if (rawTid && sf && !window.__voxAppleTrackIdCache[cacheKey]) {
+          window.__voxAppleTrackIdCache[cacheKey] = trackId;
+        }
       } catch (playErr) {
         window.__voxAppleMeSynced = false;
-        sf = await detectAppleStorefront(mk, args);
-        await syncAppleMusicKitAuth(mk, sf, args);
+        sf = await detectAppleStorefront(mk, args, true);
+        await syncAppleMusicKitAuth(mk, sf, args, true);
         sf = window.__voxAppleAccountStorefront || sf || (mk && mk.storefrontId);
-        trackId = await resolveAppleTrackIdForStorefront(mk, sf, args && args.trackId, args);
+        trackId = await resolveAppleTrackIdForStorefront(mk, sf, rawTid, args);
         await playOnce(trackId);
-      }
-      await sleep(350);
-      if (mut && !isPlayCancelled(reqSeq) && isApplePreviewActive(mk)) {
-        window.__voxAppleMeSynced = false;
-        await syncAppleMusicKitAuth(mk, sf, args);
-        sf = window.__voxAppleAccountStorefront || sf || (mk && mk.storefrontId);
-        unlockAppleFullPlayback(mk, sf);
-        var resolvedRetryId = await resolveAppleTrackIdForStorefront(mk, sf, trackId, args) || trackId;
-        try { await playOnce(resolvedRetryId); } catch (eRetry) {}
       }
       if (args.startPositionMs > 1000 && typeof mk.seekToTime === 'function') {
         var targetSec = args.startPositionMs / 1000.0;
@@ -3067,6 +3235,22 @@ object WebStreamingMusic {
             }
           } catch(e) {}
         }, 650);
+      }
+      if (mut) {
+        setTimeout(async function() {
+          try {
+            if (isPlayCancelled(reqSeq) || !isApplePreviewActive(mk)) return;
+            window.__voxAppleMeSynced = false;
+            var retrySf = await detectAppleStorefront(mk, args, true);
+            await syncAppleMusicKitAuth(mk, retrySf, args, true);
+            retrySf = window.__voxAppleAccountStorefront || retrySf || (mk && mk.storefrontId);
+            unlockAppleFullPlayback(mk, retrySf);
+            var resolvedRetryId = await resolveAppleTrackIdForStorefront(mk, retrySf, trackId, args) || trackId;
+            if (!isPlayCancelled(reqSeq)) {
+              await playOnce(resolvedRetryId);
+            }
+          } catch (eRetry) {}
+        }, 700);
       }
       return { ok: true };
     }
@@ -3300,9 +3484,25 @@ object WebStreamingMusic {
   var voxEndedDispatched = false;
   var voxSawTargetProgress = false;
 
+  function getYoutubePlayerApi() {
+    if (!isYouTubeMusic) return null;
+    try {
+      var mp = document.getElementById('movie_player');
+      if (mp && typeof mp.loadVideoById === 'function') return mp;
+      var ytpEl = document.querySelector('ytmusic-player');
+      if (ytpEl && ytpEl.playerApi && typeof ytpEl.playerApi.loadVideoById === 'function') return ytpEl.playerApi;
+    } catch (e) {}
+    return null;
+  }
+
   function currentYoutubeVideoId() {
     if (!isYouTubeMusic) return '';
     try {
+      var ytp = getYoutubePlayerApi();
+      if (ytp && typeof ytp.getVideoData === 'function') {
+        var vd = ytp.getVideoData();
+        if (vd && vd.video_id) return String(vd.video_id).trim();
+      }
       var m = String(location.search || location.href || '').match(/[?&]v=([^&#]+)/);
       return m && m[1] ? decodeURIComponent(m[1]).trim() : '';
     } catch (e) {
@@ -3426,6 +3626,21 @@ object WebStreamingMusic {
       var ended = !!endedFlag;
       var usedMusicKit = false;
       var mk = null;
+      if (window.__voxVolumeExplicit) {
+        var desiredV = Math.max(0, Math.min(1, Number(window.__voxDesiredVolume)));
+        if (!isNaN(desiredV)) {
+          var bmVol = bestMedia();
+          if (bmVol && Math.abs((Number(bmVol.volume) || 0) - desiredV) > 0.015) {
+            try { bmVol.volume = desiredV; } catch(e) {}
+          }
+          if (isApple && window.MusicKit && window.MusicKit.getInstance) {
+            var mkVol = runSafe(function(){ return window.MusicKit.getInstance(); });
+            if (mkVol && typeof mkVol.volume === 'number' && Math.abs(mkVol.volume - desiredV) > 0.015) {
+              runSafe(function(){ mkVol.volume = desiredV; });
+            }
+          }
+        }
+      }
 
       if (isApple && window.MusicKit && window.MusicKit.getInstance) {
         mk = runSafe(function(){ return window.MusicKit.getInstance(); });
@@ -3671,7 +3886,7 @@ object WebStreamingMusic {
           if (qBtn) qBtn.click();
         } catch (e) {}
       }
-      await sleep(350);
+      await sleep(120);
     }
     return false;
   }
@@ -3692,6 +3907,18 @@ object WebStreamingMusic {
     if (isYouTubeMusic && trackId && currentYoutubeVideoId() === trackId) {
       var okSame = await tryStartGenericWebMedia(reqSeq, startPosMs, 6500);
       return okSame ? { ok: true } : { ok: false, error: 'YouTube Music 网页播放启动超时' };
+    }
+    if (isYouTubeMusic && trackId) {
+      var ytp = getYoutubePlayerApi();
+      if (ytp) {
+        try {
+          var startSec = startPosMs > 1000 ? (startPosMs / 1000.0) : 0;
+          ytp.loadVideoById({ videoId: trackId, startSeconds: startSec });
+          if (typeof ytp.playVideo === 'function') ytp.playVideo();
+          try { history.replaceState({}, '', '/watch?v=' + encodeURIComponent(trackId)); } catch (eHist) {}
+          return { ok: true };
+        } catch (eSpa) {}
+      }
     }
     try {
       sessionStorage.setItem('__voxPendingWebPlay', JSON.stringify({
@@ -3768,6 +3995,16 @@ object WebStreamingMusic {
   }
 
   window.__voxBridge = {
+    prewarmApple: async function(args) {
+      if (!isApple || window.__voxApplePrewarming) return;
+      window.__voxApplePrewarming = true;
+      try {
+        var sf = await detectAppleStorefront(null, args, false);
+        await ensureAppleMusicKit(sf, args, true);
+      } catch (e) {} finally {
+        window.__voxApplePrewarming = false;
+      }
+    },
     beginSwitch: function(seq, trackId, startPosMs, title) {
       markTrackSwitching(seq, trackId, startPosMs, title);
       pushSnapshot(false);
@@ -3812,8 +4049,16 @@ object WebStreamingMusic {
       if (m) m.currentTime = sec;
     },
     setVolume: function(v) {
+      var clamped = Math.max(0, Math.min(1, Number(v)));
+      if (isNaN(clamped)) return;
+      window.__voxDesiredVolume = clamped;
+      window.__voxVolumeExplicit = true;
       var m = bestMedia();
-      if (m) m.volume = Math.max(0, Math.min(1, v));
+      if (m) m.volume = clamped;
+      if (isApple && window.MusicKit && window.MusicKit.getInstance) {
+        var mk = runSafe(function(){ return window.MusicKit.getInstance(); });
+        if (mk && typeof mk.volume === 'number') runSafe(function(){ mk.volume = clamped; });
+      }
     },
     setSpeed: function(s) {
       var m = bestMedia();
@@ -3837,12 +4082,16 @@ object WebStreamingMusic {
             }
           }
           if (!(out && out.navigating)) {
-            setTimeout(function(){ pushSnapshot(false); }, 150);
+            pushSnapshot(false);
+            setTimeout(function(){ pushSnapshot(false); }, 100);
           }
         } else if (isApple) {
           var mk = window.MusicKit && window.MusicKit.getInstance ? runSafe(function(){ return window.MusicKit.getInstance(); }) : null;
-          var sf = await detectAppleStorefront(mk, args);
+          var sf = await detectAppleStorefront(mk, args, false);
           if (method === 'loadTracks') {
+            if (window.__voxBridge && window.__voxBridge.prewarmApple) {
+              setTimeout(function(){ window.__voxBridge.prewarmApple(args); }, 50);
+            }
             var d = await appleApi(mk, '/v1/me/library/songs', { platform: 'web', 'include[library-songs]': 'catalog', limit: 100 }, args);
             var tList = ((d && d.data) || []).map(mapAppleResource).filter(Boolean);
             if (!tList.length) {
@@ -4004,6 +4253,9 @@ object WebStreamingMusic {
       }
     }
   };
+  if (window.VoxMusicHost && typeof window.VoxMusicHost.onBridgeReady === 'function') {
+    window.VoxMusicHost.onBridgeReady();
+  }
 })();
 """
 }

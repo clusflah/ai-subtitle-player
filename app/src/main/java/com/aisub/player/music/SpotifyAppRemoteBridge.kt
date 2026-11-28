@@ -5,6 +5,7 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
@@ -843,6 +844,16 @@ object SpotifyAppRemoteBridge {
         return connectRemote(context, showAuthView = true, timeoutMs = 25_000L).map { Unit }
     }
 
+    /** 后台静默预连本机官方 Spotify 客户端（不弹窗），提前唤醒其网络会话以大幅缩短首次点播延迟。 */
+    fun prewarmAsync(context: Context) {
+        val app = context.applicationContext
+        val st = refreshStatus(app)
+        if (!st.canAttemptRemotePlayback || activeRemote?.isConnected == true) return
+        scope.launch {
+            runCatching { connectRemote(app, showAuthView = false, timeoutMs = 5_000L) }
+        }
+    }
+
     private suspend fun connectRemote(
         context: Context,
         showAuthView: Boolean,
@@ -969,11 +980,35 @@ object SpotifyAppRemoteBridge {
         maxTargetPosMs = 0L
         endedDispatchedForTarget = false
 
+        val audioManager = runCatching { context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager }.getOrNull()
+        val preSwitchStreamVol = runCatching { audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) }.getOrNull()
+        val alreadyActiveOnLocal = _status.value.activeForCurrentTrack && activeRemote?.isConnected == true
+
         return withContext(Dispatchers.Main.immediate) {
-            // 先等待把 Connect 输出切回本机官方客户端（避免沿用旧的 Web Player (Chrome) 设备），再下发播放
-            awaitCallResult(remote.connectApi.connectSwitchToLocalDevice(), 1_500L)
+            // 仅首次接管播放时并发下发 Connect 切回本机，不再同步阻塞 1.5s 拖慢 playerApi.play() 首帧起播；连续切下一曲直接下发 play 避免触发设备切换重置音量
+            if (!alreadyActiveOnLocal) {
+                runCatching { remote.connectApi.connectSwitchToLocalDevice() }
+            }
             val playRes = awaitCallResult(remote.playerApi.play(spotifyUri), 4_500L)
             playRes.onSuccess {
+                val desiredVol = WebStreamingMusic.currentDesiredVolume()
+                if (desiredVol < 0.995f) {
+                    runCatching { remote.connectApi.connectSetVolume(desiredVol) }
+                }
+                if (preSwitchStreamVol != null && audioManager != null) {
+                    val guardSeq = targetPlaySeq
+                    scope.launch {
+                        kotlinx.coroutines.delay(450L)
+                        if (targetPlaySeq == guardSeq && targetTrackUri == spotifyUri) {
+                            runCatching {
+                                val afterVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                                if (afterVol != preSwitchStreamVol) {
+                                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, preSwitchStreamVol, 0)
+                                }
+                            }
+                        }
+                    }
+                }
                 if (startPositionMs > 1_000L) {
                     val seekSeq = targetPlaySeq
                     runCatching { remote.playerApi.seekTo(startPositionMs) }
