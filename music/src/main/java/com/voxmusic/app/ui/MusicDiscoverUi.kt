@@ -232,6 +232,7 @@ fun MusicDiscoverTab(
     }
 
     val playerAccent = LocalPlayerAccentColor.current
+    val tokens = playerSurfaceTokens(isAppDarkTheme())
     Column(
         Modifier
             .fillMaxSize()
@@ -256,7 +257,7 @@ fun MusicDiscoverTab(
                     Row(
                         Modifier
                             .clip(RoundedCornerShape(50))
-                            .background(Color.White.copy(alpha = 0.08f))
+                            .background(tokens.pillBg)
                             .padding(horizontal = 9.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp),
@@ -271,7 +272,7 @@ fun MusicDiscoverTab(
                     }
                 }
             } else {
-                // 嵌入播放页时左侧仅放极简无框刷新微按钮，释放首屏呼吸空间
+                // 嵌入播放页时左侧仅放极简无框刷新微按钮，释放首屏呼吸空间（双态自适应）
                 Row(
                     Modifier
                         .clip(RoundedCornerShape(50))
@@ -288,14 +289,14 @@ fun MusicDiscoverTab(
                     Icon(
                         AppIcons.Refresh,
                         "刷新榜单",
-                        tint = if (homeRefreshing) playerAccent else Color.White.copy(alpha = 0.56f),
+                        tint = if (homeRefreshing) playerAccent else tokens.inkSecondary,
                         modifier = Modifier.size(15.dp),
                     )
                     Text(
                         if (homeRefreshing) "更新中" else "风向榜",
                         fontSize = 12.5.sp,
                         fontWeight = FontWeight.Medium,
-                        color = if (homeRefreshing) playerAccent else Color.White.copy(alpha = 0.62f),
+                        color = if (homeRefreshing) playerAccent else tokens.inkSecondary,
                     )
                 }
             }
@@ -313,7 +314,7 @@ fun MusicDiscoverTab(
                 Icon(
                     if (searchExpanded) AppIcons.Close else AppIcons.Search,
                     contentDescription = if (searchExpanded) "关闭搜索" else "搜索",
-                    tint = if (embeddedInPlayer) Color.White.copy(alpha = 0.82f) else MaterialTheme.colorScheme.onBackground,
+                    tint = if (embeddedInPlayer) tokens.inkPrimary.copy(alpha = 0.84f) else MaterialTheme.colorScheme.onBackground,
                     modifier = Modifier.size(20.dp),
                 )
             }
@@ -615,12 +616,8 @@ private fun MusicQuickTagCard(
     embeddedInPlayer: Boolean = false,
     onClick: () -> Unit,
 ) {
-    val dark = isAppDarkTheme()
-    val cardBg = when {
-        embeddedInPlayer -> Color.White.copy(alpha = 0.08f)
-        dark -> Color.White.copy(alpha = 0.08f)
-        else -> MaterialTheme.colorScheme.surfaceContainerLow
-    }
+    val tokens = playerSurfaceTokens(isAppDarkTheme())
+    val cardBg = if (tokens.isDark) tokens.pillBg else Color.White.copy(alpha = 0.66f)
     val icon = when (tag.chartId) {
         "music_hot" -> AppIcons.LocalFire
         "music_new_express" -> AppIcons.AutoAwesome
@@ -628,9 +625,9 @@ private fun MusicQuickTagCard(
         "music_apple_tw" -> AppIcons.MusicNote
         else -> AppIcons.Web
     }
-    val contentTint = if (embeddedInPlayer || dark) Color.White.copy(alpha = 0.80f) else MaterialTheme.colorScheme.onSurface
+    val contentTint = tokens.inkPrimary.copy(alpha = 0.86f)
 
-    // 去除高饱和红橙紫实心色块与 1px 描边：微磨砂透明胶囊 + 单色极简线性小图标
+    // 去除高饱和红橙紫实心色块与 1px 描边：微磨砂透明胶囊 + 单色极简线性小图标（双态自适应）
     Row(
         Modifier
             .clip(RoundedCornerShape(50))
@@ -737,6 +734,7 @@ fun MusicSquareCard(
     onDetail: (() -> Unit)? = null,
     onQuickPlayAll: (() -> Unit)? = null,
 ) {
+    val tokens = playerSurfaceTokens(isAppDarkTheme())
     Column(
         modifier
             .let { if (width != null) it.width(width) else it }
@@ -752,7 +750,7 @@ fun MusicSquareCard(
                 .fillMaxWidth()
                 .aspectRatio(1f)
                 .clip(RoundedCornerShape(12.dp))
-                .background(Color.White.copy(alpha = 0.06f)),
+                .background(tokens.pillBg),
         ) {
             NetImage(
                 url = item.posterUrl,

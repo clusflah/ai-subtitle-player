@@ -306,17 +306,15 @@ fun MusicTabScreen(
                 )
             },
             discoverTabContent = {
-                AppTheme(uiState.settings.appBackground, AppDarkMode.DARK, uiState.settings.liquidGlass) {
-                    MusicDiscoverTab(
-                        vm = vm,
-                        bottomPadding = if (!isLandscape && music.tags != null) 88.dp else 20.dp,
-                        embeddedInPlayer = true,
-                        onSmartPlay = onSmartPlay,
-                        onOpenDetail = onOpenDetail,
-                        onOpenChart = onOpenChart,
-                        onOpenAiRecommend = onOpenAiRecommend,
-                    )
-                }
+                MusicDiscoverTab(
+                    vm = vm,
+                    bottomPadding = if (!isLandscape && music.tags != null) 88.dp else 20.dp,
+                    embeddedInPlayer = true,
+                    onSmartPlay = onSmartPlay,
+                    onOpenDetail = onOpenDetail,
+                    onOpenChart = onOpenChart,
+                    onOpenAiRecommend = onOpenAiRecommend,
+                )
             },
             libraryTabContent = {
                 StreamingLibraryBrowser(
@@ -526,13 +524,14 @@ private fun MusicSourcePill(
     onClick: () -> Unit,
 ) {
     val accent = LocalPlayerAccentColor.current
+    val tokens = playerSurfaceTokens(isAppDarkTheme())
     val shape = RoundedCornerShape(50)
-    // 统一顶栏右侧音源状态微胶囊：半透明无框微磨砂，点击切换音源与设置
+    // 统一顶栏右侧音源状态微胶囊：半透明无框微磨砂，双态自适应
     Row(
         modifier = Modifier
-            .tvFocusRing(shape, color = Color.White)
+            .tvFocusRing(shape, color = tokens.focusRing)
             .clip(shape)
-            .background(Color.White.copy(alpha = 0.08f))
+            .background(tokens.pillBg)
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -541,7 +540,7 @@ private fun MusicSourcePill(
         WebMusicServiceIcon(service, size = 16.dp)
         Text(
             text = service.label,
-            color = Color.White.copy(alpha = 0.86f),
+            color = tokens.inkPrimary.copy(alpha = 0.88f),
             fontSize = 11.5.sp,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
@@ -579,6 +578,7 @@ private fun StreamingLibraryBrowser(
 ) {
     val context = LocalContext.current
     val accent = LocalPlayerAccentColor.current
+    val tokens = playerSurfaceTokens(isAppDarkTheme())
     val isLogged = service in loggedInServices
     var searchExpanded by rememberSaveable(service) { mutableStateOf(false) }
     var searchQuery by rememberSaveable(service) { mutableStateOf("") }
@@ -663,7 +663,7 @@ private fun StreamingLibraryBrowser(
                     Row(
                         Modifier
                             .clip(shape)
-                            .background(if (selected) Color.White.copy(alpha = 0.10f) else Color.Transparent)
+                            .background(if (selected) tokens.pillSelectedBg else Color.Transparent)
                             .clickable { onSwitchService(svc) }
                             .padding(horizontal = 10.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -672,7 +672,7 @@ private fun StreamingLibraryBrowser(
                         WebMusicServiceIcon(svc, size = 15.dp)
                         Text(
                             text = svc.label,
-                            color = if (selected) Color.White else Color.White.copy(alpha = 0.48f),
+                            color = if (selected) tokens.inkPrimary else tokens.inkSecondary,
                             fontSize = 12.5.sp,
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                             maxLines = 1,
@@ -701,7 +701,7 @@ private fun StreamingLibraryBrowser(
                     Icon(
                         if (searchExpanded) AppIcons.Close else AppIcons.Search,
                         contentDescription = if (searchExpanded) "关闭搜索" else "搜索乐库",
-                        tint = if (searchExpanded) accent else Color.White.copy(alpha = 0.72f),
+                        tint = if (searchExpanded) accent else tokens.inkSecondary,
                         modifier = Modifier.size(19.dp),
                     )
                 }
@@ -713,7 +713,7 @@ private fun StreamingLibraryBrowser(
                 },
                 modifier = Modifier.size(34.dp),
             ) {
-                Icon(AppIcons.Refresh, "刷新", tint = Color.White.copy(alpha = 0.72f), modifier = Modifier.size(18.dp))
+                Icon(AppIcons.Refresh, "刷新", tint = tokens.inkSecondary, modifier = Modifier.size(18.dp))
             }
         }
 
@@ -721,10 +721,10 @@ private fun StreamingLibraryBrowser(
             Box(Modifier.fillMaxSize().padding(20.dp), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     WebMusicServiceIcon(service, size = 56.dp)
-                    Text("登录 ${service.label}", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text("登录 ${service.label}", color = tokens.inkPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     Text(
                         WebStreamingMusic.serviceStatusSubtitle(context, service, false),
-                        color = Color.White.copy(alpha = 0.62f),
+                        color = tokens.inkSecondary,
                         fontSize = 13.sp,
                     )
                     DarkActionChip("立即登录 ${service.label}", AppIcons.Person) {
@@ -748,17 +748,17 @@ private fun StreamingLibraryBrowser(
                     .padding(bottom = 8.dp)
                     .height(40.dp)
                     .clip(searchShape)
-                    .background(Color.White.copy(alpha = 0.08f))
+                    .background(tokens.pillBg)
                     .padding(start = 14.dp, end = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(AppIcons.Search, null, tint = Color.White.copy(alpha = 0.56f), modifier = Modifier.size(17.dp))
+                Icon(AppIcons.Search, null, tint = tokens.inkSecondary, modifier = Modifier.size(17.dp))
                 Spacer(Modifier.width(8.dp))
                 BasicTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
                     singleLine = true,
-                    textStyle = TextStyle(color = Color.White, fontSize = 14.sp, lineHeight = 18.sp),
+                    textStyle = TextStyle(color = tokens.inkPrimary, fontSize = 14.sp, lineHeight = 18.sp),
                     cursorBrush = SolidColor(accent),
                     modifier = Modifier.weight(1f),
                     decorationBox = { inner ->
@@ -766,7 +766,7 @@ private fun StreamingLibraryBrowser(
                             if (searchQuery.isEmpty()) {
                                 Text(
                                     "在 ${service.label} 中搜索歌曲、歌手、专辑",
-                                    color = Color.White.copy(alpha = 0.48f),
+                                    color = tokens.inkMuted,
                                     fontSize = 13.sp,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
@@ -778,7 +778,7 @@ private fun StreamingLibraryBrowser(
                 )
                 if (searchQuery.isNotEmpty()) {
                     IconButton(onClick = { searchQuery = "" }, modifier = Modifier.size(30.dp)) {
-                        Icon(AppIcons.Close, "清除", tint = Color.White.copy(alpha = 0.72f), modifier = Modifier.size(16.dp))
+                        Icon(AppIcons.Close, "清除", tint = tokens.inkSecondary, modifier = Modifier.size(16.dp))
                     }
                 }
             }
@@ -877,7 +877,7 @@ private fun StreamingLibraryBrowser(
                     horizontalArrangement = Arrangement.spacedBy(3.dp),
                 ) {
                     Icon(AppIcons.PlayArrow, null, tint = accent, modifier = Modifier.size(16.dp))
-                    Text("播放全部", color = Color.White.copy(alpha = 0.82f), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    Text("播放全部", color = tokens.inkPrimary.copy(alpha = 0.85f), fontSize = 12.sp, fontWeight = FontWeight.Medium)
                 }
             }
         }
@@ -886,7 +886,7 @@ private fun StreamingLibraryBrowser(
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     CircularProgressIndicator(color = accent)
-                    Text("正在加载 ${service.label} 个人曲库…", color = Color.White.copy(alpha = 0.62f), fontSize = 13.sp)
+                    Text("正在加载 ${service.label} 个人曲库…", color = tokens.inkSecondary, fontSize = 13.sp)
                 }
             }
         } else {
@@ -1045,17 +1045,18 @@ private fun MusicSourceSettingsSheet(
 
 @Composable
 private fun DarkFilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val tokens = playerSurfaceTokens(isAppDarkTheme())
     val shape = RoundedCornerShape(50)
     // 未选中态彻底去除描边与灰框，仅保留纯净文字；选中态以柔和液态毛玻璃底托承接
     Text(
         text = label,
-        color = if (selected) Color.White else Color.White.copy(alpha = 0.50f),
+        color = if (selected) tokens.inkPrimary else tokens.inkSecondary,
         fontSize = 13.5.sp,
         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         modifier = Modifier
-            .tvFocusRing(shape, color = Color.White)
+            .tvFocusRing(shape, color = tokens.focusRing)
             .let {
-                if (selected) it.liquidGlass(shape = shape, style = GlassStyle.Pill, tint = Color.White.copy(alpha = 0.14f))
+                if (selected) it.liquidGlass(shape = shape, style = GlassStyle.Pill, tint = tokens.pillSelectedBg)
                 else it.clip(shape)
             }
             .clickable(onClick = onClick)
@@ -1069,21 +1070,22 @@ private fun DarkActionChip(
     icon: androidx.compose.ui.graphics.vector.ImageVector?,
     onClick: () -> Unit,
 ) {
+    val tokens = playerSurfaceTokens(isAppDarkTheme())
     val shape = RoundedCornerShape(50)
     Row(
         Modifier
-            .tvFocusRing(shape, color = Color.White)
+            .tvFocusRing(shape, color = tokens.focusRing)
             .clip(shape)
-            .background(Color.White.copy(alpha = 0.10f))
+            .background(tokens.pillBg)
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) {
-            Icon(icon, null, tint = Color.White, modifier = Modifier.size(15.dp))
+            Icon(icon, null, tint = tokens.inkPrimary, modifier = Modifier.size(15.dp))
             Spacer(Modifier.width(4.dp))
         }
-        Text(label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
+        Text(label, color = tokens.inkPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
     }
 }
 
@@ -1095,12 +1097,13 @@ private fun DrilldownHeader(
     onBack: () -> Unit,
     onPlayAll: (() -> Unit)?,
 ) {
+    val tokens = playerSurfaceTokens(isAppDarkTheme())
     Row(
         Modifier
             .fillMaxWidth()
             .padding(bottom = 8.dp)
             .clip(RoundedCornerShape(14.dp))
-            .background(Color.White.copy(alpha = 0.08f))
+            .background(tokens.pillBg)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1108,7 +1111,7 @@ private fun DrilldownHeader(
         Spacer(Modifier.width(10.dp))
         if (!thumbUrl.isNullOrBlank()) {
             Box(
-                Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)).background(Color(0x33000000)),
+                Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)).background(tokens.pillBg),
                 contentAlignment = Alignment.Center,
             ) {
                 NetImage(url = thumbUrl, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, fallback = AppIcons.MusicNote)
@@ -1116,9 +1119,9 @@ private fun DrilldownHeader(
             Spacer(Modifier.width(9.dp))
         }
         Column(Modifier.weight(1f)) {
-            Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(title, color = tokens.inkPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (subtitle.isNotEmpty()) {
-                Text(subtitle, color = Color.White.copy(alpha = 0.56f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(subtitle, color = tokens.inkSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
         if (onPlayAll != null) {
@@ -1166,26 +1169,27 @@ private fun DarkTrackRow(
     onClick: () -> Unit,
 ) {
     val accent = LocalPlayerAccentColor.current
+    val tokens = playerSurfaceTokens(isAppDarkTheme())
     val shape = RoundedCornerShape(12.dp)
-    // 去卡片化列表：去掉每首单曲独立的深灰圆角底块，仅用舒适留白与通透封面呈现层次
+    // 去卡片化列表：去掉每首单曲独立的圆角底块，仅用舒适留白与通透封面呈现层次
     Row(
         Modifier
             .fillMaxWidth()
-            .tvFocusRing(shape, color = Color.White)
+            .tvFocusRing(shape, color = tokens.focusRing)
             .clip(shape)
-            .background(if (active) accent.copy(alpha = 0.11f) else Color.Transparent)
+            .background(if (active) accent.copy(alpha = if (tokens.isDark) 0.11f else 0.12f) else Color.Transparent)
             .clickable(onClick = onClick)
             .padding(horizontal = 6.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.size(46.dp).clip(RoundedCornerShape(8.dp)).background(Color.White.copy(alpha = 0.06f)),
+            Modifier.size(46.dp).clip(RoundedCornerShape(8.dp)).background(tokens.pillBg),
             contentAlignment = Alignment.Center,
         ) {
             if (!thumbUrl.isNullOrBlank()) {
                 NetImage(url = thumbUrl, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, fallback = AppIcons.MusicNote)
             } else {
-                Icon(AppIcons.MusicNote, null, tint = Color.White.copy(alpha = 0.48f), modifier = Modifier.size(20.dp))
+                Icon(AppIcons.MusicNote, null, tint = tokens.inkMuted, modifier = Modifier.size(20.dp))
             }
         }
         Spacer(Modifier.width(13.dp))
@@ -1197,7 +1201,7 @@ private fun DarkTrackRow(
                 }
                 Text(
                     text = title,
-                    color = if (active) accent else Color.White.copy(alpha = 0.94f),
+                    color = if (active) accent else tokens.inkPrimary.copy(alpha = 0.94f),
                     fontSize = 15.sp,
                     fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1,
@@ -1207,7 +1211,7 @@ private fun DarkTrackRow(
             if (subtitle.isNotBlank()) {
                 Text(
                     subtitle,
-                    color = Color.White.copy(alpha = 0.52f),
+                    color = tokens.inkSecondary,
                     fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -1217,7 +1221,7 @@ private fun DarkTrackRow(
         }
         if (durationMs > 0L) {
             Spacer(Modifier.width(8.dp))
-            Text(formatDuration(durationMs), color = Color.White.copy(alpha = 0.42f), fontSize = 11.5.sp)
+            Text(formatDuration(durationMs), color = tokens.inkMuted, fontSize = 11.5.sp)
         }
     }
 }
@@ -1229,31 +1233,32 @@ private fun DarkContainerRow(
     subtitle: String,
     onClick: () -> Unit,
 ) {
+    val tokens = playerSurfaceTokens(isAppDarkTheme())
     val shape = RoundedCornerShape(12.dp)
-    // 专辑/歌单行同样去卡片化，融入深邃背景
+    // 专辑/歌单行同样去卡片化，融入浅色或深色极光底色
     Row(
         Modifier
             .fillMaxWidth()
-            .tvFocusRing(shape, color = Color.White)
+            .tvFocusRing(shape, color = tokens.focusRing)
             .clip(shape)
             .clickable(onClick = onClick)
             .padding(horizontal = 6.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
-            Modifier.size(50.dp).clip(RoundedCornerShape(9.dp)).background(Color.White.copy(alpha = 0.06f)),
+            Modifier.size(50.dp).clip(RoundedCornerShape(9.dp)).background(tokens.pillBg),
             contentAlignment = Alignment.Center,
         ) {
             NetImage(url = item.thumb, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, fallback = AppIcons.MusicNote)
         }
         Spacer(Modifier.width(13.dp))
         Column(Modifier.weight(1f)) {
-            Text(item.title, color = Color.White.copy(alpha = 0.94f), fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(item.title, color = tokens.inkPrimary.copy(alpha = 0.94f), fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (subtitle.isNotBlank()) {
                 Spacer(Modifier.height(2.dp))
                 Text(
                     text = subtitle,
-                    color = Color.White.copy(alpha = 0.52f),
+                    color = tokens.inkSecondary,
                     fontSize = 12.sp,
                     maxLines = 1,
                     softWrap = false,
@@ -1263,7 +1268,7 @@ private fun DarkContainerRow(
             }
         }
         Spacer(Modifier.width(6.dp))
-        Icon(AppIcons.ChevronRight, null, tint = Color.White.copy(alpha = 0.40f), modifier = Modifier.size(19.dp))
+        Icon(AppIcons.ChevronRight, null, tint = tokens.inkMuted, modifier = Modifier.size(19.dp))
     }
 }
 
@@ -1274,14 +1279,15 @@ private fun DarkLibraryEmptyBox(
     primaryLabel: String? = null,
     onPrimary: (() -> Unit)? = null,
 ) {
+    val tokens = playerSurfaceTokens(isAppDarkTheme())
     Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(AppIcons.MusicNote, null, tint = Color(0x66FFFFFF), modifier = Modifier.size(48.dp))
+            Icon(AppIcons.MusicNote, null, tint = tokens.inkMuted, modifier = Modifier.size(48.dp))
             Spacer(Modifier.height(10.dp))
-            Text(title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Text(title, color = tokens.inkPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium)
             if (subtitle.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))
-                Text(subtitle, color = Color(0x99FFFFFF), fontSize = 13.sp)
+                Text(subtitle, color = tokens.inkSecondary, fontSize = 13.sp)
             }
             if (primaryLabel != null && onPrimary != null) {
                 Spacer(Modifier.height(14.dp))

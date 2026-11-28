@@ -23,9 +23,9 @@ import kotlin.math.min
 val LocalPlayerAccentColor = compositionLocalOf { Color(0xFFD8E4FF) }
 
 /**
- * 从当前专辑封面提取的暗调极光色板：
- * - [aurora1] / [aurora2] / [aurora3] 严格将明度控制在 15%–22% 区间，用于底层缓慢呼吸流动的暗调弥散光斑；
- * - [accent] 作为全局唯一的主强调微光色，明度清晰且克制，不与封面冲突。
+ * 从当前专辑封面提取的双态极光色板：
+ * - 深色模式：[aurora1] / [aurora2] / [aurora3] 明度收敛在 15%–22% 区间，[accent] 保持 64%–78% 明度清晰发光；
+ * - 浅色模式：[aurora1] / [aurora2] / [aurora3] 明度收敛在 82%–90% 区间呈柔雾冰川光斑，[accent] 收敛至 36%–48% 明度确保高对比度可读。
  */
 data class AmbientPalette(
     val aurora1: Color,
@@ -35,12 +35,23 @@ data class AmbientPalette(
 )
 
 object AmbientPalettes {
-    val Default = AmbientPalette(
+    val DefaultDark = AmbientPalette(
         aurora1 = Color(0xFF1E293B),
         aurora2 = Color(0xFF282138),
         aurora3 = Color(0xFF1A2E2E),
         accent = Color(0xFFA8C5FF),
     )
+
+    val DefaultLight = AmbientPalette(
+        aurora1 = Color(0xFFD8E6F8),
+        aurora2 = Color(0xFFE7DFF5),
+        aurora3 = Color(0xFFD6ECEB),
+        accent = Color(0xFF2F64C8),
+    )
+
+    val Default: AmbientPalette get() = DefaultDark
+
+    fun defaultFor(dark: Boolean): AmbientPalette = if (dark) DefaultDark else DefaultLight
 
     /**
      * 将任意 RGB 色彩按 HSL 规则收敛到目标明度区间 [minLightness, maxLightness] 和饱和度区间，
@@ -95,9 +106,13 @@ object AmbientPalettes {
     }
 
     /**
-     * 纯算法版：从 ARGB 采样像素数组中分桶提取 3 个主色调并生成暗调极光色板（方便单测且无 Android 依赖）。
+     * 纯算法版：从 ARGB 采样像素数组中分桶提取 3 个主色调并生成适配深色/浅色模式的极光色板（方便单测且无 Android 依赖）。
      */
-    internal fun extractFromPixels(pixels: IntArray, fallback: AmbientPalette = Default): AmbientPalette {
+    internal fun extractFromPixels(
+        pixels: IntArray,
+        dark: Boolean = true,
+        fallback: AmbientPalette = defaultFor(dark),
+    ): AmbientPalette {
         if (pixels.isEmpty()) return fallback
         // 将色相分为 12 个桶，优先挑饱和度高、权重大的主色调，同时保持色相差拉开层次
         val bucketWeight = FloatArray(12)
@@ -181,12 +196,21 @@ object AmbientPalettes {
         val c2Raw = picked.getOrNull(1)?.let(::bucketArgb) ?: shiftHue(c1Raw, 42f)
         val c3Raw = picked.getOrNull(2)?.let(::bucketArgb) ?: shiftHue(c1Raw, -38f)
 
-        return AmbientPalette(
-            aurora1 = tuneHsl(c1Raw, minLightness = 0.16f, maxLightness = 0.22f, minSaturation = 0.30f, maxSaturation = 0.68f),
-            aurora2 = tuneHsl(c2Raw, minLightness = 0.15f, maxLightness = 0.21f, minSaturation = 0.28f, maxSaturation = 0.64f),
-            aurora3 = tuneHsl(c3Raw, minLightness = 0.15f, maxLightness = 0.20f, minSaturation = 0.26f, maxSaturation = 0.58f),
-            accent = tuneHsl(c1Raw, minLightness = 0.64f, maxLightness = 0.78f, minSaturation = 0.38f, maxSaturation = 0.72f),
-        )
+        return if (dark) {
+            AmbientPalette(
+                aurora1 = tuneHsl(c1Raw, minLightness = 0.16f, maxLightness = 0.22f, minSaturation = 0.30f, maxSaturation = 0.68f),
+                aurora2 = tuneHsl(c2Raw, minLightness = 0.15f, maxLightness = 0.21f, minSaturation = 0.28f, maxSaturation = 0.64f),
+                aurora3 = tuneHsl(c3Raw, minLightness = 0.15f, maxLightness = 0.20f, minSaturation = 0.26f, maxSaturation = 0.58f),
+                accent = tuneHsl(c1Raw, minLightness = 0.64f, maxLightness = 0.78f, minSaturation = 0.38f, maxSaturation = 0.72f),
+            )
+        } else {
+            AmbientPalette(
+                aurora1 = tuneHsl(c1Raw, minLightness = 0.82f, maxLightness = 0.88f, minSaturation = 0.32f, maxSaturation = 0.62f),
+                aurora2 = tuneHsl(c2Raw, minLightness = 0.84f, maxLightness = 0.90f, minSaturation = 0.28f, maxSaturation = 0.58f),
+                aurora3 = tuneHsl(c3Raw, minLightness = 0.83f, maxLightness = 0.89f, minSaturation = 0.26f, maxSaturation = 0.54f),
+                accent = tuneHsl(c1Raw, minLightness = 0.36f, maxLightness = 0.48f, minSaturation = 0.45f, maxSaturation = 0.78f),
+            )
+        }
     }
 
     private fun shiftHue(argb: Int, deg: Float): Int {
@@ -208,9 +232,13 @@ object AmbientPalettes {
     }
 
     /**
-     * 安全地从 Android Bitmap 采样提取暗调极光色板（兼容 HARDWARE 位图防崩溃）。
+     * 安全地从 Android Bitmap 采样提取适配深色/浅色模式的极光色板（兼容 HARDWARE 位图防崩溃）。
      */
-    fun extract(bmp: Bitmap?, fallback: AmbientPalette = Default): AmbientPalette {
+    fun extract(
+        bmp: Bitmap?,
+        dark: Boolean = true,
+        fallback: AmbientPalette = defaultFor(dark),
+    ): AmbientPalette {
         if (bmp == null || bmp.isRecycled || bmp.width <= 0 || bmp.height <= 0) return fallback
         return runCatching {
             val safeBmp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && bmp.config == Bitmap.Config.HARDWARE) {
@@ -223,10 +251,82 @@ object AmbientPalettes {
             scaled.getPixels(pixels, 0, scaled.width, 0, 0, scaled.width, scaled.height)
             if (scaled !== safeBmp) scaled.recycle()
             if (safeBmp !== bmp) safeBmp.recycle()
-            extractFromPixels(pixels, fallback)
+            extractFromPixels(pixels, dark = dark, fallback = fallback)
         }.getOrDefault(fallback)
     }
 }
+
+/**
+ * 音乐主界面（发现 / 歌曲 / 乐库）统一的深/浅双态前景与容器语义色板，彻底消除硬编码白字导致的浅色模式缺失。
+ */
+data class PlayerSurfaceTokens(
+    val isDark: Boolean,
+    val baseBg: Color,
+    val inkPrimary: Color,
+    val inkSecondary: Color,
+    val inkMuted: Color,
+    val pillBg: Color,
+    val pillSelectedBg: Color,
+    val focusRing: Color,
+    val playBtnBg: Color,
+    val playBtnActiveBg: Color,
+    val borderTop: Color,
+    val borderMid: Color,
+    val borderBottom: Color,
+    val seekTrackBg: Color,
+    val seekTrackDragBg: Color,
+    val miniBarBg: Color,
+    val miniBarShadowAmbient: Color,
+    val miniBarShadowSpot: Color,
+    val lyricGlowColor: Color,
+)
+
+private val DarkPlayerSurfaceTokens = PlayerSurfaceTokens(
+    isDark = true,
+    baseBg = Color(0xFF0A0C10),
+    inkPrimary = Color.White,
+    inkSecondary = Color(0x9EFFFFFF),
+    inkMuted = Color(0x6EFFFFFF),
+    pillBg = Color(0x14FFFFFF),
+    pillSelectedBg = Color(0x21FFFFFF),
+    focusRing = Color.White,
+    playBtnBg = Color(0x14FFFFFF),
+    playBtnActiveBg = Color(0x1CFFFFFF),
+    borderTop = Color(0x5EFFFFFF),
+    borderMid = Color(0x16FFFFFF),
+    borderBottom = Color(0x0AFFFFFF),
+    seekTrackBg = Color(0x24FFFFFF),
+    seekTrackDragBg = Color(0x38FFFFFF),
+    miniBarBg = Color(0xCC11151E),
+    miniBarShadowAmbient = Color(0x66000000),
+    miniBarShadowSpot = Color(0x88000000),
+    lyricGlowColor = Color(0x6BFFFFFF),
+)
+
+private val LightPlayerSurfaceTokens = PlayerSurfaceTokens(
+    isDark = false,
+    baseBg = Color(0xFFF3F5FA),
+    inkPrimary = Color(0xFF14171F),
+    inkSecondary = Color(0xFF525866),
+    inkMuted = Color(0xFF848C9C),
+    pillBg = Color(0x1214171F),
+    pillSelectedBg = Color(0xC8FFFFFF),
+    focusRing = Color(0xFF14171F),
+    playBtnBg = Color(0x9EFFFFFF),
+    playBtnActiveBg = Color(0xCCFFFFFF),
+    borderTop = Color(0xEBFFFFFF),
+    borderMid = Color(0x2214171F),
+    borderBottom = Color(0x1A14171F),
+    seekTrackBg = Color(0x1C14171F),
+    seekTrackDragBg = Color(0x2E14171F),
+    miniBarBg = Color(0xE6FFFFFF),
+    miniBarShadowAmbient = Color(0x240F172A),
+    miniBarShadowSpot = Color(0x330F172A),
+    lyricGlowColor = Color(0x2814171F),
+)
+
+fun playerSurfaceTokens(isDark: Boolean): PlayerSurfaceTokens =
+    if (isDark) DarkPlayerSurfaceTokens else LightPlayerSurfaceTokens
 
 /**
  * 顶部与底部滚动渐隐遮罩（Edge Fade Mask）：

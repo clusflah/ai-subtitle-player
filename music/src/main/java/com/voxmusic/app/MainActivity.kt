@@ -113,9 +113,8 @@ class MainActivity : ComponentActivity() {
                 AppTheme(ui.settings.appBackground, ui.settings.appDarkMode, ui.settings.liquidGlass) {
                     val view = LocalView.current
                     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-                    val onMusicPlayerHome = currentScreen == MusicScreen.Home
                     SideEffect {
-                        val lightBars = !onMusicPlayerHome && !isDark
+                        val lightBars = !isDark
                         runCatching {
                             WindowCompat.getInsetsController(window, view).apply {
                                 isAppearanceLightStatusBars = lightBars
